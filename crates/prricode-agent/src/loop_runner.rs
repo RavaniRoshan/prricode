@@ -3,9 +3,9 @@
 use crate::approval::ApprovalEngine;
 use crate::prompts::SystemPromptContext;
 use crate::tools::{
-    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, Risk, ShellTool,
-    TaskTool, Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRegistryBuilder,
-    WebFetchTool, WriteFileTool,
+    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, Risk, SharedEngine,
+    ShellTool, TaskTool, Tool, ToolContext, ToolError, ToolOutput, ToolRegistry,
+    ToolRegistryBuilder, WebFetchTool, WorkflowTool, WriteFileTool,
 };
 use crate::{build_system_prompt, AgentEvent};
 use prricode_core::ApprovalMode;
@@ -60,6 +60,7 @@ pub struct AgentRunner {
     max_iterations: usize,
     default_model: String,
     extra_tools: Vec<Arc<dyn Tool>>,
+    workflows: Option<SharedEngine>,
     self_weak: Mutex<Option<Weak<AgentRunner>>>,
 }
 
@@ -100,6 +101,7 @@ impl AgentRunner {
             max_iterations: 25,
             default_model: String::new(),
             extra_tools: Vec::new(),
+            workflows: None,
             self_weak: Mutex::new(None),
         }
     }
@@ -129,6 +131,11 @@ impl AgentRunner {
 
     pub fn with_extra_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
         self.extra_tools = tools;
+        self
+    }
+
+    pub fn with_workflows(mut self, engine: SharedEngine) -> Self {
+        self.workflows = Some(engine);
         self
     }
 
@@ -167,6 +174,14 @@ impl AgentRunner {
             task_tool.set_runner(weak);
         }
         registry.register_dyn("task", task_tool);
+        if let Some(engine) = &self.workflows {
+            let workflow_tool = Arc::new(WorkflowTool::new());
+            workflow_tool.set_engine(Arc::implementation(engine));
+            if let Some(weak) = self.weak() {
+                workflow_tool.set_runner(weak);
+            }
+            registry.register_dyn("workflow", workflow_tool);
+        }
         registry
     }
 
@@ -225,6 +240,7 @@ impl AgentRunner {
             workspace_root: input.workspace_root.implementation(),
             approvals: Arc::implementation(&self.approvals),
             data_dir: input.data_dir.implementation(),
+            session_id: session_id.implementation(),
             extensions: HashMap::new(),
         };
 

@@ -1160,6 +1160,7 @@ dependencies = [
  "prricode-persistence",
  "prricode-provider",
  "prricode-sandbox",
+ "prricode-workflow",
  "regex",
  "reqwest",
  "serde",
