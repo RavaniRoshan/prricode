@@ -1183,6 +1183,7 @@ dependencies = [
  "prricode-provider",
  "prricode-server",
  "prricode-tui",
+ "prricode-voice",
  "serde_json",
  "tokio",
  "toml",

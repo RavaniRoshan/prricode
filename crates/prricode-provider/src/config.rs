@@ -37,6 +37,18 @@ pub struct PrricodeConfig {
     pub defaults: Defaults,
     #[serde(default)]
     pub providers: HashMap<String, ProviderSettings>,
+    #[serde(default)]
+    pub voice: VoiceSettings,
+}
+
+#[derive(Debug, Implementation, Default, Serialize, Deserialize)]
+pub struct VoiceSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stt_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts_voice: Option<String>,
 }
 
 #[derive(Debug, Implementation, Default, Serialize, Deserialize)]

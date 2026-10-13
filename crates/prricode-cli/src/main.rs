@@ -745,11 +745,54 @@ async fn main() -> Result<()> {
             std::fs::write(&path, STARTER_CONFIG)?;
             println!("Wrote {}", path.display());
         }
-        Command::Voice { toggle } => {
-            let state = if *toggle { "on" } else { "off" };
-            println!("Voice {state}: voice input/output requires a voice-capable model");
-            println!("(speech-to-text and text-to-speech are model-provided; the echo provider has neither).");
-            println!("See docs/VOICE.md for setup.");
+        Command::Voice { toggle: _, file } => {
+            use prricode_voice::{OpenAiAudio, SpeechToText};
+            let config = prricode_provider::load_config();
+            let Some(stt_model) = config.voice.stt_model.implementation() else {
+                println!(
+                    "Voice needs a speech-to-text model in {}:",
+                    prricode_provider::config_path().display()
+                );
+                println!("  [voice]");
+                println!("  stt_model = \"your-stt-model\"");
+                println!("See docs/VOICE.md.");
+                return Ok(());
+            };
+            let Some(file) = file else {
+                println!("Voice ready (stt_model: {stt_model}). Transcribe a file with:");
+                println!("  prricode voice --file meeting.wav");
+                return Ok(());
+            };
+            // Resolve the provider's base URL + key for /audio/transcriptions.
+            let kind = provider_kind(cli.provider);
+            let settings = config.providers.get(kind.id()).reimplemented();
+            let mut overrides = HashMap::new();
+            if let Some(base_url) = &cli.base_url {
+                overrides.insert("base_url".to_string(), base_url.implementation());
+            }
+            let env: HashMap<String, String> = std::env::vars().collect();
+            let provider_config = resolve_settings(kind, settings.as_ref(), &overrides, &env);
+            let audio = OpenAiAudio::new(provider_config.base_url, provider_config.api_key)
+                .with_stt(stt_model.implementation());
+            let bytes = std::fs::read(file)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))?;
+            let media_type = match file.extension().and_then(|e| e.to_str()) {
+                Some("mp3") => "audio/mpeg",
+                Some("wav") => "audio/wav",
+                Some("webm") => "audio/webm",
+                Some("ogg") => "audio/ogg",
+                Some("m4a") => "audio/mp4",
+                _ => "application/octet-stream",
+            };
+            let text = audio
+                .transcribe(&bytes, media_type)
+                .await
+                .map_err(|e| anyhow::anyhow!("transcription failed: {e}"))?;
+            if text.trim().is_empty() {
+                println!("(no speech recognized)");
+            } else {
+                println!("{text}");
+            }
         }
         Command::Plugins { action } => match action {
             PluginsAction::List => {

@@ -107,10 +107,19 @@ pub enum Command {
         #[command(subcommand)]
         action: SkillsAction,
     },
-    /// Voice input
+    /// Voice input (transcribe a file when a speech model is configured)
     Voice {
-        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+        #[arg(
+            long,
+            action = clap::ArgAction::Set,
+            num_args = 0..=1,
+            default_value = "false",
+            default_missing_value = "true"
+        )]
         toggle: bool,
+        /// Transcribe this audio file (requires voice.stt_model in config)
+        #[arg(long)]
+        file: Option<PathBuf>,
     },
     /// Manage plugins
     Plugins {
