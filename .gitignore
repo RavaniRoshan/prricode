@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target/
+
+# Databases and local state
+*.db
+*.db-*
+*.sqlite
+
+# Analysis scratch (never commit)
+/evidence/
+
+# Secrets
+.env
+.env.*
+auth.json
+
+# Node
+node_modules/
+
+# Editor / OS
+.DS_Store
+*.swp

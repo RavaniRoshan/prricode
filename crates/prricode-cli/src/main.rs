@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
                 ProviderArg::Openrouter => ProviderKind::OpenRouter,
                 ProviderArg::Kilo => ProviderKind::Kilo,
             };
-            let server = MspServer::new(data_dir, provider_kind);
+            let server = PrricodeServer::new(data_dir, provider_kind);
             info!("prricode server starting (port={:?})", port);
             let stdin = io::stdin();
             let stdout = io::stdout();

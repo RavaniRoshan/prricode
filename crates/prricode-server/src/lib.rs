@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-pub struct MspServer {
+pub struct PrricodeServer {
     data_dir: PathBuf,
     sessions: Arc<RwLock<HashMap<String, SessionState>>>,
     goals: Arc<RwLock<HashMap<String, GoalRecord>>>,
@@ -28,7 +28,7 @@ struct SessionState {
     items: Vec<Value>,
 }
 
-impl MspServer {
+impl PrricodeServer {
     pub fn new(data_dir: PathBuf, provider_kind: ProviderKind) -> Self {
         Self {
             data_dir,
