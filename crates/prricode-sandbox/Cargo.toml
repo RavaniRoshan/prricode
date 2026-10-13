@@ -1,0 +1,10 @@
+[package]
+name = "prricode-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+prricode-core = { path = "../prricode-core" }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
