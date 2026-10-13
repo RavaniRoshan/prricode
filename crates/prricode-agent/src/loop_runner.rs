@@ -11,8 +11,8 @@ use crate::{build_system_prompt, AgentEvent};
 use prricode_core::ApprovalMode;
 use prricode_persistence::{ItemRecord, Persistence};
 use prricode_provider::{
-    AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider, Role, StreamEvent,
-    ToolCall, ToolChoice, ToolDef,
+    repair_json, AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider, Role,
+    StreamEvent, ToolCall, ToolChoice, ToolDef,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -349,9 +349,19 @@ impl AgentRunner {
                 );
             }
             final_text = response.message.text();
+            let mut tool_calls = response.message.tool_calls.clone();
+            if tool_calls.is_empty() && !final_text.trim().is_empty() {
+                // Small local models often emit tool calls as fenced JSON in
+                // the text channel instead of native tool_calls.
+                let recovered = extract_text_tool_calls(&final_text, &registry.names());
+                if !recovered.is_empty() {
+                    final_text.clear();
+                    tool_calls = recovered;
+                }
+            }
 
-            let assistant_item = assistant_item_json(&final_text, &response.message.tool_calls);
-            if !final_text.is_empty() || !response.message.tool_calls.is_empty() {
+            let assistant_item = assistant_item_json(&final_text, &tool_calls);
+            if !final_text.is_empty() || !tool_calls.is_empty() {
                 self.persist_item(&session_id, "assistant", "assistant", &assistant_item);
                 self.emit(AgentEvent::Item {
                     session_id: session_id.clone(),
@@ -359,7 +369,7 @@ impl AgentRunner {
                 });
             }
 
-            if response.message.tool_calls.is_empty() {
+            if tool_calls.is_empty() {
                 break 'turn;
             }
 
@@ -369,10 +379,10 @@ impl AgentRunner {
                 } else {
                     vec![ContentPart::text(final_text.clone())]
                 },
-                tool_calls: response.message.tool_calls.clone(),
+                tool_calls: tool_calls.clone(),
             }));
 
-            for call in response.message.tool_calls.iter() {
+            for call in tool_calls.iter() {
                 if let Some(cancel) = cancel.as_ref() {
                     if *cancel.borrow() {
                         completed = false;
@@ -586,5 +596,183 @@ impl Tool for GoalCompleteTool {
             .and_then(|v| v.as_str())
             .unwrap_or("goal complete");
         Ok(ToolOutput::text(format!("goal marked complete: {summary}")))
+    }
+}
+
+/// Recover tool calls a model emitted as text (fenced or bare JSON) rather
+/// than native `tool_calls`. Only names in `known` are accepted, so prose
+/// that happens to contain JSON never becomes a phantom tool call.
+fn extract_text_tool_calls(text: &str, known: &[String]) -> Vec<ToolCall> {
+    let mut blocks: Vec<String> = Vec::new();
+    // Fenced ```json ... ``` blocks first (the common small-model shape).
+    let mut rest = text;
+    while let Some(start) = rest.find("```") {
+        let after = &rest[start + 3..];
+        let after = after.strip_prefix("json").unwrap_or(after);
+        let Some(end) = after.find("```") else { break };
+        blocks.push(after[..end].to_string());
+        rest = &after[end + 3..];
+    }
+    // Bare JSON objects anywhere in the text.
+    if blocks.is_empty() {
+        collect_json_objects(text, &mut blocks);
+    }
+    let mut calls = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |call: ToolCall, calls: &mut Vec<ToolCall>| {
+        let key = format!("{}:{}", call.name, call.arguments);
+        if seen.insert(key) {
+            calls.push(call);
+        }
+    };
+    for block in blocks {
+        if let Some(call) = parse_text_tool_call(&block, known) {
+            push(call, &mut calls);
+            continue;
+        }
+        // The block may hold several concatenated JSON objects.
+        let mut inner = Vec::new();
+        collect_json_objects(&block, &mut inner);
+        for object in inner {
+            if let Some(call) = parse_text_tool_call(&object, known) {
+                push(call, &mut calls);
+            }
+        }
+    }
+    calls
+}
+
+fn collect_json_objects(text: &str, out: &mut Vec<String>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '{' {
+            let mut depth = 0i32;
+            let mut in_string = false;
+            let mut escaped = false;
+            let start = i;
+            let mut end = None;
+            while i < chars.len() {
+                let c = chars[i];
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' && in_string {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = !in_string;
+                } else if !in_string {
+                    match c {
+                        '{' | '[' => depth += 1,
+                        '}' | ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(i + 1);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i += 1;
+            }
+            if let Some(end) = end {
+                out.push(chars[start..end].iter().collect());
+            }
+        }
+        i += 1;
+    }
+}
+
+fn parse_text_tool_call(block: &str, known: &[String]) -> Option<ToolCall> {
+    let value: Value = serde_json::from_str(block.trim()).ok().or_else(|| {
+        let repaired = repair_json(block);
+        if repaired.get("raw").is_some() {
+            None
+        } else {
+            Some(repaired)
+        }
+    })?;
+    let (name, arguments) = if let Some(function) = value.get("function") {
+        (
+            function.get("name").and_then(|v| v.as_str())?.to_string(),
+            function.get("arguments").cloned().unwrap_or(json!({})),
+        )
+    } else {
+        let name = value
+            .get("name")
+            .or_else(|| value.get("tool"))
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let arguments = value
+            .get("arguments")
+            .or_else(|| value.get("input"))
+            .or_else(|| value.get("parameters"))
+            .cloned()
+            .unwrap_or(json!({}));
+        (name, arguments)
+    };
+    if !known.iter().any(|k| k == &name) {
+        return None;
+    }
+    let arguments = match arguments {
+        Value::String(s) => repair_json(&s),
+        other => other,
+    };
+    Some(ToolCall {
+        id: format!("text_call_{}", uuid::Uuid::now_v7()),
+        name,
+        arguments,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn known() -> Vec<String> {
+        ["shell", "write_file", "read_file", "goal_complete"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn recovers_fenced_json_tool_call() {
+        let text = "I'll create the file:\n```json\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.py\", \"content\": \"x\"}}\n```";
+        let calls = extract_text_tool_calls(text, &known());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[0].arguments["path"], json!("a.py"));
+    }
+
+    #[test]
+    fn recovers_concatenated_fenced_calls() {
+        let text = "```json\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.py\"}}\n\n{\"name\": \"shell\", \"arguments\": {\"command\": \"python3 a.py\"}}\n```";
+        let calls = extract_text_tool_calls(text, &known());
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[1].name, "shell");
+        assert_eq!(calls[1].arguments["command"], json!("python3 a.py"));
+    }
+
+    #[test]
+    fn recovers_bare_json_tool_call() {
+        let text = "Sure: {\"name\": \"shell\", \"arguments\": {\"command\": \"ls\"}} — done";
+        let calls = extract_text_tool_calls(text, &known());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+    }
+
+    #[test]
+    fn ignores_prose_and_unknown_tools() {
+        let text = "Here is some JSON in prose: {\"hello\": 1} and a fence:\n```json\n{\"name\": \"delete_everything\", \"arguments\": {}}\n```";
+        assert!(extract_text_tool_calls(text, &known()).is_empty());
+    }
+
+    #[test]
+    fn dedupes_identical_calls() {
+        let text = "{\"name\": \"shell\", \"arguments\": {\"command\": \"ls\"}} and again {\"name\": \"shell\", \"arguments\": {\"command\": \"ls\"}}";
+        let calls = extract_text_tool_calls(text, &known());
+        assert_eq!(calls.len(), 1);
     }
 }
