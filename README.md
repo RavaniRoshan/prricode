@@ -1,151 +1,128 @@
 # prricode
 
-An autonomous AI coding agent that runs in your terminal.
+**An autonomous AI coding agent that lives in your terminal.**
 
-prricode drives a full agent loop against any OpenAI-compatible model backend —
-read and edit files, run shell commands, search code, fetch the web, and control
-the screen — with durable sessions, sandboxed execution, and a stable
-JSON-RPC protocol that any frontend can speak.
+prricode reads your request, opens your codebase, and does the work — reads
+files, writes edits, runs builds and tests, greps for that one symbol, fetches
+the docs, and (when you allow it) drives the screen. It speaks a stable
+JSON-RPC protocol over stdio, so any editor, TUI, or script can drive it.
 
-## Features
+```
+$ prricode exec "add a --json flag to the export command and test it" --provider ollama
+```
 
-- **Agent loop with tool calling** — the model works through real tools
-  (`shell`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`,
-  `web_fetch`, `computer`) instead of printing code you have to paste.
-- **Provider-agnostic models** — one OpenAI-compatible client with first-class
-  presets for Ollama (local and cloud), OpenRouter, the Kilo AI Gateway, OpenAI,
-  and any custom endpoint. Offline echo provider included for tests.
-- **Durable sessions** — every item (messages, tool calls, results) is
-  persisted to SQLite. Resume, fork, compact, and rename sessions across runs.
-- **Sandboxed execution** — shell commands run under bubblewrap isolation on
-  Linux (seatbelt on macOS, passthrough elsewhere) with workspace-scoped binds.
-- **Computer use** — screen capture and input injection over X11, gated by an
-  approval-aware permission model.
-- **Goals** — set an objective and let the agent iterate autonomously until it
-  reports completion; pause, resume, or edit at any time.
-- **Workflows** — ordered multi-step runs with pause/resume/cancel and
-  child-step retry/skip control.
-- **Skills** — `SKILL.md` capability bundles loaded from your project or home
-  directory, with import support for other tool formats.
-- **MCP** — connect Model Context Protocol servers (stdio or streamable HTTP)
-  and expose their tools to the agent.
-- **Voice plumbing** — speech-to-text/text-to-speech traits wired for
-  voice-capable models; see `docs/VOICE.md`.
-- **CLI + protocol** — 18 CLI subcommands for terminal use, or drive the same
-  surface as a JSON-RPC server over stdio from any language.
+## What it does
 
-## Supported providers
+- **Actually works, not just talks** — a real agent loop with tools: `shell`
+  (sandboxed), `read_file`, `write_file`, `edit_file`, `glob`, `grep`,
+  `web_fetch`, `task` (subagents), and `computer` (screen + input).
+- **Bring any model** — one OpenAI-compatible client with first-class presets
+  for Ollama (local and cloud), OpenRouter, the Kilo AI Gateway, OpenAI, and
+  any custom endpoint. Offline echo provider for tests.
+- **Remembers** — every message, tool call, and result is persisted in SQLite.
+  Resume, fork, and compact sessions across runs.
+- **Goals** — set an objective and let it iterate autonomously until it
+  reports done. Pause, resume, or retarget any time.
+- **Approval modes that fit your risk appetite** — ask, auto-approve, or
+  suggest-and-wait. Sensitive actions never run silently.
+- **Computer use** — screenshot, click, type, and scroll over X11, gated by
+  the same approval system. See `docs/COMPUTER_USE.md`.
+- **Skills** — `SKILL.md` capability bundles that extend what the agent knows.
+  See `docs/SKILLS.md`.
+- **Workflows** — multi-step runs with pause/resume and child retry/skip.
+- **Voice, when the model has ears** — STT/TTS plumbing over OpenAI-compatible
+  audio endpoints. See `docs/VOICE.md`.
+- **MCP-ready** — a stdio MCP client for Model Context Protocol servers.
 
-| Provider | `--provider` | Base URL | API key env |
+## Pick your brain
+
+| Provider | `--provider` | Key env | Notes |
 |---|---|---|---|
-| Echo (offline, no network) | `echo` | — | — |
-| Ollama (local) | `ollama` | `http://localhost:11434` | — |
-| Ollama Cloud | `ollama-cloud` | `https://ollama.com` | `OLLAMA_API_KEY` |
-| OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
-| Kilo AI Gateway | `kilo` | `https://api.kilo.ai/api/gateway` | `KILO_API_KEY` |
-| OpenAI | `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
-| Any OpenAI-compatible endpoint | `custom` | your `--base-url` | your key env |
-
-Any OpenAI-compatible server works as `custom` — set `--base-url` and pass the
-key through the environment variable of your choice (or `config.toml`, see
-`docs/CONFIGURATION.md`).
+| Echo (offline) | `echo` | — | No network; replies `echo: <text>`. Tests and protocol debugging. |
+| Ollama (local) | `ollama` | — | `/api` native surface with tools. |
+| Ollama Cloud | `ollama-cloud` | `OLLAMA_API_KEY` | Hosted models, same account. |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | Hundreds of models, one key. |
+| Kilo AI Gateway | `kilo` | `KILO_API_KEY` | `:free` models work anonymously. |
+| OpenAI | `openai` | `OPENAI_API_KEY` | |
+| Anything else | `custom` | yours | Any OpenAI-compatible endpoint via `--base-url`. |
 
 ## Quickstart
-
-Build:
 
 ```bash
 git implementation https://github.com/RavaniRoshan/prricode.git
 cd prricode
 cargo build --release
-```
 
-Run a one-off turn with the offline echo provider (no model, no network):
-
-```bash
+# offline, no model needed
 ./target/release/prricode exec "summarize this repo" --provider echo
-```
 
-Point it at a local [Ollama](https://ollama.com) model with tool calling:
-
-```bash
+# local model
 ollama pull qwen2.5-coder:3b
 ./target/release/prricode exec "create hello.py that prints hi, then run it" \
   --provider ollama --model qwen2.5-coder:3b
+
+# free hosted model, no key
+./target/release/prricode exec "say hi" --provider kilo --model liquid/lfm-2.5-2.6b:free
+
+# serve the protocol over stdio
+./target/release/prricode serve --provider ollama
 ```
 
-Run the JSON-RPC server over stdio (the same protocol any client can speak):
-
-```bash
-./target/release/prricode serve
-```
-
-### Example session (JSON-RPC)
+A JSON-RPC session in three lines:
 
 ```jsonc
-// request
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"my-client","version":"0.1.0"}}}
-// response
-{"jsonrpc":"2.0","id":1,"result":{"schema":{"fingerprint":"sha256:6de32db0…","version":1},"serverInfo":{"name":"prricode","version":"0.1.0"}, …}}
-```
-
-Start a session, then submit a turn:
-
-```jsonc
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"my-ui","version":"0.1.0"}}}
 {"jsonrpc":"2.0","id":2,"method":"session/start","params":{"commandId":"…","workspaceRoot":"/path/to/project"}}
-{"jsonrpc":"2.0","id":3,"method":"turn/start","params":{"commandId":"…","sessionId":"…","input":[{"type":"text","text":"add a README section about setup"}]}}
+{"jsonrpc":"2.0","id":3,"method":"turn/start","params":{"commandId":"…","sessionId":"…","input":[{"type":"text","text":"fix the failing test"}]}}
 ```
 
-See `docs/PROTOCOL.md` for the full method, notification, and type reference.
+Progress streams back as notifications: `turn/item` deltas, `tool_use`,
+`approval/requested`, `turn/completed`.
 
-## Architecture
+## Under the hood
 
 ```
 prricode/
   crates/
-    prricode-core/         protocol types, schema fingerprint, error kinds
-    prricode-cli/          clap CLI (18 subcommands)
-    prricode-server/       JSON-RPC server over stdio, session dispatch
+    prricode-core/         protocol types, schema fingerprint, 37 error kinds
+    prricode-cli/          18 subcommands
+    prricode-server/       JSON-RPC dispatch, sessions, goals, notifications
     prricode-agent/        turn loop, tool registry, approval engine
-    prricode-provider/     model providers (echo, ollama, openrouter, kilo, openai, custom)
-    prricode-sandbox/      bubblewrap/seatbelt execution isolation
-    prricode-computer-use/ screen capture + input injection (X11)
-    prricode-workflow/     workflow engine (steps, pause/resume, child control)
+    prricode-provider/     echo + ollama + OpenAI-compatible presets
+    prricode-persistence/  SQLite: sessions, items, goals, usage, settings
+    prricode-sandbox/      bubblewrap execution
+    prricode-computer-use/ X11 screenshots + input injection
+    prricode-workflow/     workflow runs with child control
     prricode-skills/       SKILL.md loading and import
-    prricode-mcp/          Model Context Protocol client (stdio + HTTP)
+    prricode-mcp/          MCP stdio client
     prricode-voice/        speech-to-text / text-to-speech plumbing
-    prricode-persistence/  SQLite storage (sessions, items, goals, usage)
-  docs/                    protocol, configuration, and operator documentation
-  skills/                  bundled skill definitions
-  tests/                   integration and end-to-end tests
+  docs/                    protocol, configuration, and operator docs
+  tests/                   e2e scenario driving the real binary
 ```
 
-Data lives under `~/.local/share/prricode` (override with `--data-dir`);
-configuration under `~/.config/prricode`.
+The tool-calling layer is built for small models: fenced-JSON recovery,
+argument repair, dedupe, and retry — so a 3B model running on your laptop
+still lands its tool calls.
+
+## Documentation
+
+- `docs/PROTOCOL.md` — the JSON-RPC surface: methods, types, error codes
+- `docs/CONFIGURATION.md` — providers, keys, config file
+- `docs/COMPUTER_USE.md` — permissions, actions, Xvfb testing
+- `docs/SKILLS.md` — skill format, import, authoring
+- `docs/VOICE.md` — speech setup
+- `docs/ARCHITECTURE.md` — request path, storage, notifications
+- `docs/TESTING.md` — test matrix and e2e scenarios
+- `docs/PROTOCOL-CONFORMANCE.md` — protocol conformance report
 
 ## Development
 
 ```bash
-cargo build              # debug build
-cargo test               # unit + integration tests
-cargo clippy -- -D warnings
+cargo build
+cargo test --workspace
+cargo clippy --workspace
 cargo fmt --check
 ```
-
-Small models (3B–4B parameters) need lenient tool-call handling — the provider
-layer repairs malformed JSON, deduplicates repeated tool calls, and retries once
-with a corrective prompt. `scripts/` and `tests/` carry the end-to-end scenarios
-(file creation, approval flow, goal autonomy, computer use under Xvfb).
-
-## Documentation
-
-- `docs/PROTOCOL.md` — JSON-RPC surface, types, error codes
-- `docs/CONFIGURATION.md` — providers, keys, config file
-- `docs/COMPUTER_USE.md` — permissions and supported actions
-- `docs/VOICE.md` — speech input/output setup
-- `docs/SKILLS.md` — skill format and import
-- `docs/ARCHITECTURE.md` — runtime design, notifications, storage layout
-- `docs/TESTING.md` — test matrix and e2e scenarios
 
 ## License
 

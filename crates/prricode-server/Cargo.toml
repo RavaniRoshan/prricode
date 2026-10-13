@@ -8,6 +8,10 @@ prricode-core = { path = "../prricode-core" }
 prricode-agent = { path = "../prricode-agent" }
 prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
+prricode-computer-use = { path = "../prricode-computer-use" }
+prricode-skills = { path = "../prricode-skills" }
+prricode-workflow = { path = "../prricode-workflow" }
+prricode-voice = { path = "../prricode-voice" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }

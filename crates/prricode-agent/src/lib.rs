@@ -14,8 +14,8 @@ pub use loop_runner::{
 };
 pub use prompts::build_system_prompt;
 pub use tools::{
-    EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, Risk, ShellTool, TaskTool,
-    ToolContext, ToolRegistry, ToolRegistryBuilder, WebFetchTool, WriteFileTool,
+    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, Risk, ShellTool,
+    TaskTool, ToolContext, ToolRegistry, ToolRegistryBuilder, WebFetchTool, WriteFileTool,
 };
 
 use prricode_provider::ContentPart;
