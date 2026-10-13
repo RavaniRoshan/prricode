@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use crate::types::*;
 
 #[derive(Debug)]
 pub struct RpcError(pub JsonRpcError);
@@ -12,40 +11,6 @@ impl fmt::Display for RpcError {
 }
 
 impl std::error::Error for RpcError {}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "method", content = "params")]
-pub enum MspRequest {
-    Initialize(InitializeParams),
-    SessionStart(SessionStartParams),
-    SessionRead(SessionReadParams),
-    SessionList(SessionListParams),
-    SessionCompact(SessionCompactParams),
-    SessionSetModel(SessionSetModelParams),
-    SessionUserShell(SessionUserShellParams),
-    TurnStart(TurnStartParams),
-    GoalSet(GoalSetParams),
-    GoalEdit(GoalEditParams),
-    GoalClear(GoalClearParams),
-    GoalPause(GoalPauseParams),
-    GoalResume(GoalResumeParams),
-    WorkflowCancel(WorkflowCancelParams),
-    WorkflowPause(WorkflowPauseParams),
-    WorkflowResume(WorkflowResumeParams),
-    WorkflowChildControl(WorkflowChildControlParams),
-    ComputerUseSetupCheck,
-    ComputerUseSetupStart(ComputerUseSetupStartParams),
-    ComputerUseSettingsUpdate(ComputerUseSettingsUpdateParams),
-    ApprovalDecide(ApprovalDecideParams),
-    SubagentClose(SubagentCloseParams),
-    SubagentSendMessage(SubagentInputParams),
-    TaskBackground(TaskBackgroundParams),
-    SkillImport(SkillImportParams),
-    UserInputAnswer(UserInputAnswerParams),
-    MediaUpload(MediaUploadParams),
-    RecapRequest(RecapRequestParams),
-    Unknown,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
