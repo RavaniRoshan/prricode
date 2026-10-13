@@ -110,7 +110,9 @@ impl Persistence {
     pub fn new(data_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let db_path = data_dir.join("prricode.db");
-        let db = Self { db_path: db_path.to_string_lossy().to_string() };
+        let db = Self {
+            db_path: db_path.to_string_lossy().to_string(),
+        };
         db.init()?;
         Ok(db)
     }
@@ -151,17 +153,19 @@ impl Persistence {
         let mut stmt = conn.prepare(
             "SELECT id, session_id, objective, status, percent_complete, current_work, next_work FROM goals WHERE session_id=?1 AND id=?2"
         )?;
-        let goal = stmt.query_row([session_id, goal_id], |row| {
-            Ok(GoalRecord {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                objective: row.get(2)?,
-                status: row.get(3)?,
-                percent_complete: row.get(4)?,
-                current_work: row.get(5)?,
-                next_work: row.get(6)?,
+        let goal = stmt
+            .query_row([session_id, goal_id], |row| {
+                Ok(GoalRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    objective: row.get(2)?,
+                    status: row.get(3)?,
+                    percent_complete: row.get(4)?,
+                    current_work: row.get(5)?,
+                    next_work: row.get(6)?,
+                })
             })
-        }).ok();
+            .ok();
         Ok(goal)
     }
 }

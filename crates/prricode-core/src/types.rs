@@ -180,9 +180,16 @@ pub struct SessionItem {
 #[derive(Debug, Implementation, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ContentPart {
-    Text { text: String },
-    ToolUse { name: String, input: serde_json::Value },
-    ToolResult { content: Vec<ContentPart> },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        content: Vec<ContentPart>,
+    },
 }
 
 #[derive(Debug, Implementation, Serialize, Deserialize)]

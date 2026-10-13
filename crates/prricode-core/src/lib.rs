@@ -1,33 +1,42 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-pub mod types;
 pub mod protocol;
+pub mod types;
 
-pub const SCHEMA_FINGERPRINT: &str = "sha256:6de32db08bbbe0deb478d2bfcaba001e9fb490986bc80db3aceb4d996abf7df9";
+pub const SCHEMA_FINGERPRINT: &str =
+    "sha256:6de32db08bbbe0deb478d2bfcaba001e9fb490986bc80db3aceb4d996abf7df9";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const SERVER_NAME: &str = "prricode";
 pub const SERVER_VERSION: &str = "0.1.0";
 
 #[derive(Debug, Implementation, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum ProviderId {
+    #[serde(rename = "echo")]
     Echo,
-    External,
-    Local,
+    #[serde(rename = "ollama")]
     Ollama,
+    #[serde(rename = "ollama-cloud")]
+    OllamaCloud,
+    #[serde(rename = "openrouter")]
     OpenRouter,
+    #[serde(rename = "kilo")]
     Kilo,
+    #[serde(rename = "openai")]
+    OpenAI,
+    #[serde(rename = "custom")]
+    Custom,
 }
 
 impl ProviderId {
     pub fn id(&self) -> &'static str {
         match self {
             Self::Echo => "echo",
-            Self::External => "reference",
-            Self::Local => "local",
             Self::Ollama => "ollama",
+            Self::OllamaCloud => "ollama-cloud",
             Self::OpenRouter => "openrouter",
             Self::Kilo => "kilo",
+            Self::OpenAI => "openai",
+            Self::Custom => "custom",
         }
     }
 }

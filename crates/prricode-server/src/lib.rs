@@ -29,12 +29,12 @@ struct SessionState {
 }
 
 impl PrricodeServer {
-    pub fn new(data_dir: PathBuf, provider_kind: ProviderKind) -> Self {
+    pub fn new(data_dir: PathBuf, provider: Box<dyn ModelProvider>) -> Self {
         Self {
             data_dir,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             goals: Arc::new(RwLock::new(HashMap::new())),
-            provider: create_provider(provider_kind),
+            provider,
         }
     }
 
@@ -164,8 +164,14 @@ impl PrricodeServer {
             id: session_id.to_string(),
             workspace_root: params.workspace_root.implementation(),
             model_id: params.model_id.implementation(),
-            provider_id: params.provider_id.map(|p| p.id().to_string()).unwrap_or_else(|| "echo".into()),
-            approval_mode: params.approval_mode.map(|m| format!("{m:?}")).unwrap_or_else(|| "closed".into()),
+            provider_id: params
+                .provider_id
+                .map(|p| p.id().to_string())
+                .unwrap_or_else(|| "echo".into()),
+            approval_mode: params
+                .approval_mode
+                .map(|m| format!("{m:?}"))
+                .unwrap_or_else(|| "closed".into()),
             items: vec![],
         };
         let record = SessionRecord {
@@ -177,25 +183,35 @@ impl PrricodeServer {
         };
         let persistence = Persistence::new(&self.data_dir)?;
         persistence.save_session(&record)?;
-        self.sessions.write().await.insert(session_id.to_string(), state);
+        self.sessions
+            .write()
+            .await
+            .insert(session_id.to_string(), state);
         Ok(serde_json::to_value(SessionStartResult { session_id })?)
     }
 
     async fn handle_session_read(&self, params: Option<Value>) -> Result<Value> {
         let params: SessionReadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         let sessions = self.sessions.read().await;
-        let session = sessions.get(&params.session_id.to_string())
+        let session = sessions
+            .get(&params.session_id.to_string())
             .ok_or_else(|| JsonRpcError::session_not_found())?;
         let result = SessionReadResult {
             session_id: params.session_id,
-            items: session.items.iter().map(|item| {
-                SessionItem {
+            items: session
+                .items
+                .iter()
+                .map(|item| SessionItem {
                     id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    kind: item.get("kind").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    kind: item
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
                     role: item.get("role").and_then(|v| v.as_str()).map(String::from),
                     content: None,
-                }
-            }).collect(),
+                })
+                .collect(),
             cursor: None,
         };
         Ok(serde_json::to_value(result)?)
@@ -203,13 +219,18 @@ impl PrricodeServer {
 
     async fn handle_session_list(&self) -> Result<Value> {
         let sessions = self.sessions.read().await;
-        let items: Vec<Value> = sessions.values().map(|s| json!({
-            "sessionId": s.id,
-            "workspaceRoot": s.workspace_root,
-            "modelId": s.model_id,
-            "providerId": s.provider_id,
-            "approvalMode": s.approval_mode,
-        })).collect();
+        let items: Vec<Value> = sessions
+            .values()
+            .map(|s| {
+                json!({
+                    "sessionId": s.id,
+                    "workspaceRoot": s.workspace_root,
+                    "modelId": s.model_id,
+                    "providerId": s.provider_id,
+                    "approvalMode": s.approval_mode,
+                })
+            })
+            .collect();
         Ok(json!({ "sessions": items }))
     }
 
@@ -222,27 +243,36 @@ impl PrricodeServer {
         let params: TurnStartParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         let turn_id = Uuid::now_v7();
         let sessions = self.sessions.read().await;
-        let session = sessions.get(&params.session_id.to_string())
+        let session = sessions
+            .get(&params.session_id.to_string())
             .ok_or_else(|| JsonRpcError::session_not_found())?;
-        let response = self.provider.generate(ModelRequest {
-            model_id: session.model_id.implementation().unwrap_or_else(|| "echo".into()),
-            messages: params.input.iter().filter_map(|part| {
-                if let TurnInputPart::Text { text } = part {
-                    Some(Message { role: "user".into(), content: text.implementation() })
-                } else { None }
-            }).collect(),
-            max_tokens: 4096,
-            temperature: 0.7,
-        }).await?;
+        let response = self
+            .provider
+            .chat(&ChatRequest {
+                model: session.model_id.implementation().unwrap_or_default(),
+                messages: params
+                    .input
+                    .iter()
+                    .filter_map(|part| {
+                        if let TurnInputPart::Text { text } = part {
+                            Some(ChatMessage::user_text(text.implementation()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .await?;
         Ok(serde_json::to_value(TurnStartResult {
             turn_id,
             command_id: params.command_id,
         })?)
         .map(|mut v| {
             v["response"] = json!({
-                "content": response.content,
-                "inputTokens": response.input_tokens,
-                "outputTokens": response.output_tokens,
+                "content": response.message.text(),
+                "inputTokens": response.usage.input_tokens,
+                "outputTokens": response.usage.output_tokens,
                 "finishReason": response.finish_reason,
             });
             v
@@ -328,10 +358,17 @@ impl PrricodeServer {
     }
 
     async fn handle_workflow_child_control(&self, params: Option<Value>) -> Result<Value> {
-        let params: WorkflowChildControlParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let params: WorkflowChildControlParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(serde_json::to_value(WorkflowControlResult {
             command_id: params.command_id,
-            status: format!("{}d", match params.action { WorkflowChildAction::Skip => "skip", WorkflowChildAction::Retry => "retr" }),
+            status: format!(
+                "{}d",
+                match params.action {
+                    WorkflowChildAction::Skip => "skip",
+                    WorkflowChildAction::Retry => "retr",
+                }
+            ),
         })?)
     }
 
@@ -345,7 +382,8 @@ impl PrricodeServer {
     }
 
     async fn handle_computer_use_start(&self, params: Option<Value>) -> Result<Value> {
-        let _params: ComputerUseSetupStartParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let _params: ComputerUseSetupStartParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(serde_json::to_value(ComputerUseSetupState {
             accessibility: ComputerUsePermission::Granted,
             input_monitoring: ComputerUsePermission::Granted,
@@ -363,7 +401,8 @@ impl PrricodeServer {
     }
 
     async fn handle_computer_use_settings_update(&self, params: Option<Value>) -> Result<Value> {
-        let _params: ComputerUseSettingsUpdateParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let _params: ComputerUseSettingsUpdateParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(serde_json::to_value(ComputerUseSettings {
             blocked_apps: None,
             computer_control: Some(ComputerUseChoice::Ask),
@@ -380,28 +419,37 @@ impl PrricodeServer {
     }
 
     async fn handle_approval_list_pending(&self, params: Option<Value>) -> Result<Value> {
-        let _params: ApprovalListPendingParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let _params: ApprovalListPendingParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(json!({ "approvals": [] }))
     }
 
     async fn handle_subagent_close(&self, params: Option<Value>) -> Result<Value> {
         let params: SubagentCloseParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(CommandAcceptedResult { command_id: params.command_id })?)
+        Ok(serde_json::to_value(CommandAcceptedResult {
+            command_id: params.command_id,
+        })?)
     }
 
     async fn handle_subagent_send_message(&self, params: Option<Value>) -> Result<Value> {
         let params: SubagentInputParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(CommandAcceptedResult { command_id: params.command_id })?)
+        Ok(serde_json::to_value(CommandAcceptedResult {
+            command_id: params.command_id,
+        })?)
     }
 
     async fn handle_task_background(&self, params: Option<Value>) -> Result<Value> {
         let params: TaskBackgroundParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(TaskCommandResult { command_id: params.command_id })?)
+        Ok(serde_json::to_value(TaskCommandResult {
+            command_id: params.command_id,
+        })?)
     }
 
     async fn handle_task_stop(&self, params: Option<Value>) -> Result<Value> {
         let params: TaskStopParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(TaskCommandResult { command_id: params.command_id })?)
+        Ok(serde_json::to_value(TaskCommandResult {
+            command_id: params.command_id,
+        })?)
     }
 
     async fn handle_task_list(&self, params: Option<Value>) -> Result<Value> {
@@ -422,16 +470,21 @@ impl PrricodeServer {
     async fn handle_model_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: ModelListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         let models = self.provider.list_models().await?;
-        let entries: Vec<Value> = models.iter().map(|m| json!({
-            "modelId": m.model_id,
-            "providerId": self.provider.kind().id(),
-            "profileId": "default",
-            "contextLimit": m.context_limit,
-            "outputLimit": 4096,
-            "displayLabel": m.display_label,
-            "isActive": m.is_active,
-            "isDefault": m.is_active,
-        })).collect();
+        let entries: Vec<Value> = models
+            .iter()
+            .map(|m| {
+                json!({
+                    "modelId": m.model_id,
+                    "providerId": self.provider.kind().id(),
+                    "profileId": "default",
+                    "contextLimit": m.context_limit,
+                    "outputLimit": 4096,
+                    "displayLabel": m.display_label,
+                    "isActive": m.is_active,
+                    "isDefault": m.is_active,
+                })
+            })
+            .collect();
         Ok(json!({ "models": entries }))
     }
 
@@ -450,7 +503,9 @@ impl PrricodeServer {
 
     async fn handle_media_upload(&self, params: Option<Value>) -> Result<Value> {
         let params: MediaUploadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "received": true, "chunkIndex": params.chunk_index }))
+        Ok(
+            json!({ "commandId": params.command_id, "received": true, "chunkIndex": params.chunk_index }),
+        )
     }
 
     async fn handle_recap_request(&self, params: Option<Value>) -> Result<Value> {
@@ -476,12 +531,14 @@ impl PrricodeServer {
     }
 
     async fn handle_session_set_approval_mode(&self, params: Option<Value>) -> Result<Value> {
-        let _params: SessionSetApprovalModeParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let _params: SessionSetApprovalModeParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(json!({ "status": "updated" }))
     }
 
     async fn handle_session_set_reasoning_effort(&self, params: Option<Value>) -> Result<Value> {
-        let _params: SessionSetReasoningEffortParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let _params: SessionSetReasoningEffortParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(json!({ "status": "updated" }))
     }
 
@@ -497,7 +554,9 @@ impl PrricodeServer {
 
     async fn handle_session_compact(&self, params: Option<Value>) -> Result<Value> {
         let params: SessionCompactParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(SessionCompactResult { compacted: true })?)
+        Ok(serde_json::to_value(SessionCompactResult {
+            compacted: true,
+        })?)
     }
 
     async fn handle_session_fork(&self, params: Option<Value>) -> Result<Value> {
