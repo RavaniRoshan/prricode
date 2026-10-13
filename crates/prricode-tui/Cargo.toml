@@ -1,0 +1,17 @@
+[package]
+name = "prricode-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+prricode-core = { path = "../prricode-core" }
+prricode-provider = { path = "../prricode-provider" }
+prricode-persistence = { path = "../prricode-persistence" }
+prricode-agent = { path = "../prricode-agent" }
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }

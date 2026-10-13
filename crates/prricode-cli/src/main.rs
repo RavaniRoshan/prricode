@@ -365,7 +365,25 @@ async fn main() -> Result<()> {
         PathBuf::from(home).join(".local/share/prricode")
     });
 
-    match &cli.command {
+    // Bare `prricode` (no subcommand) runs the interactive TUI — the
+    // Reference-compatible default entry point.
+    if cli.command.is_none() {
+        let launch = prricode_tui::LaunchConfig {
+            provider: provider_kind(cli.provider),
+            model: default_model(&cli),
+            base_url: cli.base_url.clone(),
+            approval_mode: cli
+                .approval_mode
+                .map(|m| m.to_mode())
+                .unwrap_or(prricode_core::ApprovalMode::Closed),
+            workspace_root: None,
+            data_dir: Some(data_dir),
+            resume_session: None,
+        };
+        return prricode_tui::run(launch);
+    }
+
+    match cli.command.as_ref().expect("command present") {
         Command::Serve { port } => {
             let provider = build_provider(&cli);
             let default_model = default_model(&cli);
@@ -954,6 +972,22 @@ async fn main() -> Result<()> {
             if uuid::Uuid::parse_str(session_id).is_err() {
                 println!("(note: session ids are UUIDs; run 'prricode resume' to list them)");
             }
+        }
+        Command::Resume { session_id: None } => {
+            // Interactive resume goes through the TUI picker.
+            let launch = prricode_tui::LaunchConfig {
+                provider: provider_kind(cli.provider),
+                model: default_model(&cli),
+                base_url: cli.base_url.clone(),
+                approval_mode: cli
+                    .approval_mode
+                    .map(|m| m.to_mode())
+                    .unwrap_or(prricode_core::ApprovalMode::Closed),
+                workspace_root: None,
+                data_dir: Some(data_dir),
+                resume_session: None,
+            };
+            return prricode_tui::run(launch);
         }
         Command::Resume { session_id } => {
             let persistence = Persistence::new(&data_dir)?;
