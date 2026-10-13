@@ -42,6 +42,7 @@ impl ProviderId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ApprovalMode {
     Closed,
     Open,
@@ -50,6 +51,7 @@ pub enum ApprovalMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,
     Minimal,
@@ -62,6 +64,7 @@ pub enum ReasoningEffort {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Capability {
     UserShell,
     SessionMcp,
@@ -72,18 +75,21 @@ pub enum Capability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum WorkflowChildAction {
     Skip,
     Retry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ComputerUseChoice {
     Ask,
     AlwaysAllow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ComputerUsePermission {
     Granted,
     Missing,
@@ -91,6 +97,7 @@ pub enum ComputerUsePermission {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ComputerUseSetupPhase {
     Dormant,
     InProgress,
@@ -100,6 +107,7 @@ pub enum ComputerUseSetupPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SkillSource {
     Bundled,
     Imported,
@@ -107,6 +115,7 @@ pub enum SkillSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ModelCatalogSource {
     ProviderCatalog,
     FakeCatalog,

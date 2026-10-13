@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 prricode-core = { path = "../prricode-core" }
+prricode-agent = { path = "../prricode-agent" }
 prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
 tokio = { workspace = true }
@@ -14,3 +15,4 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }

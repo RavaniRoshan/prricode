@@ -13,7 +13,7 @@ mod openai_compat;
 #[cfg(test)]
 mod tests;
 
-pub use config::{load_config, ProviderConfig, ProviderSettings, PrricodeConfig};
+pub use config::{config_path, load_config, ProviderConfig, ProviderSettings, PrricodeConfig};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

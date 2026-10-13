@@ -12,6 +12,7 @@ pub type UploadId = Uuid;
 pub type UserInputId = Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     pub client_info: ClientInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -19,15 +20,18 @@ pub struct InitializeParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientInfo {
     pub name: String,
     pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeResult {
     pub platform_family: String,
     pub platform_os: String,
@@ -38,18 +42,21 @@ pub struct InitializeResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaInfo {
     pub fingerprint: String,
     pub version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionStartParams {
     pub command_id: CommandId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,12 +78,14 @@ pub struct SessionStartParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<SessionMcpServerConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionMcpServerConfig {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,11 +93,13 @@ pub struct SessionMcpServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionStartResult {
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnStartParams {
     pub command_id: CommandId,
     pub input: Vec<TurnInputPart>,
@@ -109,12 +120,14 @@ pub enum TurnInputPart {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnStartResult {
     pub turn_id: TurnId,
     pub command_id: CommandId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoalSetParams {
     pub command_id: CommandId,
     pub objective: String,
@@ -122,6 +135,7 @@ pub struct GoalSetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoalEditParams {
     pub command_id: CommandId,
     pub objective: String,
@@ -129,30 +143,35 @@ pub struct GoalEditParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoalClearParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoalPauseParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoalResumeParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoalCommandResult {
     pub command_id: CommandId,
     pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionReadParams {
     pub session_id: SessionId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +179,7 @@ pub struct SessionReadParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionReadResult {
     pub session_id: SessionId,
     pub items: Vec<SessionItem>,
@@ -168,6 +188,7 @@ pub struct SessionReadResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionItem {
     pub id: String,
     pub kind: String,
@@ -193,6 +214,7 @@ pub enum ContentPart {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowCancelParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -200,6 +222,7 @@ pub struct WorkflowCancelParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowPauseParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -207,6 +230,7 @@ pub struct WorkflowPauseParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowResumeParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -214,12 +238,14 @@ pub struct WorkflowResumeParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowControlResult {
     pub command_id: CommandId,
     pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowResumeResult {
     pub command_id: CommandId,
     pub status: String,
@@ -227,6 +253,7 @@ pub struct WorkflowResumeResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowChildControlParams {
     pub action: crate::WorkflowChildAction,
     pub attempt: u32,
@@ -237,6 +264,7 @@ pub struct WorkflowChildControlParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComputerUseSetupState {
     pub accessibility: crate::ComputerUsePermission,
     pub input_monitoring: crate::ComputerUsePermission,
@@ -245,6 +273,7 @@ pub struct ComputerUseSetupState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComputerUseSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_apps: Option<Vec<ComputerUseBlockedApp>>,
@@ -255,11 +284,13 @@ pub struct ComputerUseSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComputerUseBlockedApp {
     pub bundle_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComputerUseSetupStartParams {
     pub command_id: CommandId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,6 +298,7 @@ pub struct ComputerUseSetupStartParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComputerUseSettingsUpdateParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_apps: Option<Vec<String>>,
@@ -279,6 +311,7 @@ pub struct ComputerUseSettingsUpdateParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionUserShellParams {
     pub command_id: CommandId,
     pub command_text: String,
@@ -286,6 +319,7 @@ pub struct SessionUserShellParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionUserShellResult {
     pub exit_code: i32,
     pub stdout: String,
@@ -293,6 +327,7 @@ pub struct SessionUserShellResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApprovalDecideParams {
     pub approval_id: ApprovalId,
     pub choice_id: String,
@@ -302,12 +337,14 @@ pub struct ApprovalDecideParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApprovalDecideResult {
     pub command_id: CommandId,
     pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubagentCloseParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -315,6 +352,7 @@ pub struct SubagentCloseParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubagentInputParams {
     pub body: String,
     pub command_id: CommandId,
@@ -323,11 +361,13 @@ pub struct SubagentInputParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommandAcceptedResult {
     pub command_id: CommandId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskBackgroundParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -335,11 +375,13 @@ pub struct TaskBackgroundParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskCommandResult {
     pub command_id: CommandId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionListParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
@@ -352,12 +394,14 @@ pub struct SessionListParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelListParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelCatalogEntry {
     pub model_id: String,
     pub provider_id: crate::ProviderId,
@@ -370,6 +414,7 @@ pub struct ModelCatalogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -377,6 +422,7 @@ pub struct TokenUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowChild {
     pub attempt: u32,
     pub child_id: String,
@@ -389,6 +435,7 @@ pub struct WorkflowChild {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillInfo {
     pub name: String,
     pub source: crate::SkillSource,
@@ -396,6 +443,7 @@ pub struct SkillInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillImportParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -407,6 +455,7 @@ pub struct SkillImportParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionCompactParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -415,11 +464,13 @@ pub struct SessionCompactParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionCompactResult {
     pub compacted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserInputAnswerParams {
     pub answers: Vec<String>,
     pub command_id: CommandId,
@@ -428,6 +479,7 @@ pub struct UserInputAnswerParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaUploadParams {
     pub chunk_base64: String,
     pub chunk_count: u32,
@@ -440,18 +492,21 @@ pub struct MediaUploadParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecapRequestParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecapRequestResult {
     pub command_id: CommandId,
     pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UsageReadResult {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
@@ -459,6 +514,7 @@ pub struct UsageReadResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionSetModelParams {
     pub command_id: CommandId,
     pub model: ModelSelection,
@@ -466,6 +522,7 @@ pub struct SessionSetModelParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelSelection {
     pub model_id: String,
     pub provider_id: crate::ProviderId,

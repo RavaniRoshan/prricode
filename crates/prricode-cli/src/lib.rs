@@ -79,7 +79,7 @@ pub enum ApprovalModeArg {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Start interactive session
+    /// List sessions, or show one session's detail
     Resume { session_id: Option<String> },
     /// Execute one-off command
     Exec {
@@ -109,7 +109,7 @@ pub enum Command {
     },
     /// Voice input
     Voice {
-        #[arg(long)]
+        #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         toggle: bool,
     },
     /// Manage plugins
@@ -146,7 +146,7 @@ pub enum Command {
     },
     /// Login to provider
     Login {
-        #[arg(long)]
+        #[arg(id = "login-provider")]
         provider: Option<String>,
     },
     /// Logout

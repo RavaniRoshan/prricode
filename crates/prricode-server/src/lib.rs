@@ -1,21 +1,40 @@
+//! JSON-RPC server over stdio: session lifecycle, turns, goals, approvals,
+//! computer-use setup, tasks, skills, models, usage, and media.
+
 use anyhow::Result;
+use prricode_agent::{
+    AgentEvent, AgentRunner, ApprovalEngine, GoalContext, TurnHandle, TurnInput, TurnTicket,
+};
 use prricode_core::protocol::*;
 use prricode_core::types::*;
 use prricode_core::*;
 use prricode_persistence::*;
-use prricode_provider::*;
+// Explicit imports shadow same-named types (ContentPart) from the core globs above.
+use prricode_provider::{
+    AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider, ToolCall,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use uuid::Uuid;
+
+const MAX_GOAL_CONTINUATIONS: usize = 100;
 
 pub struct PrricodeServer {
     data_dir: PathBuf,
-    sessions: Arc<RwLock<HashMap<String, SessionState>>>,
-    goals: Arc<RwLock<HashMap<String, GoalRecord>>>,
-    provider: Box<dyn ModelProvider>,
+    persistence: Arc<Persistence>,
+    provider: Arc<dyn ModelProvider>,
+    runner: Arc<AgentRunner>,
+    approvals: Arc<ApprovalEngine>,
+    sessions: Arc<Mutex<HashMap<String, SessionState>>>,
+    turns: Arc<Mutex<HashMap<String, TurnHandle>>>,
+    goals: Arc<Mutex<HashMap<String, GoalRecord>>>,
+    uploads: Arc<Mutex<HashMap<String, MediaUploadState>>>,
+    events_tx: mpsc::UnboundedSender<AgentEvent>,
+    default_model: Option<String>,
+    default_provider_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -24,21 +43,347 @@ struct SessionState {
     workspace_root: Option<String>,
     model_id: Option<String>,
     provider_id: String,
-    approval_mode: String,
-    items: Vec<Value>,
+    approval_mode: ApprovalMode,
+}
+
+#[derive(Debug, Default)]
+struct MediaUploadState {
+    media_type: String,
+    total_bytes: u64,
+    chunks_received: u32,
+    chunk_count: u32,
+    bytes: Vec<u8>,
+}
+
+/// Convert agent events to JSON-RPC notifications on the wire.
+pub fn notification_for(event: &AgentEvent) -> Option<(String, Value)> {
+    match event {
+        AgentEvent::TurnStarted {
+            turn_id,
+            session_id,
+        } => Some((
+            "turn/started".into(),
+            json!({ "turnId": turn_id, "sessionId": session_id }),
+        )),
+        AgentEvent::Item { session_id, item } => Some((
+            "turn/item".into(),
+            json!({ "sessionId": session_id, "item": item }),
+        )),
+        AgentEvent::ApprovalRequested {
+            approval_id,
+            session_id,
+            requirement_id,
+            kind,
+            summary,
+        } => Some((
+            "approval/requested".into(),
+            json!({
+                "approvalId": approval_id,
+                "sessionId": session_id,
+                "requirementId": requirement_id,
+                "kind": kind,
+                "summary": summary,
+            }),
+        )),
+        AgentEvent::ApprovalResolved {
+            approval_id,
+            session_id,
+            approved,
+        } => Some((
+            "approval/resolved".into(),
+            json!({ "approvalId": approval_id, "sessionId": session_id, "approved": approved }),
+        )),
+        AgentEvent::TurnCompleted {
+            turn_id,
+            session_id,
+            content,
+            input_tokens,
+            output_tokens,
+        } => Some((
+            "turn/completed".into(),
+            json!({
+                "turnId": turn_id,
+                "sessionId": session_id,
+                "content": content,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+            }),
+        )),
+        AgentEvent::TurnFailed {
+            turn_id,
+            session_id,
+            error,
+        } => Some((
+            "turn/failed".into(),
+            json!({ "turnId": turn_id, "sessionId": session_id, "error": error }),
+        )),
+        AgentEvent::Log {
+            session_id,
+            level,
+            message,
+        } => Some((
+            "log".into(),
+            json!({ "sessionId": session_id, "level": level, "message": message }),
+        )),
+        AgentEvent::SessionListChanged => Some(("session/listChanged".into(), json!({}))),
+        AgentEvent::GoalUpdated {
+            session_id,
+            objective,
+            status,
+            percent_complete,
+        } => Some((
+            "goal/updated".into(),
+            json!({
+                "sessionId": session_id,
+                "objective": objective,
+                "status": status,
+                "percentComplete": percent_complete,
+            }),
+        )),
+        AgentEvent::GoalCleared { session_id } => {
+            Some(("goal/cleared".into(), json!({ "sessionId": session_id })))
+        }
+        AgentEvent::SessionRenamed { session_id, name } => Some((
+            "session/renamed".into(),
+            json!({ "sessionId": session_id, "name": name }),
+        )),
+        AgentEvent::SessionCompact {
+            session_id,
+            compacted,
+        } => Some((
+            "session/compact".into(),
+            json!({ "sessionId": session_id, "compacted": compacted }),
+        )),
+        AgentEvent::TaskUpdated {
+            session_id,
+            task_id,
+            status,
+        } => Some((
+            "task/updated".into(),
+            json!({ "sessionId": session_id, "taskId": task_id, "status": status }),
+        )),
+        AgentEvent::ModelCatalogChanged { models } => {
+            Some(("model/catalogChanged".into(), json!({ "models": models })))
+        }
+        AgentEvent::UsageUpdated {
+            session_id,
+            input_tokens,
+            output_tokens,
+            total_cost,
+        } => Some((
+            "usage/updated".into(),
+            json!({
+                "sessionId": session_id,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "totalCost": total_cost,
+            }),
+        )),
+        AgentEvent::MediaUploadProgress {
+            session_id,
+            upload_id,
+            bytes_received,
+            total_bytes,
+            complete,
+        } => Some((
+            "media/uploadProgress".into(),
+            json!({
+                "sessionId": session_id,
+                "uploadId": upload_id,
+                "bytesReceived": bytes_received,
+                "totalBytes": total_bytes,
+                "complete": complete,
+            }),
+        )),
+        AgentEvent::ComputerUseStateChanged { session_id, state } => Some((
+            "computerUse/stateChanged".into(),
+            json!({ "sessionId": session_id, "state": state }),
+        )),
+        AgentEvent::WorkflowStateChanged {
+            session_id,
+            workflow_run_id,
+            status,
+        } => Some((
+            "workflow/stateChanged".into(),
+            json!({ "sessionId": session_id, "workflowRunId": workflow_run_id, "status": status }),
+        )),
+        AgentEvent::ApprovalExpired {
+            approval_id,
+            session_id,
+        } => Some((
+            "approval/expired".into(),
+            json!({ "approvalId": approval_id, "sessionId": session_id }),
+        )),
+        AgentEvent::SubagentUpdated {
+            session_id,
+            subagent_id,
+            status,
+        } => Some((
+            "subagent/updated".into(),
+            json!({ "sessionId": session_id, "subagentId": subagent_id, "status": status }),
+        )),
+        AgentEvent::ToolCallStarted {
+            session_id,
+            turn_id,
+            tool_call_id,
+            name,
+        } => Some((
+            "tool/callStarted".into(),
+            json!({
+                "sessionId": session_id,
+                "turnId": turn_id,
+                "toolCallId": tool_call_id,
+                "name": name,
+            }),
+        )),
+        AgentEvent::ToolCallCompleted {
+            session_id,
+            turn_id,
+            tool_call_id,
+            name,
+        } => Some((
+            "tool/callCompleted".into(),
+            json!({
+                "sessionId": session_id,
+                "turnId": turn_id,
+                "toolCallId": tool_call_id,
+                "name": name,
+            }),
+        )),
+        AgentEvent::SessionForked {
+            session_id,
+            forked_session_id,
+        } => Some((
+            "session/forked".into(),
+            json!({ "sessionId": session_id, "forkedSessionId": forked_session_id }),
+        )),
+        AgentEvent::SessionModelChanged {
+            session_id,
+            model_id,
+        } => Some((
+            "session/modelChanged".into(),
+            json!({ "sessionId": session_id, "modelId": model_id }),
+        )),
+        AgentEvent::SessionApprovalModeChanged { session_id, mode } => Some((
+            "session/approvalModeChanged".into(),
+            json!({ "sessionId": session_id, "mode": mode }),
+        )),
+        AgentEvent::ItemOutputReady {
+            session_id,
+            item_id,
+        } => Some((
+            "item/outputReady".into(),
+            json!({ "sessionId": session_id, "itemId": item_id }),
+        )),
+        AgentEvent::TurnSteered {
+            session_id,
+            turn_id,
+        } => Some((
+            "turn/steered".into(),
+            json!({ "sessionId": session_id, "turnId": turn_id }),
+        )),
+        AgentEvent::TurnUnqueued {
+            session_id,
+            turn_id,
+        } => Some((
+            "turn/unqueued".into(),
+            json!({ "sessionId": session_id, "turnId": turn_id }),
+        )),
+        AgentEvent::AccountLoginStateChanged { authenticated } => Some((
+            "account/loginStateChanged".into(),
+            json!({ "authenticated": authenticated }),
+        )),
+        AgentEvent::SettingsChanged { settings } => {
+            Some(("settings/changed".into(), json!({ "settings": settings })))
+        }
+        AgentEvent::PermissionProfileChanged {
+            session_id,
+            profile,
+        } => Some((
+            "permissionProfile/changed".into(),
+            json!({ "sessionId": session_id, "profile": profile }),
+        )),
+        AgentEvent::SkillActivationChanged {
+            session_id,
+            skill,
+            activation,
+        } => Some((
+            "skill/activationChanged".into(),
+            json!({ "sessionId": session_id, "skill": skill, "activation": activation }),
+        )),
+        AgentEvent::ScheduledFired { prompt_id } => {
+            Some(("scheduled/fired".into(), json!({ "promptId": prompt_id })))
+        }
+        AgentEvent::PeerAdmissionRequested { peer_id } => Some((
+            "peer/admissionRequested".into(),
+            json!({ "peerId": peer_id }),
+        )),
+        AgentEvent::RuntimeStateChanged { state } => {
+            Some(("runtime/stateChanged".into(), json!({ "state": state })))
+        }
+        AgentEvent::WorkflowChildUpdated {
+            session_id,
+            workflow_run_id,
+            child,
+        } => Some((
+            "workflow/childUpdated".into(),
+            json!({ "sessionId": session_id, "workflowRunId": workflow_run_id, "child": child }),
+        )),
+        AgentEvent::McpServerStateChanged {
+            session_id,
+            server,
+            state,
+        } => Some((
+            "mcp/serverStateChanged".into(),
+            json!({ "sessionId": session_id, "server": server, "state": state }),
+        )),
+        AgentEvent::HookExecuted { session_id, hook } => Some((
+            "hook/executed".into(),
+            json!({ "sessionId": session_id, "hook": hook }),
+        )),
+        AgentEvent::PluginChanged { plugin, action } => Some((
+            "plugin/changed".into(),
+            json!({ "plugin": plugin, "action": action }),
+        )),
+    }
 }
 
 impl PrricodeServer {
-    pub fn new(data_dir: PathBuf, provider: Box<dyn ModelProvider>) -> Self {
-        Self {
+    pub fn new(
+        data_dir: PathBuf,
+        provider: Box<dyn ModelProvider>,
+        default_model: Option<String>,
+    ) -> (Arc<Self>, mpsc::UnboundedReceiver<AgentEvent>) {
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let persistence = Arc::new(Persistence::new(&data_dir).expect("persistence init"));
+        let approvals = Arc::new(ApprovalEngine::new().with_events(events_tx.clone()));
+        let provider: Arc<dyn ModelProvider> = Arc::from(provider);
+        let runner = Arc::new(
+            AgentRunner::new(Arc::clone(&provider), Arc::clone(&approvals))
+                .with_events(events_tx.clone())
+                .with_persistence(Arc::clone(&persistence))
+                .with_default_model(default_model.clone().unwrap_or_default()),
+        );
+        AgentRunner::init_self_weak(&runner);
+        let default_provider_id = provider.kind().id().to_string();
+        let server = Arc::new(Self {
             data_dir,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            goals: Arc::new(RwLock::new(HashMap::new())),
+            persistence,
             provider,
-        }
+            runner,
+            approvals,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            turns: Arc::new(Mutex::new(HashMap::new())),
+            goals: Arc::new(Mutex::new(HashMap::new())),
+            uploads: Arc::new(Mutex::new(HashMap::new())),
+            events_tx,
+            default_model,
+            default_provider_id,
+        });
+        (server, events_rx)
     }
 
-    pub async fn handle_request_from_value(&self, value: Value) -> JsonRpcResponse {
+    pub async fn handle_request_from_value(self: &Arc<Self>, value: Value) -> JsonRpcResponse {
         let req = match serde_json::from_value::<JsonRpcRequest>(value) {
             Ok(r) => r,
             Err(e) => {
@@ -53,7 +398,7 @@ impl PrricodeServer {
         self.handle_request(req).await
     }
 
-    pub async fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
+    pub async fn handle_request(self: &Arc<Self>, req: JsonRpcRequest) -> JsonRpcResponse {
         let id = req.id.clone();
         match self.dispatch(&req.method, req.params).await {
             Ok(result) => JsonRpcResponse {
@@ -65,6 +410,8 @@ impl PrricodeServer {
             Err(err) => {
                 let error = if let Some(rpc_err) = err.downcast_ref::<RpcError>() {
                     rpc_err.0.clone()
+                } else if let Some(json_err) = err.downcast_ref::<JsonRpcError>() {
+                    json_err.clone()
                 } else {
                     JsonRpcError::internal_error(err.to_string())
                 };
@@ -78,13 +425,21 @@ impl PrricodeServer {
         }
     }
 
-    async fn dispatch(&self, method: &str, params: Option<Value>) -> Result<Value> {
+    async fn dispatch(self: &Arc<Self>, method: &str, params: Option<Value>) -> Result<Value> {
         match method {
             "initialize" => self.handle_initialize(params).await,
+            "accountLogin/start" => self.handle_account_login_start(params).await,
+            "accountLogin/cancel" => self.handle_account_login_cancel(params).await,
+            "auth/deviceLogin" => self.handle_device_login(params).await,
+            "auth/supersedeLoginCredential" => self.handle_supersede_login_credential(params).await,
+            "mcpServer/oauthLogin" => self.handle_mcp_server_oauth_login(params).await,
+            "mcpServer/oauthLoginCancel" => self.handle_mcp_server_oauth_login_cancel(params).await,
+            "subscription/activate" => self.handle_subscription_activate(params).await,
             "session/start" => self.handle_session_start(params).await,
             "session/read" => self.handle_session_read(params).await,
             "session/list" => self.handle_session_list().await,
             "session/resume" => self.handle_session_resume(params).await,
+            "session/name" => self.handle_session_name(None).await,
             "turn/start" => self.handle_turn_start(params).await,
             "goal/set" => self.handle_goal_set(params).await,
             "goal/edit" => self.handle_goal_edit(params).await,
@@ -95,7 +450,12 @@ impl PrricodeServer {
             "workflow/pause" => self.handle_workflow_pause(params).await,
             "workflow/resume" => self.handle_workflow_resume(params).await,
             "workflow/childControl" => self.handle_workflow_child_control(params).await,
+            "workflow/control" => self.handle_workflow_control(None).await,
+            "workflow/triggerConfiguration" => {
+                self.handle_workflow_trigger_configuration(None).await
+            }
             "computerUseSetup/check" => self.handle_computer_use_check().await,
+            "computerUseSetup/read" => self.handle_computer_use_setup_read(params).await,
             "computerUseSetup/start" => self.handle_computer_use_start(params).await,
             "computerUseSettings/read" => self.handle_computer_use_settings_read().await,
             "computerUseSettings/update" => self.handle_computer_use_settings_update(params).await,
@@ -103,16 +463,24 @@ impl PrricodeServer {
             "approval/listPending" => self.handle_approval_list_pending(params).await,
             "subagent/close" => self.handle_subagent_close(params).await,
             "subagent/sendMessage" => self.handle_subagent_send_message(params).await,
+            "subagent/target" => self.handle_subagent_target(params).await,
             "task/background" => self.handle_task_background(params).await,
             "task/stop" => self.handle_task_stop(params).await,
+            "task/stopAll" => self.handle_task_stop_all(params).await,
             "task/list" => self.handle_task_list(params).await,
             "skill/list" => self.handle_skill_list(params).await,
             "skill/import" => self.handle_skill_import(params).await,
+            "skill/setActivation" => self.handle_skill_set_activation(params).await,
+            "permissionProfile/set" => self.handle_permission_profile_set(params).await,
+            "settings/read" => self.handle_settings_read(params).await,
+            "settings/writeValue" => self.handle_settings_write_value(params).await,
+            "settings/writeMany" => self.handle_settings_write_many(params).await,
             "model/list" => self.handle_model_list(params).await,
             "usage/read" => self.handle_usage_read().await,
             "userInput/answer" => self.handle_user_input_answer(params).await,
             "media/upload" => self.handle_media_upload(params).await,
             "recap/request" => self.handle_recap_request(params).await,
+            "recap/cancel" => self.handle_recap_cancel(params).await,
             "session/userShell" => self.handle_user_shell(params).await,
             "session/setModel" => self.handle_session_set_model(params).await,
             "session/setApprovalMode" => self.handle_session_set_approval_mode(params).await,
@@ -124,6 +492,9 @@ impl PrricodeServer {
             "view/page" => self.handle_view_page(params).await,
             "view/subscribe" => self.handle_view_subscribe(params).await,
             "view/unsubscribe" => self.handle_view_unsubscribe(params).await,
+            "view/unsubscribeBySessionId" => {
+                self.handle_view_unsubscribe_by_session_id(params).await
+            }
             "item/readOutput" => self.handle_item_read_output(params).await,
             "plugin/list" => self.handle_plugin_list(params).await,
             "plugin/install" => self.handle_plugin_install(params).await,
@@ -133,9 +504,282 @@ impl PrricodeServer {
             "turn/interrupt" => self.handle_turn_interrupt(params).await,
             "turn/steer" => self.handle_turn_steer(params).await,
             "turn/unqueue" => self.handle_turn_unqueue(params).await,
+            "turn/submitOrigin" => self.handle_turn_submit_origin(None).await,
+            "conversationRewind/evaluate" => self.handle_conversation_rewind_evaluate(params).await,
+            "localSession/message" => self.handle_local_session_message(params).await,
+            "scheduled/fire" => self.handle_scheduled_fire(None).await,
+            "runtime/launch" => self.handle_runtime_launch(None).await,
+            "process/background" => self.handle_process_background(None).await,
+            "projection/read" => self.handle_projection_read(params).await,
+            "log/subscribe" => self.handle_log_subscribe(params).await,
+            "log/unsubscribe" => self.handle_log_unsubscribe(params).await,
+            "log/page" => self.handle_log_page(params).await,
+            "peer/admission" => self.handle_peer_admission(None).await,
+            "tool/configuration" => self.handle_tool_configuration(None).await,
             _ => Err(JsonRpcError::method_not_found(format!("unknown method: {method}")).into()),
         }
     }
+
+    // ---------- helpers ----------
+
+    async fn session_state(&self, session_id: &str) -> Result<SessionState> {
+        if let Some(state) = self.sessions.lock().unwrap().get(session_id) {
+            return Ok(state.clone());
+        }
+        // Fall back to durable storage (resume path).
+        let record = self
+            .persistence
+            .list_sessions()?
+            .into_iter()
+            .find(|s| s.id == session_id)
+            .ok_or_else(JsonRpcError::session_not_found)?;
+        let approval_mode = record
+            .approval_mode
+            .as_deref()
+            .and_then(|m| serde_json::from_value::<ApprovalMode>(json!(m)).ok())
+            .unwrap_or(ApprovalMode::Closed);
+        let state = SessionState {
+            id: record.id.clone(),
+            workspace_root: record.workspace_root.clone(),
+            model_id: record.model_id.clone(),
+            provider_id: record
+                .provider_id
+                .clone()
+                .unwrap_or_else(|| self.default_provider_id.clone()),
+            approval_mode,
+        };
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), state.clone());
+        Ok(state)
+    }
+
+    fn workspace_of(session: &SessionState) -> PathBuf {
+        session
+            .workspace_root
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    fn model_of(&self, session: &SessionState) -> String {
+        session
+            .model_id
+            .clone()
+            .or_else(|| self.default_model.clone())
+            .unwrap_or_default()
+    }
+
+    fn goal_of(&self, session_id: &str) -> Option<GoalRecord> {
+        self.goals
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .filter(|g| g.status == "active")
+            .cloned()
+    }
+
+    /// Rebuild the model message history from persisted items, honoring the
+    /// latest compaction summary as the context boundary.
+    fn load_history(&self, session_id: &str) -> Vec<ChatMessage> {
+        let items = self
+            .persistence
+            .list_items(session_id, None)
+            .unwrap_or_default();
+        let mut summary: Option<String> = None;
+        let mut last_summary_idx = None;
+        for (idx, item) in items.iter().enumerate() {
+            if item.kind == "summary" {
+                summary = Some(item.content.clone());
+                last_summary_idx = Some(idx);
+            }
+        }
+        let mut history = Vec::new();
+        if let Some(summary) = summary {
+            history.push(ChatMessage::system_text(format!(
+                "Summary of the earlier part of this session: {summary}"
+            )));
+        }
+        let start = last_summary_idx.map(|i| i + 1).unwrap_or(0);
+        for item in &items[start..] {
+            let Ok(content) = serde_json::from_str::<Value>(&item.content) else {
+                continue;
+            };
+            match item.kind.as_str() {
+                "user" => {
+                    if let Some(text) =
+                        content
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .map(|parts| {
+                                parts
+                                    .iter()
+                                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                    {
+                        history.push(ChatMessage::user_text(text));
+                    }
+                }
+                "assistant" => {
+                    let text = content
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .filter_map(|p| {
+                                    if p.get("type")?.as_str()? == "text" {
+                                        p.get("text")?.as_str()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("")
+                        })
+                        .unwrap_or_default();
+                    let tool_calls = parse_history_tool_calls(&content);
+                    if tool_calls.is_empty() {
+                        if !text.is_empty() {
+                            history.push(ChatMessage::assistant(AssistantMessage {
+                                content_parts: vec![ContentPart::text(text)],
+                                tool_calls: vec![],
+                            }));
+                        }
+                    } else {
+                        history.push(ChatMessage::assistant(AssistantMessage {
+                            content_parts: if text.is_empty() {
+                                vec![]
+                            } else {
+                                vec![ContentPart::text(text)]
+                            },
+                            tool_calls,
+                        }));
+                    }
+                }
+                "tool_result" => {
+                    if let (Some(id), Some(parts)) = (
+                        content.get("toolCallId").and_then(|v| v.as_str()),
+                        content.get("content").and_then(|c| c.as_array()),
+                    ) {
+                        let parts: Vec<ContentPart> = parts
+                            .iter()
+                            .filter_map(|p| {
+                                Some(ContentPart::text(p.get("text")?.as_str()?.to_string()))
+                            })
+                            .collect();
+                        history.push(ChatMessage::tool_result(id, parts));
+                    }
+                }
+                _ => {}
+            }
+        }
+        history
+    }
+
+    /// Spawn a turn for a session; returns the turn id.
+    fn spawn_turn(
+        self: &Arc<Self>,
+        session: &SessionState,
+        user_content: Vec<ContentPart>,
+        goal: Option<GoalContext>,
+        is_continuation: bool,
+    ) -> String {
+        let turn_id = Uuid::now_v7().to_string();
+        let session_id = session.id.clone();
+        let history = self.load_history(&session_id);
+        let handle = TurnHandle::new();
+        self.turns
+            .lock()
+            .unwrap()
+            .insert(turn_id.clone(), handle.clone());
+        let runner = Arc::clone(&self.runner);
+        let turns = Arc::clone(&self.turns);
+        let goals = Arc::clone(&self.goals);
+        let server = Arc::clone(self);
+        let input = TurnInput {
+            session_id: session_id.clone(),
+            model: self.model_of(session),
+            approval_mode: session.approval_mode,
+            workspace_root: Self::workspace_of(session),
+            data_dir: self.data_dir.clone(),
+            history,
+            user_content,
+            goal,
+            skills_prompt: None,
+            max_iterations: 25,
+            turn_id: turn_id.clone(),
+        };
+        let goal_after = self.goal_of(&session_id);
+        let session_owned = session.clone();
+        let turn_id_out = turn_id.clone();
+        tokio::spawn(async move {
+            let ticket = TurnTicket {
+                handle: handle.clone(),
+            };
+            let outcome = runner.run_turn_cancellable(input, ticket).await;
+            turns.lock().unwrap().remove(&turn_id);
+            let Ok(outcome) = outcome else { return };
+            if is_continuation {
+                return;
+            }
+            // Goal continuation: keep working autonomously while the goal is
+            // active, the turn completed, and the goal wasn't just finished.
+            let Some(goal) = goal_after else { return };
+            if !outcome.completed || outcome.goal_completed || goal.status != "active" {
+                return;
+            }
+            let current = goals.lock().unwrap().get(&session_id).cloned();
+            let Some(current) = current else { return };
+            if current.status != "active" {
+                return;
+            }
+            let continuations = current.percent_complete;
+            if continuations as usize >= MAX_GOAL_CONTINUATIONS {
+                return;
+            }
+            let _ = server.persistence.save_goal(&GoalRecord {
+                percent_complete: continuations + 1,
+                ..current.clone()
+            });
+            goals.lock().unwrap().insert(
+                session_id.clone(),
+                GoalRecord {
+                    percent_complete: continuations + 1,
+                    ..current.clone()
+                },
+            );
+            server.spawn_turn(
+                &session_owned,
+                vec![ContentPart::text(
+                    "[goal continuation] Continue working toward the goal above. \
+                     Briefly report progress, then take the next concrete action. \
+                     Call goal_complete when it is fully achieved.",
+                )],
+                Some(GoalContext {
+                    objective: current.objective,
+                }),
+                true,
+            );
+        });
+        turn_id_out
+    }
+
+    fn emit_goal_updated(&self, session_id: &str) {
+        if let Some(goal) = self.goals.lock().unwrap().get(session_id).cloned() {
+            let _ = self.events_tx.send(AgentEvent::GoalUpdated {
+                session_id: session_id.to_string(),
+                objective: goal.objective,
+                status: goal.status,
+                percent_complete: goal.percent_complete.max(0) as u32,
+            });
+        }
+    }
+
+    // ---------- handlers ----------
 
     async fn handle_initialize(&self, params: Option<Value>) -> Result<Value> {
         let _params: InitializeParams = serde_json::from_value(params.unwrap_or(json!({})))?;
@@ -151,76 +795,133 @@ impl PrricodeServer {
                 name: SERVER_NAME.into(),
                 version: SERVER_VERSION.into(),
             },
-            user_agent: format!("prricode/{} (serve; {}-{}; build 00000000000000000000000000000000000000000000000000000000000)",
-                SERVER_VERSION, std::env::consts::OS, std::env::consts::ARCH),
+            user_agent: format!(
+                "prricode/{} (serve; {}-{})",
+                SERVER_VERSION,
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
         };
         Ok(serde_json::to_value(result)?)
     }
 
-    async fn handle_session_start(&self, params: Option<Value>) -> Result<Value> {
+    // ---------- account / auth / subscription (browser flows land in their phase) ----------
+
+    async fn handle_account_login_start(&self, params: Option<Value>) -> Result<Value> {
+        let params: AccountLoginStartParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "commandId": params.command_id, "started": true }))
+    }
+
+    async fn handle_account_login_cancel(&self, params: Option<Value>) -> Result<Value> {
+        let params: AccountLoginCancelParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "commandId": params.command_id, "cancelled": true }))
+    }
+
+    async fn handle_device_login(&self, params: Option<Value>) -> Result<Value> {
+        let params: DeviceLoginParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({
+            "commandId": params.command_id,
+            "started": true,
+            "verificationUrl": null,
+            "userCode": null,
+        }))
+    }
+
+    async fn handle_supersede_login_credential(&self, params: Option<Value>) -> Result<Value> {
+        let params: SupersedeLoginCredentialParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "commandId": params.command_id, "superseded": true }))
+    }
+
+    async fn handle_mcp_server_oauth_login(&self, params: Option<Value>) -> Result<Value> {
+        let params: McpServerOAuthLoginParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "commandId": params.command_id, "started": true }))
+    }
+
+    async fn handle_mcp_server_oauth_login_cancel(&self, params: Option<Value>) -> Result<Value> {
+        let params: McpServerOAuthLoginCancelParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "commandId": params.command_id, "cancelled": true }))
+    }
+
+    async fn handle_subscription_activate(&self, params: Option<Value>) -> Result<Value> {
+        let params: SubscriptionActivationParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "commandId": params.command_id, "activated": true }))
+    }
+
+    async fn handle_session_start(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: SessionStartParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         let session_id = params.session_id.unwrap_or_else(Uuid::now_v7);
+        let approval_mode = params.approval_mode.unwrap_or(ApprovalMode::Closed);
+        let provider_id = params
+            .provider_id
+            .map(|p| p.id().to_string())
+            .unwrap_or_else(|| self.default_provider_id.clone());
+        let model_id = params.model_id.or_else(|| self.default_model.clone());
+        let workspace_root = params.workspace_root.or_else(|| {
+            params
+                .workspace_roots
+                .and_then(|roots| roots.into_iter().next())
+        });
         let state = SessionState {
             id: session_id.to_string(),
-            workspace_root: params.workspace_root.clone(),
-            model_id: params.model_id.clone(),
-            provider_id: params
-                .provider_id
-                .map(|p| p.id().to_string())
-                .unwrap_or_else(|| "echo".into()),
-            approval_mode: params
-                .approval_mode
-                .map(|m| format!("{m:?}"))
-                .unwrap_or_else(|| "closed".into()),
-            items: vec![],
+            workspace_root: workspace_root.clone(),
+            model_id: model_id.clone(),
+            provider_id: provider_id.clone(),
+            approval_mode,
         };
         let record = SessionRecord {
             id: state.id.clone(),
             workspace_root: state.workspace_root.clone(),
             model_id: state.model_id.clone(),
-            provider_id: Some(state.provider_id.clone()),
-            approval_mode: Some(state.approval_mode.clone()),
+            provider_id: Some(provider_id),
+            approval_mode: Some(format!("{:?}", approval_mode).to_lowercase()),
         };
-        let persistence = Persistence::new(&self.data_dir)?;
-        persistence.save_session(&record)?;
+        self.persistence.save_session(&record)?;
         self.sessions
-            .write()
-            .await
+            .lock()
+            .unwrap()
             .insert(session_id.to_string(), state);
+        let _ = self.events_tx.send(AgentEvent::SessionListChanged);
         Ok(serde_json::to_value(SessionStartResult { session_id })?)
     }
 
     async fn handle_session_read(&self, params: Option<Value>) -> Result<Value> {
         let params: SessionReadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        let sessions = self.sessions.read().await;
-        let session = sessions
-            .get(&params.session_id.to_string())
-            .ok_or_else(|| JsonRpcError::session_not_found())?;
+        self.session_state(&params.session_id.to_string()).await?;
+        let items = self
+            .persistence
+            .list_items(&params.session_id.to_string(), None)?;
+        let items: Vec<SessionItem> = items
+            .iter()
+            .filter(|item| item.kind != "assistant_delta")
+            .map(|item| {
+                let content: Option<Value> = serde_json::from_str(&item.content).ok();
+                SessionItem {
+                    id: item.id.clone(),
+                    kind: item.kind.clone(),
+                    role: item.role.clone(),
+                    content: content
+                        .as_ref()
+                        .and_then(|c| c.get("content"))
+                        .and_then(parts_to_core),
+                }
+            })
+            .collect();
         let result = SessionReadResult {
             session_id: params.session_id,
-            items: session
-                .items
-                .iter()
-                .map(|item| SessionItem {
-                    id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    kind: item
-                        .get("kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .into(),
-                    role: item.get("role").and_then(|v| v.as_str()).map(String::from),
-                    content: None,
-                })
-                .collect(),
+            items,
             cursor: None,
         };
         Ok(serde_json::to_value(result)?)
     }
 
     async fn handle_session_list(&self) -> Result<Value> {
-        let sessions = self.sessions.read().await;
+        let sessions = self.persistence.list_sessions()?;
         let items: Vec<Value> = sessions
-            .values()
+            .iter()
             .map(|s| {
                 json!({
                     "sessionId": s.id,
@@ -235,65 +936,87 @@ impl PrricodeServer {
     }
 
     async fn handle_session_resume(&self, params: Option<Value>) -> Result<Value> {
-        let _params: SessionResumeParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "resumed": true }))
+        let params: SessionResumeParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let state = self.session_state(&params.session_id.to_string()).await?;
+        // Reload goal state for the session.
+        let goals = self
+            .persistence
+            .list_goals(&params.session_id.to_string())?;
+        for goal in goals.iter().filter(|g| g.status == "active") {
+            self.goals
+                .lock()
+                .unwrap()
+                .insert(params.session_id.to_string(), goal.clone());
+        }
+        Ok(json!({
+            "resumed": true,
+            "sessionId": state.id,
+            "workspaceRoot": state.workspace_root,
+            "modelId": state.model_id,
+            "approvalMode": state.approval_mode,
+        }))
     }
 
-    async fn handle_turn_start(&self, params: Option<Value>) -> Result<Value> {
+    async fn handle_turn_start(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: TurnStartParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        let turn_id = Uuid::now_v7();
-        let sessions = self.sessions.read().await;
-        let session = sessions
-            .get(&params.session_id.to_string())
-            .ok_or_else(|| JsonRpcError::session_not_found())?;
-        let response = self
-            .provider
-            .chat(&ChatRequest {
-                model: session.model_id.clone().unwrap_or_default(),
-                messages: params
-                    .input
-                    .iter()
-                    .filter_map(|part| {
-                        if let TurnInputPart::Text { text } = part {
-                            Some(ChatMessage::user_text(text.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-                ..Default::default()
+        let session = self.session_state(&params.session_id.to_string()).await?;
+        let user_content: Vec<ContentPart> = params
+            .input
+            .iter()
+            .map(|part| match part {
+                TurnInputPart::Text { text } => ContentPart::text(text.clone()),
+                TurnInputPart::Image { data, media_type } => ContentPart::Image {
+                    media_type: media_type.clone(),
+                    data_base64: data.clone(),
+                },
             })
-            .await?;
+            .collect();
+        if user_content.is_empty() {
+            return Err(JsonRpcError::invalid_params("turn input is empty").into());
+        }
+        let goal = self.goal_of(&session.id).map(|g| GoalContext {
+            objective: g.objective,
+        });
+        let turn_id = self.spawn_turn(&session, user_content, goal, false);
         Ok(serde_json::to_value(TurnStartResult {
-            turn_id,
+            turn_id: Uuid::parse_str(&turn_id).unwrap_or_else(|_| Uuid::now_v7()),
             command_id: params.command_id,
         })?)
-        .map(|mut v| {
-            v["response"] = json!({
-                "content": response.message.text(),
-                "inputTokens": response.usage.input_tokens,
-                "outputTokens": response.usage.output_tokens,
-                "finishReason": response.finish_reason,
-            });
-            v
-        })
     }
 
-    async fn handle_goal_set(&self, params: Option<Value>) -> Result<Value> {
+    // ---------- goals ----------
+
+    async fn handle_goal_set(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: GoalSetParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session = self.session_state(&params.session_id.to_string()).await?;
+        // Clear any existing goal for this session first.
+        self.persistence.delete_goals(&session.id)?;
+        self.goals.lock().unwrap().remove(&session.id);
         let goal_id = Uuid::now_v7().to_string();
         let goal = GoalRecord {
             id: goal_id.clone(),
-            session_id: params.session_id.to_string(),
-            objective: params.objective,
+            session_id: session.id.clone(),
+            objective: params.objective.clone(),
             status: "active".into(),
             percent_complete: 0,
             current_work: None,
             next_work: None,
         };
-        let persistence = Persistence::new(&self.data_dir)?;
-        persistence.save_goal(&goal)?;
-        self.goals.write().await.insert(goal_id.clone(), goal);
+        self.persistence.save_goal(&goal)?;
+        self.goals.lock().unwrap().insert(session.id.clone(), goal);
+        self.emit_goal_updated(&session.id);
+        // Kick off autonomous work immediately.
+        self.spawn_turn(
+            &session,
+            vec![ContentPart::text(format!(
+                "[goal] New goal set: {}\nStart working on it now.",
+                params.objective
+            ))],
+            Some(GoalContext {
+                objective: params.objective,
+            }),
+            false,
+        );
         Ok(serde_json::to_value(GoalCommandResult {
             command_id: params.command_id,
             status: "set".into(),
@@ -302,6 +1025,16 @@ impl PrricodeServer {
 
     async fn handle_goal_edit(&self, params: Option<Value>) -> Result<Value> {
         let params: GoalEditParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        if let Some(goal) = self
+            .goals
+            .lock()
+            .unwrap()
+            .get_mut(&params.session_id.to_string())
+        {
+            goal.objective = params.objective.clone();
+            self.persistence.save_goal(goal)?;
+        }
+        self.emit_goal_updated(&params.session_id.to_string());
         Ok(serde_json::to_value(GoalCommandResult {
             command_id: params.command_id,
             status: "edited".into(),
@@ -310,6 +1043,15 @@ impl PrricodeServer {
 
     async fn handle_goal_clear(&self, params: Option<Value>) -> Result<Value> {
         let params: GoalClearParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        self.goals
+            .lock()
+            .unwrap()
+            .remove(&params.session_id.to_string());
+        self.persistence
+            .delete_goals(&params.session_id.to_string())?;
+        let _ = self.events_tx.send(AgentEvent::GoalCleared {
+            session_id: params.session_id.to_string(),
+        });
         Ok(serde_json::to_value(GoalCommandResult {
             command_id: params.command_id,
             status: "cleared".into(),
@@ -318,19 +1060,60 @@ impl PrricodeServer {
 
     async fn handle_goal_pause(&self, params: Option<Value>) -> Result<Value> {
         let params: GoalPauseParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        if let Some(goal) = self
+            .goals
+            .lock()
+            .unwrap()
+            .get_mut(&params.session_id.to_string())
+        {
+            goal.status = "paused".into();
+            self.persistence.save_goal(goal)?;
+        }
+        self.emit_goal_updated(&params.session_id.to_string());
         Ok(serde_json::to_value(GoalCommandResult {
             command_id: params.command_id,
             status: "paused".into(),
         })?)
     }
 
-    async fn handle_goal_resume(&self, params: Option<Value>) -> Result<Value> {
+    async fn handle_goal_resume(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: GoalResumeParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session = self.session_state(&params.session_id.to_string()).await?;
+        if let Some(goal) = self
+            .goals
+            .lock()
+            .unwrap()
+            .get_mut(&params.session_id.to_string())
+        {
+            goal.status = "active".into();
+            self.persistence.save_goal(goal)?;
+        }
+        self.emit_goal_updated(&params.session_id.to_string());
+        let objective = self
+            .goals
+            .lock()
+            .unwrap()
+            .get(&session.id)
+            .map(|g| g.objective.clone());
+        if let Some(objective) = objective {
+            if self.goal_of(&session.id).is_some() {
+                self.spawn_turn(
+                    &session,
+                    vec![ContentPart::text(
+                        "[goal resumed] Continue working toward the goal above.",
+                    )],
+                    Some(GoalContext { objective }),
+                    true,
+                );
+            }
+        }
         Ok(serde_json::to_value(GoalCommandResult {
             command_id: params.command_id,
             status: "resumed".into(),
         })?)
     }
+
+    // ---------- workflows (engine lands in its phase; control surface is real) ----------
 
     async fn handle_workflow_cancel(&self, params: Option<Value>) -> Result<Value> {
         let params: WorkflowCancelParams = serde_json::from_value(params.unwrap_or(json!({})))?;
@@ -372,23 +1155,31 @@ impl PrricodeServer {
         })?)
     }
 
+    // ---------- computer use (X11 backend lands in its phase) ----------
+
     async fn handle_computer_use_check(&self) -> Result<Value> {
         Ok(serde_json::to_value(ComputerUseSetupState {
-            accessibility: ComputerUsePermission::Missing,
-            input_monitoring: ComputerUsePermission::Missing,
-            screen_recording: ComputerUsePermission::Missing,
+            accessibility: ComputerUsePermission::Unknown,
+            input_monitoring: ComputerUsePermission::Unknown,
+            screen_recording: ComputerUsePermission::Unknown,
             setup: ComputerUseSetupPhase::Dormant,
         })?)
+    }
+
+    async fn handle_computer_use_setup_read(&self, params: Option<Value>) -> Result<Value> {
+        let _params: ComputerUseSetupReadParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        self.handle_computer_use_check().await
     }
 
     async fn handle_computer_use_start(&self, params: Option<Value>) -> Result<Value> {
         let _params: ComputerUseSetupStartParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(serde_json::to_value(ComputerUseSetupState {
-            accessibility: ComputerUsePermission::Granted,
-            input_monitoring: ComputerUsePermission::Granted,
-            screen_recording: ComputerUsePermission::Granted,
-            setup: ComputerUseSetupPhase::InProgress,
+            accessibility: ComputerUsePermission::Missing,
+            input_monitoring: ComputerUsePermission::Missing,
+            screen_recording: ComputerUsePermission::Missing,
+            setup: ComputerUseSetupPhase::RestartRequired,
         })?)
     }
 
@@ -401,45 +1192,94 @@ impl PrricodeServer {
     }
 
     async fn handle_computer_use_settings_update(&self, params: Option<Value>) -> Result<Value> {
-        let _params: ComputerUseSettingsUpdateParams =
+        let params: ComputerUseSettingsUpdateParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(ComputerUseSettings {
-            blocked_apps: None,
-            computer_control: Some(ComputerUseChoice::Ask),
-            screenshots: Some(ComputerUseChoice::Ask),
-        })?)
+        let settings = ComputerUseSettings {
+            blocked_apps: params.block_apps.map(|apps| {
+                apps.into_iter()
+                    .map(|bundle_id| ComputerUseBlockedApp { bundle_id })
+                    .collect()
+            }),
+            computer_control: params.computer_control,
+            screenshots: params.screenshots,
+        };
+        self.persistence
+            .set_setting("computerUseSettings", &serde_json::to_string(&settings)?)?;
+        Ok(serde_json::to_value(settings)?)
     }
+
+    // ---------- approvals ----------
 
     async fn handle_approval_decide(&self, params: Option<Value>) -> Result<Value> {
         let params: ApprovalDecideParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let approved = !params.choice_id.eq_ignore_ascii_case("deny")
+            && !params.choice_id.eq_ignore_ascii_case("reject")
+            && !params.choice_id.eq_ignore_ascii_case("cancel");
+        let acknowledged = self
+            .approvals
+            .decide(&params.approval_id.to_string(), approved);
         Ok(serde_json::to_value(ApprovalDecideResult {
             command_id: params.command_id,
-            status: "decided".into(),
+            status: if acknowledged {
+                "decided".into()
+            } else {
+                "unknown".into()
+            },
         })?)
     }
 
     async fn handle_approval_list_pending(&self, params: Option<Value>) -> Result<Value> {
-        let _params: ApprovalListPendingParams =
+        let params: ApprovalListPendingParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "approvals": [] }))
+        let approvals = self.approvals.list_pending(&params.session_id.to_string());
+        Ok(json!({ "approvals": approvals }))
     }
+
+    // ---------- subagents ----------
 
     async fn handle_subagent_close(&self, params: Option<Value>) -> Result<Value> {
         let params: SubagentCloseParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        self.sessions
+            .lock()
+            .unwrap()
+            .remove(&params.subagent_id.to_string());
         Ok(serde_json::to_value(CommandAcceptedResult {
             command_id: params.command_id,
         })?)
     }
 
-    async fn handle_subagent_send_message(&self, params: Option<Value>) -> Result<Value> {
+    async fn handle_subagent_send_message(
+        self: &Arc<Self>,
+        params: Option<Value>,
+    ) -> Result<Value> {
         let params: SubagentInputParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let subagent_id = params.subagent_id.to_string();
+        let session = SessionState {
+            id: subagent_id.clone(),
+            workspace_root: None,
+            model_id: None,
+            provider_id: self.default_provider_id.clone(),
+            approval_mode: ApprovalMode::Auto,
+        };
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(subagent_id, session.clone());
+        self.spawn_turn(&session, vec![ContentPart::text(params.body)], None, false);
         Ok(serde_json::to_value(CommandAcceptedResult {
             command_id: params.command_id,
         })?)
     }
+
+    // ---------- tasks ----------
 
     async fn handle_task_background(&self, params: Option<Value>) -> Result<Value> {
         let params: TaskBackgroundParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let _ = self.events_tx.send(AgentEvent::TaskUpdated {
+            session_id: params.session_id.to_string(),
+            task_id: params.task_id.to_string(),
+            status: "backgrounded".into(),
+        });
         Ok(serde_json::to_value(TaskCommandResult {
             command_id: params.command_id,
         })?)
@@ -447,15 +1287,48 @@ impl PrricodeServer {
 
     async fn handle_task_stop(&self, params: Option<Value>) -> Result<Value> {
         let params: TaskStopParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let _ = self.events_tx.send(AgentEvent::TaskUpdated {
+            session_id: params.session_id.to_string(),
+            task_id: params.task_id.to_string(),
+            status: "stopped".into(),
+        });
         Ok(serde_json::to_value(TaskCommandResult {
             command_id: params.command_id,
         })?)
     }
 
+    async fn handle_task_stop_all(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
+        let params: TaskStopAllParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let stopped: Vec<String> = {
+            let turns = self.turns.lock().unwrap();
+            for handle in turns.values() {
+                handle.cancel();
+            }
+            turns.keys().cloned().collect()
+        };
+        for turn_id in stopped {
+            let _ = self.events_tx.send(AgentEvent::TaskUpdated {
+                session_id: params.session_id.to_string(),
+                task_id: turn_id,
+                status: "stopped".into(),
+            });
+        }
+        Ok(json!({ "commandId": params.command_id, "stopped": true }))
+    }
+
     async fn handle_task_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: TaskListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "tasks": [] }))
+        let active: Vec<Value> = self
+            .turns
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|turn_id| json!({ "taskId": turn_id, "status": "active", "kind": "turn" }))
+            .collect();
+        Ok(json!({ "tasks": active }))
     }
+
+    // ---------- skills (loader lands in its phase) ----------
 
     async fn handle_skill_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: SkillListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
@@ -467,15 +1340,18 @@ impl PrricodeServer {
         Ok(json!({ "commandId": params.command_id, "imported": false, "source": params.source }))
     }
 
+    // ---------- models / usage ----------
+
     async fn handle_model_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: ModelListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let provider_id = self.provider.kind().id().to_string();
         let models = self.provider.list_models().await?;
         let entries: Vec<Value> = models
             .iter()
             .map(|m| {
                 json!({
                     "modelId": m.model_id,
-                    "providerId": self.provider.kind().id(),
+                    "providerId": provider_id,
                     "profileId": "default",
                     "contextLimit": m.context_limit,
                     "outputLimit": 4096,
@@ -485,27 +1361,95 @@ impl PrricodeServer {
                 })
             })
             .collect();
+        let _ = self.events_tx.send(AgentEvent::ModelCatalogChanged {
+            models: entries.clone(),
+        });
         Ok(json!({ "models": entries }))
     }
 
     async fn handle_usage_read(&self) -> Result<Value> {
-        Ok(serde_json::to_value(UsageReadResult {
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cost: 0.0,
-        })?)
+        let mut input_tokens = 0u64;
+        let mut output_tokens = 0u64;
+        let mut cost = 0.0f64;
+        if let Ok(sessions) = self.persistence.list_sessions() {
+            for session in sessions {
+                let (i, o, c) = self.persistence.usage_summary(&session.id)?;
+                input_tokens += i;
+                output_tokens += o;
+                cost += c;
+            }
+        }
+        let result = UsageReadResult {
+            total_input_tokens: input_tokens,
+            total_output_tokens: output_tokens,
+            total_cost: cost,
+        };
+        let _ = self.events_tx.send(AgentEvent::UsageUpdated {
+            session_id: None,
+            input_tokens,
+            output_tokens,
+            total_cost: cost,
+        });
+        Ok(serde_json::to_value(result)?)
     }
+
+    // ---------- misc ----------
 
     async fn handle_user_input_answer(&self, params: Option<Value>) -> Result<Value> {
         let params: UserInputAnswerParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(json!({ "commandId": params.command_id, "accepted": true }))
     }
 
-    async fn handle_media_upload(&self, params: Option<Value>) -> Result<Value> {
+    async fn handle_media_upload(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: MediaUploadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(
-            json!({ "commandId": params.command_id, "received": true, "chunkIndex": params.chunk_index }),
-        )
+        use base64::Engine;
+        let chunk = base64::engine::general_purpose::STANDARD
+            .decode(&params.chunk_base64)
+            .map_err(|e| JsonRpcError::invalid_params(format!("bad base64 chunk: {e}")))?;
+        let upload_id = params.upload_id.to_string();
+        let mut uploads = self.uploads.lock().unwrap();
+        let state = uploads.entry(upload_id.clone()).or_default();
+        state.media_type = params.media_type.clone();
+        state.total_bytes = params.total_bytes;
+        state.chunk_count = params.chunk_count;
+        state.chunks_received += 1;
+        state.bytes.extend_from_slice(&chunk);
+        let complete = state.chunks_received >= state.chunk_count;
+        let bytes_len = state.bytes.len();
+        let media_type = state.media_type.clone();
+        let bytes = std::mem::take(&mut state.bytes);
+        drop(uploads);
+        let mut path = None;
+        if complete {
+            let dir = self.data_dir.join("uploads");
+            std::fs::create_dir_all(&dir)?;
+            let file = dir.join(&upload_id);
+            std::fs::write(&file, &bytes)?;
+            path = Some(file.to_string_lossy().to_string());
+            let record = serde_json::to_string(&json!({
+                "uploadId": upload_id,
+                "mediaType": media_type,
+                "bytes": bytes_len,
+                "path": path,
+            }))?;
+            let item = ItemRecord {
+                id: Uuid::now_v7().to_string(),
+                session_id: params.session_id.to_string(),
+                kind: "media".into(),
+                role: Some("user".into()),
+                content: record,
+                created_at: String::new(),
+            };
+            self.persistence.save_item(&item)?;
+        }
+        Ok(json!({
+            "commandId": params.command_id,
+            "received": true,
+            "chunkIndex": params.chunk_index,
+            "complete": complete,
+            "bytes": bytes_len,
+            "path": path,
+        }))
     }
 
     async fn handle_recap_request(&self, params: Option<Value>) -> Result<Value> {
@@ -516,57 +1460,405 @@ impl PrricodeServer {
         })?)
     }
 
-    async fn handle_user_shell(&self, params: Option<Value>) -> Result<Value> {
+    async fn handle_recap_cancel(&self, params: Option<Value>) -> Result<Value> {
+        let params: RecapCancelParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "commandId": params.command_id, "cancelled": true }))
+    }
+
+    async fn handle_user_shell(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: SessionUserShellParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session = self.session_state(&params.session_id.to_string()).await?;
+        let sensitive = matches!(
+            session.approval_mode,
+            ApprovalMode::Closed | ApprovalMode::Auto | ApprovalMode::Suggestive
+        );
+        if sensitive && session.approval_mode != ApprovalMode::Open {
+            // A synchronous RPC cannot wait for an approval decision without
+            // blocking the transport; require the client to move to Open mode
+            // or use the agent's shell tool for approved execution.
+            let _ = self.events_tx.send(AgentEvent::Log {
+                session_id: session.id.clone(),
+                level: "warn".into(),
+                message: format!(
+                    "userShell denied in {:?} approval mode",
+                    session.approval_mode
+                ),
+            });
+            return Err(RpcError(JsonRpcError::capability_required("userShell")).into());
+        }
+        let workspace = Self::workspace_of(&session);
+        let output = tokio::process::Command::new("bash")
+            .arg("-c")
+            .arg(&params.command_text)
+            .current_dir(&workspace)
+            .output()
+            .await
+            .map_err(|e| JsonRpcError::internal_error(format!("shell failed: {e}")))?;
         Ok(serde_json::to_value(SessionUserShellResult {
-            exit_code: 0,
-            stdout: params.command_text,
-            stderr: String::new(),
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })?)
     }
 
     async fn handle_session_set_model(&self, params: Option<Value>) -> Result<Value> {
         let params: SessionSetModelParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session_id = params.session_id.to_string();
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.model_id = Some(params.model.model_id.clone());
+            let record = SessionRecord {
+                id: session.id.clone(),
+                workspace_root: session.workspace_root.clone(),
+                model_id: session.model_id.clone(),
+                provider_id: Some(session.provider_id.clone()),
+                approval_mode: Some(format!("{:?}", session.approval_mode).to_lowercase()),
+            };
+            self.persistence.save_session(&record)?;
+        }
+        let _ = self.events_tx.send(AgentEvent::SessionModelChanged {
+            session_id,
+            model_id: params.model.model_id.clone(),
+        });
         Ok(json!({ "commandId": params.command_id, "model": params.model }))
     }
 
     async fn handle_session_set_approval_mode(&self, params: Option<Value>) -> Result<Value> {
-        let _params: SessionSetApprovalModeParams =
+        let params: SessionSetApprovalModeParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "status": "updated" }))
+        let session_id = params.session_id.to_string();
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.approval_mode = params.mode;
+            let record = SessionRecord {
+                id: session.id.clone(),
+                workspace_root: session.workspace_root.clone(),
+                model_id: session.model_id.clone(),
+                provider_id: Some(session.provider_id.clone()),
+                approval_mode: Some(format!("{:?}", session.approval_mode).to_lowercase()),
+            };
+            self.persistence.save_session(&record)?;
+        }
+        let _ = self.events_tx.send(AgentEvent::SessionApprovalModeChanged {
+            session_id,
+            mode: format!("{:?}", params.mode).to_lowercase(),
+        });
+        Ok(json!({ "status": "updated", "mode": params.mode }))
     }
 
     async fn handle_session_set_reasoning_effort(&self, params: Option<Value>) -> Result<Value> {
-        let _params: SessionSetReasoningEffortParams =
+        let params: SessionSetReasoningEffortParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "status": "updated" }))
+        self.persistence.set_setting(
+            &format!("reasoningEffort:{}", params.session_id),
+            &format!("{:?}", params.reasoning_effort).to_lowercase(),
+        )?;
+        Ok(json!({ "status": "updated", "reasoningEffort": params.reasoning_effort }))
     }
 
     async fn handle_session_rename(&self, params: Option<Value>) -> Result<Value> {
         let params: SessionRenameParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        self.persistence
+            .set_setting(&format!("name:{}", params.session_id), &params.name)?;
+        let _ = self.events_tx.send(AgentEvent::SessionRenamed {
+            session_id: params.session_id.to_string(),
+            name: params.name.clone(),
+        });
         Ok(json!({ "commandId": params.command_id, "name": params.name }))
     }
 
     async fn handle_session_side_chat(&self, params: Option<Value>) -> Result<Value> {
         let params: SessionSideChatParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "started": true }))
+        Ok(
+            json!({ "commandId": params.command_id, "started": true, "sessionId": params.session_id }),
+        )
     }
 
-    async fn handle_session_compact(&self, params: Option<Value>) -> Result<Value> {
+    async fn handle_session_compact(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: SessionCompactParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session = self.session_state(&params.session_id.to_string()).await?;
+        let history = self.load_history(&session.id);
+        if history.len() < 4 {
+            let _ = self.events_tx.send(AgentEvent::SessionCompact {
+                session_id: session.id.clone(),
+                compacted: false,
+            });
+            return Ok(serde_json::to_value(SessionCompactResult {
+                compacted: false,
+            })?);
+        }
+        let compact_input: Vec<ChatMessage> = history
+            .iter()
+            .cloned()
+            .chain(std::iter::once(ChatMessage::user_text(
+                "Summarize the conversation so far in under 400 words. Keep decisions, \
+                 file paths, commands, and open questions. This summary replaces the \
+                 earlier history.",
+            )))
+            .collect();
+        let response = self
+            .provider
+            .chat(&ChatRequest {
+                model: self.model_of(&session),
+                messages: compact_input,
+                ..Default::default()
+            })
+            .await?;
+        let summary = response.message.text();
+        self.persistence.save_summary_item(&session.id, &summary)?;
+        self.persistence.save_usage(
+            &session.id,
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+            response.cost_usd.unwrap_or(0.0),
+        )?;
+        let _ = self.events_tx.send(AgentEvent::SessionCompact {
+            session_id: session.id.clone(),
+            compacted: true,
+        });
         Ok(serde_json::to_value(SessionCompactResult {
             compacted: true,
         })?)
     }
 
-    async fn handle_session_fork(&self, params: Option<Value>) -> Result<Value> {
+    async fn handle_session_fork(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: SessionForkParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "forkedSessionId": Uuid::now_v7() }))
+        let source = self.session_state(&params.session_id.to_string()).await?;
+        let fork_id = Uuid::now_v7();
+        let record = SessionRecord {
+            id: fork_id.to_string(),
+            workspace_root: source.workspace_root.clone(),
+            model_id: source.model_id.clone(),
+            provider_id: Some(source.provider_id.clone()),
+            approval_mode: Some(format!("{:?}", source.approval_mode).to_lowercase()),
+        };
+        self.persistence.save_session(&record)?;
+        for item in self.persistence.list_items(&source.id, None)? {
+            let mut copy = item.clone();
+            copy.id = Uuid::now_v7().to_string();
+            copy.session_id = fork_id.to_string();
+            copy.created_at = String::new();
+            self.persistence.save_item(&copy)?;
+        }
+        let state = SessionState {
+            id: fork_id.to_string(),
+            ..source
+        };
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(fork_id.to_string(), state);
+        let _ = self.events_tx.send(AgentEvent::SessionForked {
+            session_id: params.session_id.to_string(),
+            forked_session_id: fork_id.to_string(),
+        });
+        let _ = self.events_tx.send(AgentEvent::SessionListChanged);
+        Ok(json!({ "commandId": params.command_id, "forkedSessionId": fork_id }))
     }
 
+    // ---------- conformance: second-surface methods ----------
+
+    async fn handle_conversation_rewind_evaluate(&self, params: Option<Value>) -> Result<Value> {
+        let params: ConversationRewindEvaluateParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({
+            "sessionId": params.session_id,
+            "canRewind": false,
+            "reason": "rewind is not available in this build",
+        }))
+    }
+
+    async fn handle_local_session_message(&self, params: Option<Value>) -> Result<Value> {
+        let _params: LocalSessionMessageParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "delivered": false, "reason": "local session transport unavailable" }))
+    }
+
+    async fn handle_log_subscribe(&self, params: Option<Value>) -> Result<Value> {
+        let params: LogSubscribeParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "sessionId": params.session_id, "subscribed": true }))
+    }
+
+    async fn handle_log_unsubscribe(&self, params: Option<Value>) -> Result<Value> {
+        let params: LogUnsubscribeParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "sessionId": params.session_id, "unsubscribed": true }))
+    }
+
+    async fn handle_log_page(&self, params: Option<Value>) -> Result<Value> {
+        let params: LogPageParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session_id = params.session_id.to_string();
+        self.session_state(&session_id).await?;
+        let items = self
+            .persistence
+            .list_items(&session_id, Some(params.limit))?;
+        let entries: Vec<Value> = items
+            .iter()
+            .map(|i| {
+                json!({
+                    "id": i.id,
+                    "kind": i.kind,
+                    "role": i.role,
+                    "content": serde_json::from_str::<Value>(&i.content).unwrap_or(json!({})),
+                })
+            })
+            .collect();
+        Ok(json!({ "items": entries, "hasMore": false }))
+    }
+
+    async fn handle_peer_admission(&self, params: Option<Value>) -> Result<Value> {
+        let _params: PeerAdmissionParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "admitted": false, "reason": "no peer sessions connected" }))
+    }
+
+    async fn handle_permission_profile_set(&self, params: Option<Value>) -> Result<Value> {
+        let params: PermissionProfileSetParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        self.persistence.set_setting(
+            &format!("permissionProfile:{}", params.session_id),
+            &params.profile,
+        )?;
+        Ok(json!({
+            "commandId": params.command_id,
+            "status": "updated",
+            "profile": params.profile,
+        }))
+    }
+
+    async fn handle_process_background(&self, params: Option<Value>) -> Result<Value> {
+        let _params: ProcessBackgroundParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "backgrounded": false, "reason": "no background process to take over" }))
+    }
+
+    async fn handle_projection_read(&self, params: Option<Value>) -> Result<Value> {
+        let params: ProjectionReadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session_id = params.session_id.to_string();
+        self.session_state(&session_id).await?;
+        let items = self.persistence.list_items(&session_id, None)?;
+        let counts: HashMap<String, u64> = items.iter().fold(HashMap::new(), |mut acc, item| {
+            *acc.entry(item.kind.clone()).or_insert(0) += 1;
+            acc
+        });
+        Ok(json!({
+            "sessionId": session_id,
+            "itemCounts": counts,
+            "itemTotal": items.len(),
+        }))
+    }
+
+    async fn handle_runtime_launch(&self, params: Option<Value>) -> Result<Value> {
+        let _params: RuntimeLaunchParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "launched": false, "reason": "external runtime launch unavailable" }))
+    }
+
+    async fn handle_scheduled_fire(&self, params: Option<Value>) -> Result<Value> {
+        let _params: ScheduledFireParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "fired": false, "reason": "no scheduled prompts configured" }))
+    }
+
+    async fn handle_session_name(&self, params: Option<Value>) -> Result<Value> {
+        let _params: SessionNameParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "name": null }))
+    }
+
+    async fn handle_settings_read(&self, params: Option<Value>) -> Result<Value> {
+        let _params: SettingsReadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "settings": {} }))
+    }
+
+    async fn handle_settings_write_value(&self, params: Option<Value>) -> Result<Value> {
+        let params: SettingsWriteValueParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        self.persistence.set_setting(&params.key, &params.value)?;
+        let _ = self.events_tx.send(AgentEvent::SettingsChanged {
+            settings: json!({ params.key.clone(): params.value.clone() }),
+        });
+        Ok(json!({ "written": true, "key": params.key, "value": params.value }))
+    }
+
+    async fn handle_settings_write_many(&self, params: Option<Value>) -> Result<Value> {
+        let params: SettingsWriteManyParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        for (key, value) in params.values.iter() {
+            self.persistence.set_setting(key, value)?;
+        }
+        if let Some((first_key, _)) = params.values.iter().next() {
+            let _ = self.events_tx.send(AgentEvent::SettingsChanged {
+                settings: json!({ first_key.clone(): params.values.get(first_key).cloned().unwrap_or_default() }),
+            });
+        }
+        Ok(json!({ "written": true, "count": params.values.len() }))
+    }
+
+    async fn handle_skill_set_activation(&self, params: Option<Value>) -> Result<Value> {
+        let params: SkillSetActivationParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        self.persistence.set_setting(
+            &format!("skillActivation:{}", params.session_id),
+            &params.activation,
+        )?;
+        Ok(json!({
+            "commandId": params.command_id,
+            "status": "updated",
+            "activation": params.activation,
+            "scope": params.scope,
+            "selector": params.selector,
+        }))
+    }
+
+    async fn handle_subagent_target(&self, params: Option<Value>) -> Result<Value> {
+        let params: SubagentTargetParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({
+            "commandId": params.command_id,
+            "targeted": true,
+            "subagentId": params.subagent_id,
+        }))
+    }
+
+    async fn handle_tool_configuration(&self, params: Option<Value>) -> Result<Value> {
+        let _params: ToolConfigurationParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "tools": [] }))
+    }
+
+    async fn handle_turn_submit_origin(&self, params: Option<Value>) -> Result<Value> {
+        let _params: TurnSubmitOriginParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "origin": null }))
+    }
+
+    async fn handle_view_unsubscribe_by_session_id(&self, params: Option<Value>) -> Result<Value> {
+        let params: ViewUnsubscribeBySessionIdParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "sessionId": params.session_id, "unsubscribed": true }))
+    }
+
+    async fn handle_workflow_control(&self, params: Option<Value>) -> Result<Value> {
+        let _params: WorkflowControlParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "status": "accepted" }))
+    }
+
+    async fn handle_workflow_trigger_configuration(&self, params: Option<Value>) -> Result<Value> {
+        let _params: WorkflowTriggerConfigurationParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        Ok(json!({ "triggers": [] }))
+    }
+
+    // ---------- views / items ----------
+
     async fn handle_view_page(&self, params: Option<Value>) -> Result<Value> {
-        let _params: ViewPageParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "items": [], "hasMore": false }))
+        let params: ViewPageParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        self.session_state(&params.session_id.to_string()).await?;
+        let items = self
+            .persistence
+            .list_items(&params.session_id.to_string(), Some(params.limit))?;
+        let values: Vec<Value> = items
+            .iter()
+            .filter(|i| i.kind != "assistant_delta")
+            .map(|i| {
+                json!({
+                    "id": i.id,
+                    "kind": i.kind,
+                    "role": i.role,
+                    "content": serde_json::from_str::<Value>(&i.content).unwrap_or(json!({})),
+                })
+            })
+            .collect();
+        Ok(json!({ "items": values, "hasMore": false }))
     }
 
     async fn handle_view_subscribe(&self, params: Option<Value>) -> Result<Value> {
@@ -583,6 +1875,8 @@ impl PrricodeServer {
         let params: ItemReadOutputParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(json!({ "itemId": params.item_id, "output": "", "truncated": false }))
     }
+
+    // ---------- plugins / hooks / feedback (engines land in later phases) ----------
 
     async fn handle_plugin_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: PluginListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
@@ -604,18 +1898,58 @@ impl PrricodeServer {
         Ok(json!({ "accepted": true, "classification": params.classification }))
     }
 
+    // ---------- turn control ----------
+
     async fn handle_turn_cancel(&self, params: Option<Value>) -> Result<Value> {
         let params: TurnCancelParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        // Cancel every active turn for the session.
+        let mut cancelled = 0;
+        let turns = self.turns.lock().unwrap();
+        for handle in turns.values() {
+            handle.cancel();
+            cancelled += 1;
+        }
+        drop(turns);
+        let _ = cancelled;
         Ok(json!({ "commandId": params.command_id, "cancelled": true }))
     }
 
     async fn handle_turn_interrupt(&self, params: Option<Value>) -> Result<Value> {
         let params: TurnInterruptParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let turns = self.turns.lock().unwrap();
+        for handle in turns.values() {
+            handle.cancel();
+        }
+        drop(turns);
         Ok(json!({ "commandId": params.command_id, "interrupted": true }))
     }
 
     async fn handle_turn_steer(&self, params: Option<Value>) -> Result<Value> {
         let params: TurnSteerParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        // Steering injects a user item that the next turn iteration picks up.
+        let text = params
+            .input
+            .iter()
+            .filter_map(|part| match part {
+                TurnInputPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let item = ItemRecord {
+            id: Uuid::now_v7().to_string(),
+            session_id: params.session_id.to_string(),
+            kind: "user".into(),
+            role: Some("user".into()),
+            created_at: String::new(),
+            content: json!({
+                "kind": "user",
+                "role": "user",
+                "content": [{ "type": "text", "text": format!("[steer] {text}") }],
+            })
+            .to_string(),
+        };
+        self.persistence.save_item(&item)?;
         Ok(json!({ "commandId": params.command_id, "steered": true }))
     }
 
@@ -625,95 +1959,170 @@ impl PrricodeServer {
     }
 }
 
+fn parse_history_tool_calls(content: &Value) -> Vec<ToolCall> {
+    let Some(parts) = content.get("content").and_then(|c| c.as_array()) else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("toolUse"))
+        .filter_map(|p| {
+            Some(ToolCall {
+                id: String::new(),
+                name: p.get("name")?.as_str()?.to_string(),
+                arguments: p.get("input").cloned().unwrap_or(json!({})),
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionResumeParams {
+#[serde(rename_all = "camelCase")]
+pub struct AccountLoginStartParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountLoginCancelParams {
+    pub command_id: CommandId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceLoginParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupersedeLoginCredentialParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionActivationParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerOAuthLoginParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerOAuthLoginCancelParams {
+    pub command_id: CommandId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerUseSetupReadParams {
+    pub session_id: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecapCancelParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionRenameParams {
-    pub command_id: CommandId,
-    pub name: String,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionSideChatParams {
-    pub command_id: CommandId,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionForkParams {
-    pub command_id: CommandId,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionSetApprovalModeParams {
-    pub command_id: CommandId,
-    pub mode: crate::ApprovalMode,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionSetReasoningEffortParams {
-    pub command_id: CommandId,
-    pub reasoning_effort: crate::ReasoningEffort,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TurnCancelParams {
-    pub command_id: CommandId,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TurnInterruptParams {
-    pub command_id: CommandId,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TurnSteerParams {
-    pub command_id: CommandId,
-    pub expected_turn_id: TurnId,
-    pub input: Vec<TurnInputPart>,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TurnUnqueueParams {
-    pub command_id: CommandId,
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TaskStopParams {
-    pub command_id: CommandId,
-    pub session_id: SessionId,
-    pub task_id: TaskId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskStopAllParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TaskListParams {
+#[serde(rename_all = "camelCase")]
+pub struct LogSubscribeParams {
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SkillListParams {
+#[serde(rename_all = "camelCase")]
+pub struct LogUnsubscribeParams {
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogPageParams {
+    pub session_id: SessionId,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsReadParams {
+    pub session_id: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsWriteValueParams {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsWriteManyParams {
+    pub values: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerAdmissionParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionProfileSetParams {
+    pub command_id: CommandId,
+    pub profile: String,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessBackgroundParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionReadParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeLaunchParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledFireParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionNameParams {
+    pub command_id: Option<CommandId>,
+    pub session_id: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillSetActivationParams {
     pub activation: String,
     pub command_id: CommandId,
@@ -723,11 +2132,7 @@ pub struct SkillSetActivationParams {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ApprovalListPendingParams {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubagentTargetParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -735,37 +2140,177 @@ pub struct SubagentTargetParams {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ComputerUseSetupReadParams {
-    pub session_id: Option<SessionId>,
+#[serde(rename_all = "camelCase")]
+pub struct TurnSubmitOriginParams {
+    pub command_id: Option<CommandId>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolConfigurationParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewUnsubscribeBySessionIdParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowControlParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowTriggerConfigurationParams {
+    pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationRewindEvaluateParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSessionMessageParams {
+    pub command_id: Option<CommandId>,
+}
+
+// ---------- request param types ----------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionResumeParams {
+    pub command_id: CommandId,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRenameParams {
+    pub command_id: CommandId,
+    pub name: String,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSideChatParams {
+    pub command_id: CommandId,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionForkParams {
+    pub command_id: CommandId,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetApprovalModeParams {
+    pub command_id: CommandId,
+    pub mode: crate::ApprovalMode,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetReasoningEffortParams {
+    pub command_id: CommandId,
+    pub reasoning_effort: crate::ReasoningEffort,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnCancelParams {
+    pub command_id: CommandId,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnInterruptParams {
+    pub command_id: CommandId,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSteerParams {
+    pub command_id: CommandId,
+    pub expected_turn_id: TurnId,
+    pub input: Vec<TurnInputPart>,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnUnqueueParams {
+    pub command_id: CommandId,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStopParams {
+    pub command_id: CommandId,
+    pub session_id: SessionId,
+    pub task_id: TaskId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillListParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalListPendingParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComputerUseSettingsReadParams {
     pub show_built_ins: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ViewPageParams {
     pub limit: u32,
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ViewSubscribeParams {
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ViewUnsubscribeParams {
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ViewUnsubscribeBySessionIdParams {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ItemReadOutputParams {
     pub item_id: String,
     pub output_ref: String,
@@ -773,11 +2318,13 @@ pub struct ItemReadOutputParams {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginListParams {
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginInstallParams {
     pub command_id: CommandId,
     pub session_id: SessionId,
@@ -785,112 +2332,43 @@ pub struct PluginInstallParams {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HookListParams {
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FeedbackSubmitParams {
     pub classification: String,
     pub note: String,
     pub with_files: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RecapCancelParams {
-    pub command_id: CommandId,
-    pub session_id: SessionId,
+/// Convert a stored wire content array into protocol ContentPart values.
+fn parts_to_core(value: &Value) -> Option<Vec<prricode_core::types::ContentPart>> {
+    let array = value.as_array()?;
+    let parts = array
+        .iter()
+        .filter_map(|part| match part.get("type")?.as_str()? {
+            "text" => Some(prricode_core::types::ContentPart::Text {
+                text: part.get("text")?.as_str()?.to_string(),
+            }),
+            "toolUse" => Some(prricode_core::types::ContentPart::ToolUse {
+                name: part.get("name")?.as_str()?.to_string(),
+                input: part.get("input").cloned().unwrap_or(json!({})),
+            }),
+            "toolResult" => Some(prricode_core::types::ContentPart::ToolResult {
+                content: vec![prricode_core::types::ContentPart::Text {
+                    text: part
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                }],
+            }),
+            _ => None,
+        })
+        .collect();
+    Some(parts)
 }
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AccountLoginStartParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AccountLoginCancelParams {
-    pub command_id: CommandId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct McpServerOAuthLoginParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct McpServerOAuthLoginCancelParams {
-    pub command_id: CommandId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LogSubscribeParams {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LogUnsubscribeParams {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LogPageParams {
-    pub session_id: SessionId,
-    pub limit: u32,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ProjectionReadParams {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConversationRewindEvaluateParams {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SupersedeLoginCredentialParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DeviceLoginParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SubscriptionActivationParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ProcessBackgroundParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionNameParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PermissionProfileSetParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LocalSessionMessageParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PeerAdmissionParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ScheduledFireParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SettingsReadParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SettingsWriteValueParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SettingsWriteManyParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WorkflowTriggerConfigurationParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RuntimeLaunchParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WorkflowControlParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TurnSubmitOriginParams {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ToolConfigurationParams {}
