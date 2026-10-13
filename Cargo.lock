@@ -1157,6 +1157,7 @@ dependencies = [
  "futures-util",
  "prricode-computer-use",
  "prricode-core",
+ "prricode-mcp",
  "prricode-persistence",
  "prricode-provider",
  "prricode-sandbox",
@@ -1269,6 +1270,7 @@ dependencies = [
  "prricode-agent",
  "prricode-computer-use",
  "prricode-core",
+ "prricode-mcp",
  "prricode-persistence",
  "prricode-provider",
  "prricode-skills",
@@ -1277,6 +1279,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml",
  "tracing",
  "uuid",
 ]

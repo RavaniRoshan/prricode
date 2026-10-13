@@ -13,9 +13,11 @@ pub use loop_runner::{
     AgentRunner, GoalContext, TurnHandle, TurnInput, TurnOutcome, TurnTicket, GOAL_COMPLETE_TOOL,
 };
 pub use prompts::build_system_prompt;
+pub use prricode_mcp::McpRegistry;
 pub use tools::{
-    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, Risk, ShellTool,
-    TaskTool, ToolContext, ToolRegistry, ToolRegistryBuilder, WebFetchTool, WriteFileTool,
+    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, McpTool, ReadFileTool, Risk,
+    ShellTool, TaskTool, ToolContext, ToolRegistry, ToolRegistryBuilder, WebFetchTool,
+    WriteFileTool,
 };
 
 use prricode_provider::ContentPart;
