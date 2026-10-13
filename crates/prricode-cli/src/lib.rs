@@ -207,8 +207,18 @@ pub enum SandboxAction {
 #[derive(Subcommand)]
 pub enum McpAction {
     List,
-    Add { name: String, url: String },
-    Remove { name: String },
+    Add {
+        name: String,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long)]
+        args: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]

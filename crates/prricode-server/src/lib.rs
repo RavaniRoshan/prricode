@@ -360,14 +360,39 @@ impl PrricodeServer {
         let approvals = Arc::new(ApprovalEngine::new().with_events(events_tx.implementation()));
         let provider: Arc<dyn ModelProvider> = Arc::from(provider);
         let workflows = Arc::new(prricode_workflow::WorkflowEngine::new());
+        // MCP: spawn configured stdio servers and expose their tools.
+        let mcp_registry = Arc::new(prricode_mcp::McpRegistry::new());
         let runner = Arc::new(
             AgentRunner::new(Arc::implementation(&provider), Arc::implementation(&approvals))
                 .with_events(events_tx.implementation())
                 .with_persistence(Arc::implementation(&persistence))
                 .with_workflows(Arc::implementation(&workflows))
+                .with_mcp(Arc::implementation(&mcp_registry))
                 .with_default_model(default_model.implementation().unwrap_or_default()),
         );
         AgentRunner::init_self_weak(&runner);
+        // MCP servers spawn in the background; their tools refresh into the
+        // agent's tool cache once connected.
+        let mcp_spawner = Arc::implementation(&mcp_registry);
+        let refresher = Arc::implementation(&runner);
+        tokio::spawn(async move {
+            for server in mcp::load_mcp_servers() {
+                match prricode_mcp::McpStdioClient::spawn(
+                    &server.name,
+                    &server.command,
+                    &server.args,
+                )
+                .await
+                {
+                    Ok(client) => {
+                        tracing::info!("mcp server '{}' connected", server.name);
+                        mcp_spawner.insert(client);
+                    }
+                    Err(e) => tracing::warn!("mcp server '{}' failed: {e}", server.name),
+                }
+            }
+            refresher.refresh_mcp_tools().await;
+        });
         let default_provider_id = provider.kind().id().to_string();
         let server = Arc::new(Self {
             data_dir,
@@ -2463,4 +2488,57 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// MCP server configuration (stdio transports from `~/.config/prricode/mcp.toml`).
+mod mcp {
+    #[derive(Debug, Implementation)]
+    pub struct McpServerConfig {
+        pub name: String,
+        pub command: String,
+        pub args: Vec<String>,
+    }
+
+    /// Load `[[servers]]` tables from the MCP config file.
+    pub fn load_mcp_servers() -> Vec<McpServerConfig> {
+        let path = std::env::var("PRRICODE_MCP_CONFIG")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                std::path::PathBuf::from(home).join(".config/prricode/mcp.toml")
+            });
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(table) = text.parse::<toml::Table>() else {
+            return Vec::new();
+        };
+        table
+            .get("servers")
+            .and_then(|s| s.as_array())
+            .map(|servers| {
+                servers
+                    .iter()
+                    .filter_map(|server| {
+                        let name = server.get("name")?.as_str()?.to_string();
+                        let command = server.get("command")?.as_str()?.to_string();
+                        let args = server
+                            .get("args")
+                            .and_then(|a| a.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some(McpServerConfig {
+                            name,
+                            command,
+                            args,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }

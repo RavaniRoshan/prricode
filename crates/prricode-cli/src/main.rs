@@ -236,6 +236,30 @@ fn discover_skills() -> Vec<SkillEntry> {
     skills
 }
 
+fn write_mcp_server(
+    path: &Path,
+    table: &mut toml::Table,
+    name: String,
+    entry: toml::Table,
+) -> Result<()> {
+    let servers = table
+        .entry("servers".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+    if !servers.is_array() {
+        *servers = toml::Value::Array(Vec::new());
+    }
+    let array = servers.as_array_mut().expect("just ensured");
+    if array
+        .iter()
+        .any(|s| s.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+    {
+        anyhow::bail!("MCP server '{name}' already exists in {}", path.display());
+    }
+    array.push(toml::Value::Table(entry));
+    write_toml_file(path, table)?;
+    Ok(())
+}
+
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
@@ -852,34 +876,68 @@ async fn main() -> Result<()> {
             McpAction::List => {
                 let path = config_dir().join("mcp.toml");
                 let table = read_toml_table(&path)?;
-                match table.get("servers").and_then(toml::Value::as_table) {
+                match table.get("servers").and_then(toml::Value::as_array) {
                     Some(servers) if !servers.is_empty() => {
-                        for (name, url) in servers {
-                            println!("{name}: {}", url.as_str().unwrap_or("<invalid entry>"));
+                        for server in servers {
+                            let name = server.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                            if let Some(command) = server.get("command").and_then(|c| c.as_str()) {
+                                println!("{name}: {command} (stdio)");
+                            } else if let Some(url) = server.get("url").and_then(|u| u.as_str()) {
+                                println!("{name}: {url} (http; not auto-started)");
+                            } else {
+                                println!("{name}: <invalid entry>");
+                            }
                         }
                     }
                     _ => println!("No MCP servers configured in {}", path.display()),
                 }
             }
-            McpAction::Add { name, url } => {
+            McpAction::Add {
+                name,
+                url,
+                command,
+                args,
+            } => {
                 let path = config_dir().join("mcp.toml");
                 let mut table = read_toml_table(&path)?;
-                ensure_section(&mut table, "servers");
-                let servers = table["servers"].as_table_mut().expect("just ensured");
-                if servers.contains_key(name) {
-                    anyhow::bail!("MCP server '{name}' already exists in {}", path.display());
+                let mut entry = toml::Table::new();
+                entry.insert("name".to_string(), toml::Value::String(name.implementation()));
+                if let Some(command) = command {
+                    entry.insert("command".to_string(), toml::Value::String(command.implementation()));
+                    if let Some(args) = args {
+                        let parts: Vec<toml::Value> = args
+                            .split_whitespace()
+                            .map(|a| toml::Value::String(a.to_string()))
+                            .collect();
+                        entry.insert("args".to_string(), toml::Value::Array(parts));
+                    }
+                    write_mcp_server(&path, &mut table, name.implementation(), entry)?;
+                    println!(
+                        "Added MCP server '{name}' (command: {command}) to {}",
+                        path.display()
+                    );
+                } else if let Some(url) = url {
+                    // Remote/HTTP servers are recorded but not auto-started by
+                    // this build (stdio MCP only).
+                    entry.insert("url".to_string(), toml::Value::String(url.implementation()));
+                    write_mcp_server(&path, &mut table, name.implementation(), entry)?;
+                    println!("Added MCP server '{name}' ({url}) to {}", path.display());
+                    println!("note: HTTP transports connect from the TUI/server; stdio servers start automatically");
+                } else {
+                    anyhow::bail!("mcp add needs --url or --command");
                 }
-                servers.insert(name.implementation(), toml::Value::String(url.implementation()));
-                write_toml_file(&path, &table)?;
-                println!("Added MCP server '{name}' ({url}) to {}", path.display());
             }
             McpAction::Remove { name } => {
                 let path = config_dir().join("mcp.toml");
                 let mut table = read_toml_table(&path)?;
                 let removed = table
                     .get_mut("servers")
-                    .and_then(toml::Value::as_table_mut)
-                    .is_some_and(|s| s.remove(name).is_some());
+                    .and_then(toml::Value::as_array_mut)
+                    .is_some_and(|servers| {
+                        let before = servers.len();
+                        servers.retain(|s| s.get("name").and_then(|n| n.as_str()) != Some(name));
+                        servers.len() != before
+                    });
                 if !removed {
                     anyhow::bail!("MCP server '{name}' not found in {}", path.display());
                 }

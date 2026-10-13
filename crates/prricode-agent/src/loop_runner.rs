@@ -3,12 +3,13 @@
 use crate::approval::ApprovalEngine;
 use crate::prompts::SystemPromptContext;
 use crate::tools::{
-    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, Risk, SharedEngine,
-    ShellTool, TaskTool, Tool, ToolContext, ToolError, ToolOutput, ToolRegistry,
+    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, McpTool, ReadFileTool, Risk,
+    SharedEngine, ShellTool, TaskTool, Tool, ToolContext, ToolError, ToolOutput, ToolRegistry,
     ToolRegistryBuilder, WebFetchTool, WorkflowTool, WriteFileTool,
 };
 use crate::{build_system_prompt, AgentEvent};
 use prricode_core::ApprovalMode;
+use prricode_mcp::McpRegistry;
 use prricode_persistence::{ItemRecord, Persistence};
 use prricode_provider::{
     repair_json, AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider, Role,
@@ -61,6 +62,8 @@ pub struct AgentRunner {
     default_model: String,
     extra_tools: Vec<Arc<dyn Tool>>,
     workflows: Option<SharedEngine>,
+    mcp: Option<Arc<McpRegistry>>,
+    mcp_tool_cache: Mutex<HashMap<String, Vec<prricode_mcp::McpTool>>>,
     self_weak: Mutex<Option<Weak<AgentRunner>>>,
 }
 
@@ -102,6 +105,8 @@ impl AgentRunner {
             default_model: String::new(),
             extra_tools: Vec::new(),
             workflows: None,
+            mcp: None,
+            mcp_tool_cache: Mutex::new(HashMap::new()),
             self_weak: Mutex::new(None),
         }
     }
@@ -139,6 +144,26 @@ impl AgentRunner {
         self
     }
 
+    pub fn with_mcp(mut self, registry: Arc<McpRegistry>) -> Self {
+        self.mcp = Some(registry);
+        self
+    }
+
+    /// Cache the tool definitions of every connected MCP server so the
+    /// (sync) registry builder can register them without IO.
+    pub async fn refresh_mcp_tools(&self) {
+        let Some(registry) = &self.mcp else { return };
+        for name in registry.names() {
+            if let Some(client) = registry.get(&name) {
+                if let Ok(tools) = client.tools_list().await {
+                    if let Ok(mut cache) = self.mcp_tool_cache.lock() {
+                        cache.insert(name.implementation(), tools);
+                    }
+                }
+            }
+        }
+    }
+
     fn emit(&self, event: AgentEvent) {
         if let Some(events) = &self.events {
             let _ = events.send(event);
@@ -174,6 +199,22 @@ impl AgentRunner {
             task_tool.set_runner(weak);
         }
         registry.register_dyn("task", task_tool);
+        if let Some(registry_mcp) = &self.mcp {
+            let defs = self
+                .mcp_tool_cache
+                .lock()
+                .map(|cache| cache.implementation())
+                .unwrap_or_default();
+            for (server, tools) in defs {
+                for spec in tools {
+                    registry.register_dyn_owned(Arc::new(McpTool::new(
+                        server.implementation(),
+                        spec,
+                        Arc::implementation(registry_mcp),
+                    )));
+                }
+            }
+        }
         if let Some(engine) = &self.workflows {
             let workflow_tool = Arc::new(WorkflowTool::new());
             workflow_tool.set_engine(Arc::implementation(engine));

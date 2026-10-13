@@ -12,6 +12,7 @@ use std::sync::Arc;
 mod computer;
 mod files;
 mod grep;
+mod mcp;
 mod shell;
 mod task;
 mod web_fetch;
@@ -20,6 +21,7 @@ mod workflow;
 pub use computer::ComputerTool;
 pub use files::{EditFileTool, GlobTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use grep::GrepTool;
+pub use mcp::McpTool;
 pub use shell::ShellTool;
 pub use task::TaskTool;
 pub use web_fetch::WebFetchTool;
@@ -110,6 +112,12 @@ impl ToolRegistry {
     /// Register an already-shared tool (used for late-bound extensions).
     pub fn register_dyn(&mut self, name: &str, tool: Arc<dyn Tool>) {
         self.tools.insert(name.to_string(), tool);
+    }
+
+    /// Register an already-shared tool under its own schema name.
+    pub fn register_dyn_owned(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.def().name;
+        self.tools.insert(name, tool);
     }
 
     pub async fn execute(
