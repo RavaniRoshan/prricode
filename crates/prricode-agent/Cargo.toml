@@ -9,6 +9,7 @@ prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
 prricode-sandbox = { path = "../prricode-sandbox" }
 prricode-computer-use = { path = "../prricode-computer-use" }
+prricode-workflow = { path = "../prricode-workflow" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

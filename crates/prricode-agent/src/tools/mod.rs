@@ -15,6 +15,7 @@ mod grep;
 mod shell;
 mod task;
 mod web_fetch;
+mod workflow;
 
 pub use computer::ComputerTool;
 pub use files::{EditFileTool, GlobTool, ListDirTool, ReadFileTool, WriteFileTool};
@@ -22,6 +23,7 @@ pub use grep::GrepTool;
 pub use shell::ShellTool;
 pub use task::TaskTool;
 pub use web_fetch::WebFetchTool;
+pub use workflow::{SharedEngine, WorkflowTool};
 
 /// How sensitive a tool call is, used by the approval engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,7 @@ pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub approvals: Arc<ApprovalEngine>,
     pub data_dir: PathBuf,
+    pub session_id: String,
     /// Extra hooks installed later (computer use, MCP, skills).
     pub extensions: HashMap<String, Arc<dyn Tool>>,
 }

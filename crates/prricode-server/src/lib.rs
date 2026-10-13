@@ -32,7 +32,7 @@ pub struct PrricodeServer {
     turns: Arc<Mutex<HashMap<String, TurnHandle>>>,
     goals: Arc<Mutex<HashMap<String, GoalRecord>>>,
     uploads: Arc<Mutex<HashMap<String, MediaUploadState>>>,
-    workflows: prricode_workflow::WorkflowEngine,
+    workflows: Arc<prricode_workflow::WorkflowEngine>,
     events_tx: mpsc::UnboundedSender<AgentEvent>,
     default_model: Option<String>,
     default_provider_id: String,
@@ -359,10 +359,12 @@ impl PrricodeServer {
         let persistence = Arc::new(Persistence::new(&data_dir).expect("persistence init"));
         let approvals = Arc::new(ApprovalEngine::new().with_events(events_tx.clone()));
         let provider: Arc<dyn ModelProvider> = Arc::from(provider);
+        let workflows = Arc::new(prricode_workflow::WorkflowEngine::new());
         let runner = Arc::new(
             AgentRunner::new(Arc::clone(&provider), Arc::clone(&approvals))
                 .with_events(events_tx.clone())
                 .with_persistence(Arc::clone(&persistence))
+                .with_workflows(Arc::clone(&workflows))
                 .with_default_model(default_model.clone().unwrap_or_default()),
         );
         AgentRunner::init_self_weak(&runner);
@@ -377,7 +379,7 @@ impl PrricodeServer {
             turns: Arc::new(Mutex::new(HashMap::new())),
             goals: Arc::new(Mutex::new(HashMap::new())),
             uploads: Arc::new(Mutex::new(HashMap::new())),
-            workflows: prricode_workflow::WorkflowEngine::new(),
+            workflows,
             events_tx,
             default_model,
             default_provider_id,
