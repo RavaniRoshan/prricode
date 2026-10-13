@@ -4,8 +4,8 @@
 use prricode_agent::{AgentRunner, ApprovalEngine, TurnInput};
 use prricode_mcp::{McpRegistry, McpStdioClient};
 use prricode_provider::{
-    AssistantMessage, ChatMessage, ChatRequest, ChatResponse, ContentPart, ModelProvider,
-    ProviderKind, ProviderResult, ToolCall, Usage,
+    AssistantMessage, ChatRequest, ChatResponse, ContentPart, ModelProvider, ProviderKind,
+    ProviderResult, ToolCall, Usage,
 };
 use serde_json::json;
 use std::sync::Arc;

@@ -305,7 +305,7 @@ mod tests {
     fn cancel_and_child_control() {
         let engine = WorkflowEngine::new();
         let id = engine.start("s1", two_step(), None).unwrap();
-        let child = engine.add_child(&id, "child-a").unwrap();
+        let _child = engine.add_child(&id, "child-a").unwrap();
         engine.cancel(&id).unwrap();
         let run = engine.get(&id).unwrap();
         assert!(run.children.iter().all(|c| c.terminal));

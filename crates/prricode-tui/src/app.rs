@@ -569,13 +569,6 @@ mod tests {
         App::new(ProviderKind::Echo, "echo".into())
     }
 
-    fn channel() -> (
-        mpsc::UnboundedSender<super::super::UiCommand>,
-        mpsc::UnboundedReceiver<super::super::UiCommand>,
-    ) {
-        mpsc::unbounded_channel()
-    }
-
     #[test]
     fn status_line_reports_state() {
         let mut app = new_app();
@@ -760,7 +753,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_cancels_only_when_running() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = new_app();
         app.handle_key(KeyAction::Ctrl('c'), &tx);
         assert!(app.should_quit);
