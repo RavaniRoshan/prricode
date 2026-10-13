@@ -14,9 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-action@stable
-        with:
-          components: clippy, rustfmt
+      - name: Install Rust (stable, minimal, with clippy + rustfmt)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal \
+                --component clippy --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -36,7 +39,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-action@stable
+      - name: Install Rust (stable, minimal)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Install ollama and pull the model
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
