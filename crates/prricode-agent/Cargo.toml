@@ -7,6 +7,8 @@ edition.workspace = true
 prricode-core = { path = "../prricode-core" }
 prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
+prricode-sandbox = { path = "../prricode-sandbox" }
+prricode-computer-use = { path = "../prricode-computer-use" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,3 +20,4 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true }
+base64 = { workspace = true }

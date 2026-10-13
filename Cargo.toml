@@ -11,6 +11,8 @@ members = [
     "crates/prricode-persistence",
     "crates/prricode-provider",
     "crates/prricode-agent",
+    "crates/prricode-mcp",
+    "crates/prricode-voice",
 ]
 
 [workspace.package]
@@ -31,7 +33,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 async-trait = "0.1"
 toml = "0.8"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 futures-util = "0.3"
 dirs = "5"
 regex = "1"

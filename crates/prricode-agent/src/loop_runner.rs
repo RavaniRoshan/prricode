@@ -3,9 +3,9 @@
 use crate::approval::ApprovalEngine;
 use crate::prompts::SystemPromptContext;
 use crate::tools::{
-    EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, Risk, ShellTool, TaskTool, Tool,
-    ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRegistryBuilder, WebFetchTool,
-    WriteFileTool,
+    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, Risk, ShellTool,
+    TaskTool, Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRegistryBuilder,
+    WebFetchTool, WriteFileTool,
 };
 use crate::{build_system_prompt, AgentEvent};
 use prricode_core::ApprovalMode;
@@ -153,7 +153,8 @@ impl AgentRunner {
             .with_tool(ListDirTool)
             .with_tool(GlobTool)
             .with_tool(GrepTool)
-            .with_tool(WebFetchTool::default());
+            .with_tool(WebFetchTool::default())
+            .with_tool(ComputerTool);
         if goal {
             builder = builder.with_tool(GoalCompleteTool);
         }

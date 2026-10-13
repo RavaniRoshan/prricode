@@ -9,12 +9,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod computer;
 mod files;
 mod grep;
 mod shell;
 mod task;
 mod web_fetch;
 
+pub use computer::ComputerTool;
 pub use files::{EditFileTool, GlobTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use grep::GrepTool;
 pub use shell::ShellTool;

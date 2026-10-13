@@ -32,6 +32,7 @@ pub struct PrricodeServer {
     turns: Arc<Mutex<HashMap<String, TurnHandle>>>,
     goals: Arc<Mutex<HashMap<String, GoalRecord>>>,
     uploads: Arc<Mutex<HashMap<String, MediaUploadState>>>,
+    workflows: prricode_workflow::WorkflowEngine,
     events_tx: mpsc::UnboundedSender<AgentEvent>,
     default_model: Option<String>,
     default_provider_id: String,
@@ -376,6 +377,7 @@ impl PrricodeServer {
             turns: Arc::new(Mutex::new(HashMap::new())),
             goals: Arc::new(Mutex::new(HashMap::new())),
             uploads: Arc::new(Mutex::new(HashMap::new())),
+            workflows: prricode_workflow::WorkflowEngine::new(),
             events_tx,
             default_model,
             default_provider_id,
@@ -1117,53 +1119,72 @@ impl PrricodeServer {
 
     async fn handle_workflow_cancel(&self, params: Option<Value>) -> Result<Value> {
         let params: WorkflowCancelParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(WorkflowControlResult {
-            command_id: params.command_id,
-            status: "cancelled".into(),
-        })?)
+        match self.workflows.cancel(&params.workflow_run_id.to_string()) {
+            Ok(()) => Ok(serde_json::to_value(WorkflowControlResult {
+                command_id: params.command_id,
+                status: "cancelled".into(),
+            })?),
+            Err(_) => Ok(serde_json::to_value(WorkflowControlResult {
+                command_id: params.command_id,
+                status: "not_found".into(),
+            })?),
+        }
     }
 
     async fn handle_workflow_pause(&self, params: Option<Value>) -> Result<Value> {
         let params: WorkflowPauseParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(WorkflowControlResult {
-            command_id: params.command_id,
-            status: "paused".into(),
-        })?)
+        match self.workflows.pause(&params.workflow_run_id.to_string()) {
+            Ok(()) => Ok(serde_json::to_value(WorkflowControlResult {
+                command_id: params.command_id,
+                status: "paused".into(),
+            })?),
+            Err(_) => Ok(serde_json::to_value(WorkflowControlResult {
+                command_id: params.command_id,
+                status: "invalid_transition".into(),
+            })?),
+        }
     }
 
     async fn handle_workflow_resume(&self, params: Option<Value>) -> Result<Value> {
         let params: WorkflowResumeParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(WorkflowResumeResult {
-            command_id: params.command_id,
-            status: "resumed".into(),
-            turn_id: Uuid::now_v7(),
-        })?)
+        match self.workflows.resume(&params.workflow_run_id.to_string()) {
+            Ok(()) => Ok(serde_json::to_value(WorkflowResumeResult {
+                command_id: params.command_id,
+                status: "resumed".into(),
+                turn_id: Uuid::now_v7(),
+            })?),
+            Err(_) => Ok(serde_json::to_value(WorkflowResumeResult {
+                command_id: params.command_id,
+                status: "invalid_transition".into(),
+                turn_id: Uuid::now_v7(),
+            })?),
+        }
     }
 
     async fn handle_workflow_child_control(&self, params: Option<Value>) -> Result<Value> {
         let params: WorkflowChildControlParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(WorkflowControlResult {
-            command_id: params.command_id,
-            status: format!(
-                "{}d",
-                match params.action {
-                    WorkflowChildAction::Skip => "skip",
-                    WorkflowChildAction::Retry => "retr",
-                }
-            ),
-        })?)
+        let retry = matches!(params.action, WorkflowChildAction::Retry);
+        match self.workflows.child_control(
+            &params.workflow_run_id.to_string(),
+            &params.child_id,
+            retry,
+        ) {
+            Ok(child) => Ok(serde_json::to_value(WorkflowControlResult {
+                command_id: params.command_id,
+                status: format!("{}:{}", child.status, child.phase),
+            })?),
+            Err(_) => Ok(serde_json::to_value(WorkflowControlResult {
+                command_id: params.command_id,
+                status: "not_found".into(),
+            })?),
+        }
     }
 
     // ---------- computer use (X11 backend lands in its phase) ----------
 
     async fn handle_computer_use_check(&self) -> Result<Value> {
-        Ok(serde_json::to_value(ComputerUseSetupState {
-            accessibility: ComputerUsePermission::Unknown,
-            input_monitoring: ComputerUsePermission::Unknown,
-            screen_recording: ComputerUsePermission::Unknown,
-            setup: ComputerUseSetupPhase::Dormant,
-        })?)
+        Ok(serde_json::to_value(computer_use_state())?)
     }
 
     async fn handle_computer_use_setup_read(&self, params: Option<Value>) -> Result<Value> {
@@ -1175,12 +1196,11 @@ impl PrricodeServer {
     async fn handle_computer_use_start(&self, params: Option<Value>) -> Result<Value> {
         let _params: ComputerUseSetupStartParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(serde_json::to_value(ComputerUseSetupState {
-            accessibility: ComputerUsePermission::Missing,
-            input_monitoring: ComputerUsePermission::Missing,
-            screen_recording: ComputerUsePermission::Missing,
-            setup: ComputerUseSetupPhase::RestartRequired,
-        })?)
+        let mut state = computer_use_state();
+        if state.setup == ComputerUseSetupPhase::ReadyForTarget {
+            state.setup = ComputerUseSetupPhase::InProgress;
+        }
+        Ok(serde_json::to_value(state)?)
     }
 
     async fn handle_computer_use_settings_read(&self) -> Result<Value> {
@@ -1332,12 +1352,42 @@ impl PrricodeServer {
 
     async fn handle_skill_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: SkillListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "skills": [] }))
+        let home = dirs_home();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let skills = prricode_skills::load_skills(&home, &cwd);
+        let entries: Vec<Value> = skills
+            .iter()
+            .map(|skill| {
+                json!({
+                    "name": skill.name,
+                    "source": skill.source,
+                    "description": skill.description,
+                    "location": skill.location.display().to_string(),
+                })
+            })
+            .collect();
+        Ok(json!({ "skills": entries }))
     }
 
     async fn handle_skill_import(&self, params: Option<Value>) -> Result<Value> {
         let params: SkillImportParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "imported": false, "source": params.source }))
+        let home = dirs_home();
+        match prricode_skills::import_skill(
+            &home,
+            std::path::Path::new(&params.source),
+            params.dry_run.unwrap_or(false),
+            params.force.unwrap_or(false),
+        ) {
+            Ok(imported) => Ok(json!({
+                "commandId": params.command_id,
+                "imported": imported.imported,
+                "name": imported.name,
+                "source": params.source,
+                "dryRun": params.dry_run.unwrap_or(false),
+                "dest": imported.dest.display().to_string(),
+            })),
+            Err(e) => Err(JsonRpcError::invalid_params(e.to_string()).into()),
+        }
     }
 
     // ---------- models / usage ----------
@@ -2371,4 +2421,44 @@ fn parts_to_core(value: &Value) -> Option<Vec<prricode_core::types::ContentPart>
         })
         .collect();
     Some(parts)
+}
+
+/// Probe the host's computer-use permissions (X11 backend).
+fn computer_use_state() -> ComputerUseSetupState {
+    let probe = prricode_computer_use::ComputerUse::probe();
+    let state = probe.state();
+    ComputerUseSetupState {
+        accessibility: match state.accessibility {
+            prricode_computer_use::Permission::Granted => ComputerUsePermission::Granted,
+            prricode_computer_use::Permission::Missing => ComputerUsePermission::Missing,
+            prricode_computer_use::Permission::Unknown => ComputerUsePermission::Unknown,
+        },
+        input_monitoring: match state.input_monitoring {
+            prricode_computer_use::Permission::Granted => ComputerUsePermission::Granted,
+            prricode_computer_use::Permission::Missing => ComputerUsePermission::Missing,
+            prricode_computer_use::Permission::Unknown => ComputerUsePermission::Unknown,
+        },
+        screen_recording: match state.screen_recording {
+            prricode_computer_use::Permission::Granted => ComputerUsePermission::Granted,
+            prricode_computer_use::Permission::Missing => ComputerUsePermission::Missing,
+            prricode_computer_use::Permission::Unknown => ComputerUsePermission::Unknown,
+        },
+        setup: match state.setup {
+            prricode_computer_use::SetupPhase::Dormant => ComputerUseSetupPhase::Dormant,
+            prricode_computer_use::SetupPhase::InProgress => ComputerUseSetupPhase::InProgress,
+            prricode_computer_use::SetupPhase::RestartRequired => {
+                ComputerUseSetupPhase::RestartRequired
+            }
+            prricode_computer_use::SetupPhase::ReadyForTarget => {
+                ComputerUseSetupPhase::ReadyForTarget
+            }
+            prricode_computer_use::SetupPhase::Stopped => ComputerUseSetupPhase::Stopped,
+        },
+    }
+}
+
+fn dirs_home() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
