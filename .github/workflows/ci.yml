@@ -27,7 +27,7 @@ jobs:
           ./target/debug/prricode schema --json
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"ci","version":"0"}}}' \
             '{"jsonrpc":"2.0","id":2,"method":"bogus/method","params":{}}' \
-            | ./target/debug/prricode serve --provider echo | tail -1 | grep -q '"-32601"'
+            | ./target/debug/prricode serve --provider echo | grep -q -- '-32601'
 
   e2e:
     name: e2e (ollama qwen2.5-coder:3b)
