@@ -10,6 +10,7 @@ members = [
     "crates/prricode-skills",
     "crates/prricode-persistence",
     "crates/prricode-provider",
+    "crates/prricode-agent",
 ]
 
 [workspace.package]
@@ -33,3 +34,5 @@ toml = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
 dirs = "5"
+regex = "1"
+base64 = "0.22"

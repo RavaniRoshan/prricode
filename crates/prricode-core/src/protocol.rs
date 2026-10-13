@@ -96,4 +96,79 @@ impl JsonRpcError {
     pub fn user_input_invalid() -> Self {
         Self::new(-32070, "user input invalid")
     }
+    pub fn workspace_not_trusted() -> Self {
+        Self::new(-32100, "workspace not trusted")
+    }
+    pub fn workspace_unknown() -> Self {
+        Self::new(-32101, "workspace unknown")
+    }
+    pub fn workspace_mismatch() -> Self {
+        Self::new(-32102, "workspace mismatch")
+    }
+    pub fn session_log_unavailable() -> Self {
+        Self::new(-32103, "session log unavailable")
+    }
+    pub fn invalid_session_id() -> Self {
+        Self::new(-32104, "invalid session id")
+    }
+    pub fn invalid_payload() -> Self {
+        Self::new(-32105, "invalid payload")
+    }
+    pub fn command_id_conflict() -> Self {
+        Self::new(-32106, "command id conflict")
+    }
+    pub fn unknown_method() -> Self {
+        Self::new(-32107, "unknown method")
+    }
+    pub fn wrong_target() -> Self {
+        Self::new(-32108, "wrong target")
+    }
+    pub fn role_denied() -> Self {
+        Self::new(-32109, "role denied")
+    }
+    pub fn process_generation_retired() -> Self {
+        Self::new(-32110, "process generation retired")
+    }
+    pub fn policy_denied() -> Self {
+        Self::new(-32111, "policy denied")
+    }
+    pub fn root_capacity_exhausted() -> Self {
+        Self::new(-32112, "root capacity exhausted")
+    }
+    pub fn invalid_model() -> Self {
+        Self::new(-32113, "invalid model")
+    }
+    pub fn unsupported_provider() -> Self {
+        Self::new(-32114, "unsupported provider")
+    }
+    pub fn validator_unavailable() -> Self {
+        Self::new(-32115, "validator unavailable")
+    }
+    pub fn stale_attempt() -> Self {
+        Self::new(-32116, "stale attempt")
+    }
+    pub fn already_processed() -> Self {
+        Self::new(-32117, "already processed")
+    }
+    pub fn invalid_target() -> Self {
+        Self::new(-32118, "invalid target")
+    }
+    pub fn run_active() -> Self {
+        Self::new(-32119, "run active")
+    }
+    pub fn current_session_required() -> Self {
+        Self::new(-32120, "current session required")
+    }
+    pub fn schema_invalid() -> Self {
+        Self::new(-32121, "schema invalid")
+    }
+    pub fn skill_not_found() -> Self {
+        Self::new(-32122, "skill not found")
+    }
+    pub fn media_not_found() -> Self {
+        Self::new(-32123, "media not found")
+    }
+    pub fn approval_expired() -> Self {
+        Self::new(-32124, "approval expired")
+    }
 }
