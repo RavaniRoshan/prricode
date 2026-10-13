@@ -29,3 +29,7 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 async-trait = "0.1"
+toml = "0.8"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+dirs = "5"
