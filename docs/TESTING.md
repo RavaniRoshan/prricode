@@ -56,6 +56,16 @@ prricode exec "say hi" --provider kilo --model liquid/lfm-2.5-2.6b:free
 prricode exec "say hi" --provider ollama --model qwen2.5-coder:3b
 ```
 
+## CI
+
+`.github/workflows/ci.yml` has two jobs:
+
+- **fast** (every push/PR): `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
+  plus an offline CLI smoke (echo exec, schema, and a `-32601` check over stdio).
+- **e2e** (main pushes / manual dispatch): installs Ollama, pulls
+  `qwen2.5-coder:3b`, and runs `tests/e2e.sh`.
+
 ## Known flakes
 
 - The 3B e2e model sometimes emits prose before/after tool calls; recovery

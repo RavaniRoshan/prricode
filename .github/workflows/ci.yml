@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fast:
+    name: build, clippy, fmt, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-action@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: CLI smoke (offline echo provider)
+        run: |
+          cargo build
+          ./target/debug/prricode exec "hello" --provider echo
+          ./target/debug/prricode schema --json
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"bogus/method","params":{}}' \
+            | ./target/debug/prricode serve --provider echo | tail -1 | grep -q '"-32601"'
+
+  e2e:
+    name: e2e (ollama qwen2.5-coder:3b)
+    runs-on: ubuntu-latest
+    # Network-dependent and slow; runs on demand or on main pushes.
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-action@stable
+      - name: Install ollama and pull the model
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          ollama pull qwen2.5-coder:3b
+      - name: Build
+        run: cargo build
+      - name: Run the e2e scenario
+        run: BIN=./target/debug/prricode bash tests/e2e.sh
