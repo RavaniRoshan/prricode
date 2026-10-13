@@ -1,0 +1,232 @@
+//! Terminal setup, event polling, and rendering.
+
+use crate::app::{App, KeyAction, Role};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::Terminal;
+use std::io::Stdout;
+
+type Term = Terminal<CrosstermBackend<Stdout>>;
+
+pub fn init_terminal() -> anyhow::Result<Term> {
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)?;
+    Ok(terminal)
+}
+
+pub fn restore_terminal() -> anyhow::Result<()> {
+    disable_raw_mode()?;
+    execute!(std::io::stdout(), LeaveAlternateScreen)?;
+    Ok(())
+}
+
+/// Poll for the next keyboard event using the Reference composer keymap:
+/// Ctrl+<c> and Alt+<c> arrive as their own actions.
+pub fn next_event(timeout: std::time::Duration) -> anyhow::Result<Option<KeyAction>> {
+    if !event::poll(timeout)? {
+        return Ok(None);
+    }
+    let Event::Key(KeyEvent {
+        code, modifiers, ..
+    }) = event::read()?
+    else {
+        return Ok(None);
+    };
+    let action = match code {
+        KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Ctrl(c),
+        KeyCode::Char(c) if modifiers.contains(KeyModifiers::ALT) => KeyAction::Alt(c),
+        KeyCode::Char(c) => KeyAction::Char(c),
+        KeyCode::Enter => KeyAction::Enter,
+        KeyCode::Backspace => KeyAction::Backspace,
+        KeyCode::Delete => KeyAction::Delete,
+        KeyCode::Esc => KeyAction::Esc,
+        KeyCode::Left => KeyAction::Left,
+        KeyCode::Right => KeyAction::Right,
+        KeyCode::Up => KeyAction::Up,
+        KeyCode::Down => KeyAction::Down,
+        KeyCode::Home => KeyAction::Home,
+        KeyCode::End => KeyAction::End,
+        KeyCode::PageUp => KeyAction::PageUp,
+        KeyCode::PageDown => KeyAction::PageDown,
+        _ => return Ok(None),
+    };
+    Ok(Some(action))
+}
+
+pub fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let area = frame.area();
+    if app.should_quit {
+        return;
+    }
+    // Ctrl+C sentinel quits from the event layer.
+    if app.pending_approval.is_some() {
+        render_approval(frame, app, area);
+    } else {
+        render_main(frame, app, area);
+    }
+}
+
+fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(5),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "prricode",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("session {}", &app.session_id.to_string()[..8]),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("  "),
+        Span::styled(app.status_line(), Style::default().fg(Color::Yellow)),
+    ]))
+    .block(Block::default().borders(Borders::BOTTOM));
+    frame.render_widget(header, chunks[0]);
+
+    // Conversation.
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    for message in app.rendered_messages() {
+        let (prefix, style) = match message.role {
+            Role::User => ("you › ", Style::default().fg(Color::Green)),
+            Role::Assistant => ("agent › ", Style::default().fg(Color::Blue)),
+            Role::Tool => ("tool › ", Style::default().fg(Color::Magenta)),
+            Role::System => ("sys › ", Style::default().fg(Color::DarkGray)),
+        };
+        for (i, line) in message.text.lines().enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
+                    Span::raw(line.to_string()),
+                ]));
+            } else {
+                lines.push(Line::from(Span::raw(format!("      {line}"))));
+            }
+        }
+        lines.push(Line::from(""));
+    }
+    let visible = chunks[1].height.saturating_sub(1) as usize;
+    let total = lines.len();
+    let scroll = (app.scroll as usize).min(total.saturating_sub(visible));
+    let offset = total.saturating_sub(visible).saturating_sub(scroll);
+    let conversation = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::TOP).title("conversation"))
+        .wrap(Wrap { trim: false })
+        .scroll((offset as u16, 0));
+    frame.render_widget(conversation, chunks[1]);
+
+    // Input.
+    let input = Paragraph::new(app.input.as_str())
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("input  (Enter send · Esc cancel · /help)"),
+        );
+    frame.render_widget(input, chunks[2]);
+    // Cursor follows the composer cursor (clamped to the visible line).
+    let visible = app.input.chars().take(app.cursor).collect::<String>();
+    let (row, column) = visible
+        .rsplit_once('\n')
+        .map(|(_, tail)| (1, tail.chars().count() as u16))
+        .unwrap_or((0, visible.chars().count() as u16));
+    let max_column = chunks[2].width.saturating_sub(2);
+    frame.set_cursor_position((
+        chunks[2].x + 1 + column.min(max_column),
+        chunks[2].y + 1 + row.min(chunks[2].height.saturating_sub(2)),
+    ));
+
+    // Footer.
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" cancel  "),
+        Span::styled("PgUp/PgDn", Style::default().fg(Color::Yellow)),
+        Span::raw(" scroll  "),
+        Span::styled("/model", Style::default().fg(Color::Cyan)),
+        Span::raw(" switch model  "),
+        Span::styled("/approval", Style::default().fg(Color::Cyan)),
+        Span::raw(" approval mode  "),
+        Span::styled("/quit", Style::default().fg(Color::Cyan)),
+        Span::raw(" quit"),
+    ]));
+    frame.render_widget(footer, chunks[3]);
+}
+
+fn render_approval(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    // Conversation behind the modal.
+    render_main(frame, app, area);
+    if let Some(approval) = &app.pending_approval {
+        let popup = centered_rect(70, 7, area);
+        frame.render_widget(Clear, popup);
+        let text = vec![
+            Line::from(vec![Span::styled(
+                "approval required",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("tool: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(approval.kind.implementation()),
+            ]),
+            Line::from(Span::raw(approval.summary.implementation())),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    "[y]",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" approve   "),
+                Span::styled(
+                    "[n]",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" deny"),
+            ]),
+        ];
+        let popup_widget = Paragraph::new(text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+                .title("approve?"),
+        );
+        frame.render_widget(popup_widget, popup);
+    }
+}
+
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage(50),
+        Constraint::Length(height),
+        Constraint::Percentage(50),
+    ])
+    .split(area);
+    let vertical = Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1]);
+    vertical[1]
+}

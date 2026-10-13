@@ -140,6 +140,24 @@ unchanged, so the handshake still identifies as protocol-compatible.
 3. Notification emissions for computer use, workflow, MCP, and hooks arrive with
    those subsystems.
 
+### TUI surface — evidence-matched
+
+The interactive UI was rebuilt from binary evidence rather than invented
+(strings from `the public release`):
+
+- Keymap observed in the binary: Return submits the composer, `ctrl+j`/
+  `ctrl+m`/`shift+enter` newline, `ctrl+r` history search ("Search composer
+  history newest first"), `ctrl+p`/`ctrl+n` history navigation, `ctrl+g`
+  edit in `$VISUAL`/`$EDITOR`, `ctrl+l` clear terminal, `alt+b`/`alt+f`
+  word moves, `ctrl+k`/`ctrl+y` kill/yank, `ctrl+t` transpose, `esc`
+  "Close focused UI, cancel completion", `ctrl+v` paste images.
+- Approval vocabulary observed: `allow:approved`, `allow:approved_for_session`,
+  `allow:session_policy_amendment`, "approval timed out", "denied by user" —
+  realized as y/a/n inline approval with a session-scoped allow list.
+- Slash commands observed: `/model`, `/sessions`, `/settings`, `/provider`,
+  `/help`, `/new`, `/resume`, `/clear`, `/export`, `/quit`, `/exit` — all
+  implemented in the TUI command bar.
+
 ## Reproduce
 
 ```bash

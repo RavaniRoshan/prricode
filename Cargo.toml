@@ -13,6 +13,7 @@ members = [
     "crates/prricode-agent",
     "crates/prricode-mcp",
     "crates/prricode-voice",
+    "crates/prricode-tui",
 ]
 
 [workspace.package]

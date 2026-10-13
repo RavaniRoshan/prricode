@@ -10,7 +10,7 @@ use std::path::PathBuf;
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 
     #[arg(long, value_enum, default_value = "echo", global = true)]
     pub provider: ProviderArg,

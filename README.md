@@ -46,6 +46,25 @@ $ prricode exec "add a --json flag to the export command and test it" --provider
 | OpenAI | `openai` | `OPENAI_API_KEY` | |
 | Anything else | `custom` | yours | Any OpenAI-compatible endpoint via `--base-url`. |
 
+## The interactive session
+
+Running `prricode` with no subcommand opens the terminal UI — the default
+way to work with the agent:
+
+- **Composer**: `Return` sends, `Ctrl+J` newline, `Ctrl+R`/`Ctrl+P`/`Ctrl+N`
+  history, `Ctrl+G` edit in `$EDITOR`, `Alt+B`/`Alt+F` word moves, `Ctrl+K`/
+  `Ctrl+Y` kill/yank, `Ctrl+L` clear
+- **Approvals inline**: sensitive tool calls pause with
+  `y` allow-once / `a` allow-for-session / `n` deny
+- **`Ctrl+C`/`Esc`** interrupt a running turn without losing the session
+- **Slash commands**: `/model`, `/sessions`, `/new`, `/resume`, `/clear`,
+  `/approval`, `/provider`, `/settings`, `/help`, `/quit`
+
+```bash
+prricode                                  # pick your provider/model, start talking
+prricode --provider ollama --model qwen2.5-coder:3b
+```
+
 ## Quickstart
 
 ```bash
