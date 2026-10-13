@@ -9,6 +9,7 @@ prricode-server = { path = "../prricode-server" }
 prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
 prricode-tui = { path = "../prricode-tui" }
+prricode-voice = { path = "../prricode-voice" }
 clap = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
