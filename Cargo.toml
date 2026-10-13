@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/prricode-core",
+    "crates/prricode-cli",
+    "crates/prricode-server",
+    "crates/prricode-sandbox",
+    "crates/prricode-computer-use",
+    "crates/prricode-workflow",
+    "crates/prricode-skills",
+    "crates/prricode-persistence",
+    "crates/prricode-provider",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
