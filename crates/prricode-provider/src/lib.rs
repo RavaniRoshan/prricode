@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 pub use echo::EchoProvider;
 pub use ollama::OllamaProvider;
-pub use openai_compat::OpenAiCompatProvider;
+pub use openai_compat::{repair_json, OpenAiCompatProvider};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
