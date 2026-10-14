@@ -115,6 +115,16 @@ pub struct Spec {
 const STALE_MARKER: &str = "\n\n[stale: requirements changed — regenerate]";
 
 impl Spec {
+    pub fn draft(concept: Concept) -> Self {
+        Self {
+            concept,
+            requirements: Requirements::default(),
+            design: String::new(),
+            tasks: String::new(),
+            version: 1,
+        }
+    }
+
     pub fn regenerate(&mut self, requirements: Requirements) {
         self.requirements = requirements;
         self.version += 1;
@@ -222,6 +232,16 @@ impl TaskGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spec_draft_starts_at_version_one_with_empty_artifacts() {
+        let spec = Spec::draft(Concept::from_idea("a daily briefing app for commuters"));
+        assert_eq!(spec.version, 1);
+        assert!(spec.requirements.items.is_empty());
+        assert!(spec.design.is_empty());
+        assert!(spec.tasks.is_empty());
+        assert!(!spec.concept.problem.is_empty());
+    }
 
     #[test]
     fn concept_from_idea_extracts_shape() {
