@@ -2094,6 +2094,84 @@ mod tests {
     }
 
     #[test]
+    fn interview_answers_then_the_gate_keys_confirm_or_reject() {
+        // The whole concept->clarify->confirm key path: a plain message
+        // answers the interview, and once the gate is pending `y` confirms
+        // while `n` rejects. A key that is neither falls through to the
+        // composer instead of answering the gate.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+
+        for c in "/concept an rss briefing service".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::PipelineConcept { .. }
+        ));
+
+        app.apply_ui_event(
+            UiEvent::PipelineInterview {
+                question: "Who is the primary user?".into(),
+            },
+            &tx,
+        );
+        assert!(
+            app.interview_active,
+            "the interview takes over the composer"
+        );
+
+        // While the interview is live, a plain message answers it.
+        for c in "commuters".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::PipelineAnswer { .. }
+        ));
+
+        // The gate opens and waits for y/n.
+        app.apply_ui_event(
+            UiEvent::PipelineGate {
+                gate: "concept-confirmation".into(),
+            },
+            &tx,
+        );
+        app.handle_key(KeyAction::Char('y'), &tx);
+        match rx.try_recv().unwrap() {
+            super::super::UiCommand::PipelineConfirm { stage, ok } => {
+                assert_eq!(stage, "concept-confirmation");
+                assert!(ok, "y confirms the gate");
+            }
+            other => {
+                let _ = other;
+                panic!("expected a pipeline confirm, got another command")
+            }
+        }
+
+        // Re-open and reject: n is a refusal, not a composer character.
+        app.apply_ui_event(
+            UiEvent::PipelineGate {
+                gate: "spec-confirmation".into(),
+            },
+            &tx,
+        );
+        app.handle_key(KeyAction::Char('n'), &tx);
+        match rx.try_recv().unwrap() {
+            super::super::UiCommand::PipelineConfirm { stage, ok } => {
+                assert_eq!(stage, "spec-confirmation");
+                assert!(!ok, "n rejects the gate");
+            }
+            other => {
+                let _ = other;
+                panic!("expected a pipeline confirm, got another command")
+            }
+        }
+    }
+
+    #[test]
     fn pipeline_rail_shows_stage_and_gate() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = new_app();
