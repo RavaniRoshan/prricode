@@ -1,12 +1,12 @@
 # Protocol Conformance Report
 
 How prricode's JSON-RPC surface was verified against the mapped
-Reference Code protocol, what the evidence showed, and where it now stands.
+protocol, what the evidence showed, and where it now stands.
 
 **Method of verification.** The protocol surface (69 methods, 39 notifications,
 37 error kinds, 345 types, 18 CLI subcommands, 6 grantable capabilities) was
 mapped from the target product's binary. The  artifact
-`the public release` (ELF x86-64, statically linked, stripped, ~89 MB) is a
+(the public build; ELF x86-64, statically linked, stripped, ~89 MB) is a
 related but earlier build of the same family: its JSON-RPC surface differs
 (12 CLI subcommands, snake_case field vocabulary, approval modes
 `untrusted|on-request|never`), so the camelCase stdio protocol prricode targets
@@ -18,8 +18,8 @@ the protocol specification.
 
 | Source | What it establishes |
 |---|---|
-| `the public release` strings | Type inventory (364 `struct X with N elements` Debug literals), error-kind vocabulary, event/stream vocabulary, session event-store format, tool-call XML grammar |
-| `~/.local/share/reference/sessions/…/session.jsonl` | Real session event records (`runtime.session.metadata`, `session.opened.observed`), `session.jsonl` durable format, security modes |
+| the public build's strings | Type inventory (364 `struct X with N elements` Debug literals), error-kind vocabulary, event/stream vocabulary, session event-store format, tool-call XML grammar |
+| the protocol surface's session directory (`~/.local/share/<product>/sessions/…`) | Real session event records (`runtime.session.metadata`, `session.opened.observed`), `session.jsonl` durable format, security modes |
 | Prior mapped protocol spec (69/39/37/345/18/6) | The compatibility target: method names, notification set, error kinds, CLI grammar, capability flags |
 | prricode source + git history | Current implementation state per category |
 
@@ -154,7 +154,7 @@ unchanged, so the handshake still identifies as protocol-compatible.
 ### TUI surface — evidence-matched
 
 The interactive UI was rebuilt from binary evidence rather than invented
-(strings from `the public release`):
+(strings from the public build):
 
 - Keymap observed in the binary: Return submits the composer, `ctrl+j`/
   `ctrl+m`/`shift+enter` newline, `ctrl+r` history search ("Search composer

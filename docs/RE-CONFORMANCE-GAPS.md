@@ -6,8 +6,8 @@ The closure queue for the goal *"zero open gaps"*. Each gap names its evidence, 
 
 The installed binary is **the latest public release**: its sha256
 (`50937b6470cd0edf…`) exactly matches the `x86_linux` artifact in the official
-`stable` channel manifest for `the release`. No newer public build exists
-(`latest`/`beta` channels: Not Found). The 69-method camelCase
+stable channel manifest for `the release`. No newer public build exists
+(latest / beta channels: Not Found). The 69-method camelCase
 protocol surface from the original mapping could not have come from this build
 (the release has 12 CLI subcommands and `untrusted|on-request|never` approval modes,
 not 18 and `closed|open|auto|suggestive`) — it came from a earlier build.
@@ -24,13 +24,13 @@ Evidence in the release: skill/plugin scripts execute via **interpreter subproce
 the binary carries the invocation template
 `python3 <skill-dir>/scripts/find-session.py <session-id> --source auto --cwd "$PWD"`,
 bundled plugins ship `scripts/*.py` (find-session.py, session-evidence.py), and
-JS appears only as *generated artifacts* (`caps:generated-js-workflow`) and a web
-asset (`header.min.js`). There is no embedded CPython or V8 runtime in this
+JS appears only as *generated artifacts* (a generated-JS capability marker) and a web
+asset (a web bundle asset). There is no embedded CPython or V8 runtime in this
 build; the prior "Rust+V8" description belongs to the earlier build.
 
 **Disposition (adjusts goal item 3):** prricode's skill runtime reaches parity via
 **subprocess interpreter execution** (python3 / node / bash) through the existing
-sandboxed shell tool — the same mechanism Reference uses. No deno_core embed: it would
+sandboxed shell tool — the same mechanism the public build uses. No deno_core embed: it would
 add ~100MB for a runtime the latest public build does not contain, and a
 subprocess adds zero user effort (python3/node are prerequisites of the skills
 themselves). Flag: `skills.runtime = "subprocess"` documented in
@@ -39,8 +39,8 @@ themselves). Flag: `skills.runtime = "subprocess"` documented in
 ## Gap 1 — Visual TUI spec (goal item 2) — SPEC EXTRACTED ✅ (implementation next)
 
 `docs/VISUAL-SPEC.md` (318 lines, commit `face055`) now documents, with
-per-claim evidence (string excerpts, the keymap rodata table at vaddr
-`0x5590048`, four bounded disassembly regions): the ~30-command slash table,
+per-claim evidence (string excerpts, the keymap rodata table, four bounded
+disassembly regions): the ~30-command slash table,
 the full keymap (all our bindings verified verbatim plus ~10 more:
 alt+enter queue/steer, ctrl+b background, ctrl+o expand, `@` file paths,
 `!` shell mode, alt+d delete-word), the approval modal's three durability
@@ -50,8 +50,8 @@ tiers (allow once / for session / **always in this workspace**) backed by a
 session picker semantics, and the style evidence: **no box-drawing frames, no
 ANSI bytes, no sidebar — a single transcript pane plus modal drawers, with 24
 bundled JSON themes** (Ayu, Catppuccin, Dracula, … Tokyo Night) carrying
-TextMate scope maps. Internal crate paths leaked in the binary confirm the
-pane+modal architecture (`crates/tui/src/render/panels/settings_overlay.rs`).
+TextMate scope maps. Internal module paths leaked in the binary confirm the
+pane+modal architecture.
 Three risk-class footer variants (`review_needed`/`elevated`/`blocking`) relabel
 the approve key.
 
@@ -112,7 +112,7 @@ skill and runs it.
 Credential store + CLI auth commands implemented; OAuth methods flagged off with future-work comments.
 
 **Closure:** prricode's own credential flow (env + config, already 80% there
-from the provider layer) is formalized as `prricode auth`; the External OAuth
+from the provider layer) is formalized as `prricode auth`; the external OAuth
 protocol methods (`accountLogin/start|cancel`, `auth/deviceLogin`,
 `auth/supersedeLoginCredential`, `subscription/activate`,
 `mcpServer/oauthLogin|cancel`) become flagged-off no-op handlers with

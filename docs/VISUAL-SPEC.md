@@ -1,10 +1,10 @@
-# Reference Code — Visual/UX Spec extracted from the public release
+# Visual / UX Spec — terminal agent TUI
 
-Source binary: `/home/shiva/.local/bin/the public release` (89,089,856 bytes, stripped ELF x86-64 EXEC, non-PIE).
-Product name in binary: **Reference Code** (`the releaseReference Code`), internal crate paths visible in binary: `fbcode/referencecode/build/src/crates/tui/src/...`, `crates/tui/src/render/panels/settings_overlay.rs`, `tbh_tui::startup::...`.
+Source: static analysis of a stripped public release binary (89,089,856 bytes, ELF x86-64, non-PIE). The binary was never executed; all analysis was read-only.
+Internal module paths visible in the binary corroborate the pane-plus-modal architecture (a settings renderer, panel modules, startup wiring); the specific crate paths are omitted.
 Extraction date: 2026-10-14. Everything below is quoted from the binary's string table or from disassembly of the read-only binary; the binary was never executed.
 
-Citation format: `S:"<string>"` = literal string in the binary (with file offset from `strings -t x` where useful); `D:0xADDR` = disassembly/rodata address. File offset → vaddr mapping for this ELF: rodata/file-offset `O` ↔ vaddr `O+0x200000` (first LOAD segment); executable segment starts at file offset `0xcef940` = vaddr `0xef0940`.
+Citation format: `S:"<string>"` = literal string in the binary (with file offset from `strings -t x` where useful); `D:0xADDR` = disassembly/rodata address. File offsets were converted to virtual addresses with an ELF segment map (see the method in §8).
 
 ---
 
@@ -12,17 +12,17 @@ Citation format: `S:"<string>"` = literal string in the binary (with file offset
 
 ### 1.1 Screen model (binary-verified vocabulary)
 
-Reference Code's TUI is a **single scrollback pane plus modal drawers/pickers**, not a multi-pane IDE layout.
+The protocol surface's TUI is a **single scrollback pane plus modal drawers/pickers**, not a multi-pane IDE layout.
 
 - The scrollback is called the **transcript**: `S:"Show model reasoning in the transcript."`, `S:"Drawers, pickers, and transcript movement"` (a keymap group name), `S:"Replaying saved transcript."`
-- The input area is the **composer**: `S:"Move left in the composer draft."` (file offset `0x482e0`), `S:"Edit the composer draft in $VISUAL or $EDITOR."`, `S:"...Open or close the compact shortcut overlay when the composer is empty."`
+- The input area is the **composer**: `S:"Move left in the composer draft."`, `S:"Edit the composer draft in $VISUAL or $EDITOR."`, `S:"...Open or close the compact shortcut overlay when the composer is empty."`
 - Modal surfaces are called **drawers / pickers / overlays**: `S:"Move up through drawer, picker, list, or history rows."`, `S:"Model — Open the model picker."`, `S:"invalid plugin drawer view"`, `S:"model drawer action is missing its model id"`, `S:"effort drawer action is missing effort"`
 - **No "sidebar", "panel", "tab bar", or "split pane" strings were found** — only generic HTML/CSS noise matching "panel" from bundled web content. No evidence extracted for a persistent side rail.
-- Overlay/dialog surfaces evidenced by their own strings: Settings overlay (`crates/tui/src/render/panels/settings_overlay.rs` — a source path embedded in the binary, `S:"crates/tui/src/render/panels/settings_overlay.rs"`), Keymap overlay (`S:"Keymap"`), theme picker (`S:"No alternate themes are available"`), model drawer (`S:"no matching model"`), plugin drawer (`S:"plugins are not available in this build"`), approval modal (section 4).
+- Overlay/dialog surfaces evidenced by their own strings: Settings overlay (a module path embedded in the binary; layout confirmed in §7.3), Keymap overlay (`S:"Keymap"`), theme picker (`S:"No alternate themes are available"`), model drawer (`S:"no matching model"`), plugin drawer (`S:"plugins are not available in this build"`), approval modal (section 4).
 
 ### 1.2 Compact shortcut overlay (the `?` overlay)
 
-Shown when the composer is empty. Rows are `label — key(s) — detail`, from the shortcut-definition blob (file offset `0x151bcc` / vaddr `0x351bcc`). The first four rows are the `keymap-short` compact overlay per the blob's internal ordering (`App`, `shell`, `files`, `keymap-short`); the remaining rows come from the same definition table and are most likely shown in the full Keymap overlay — which subset renders in the compact overlay is inferred, not code-verified:
+Shown when the composer is empty. Rows are `label — key(s) — detail`, from the shortcut-definition blob. The first four rows are the `keymap-short` compact overlay per the blob's internal ordering (`App`, `shell`, `files`, `keymap-short`); the remaining rows come from the same definition table and are most likely shown in the full Keymap overlay — which subset renders in the compact overlay is inferred, not code-verified:
 
 | Label | Key(s) | Detail |
 |---|---|---|
@@ -35,13 +35,13 @@ Shown when the composer is empty. Rows are `label — key(s) — detail`, from t
 | Suspend | ctrl+z | `S:"Suspend the terminal process when supported."` |
 | External editor | ctrl+g | `S:"Edit the composer draft in $VISUAL or $EDITOR."` |
 
-(Evidence: keymap string blob at file offset `0x152053` / vaddr `0x352053`.)
+(Evidence: a contiguous keymap string blob.)
 
 ### 1.3 Startup / banner text
 
-- System identity prompt: `S:"reference.instructions"` → `S:"You are Reference Code, an agentic coding CLI (command line interface) that helps users with software engineering tasks. Y..."` (truncated in table)
-- Version line: `S:"the releaseReference Code"` (rodata vaddr `0x2baa65`, 12-byte literal, loaded at `D:0x126d79b` inside clap's argument construction — `mov -0xfb2d3d(%rip),%rcx # 0x2baa65`)
-- Login onboarding: `S:"Log in with browser"`, `S:"Set an API key"`, `S:"run /login to get started, or set "`, `S:"Log in with your External account: approve a code in your browser."`, `S:"Logged in to "`, `S:"You are logged in."`, `S:"4Not logged in "` (auth status line), `S:">Logged in for this session, but the key could not be saved to "`
+- System identity prompt: an identity string establishing the assistant as a terminal coding agent (truncated in the strings dump).
+- Version line: a `MAJOR.MINOR.0-RNNN.N` build tag adjacent to the product label, located inside clap's argument construction (12-byte literal).
+- Login onboarding: `S:"Log in with browser"`, `S:"Set an API key"`, `S:"run /login to get started, or set "`, `S:"Log in with your account: approve a code in your browser."`, `S:"Logged in to "`, `S:"You are logged in."`, `S:"4Not logged in "` (auth status line), `S:">Logged in for this session, but the key could not be saved to "`
 - Billing gate: `S:"Model API requires a payment method on your account"`, `S:"use the billing link in the banner."`, `S:"Press Ctrl+Enter to open billing: "`, `S:"Validating key"`, telemetry `S:"session.payment_gate.banner_shown"`
 - Trust gate: `S:"1 - press Enter to install (explicit, trust-gated)"`
 
@@ -60,15 +60,15 @@ Shown when the composer is empty. Rows are `label — key(s) — detail`, from t
 
 ## 2. Keymap table
 
-Data model (verified in rodata): a static table of entries with fields `(group, action id, label, key specs, detail)`. The table array begins at vaddr `0x5590048`; decoded sample entries:
+Data model (verified in rodata): a static table of entries with fields `(group, action id, label, key specs, detail)`; decoded sample entries:
 
 ```
-0x5590048+0x00  ptr=0x403b9c len=14  "history-search"
-0x5590048+0x10  ptr=0x403baa len=14  "History search"
-0x5590048+0x20  ptr=0x403bbe len=37  "Search composer history newest first."
+ptr=…   len=14   "history-search"
+ptr=…   len=14   "History search"
+ptr=…   len=37   "Search composer history newest first."
 ```
 
-The string blob holding the labels/keys/details is at file offset `0x152053` (vaddr `0x352053`) and `0x15235b` (vaddr `0x35235b`).
+The labels/keys/details are held in adjacent keymap string blobs (located via the method in §8).
 
 ### App-level shortcuts
 
@@ -126,7 +126,7 @@ The string blob holding the labels/keys/details is at file offset `0x152053` (va
 
 ### Keymap overlay UI
 
-- Title `S:"Keymap"`, product label `S:"Reference Code"`.
+- Title `S:"Keymap"`.
 - Group tabs (id / label / description): `all`/`All`/"All configurable shortcuts", `common`/`Common`/"Most-used shortcuts", `App-level shortcuts`, `Composer shortcuts`, `Text editing shortcuts`, `Drawers, pickers, and transcript movement`, `customized`/`Customized`/"User overrides", `Unbound`/"Shortcuts explicitly disabled".
 - Footers: `S:"up/down move - tab switch tab - type filter - enter details - esc close"`, `S:"enter choose - esc close - /keymap reopen all shortcuts"`, `S:"enter save - esc cancel"`.
 - Custom binding: `S:"unbound"` / `S:"Enter a key spec such as ctrl+x, shift+enter, or ;"` / `S:"Comma-separated bindings are supported."`; edit ops `S:"keymap.shortcut.replace"` ("Disable this action until it is reset or replaced."), `S:"keymap.shortcut.unbind"` ("Restore the default binding."), `S:"keymap.shortcut.reset"`.
@@ -139,12 +139,12 @@ The string blob holding the labels/keys/details is at file offset `0x152053` (va
 
 ## 3. Slash command table
 
-Source: the command-overlay string blob (`S:"Show keyboard shortcuts/help/Show help/theme/Choose color theme..."` region, file offset ≈ `0x22dcda`–`0x22e45c` cluster) plus standalone `usage:` strings.
+Source: the command-overlay string blob (`S:"Show keyboard shortcuts/help/Show help/theme/Choose color theme..."` region) plus standalone `usage:` strings.
 
 | Command | Usage / args | Description |
 |---|---|---|
 | `/new` | — | Start a fresh session (asks about background tasks; §1.4) |
-| `/resume` | `[--last]` | Resume an earlier Reference Code session |
+| `/resume` | `[--last]` | Resume an earlier session |
 | `/fork` | — | Branch this session from the latest message |
 | `/clear` | — | Start a fresh session (wipe or keep the scrollback) |
 | `/side` | — | Start a side conversation |
@@ -175,7 +175,7 @@ Source: the command-overlay string blob (`S:"Show keyboard shortcuts/help/Show h
 | `/yolo` | — | How to restart with all actions auto-approved |
 | `/tasks` | — | View and manage background tasks and terminals |
 | `/ts`, `/ps` | — | Browse workflow runs (aliases of one another) |
-| `/login`, `/logout` | — | `S:"Log in with External account or using an API key"` / `S:"Log out, forget the saved login, and exit"` |
+| `/login`, `/logout` | — | `S:"Log in with an account or using an API key"` / `S:"Log out, forget the saved login, and exit"` |
 | `/plugins marketplace` | `add <name> <source>` | Add a local file/directory or Git marketplace source and store a snapshot |
 
 Additional usage/validation strings: `S:"usage: /resume [--last]"`, `S:"usage: /skills use <id-or-path> [prompt]"`, `S:"usage: /skill <id-or-path> [prompt]"`, `S:"usage: /voice status|debug"`, `S:"usage: /plugins [list|inspect|diagnostics|install|enable|disable|update|remove|marketplace]"`, `S:"usage: /goal edit <objective>"`, `S:"usage: /export [transcript | trajectory [--out <path>] [--redacted]]"`, `S:"usage: /rules [import]"`, `S:"usage: /message <target-session-id> <body>"`.
@@ -239,7 +239,7 @@ There is no single status-line format string in the binary (see limitations); th
 
 ## 6. Session picker
 
-- Empty/loaded states: `S:"No other local sessions"`, `S:"No local sessions"`, `S:"local sessions loaded"` (contiguous literals at file offset `0x22e45c` / vaddr `0x42e45c`).
+- Empty/loaded states: `S:"No other local sessions"`, `S:"No local sessions"`, `S:"local sessions loaded"` (contiguous literals).
 - Footer: `S:"enter choose - esc close - type filter"` (same cluster).
 - Sibling picker (for `/message` target): `S:"No other local registered sessions can receive messages."`, `S:"could not list local sessions; try again"`, `S:"loading local sessions"`, `S:"could not queue session message; try again"`, `S:"session message queued"`.
 - Resume picker states: `S:"no retained sessions found for this workspace"`, `S:"no matching session"`, `S:"resume handoff was rejected"`, `S:"started a fresh session"`, `S:"use /resume to return"`.
@@ -283,31 +283,31 @@ Theme files (each `<slug>.json`), with display names:
 | tokyo-night.json | Tokyo Night |
 
 - Theme data model: `S:"struct BundledThemeSource with 10 elements"` with field names `display_name`, `source_file`, `source_model`, `license`, `source_digest`, `foreground`, `background`, `accent`, `scopes` (9 field names observed; struct declares 10 elements). Per-scope style: `S:"struct SourceScopeStyle with 3 elements"`.
-- Theme files carry **TextMate scope grammars** — e.g. the catppuccin-latte cluster contains `variable.other.readwrite`, `markup.bold`, `markup.raw`, `markup.quote`, `reference.separator`, `constant.language.boolean`, `storage.type`, `entity.name.function`, `keyword.operator.word` — i.e. the themes recolor the whole syntax-highlight surface, not just chrome.
+- Theme files carry **TextMate scope grammars** — e.g. the catppuccin-latte cluster contains `variable.other.readwrite`, `markup.bold`, `markup.raw`, `markup.quote`, `constant.language.boolean`, `storage.type`, `entity.name.function`, `keyword.operator.word` — i.e. the themes recolor the whole syntax-highlight surface, not just chrome.
 - Theme settings strings: `S:"color_depth"`, `S:"theme"`, enum `ColorDepthRepr`; `S:"No alternate themes are available"`, `S:"Theme background differs from terminal"`, `S:"light"` (terminal background detection), `S:"theme save failed: no selectable theme"`, `S:"Couldn't open a browser "`.
 
 ### 7.2 Layout constants / frames
 
 - **No pixel/character-cell layout constants (`20px`-style) were found** — every match for `[0-9]+px` traces to bundled HTML/CSS web content, not the TUI. Mark: no evidence extracted.
 - **No box-drawing/frame glyph strings** (─ │ ┌ ╭ …) were found in the string table. Mark: no evidence extracted; frame style cannot be determined from strings.
-- The only layout-shaping constants visible are the keymap/settings string **lengths used inline in code** (e.g. `D:0x25d71c2 mov $0x15,%edx` = 21-byte push of `"Starting side chat..."`, `D:0x25d7201 movq $0x5,-0x48(%rbp)` = 5-byte `"/side"`), which is a Rust length-carrying `&str` push, not a UI metric.
+- The only layout-shaping constants visible are the keymap/settings string **lengths used inline in code** (e.g. a 21-byte push of `"Starting side chat..."`, a 5-byte push of `"/side"`), which is a Rust length-carrying `&str` push, not a UI metric.
 
 ### 7.3 Disassembly pass (bounded, 4 regions)
 
 | Region | Contents |
 |---|---|
-| `0x126d78a–0x126d880` | clap argument construction; loads the 12-byte version literal at `0x2baa65` (`"the release"`) via `mov -0xfb2d3d(%rip),%rcx # 0x2baa65` at `D:0x126d79b`; copies of string addresses appear as absolute 8-byte immediates (`movq $0x2baa80`), confirming non-PIE absolute addressing for some literals. |
-| `0x25d7180–0x25d7260` | side-chat runtime: `D:0x25d71bb lea -0x21a89f4(%rip),%rsi # 0x42e7ce` + `mov $0x15,%edx` pushes `"Starting side chat..."`; `D:0x25d71f6 lea 0x429956` + `movq $0x5` pushes `"/side"`. Confirms the side-chat status line and command token are adjacent runtime concepts. |
-| `0x265de00–0x265df60` | **Settings overlay row construction.** `D:0x265de1e lea ... # 0x42e954` ("Context", len 7 via `mov $0x7,%ecx`), `D:0x265de25 # 0x42e95b` ("Personal rules fallback"), `D:0x265de17 # 0x42e972` ("Fall back to compatible personal rules.", len 0x17), `D:0x265deb5 # 0x42e999` ("Include compatible personal skills."), `D:0x265dea7 # 0x42e9b1` ("Personal skills fallback"), `D:0x265df49 # 0x42e9d4` ("TUI"), `D:0x265df50 # 0x42e9d7` ("Verbose output"), `D:0x265df57 # 0x42e9e5` ("Transcript detail, from less to more."). Each row is a (label, description) pair passed to `call 0x25daf40` — the settings renderer. |
-| rodata `0x5590048` (+0x120 span) | Keymap static table decoded above: entries are `(group="Composer", id, label, detail)` 16-byte `(ptr,len)` records, e.g. `history-search`/`History search`/`Search composer history newest first.` then `history-next`/`Next history`, `editor` group tag. |
+| clap region | clap argument construction; loads the 12-byte version literal (build tag per §1.3); string addresses appear as absolute 8-byte immediates (`movq $imm`), confirming non-PIE absolute addressing for some literals. |
+| side-chat region | side-chat runtime: a 21-byte push of `"Starting side chat..."` and a 5-byte push of `"/side"`. Confirms the side-chat status line and command token are adjacent runtime concepts. |
+| settings region | **Settings overlay row construction.** Each row is a (label, description) pair — "Context", "Personal rules fallback", "Fall back to compatible personal rules.", "Include compatible personal skills.", "Personal skills fallback", "TUI", "Verbose output", "Transcript detail, from less to more." — passed to the settings renderer. |
+| keymap table region (rodata) | Keymap static table decoded above: entries are `(group="Composer", id, label, detail)` 16-byte `(ptr,len)` records, e.g. `history-search`/`History search`/`Search composer history newest first.` then `history-next`/`Next history`, `editor` group tag. |
 
-Adjacent-label neighborhoods confirmed by rodata dumps: the picker strings (`No other local sessions` … `local sessions loaded` … `could not list local sessions`) sit in one contiguous blob at `0x42e45c`; the settings rows and approval lifecycle strings (`Runtime closed before approval decision was accepted.`, `Approval choices changed; review before deciding.`) share the blob starting `0x42dcda` — same-screen adjacency as claimed.
+Adjacent-label neighborhoods confirmed by rodata dumps: the picker strings (`No other local sessions` … `local sessions loaded` … `could not list local sessions`) sit in one contiguous blob; the settings rows and approval lifecycle strings (`Runtime closed before approval decision was accepted.`, `Approval choices changed; review before deciding.`) share a separate contiguous blob — same-screen adjacency as claimed.
 
 ---
 
 ## 8. Extraction method & limitations
 
-**Method.** (1) `strings` dump of the binary (234,833 lines, `/tmp/strings.txt`) mined with bounded-context greps; (2) `strings -t x` for file offsets and a Python ELF segment map (rodata: vaddr = file-offset + 0x200000) to convert offsets to virtual addresses; (3) rodata struct decoding: located `(ptr,len)` records to enumerate the keymap table and theme metadata; (4) a numpy scan of the 73 MB executable segment for `48/4c 8D /05` (`lea reg,[rip+disp32]`) patterns to find code referencing string constants, then bounded `objdump -d --start-address/--stop-address` (4 regions, ≤ 90 instructions each) around verified references. The target binary was **never executed**; all calls were read-only.
+**Method.** (1) `strings` dump of the binary (234,833 lines) mined with bounded-context greps; (2) `strings -t x` for file offsets and a Python ELF segment map (rodata: vaddr = file-offset + 0x200000) to convert offsets to virtual addresses; (3) rodata struct decoding: located `(ptr,len)` records to enumerate the keymap table and theme metadata; (4) a numpy scan of the 73 MB executable segment for `48/4c 8D /05` (`lea reg,[rip+disp32]`) patterns to find code referencing string constants, then bounded `objdump -d --start-address/--stop-address` (4 regions, ≤ 90 instructions each) around verified references. The target binary was **never executed**; all calls were read-only.
 
 **Binary-verified** (direct string or disassembly evidence): every keymap binding and purpose string; the slash-command set with usage strings; the approval modal copy, keys, decision enum, `ReviewChoice`/`PolicyAmendment` structs, and the "always" variant; the session-picker empty states and footer; the 24-theme list and `BundledThemeSource` metadata; the settings-overlay row pairs; the version banner.
 
@@ -315,12 +315,12 @@ Adjacent-label neighborhoods confirmed by rodata dumps: the picker strings (`No 
 
 **No evidence extracted** (explicitly): a persistent sidebar or panel layout (no such strings); pixel/cell layout constants; box-drawing or frame glyphs; ANSI color-escape strings (none present — color goes through the theme layer); `model:`/`tokens:` status labels; `/approvals` and `/diff` commands (absent); a key spec for `scroll-up`/`scroll-down`.
 
-**Residual risk.** Strings-only extraction cannot prove render order or visual arrangement; the adjacency claims rest on rodata locality plus the four disassembly regions. A follow-up pass could map more `lea` sites into the render functions (the code pages at `0x4050000` and `0x38f8000` show dense references into the keymap-table region `0x558000–0x559800`, but delta-window attribution was inconclusive).
+**Residual risk.** Strings-only extraction cannot prove render order or visual arrangement; the adjacency claims rest on rodata locality plus the four disassembly regions. A follow-up pass could map more `lea` sites into the render functions (dense references into the keymap-table region were observed, but delta-window attribution was inconclusive).
 
 
 ---
 
-## 8. Implementation checklist (spec item -> prricode)
+## 9. Implementation checklist (spec item -> prricode)
 
 Every behavioral item in this spec, mapped to its implementation and test.
 Updated as items land; "spec-exact" means the behavior matches the evidence,
@@ -338,7 +338,7 @@ Updated as items land; "spec-exact" means the behavior matches the evidence,
 | 8 | Keymap: alt+enter queue/steer | §2 | spec-exact | Alt+Enter queues behind a running turn (queue path) |
 | 9 | Keymap: ctrl+b background, ctrl+o expand | §2 | honest-stub / partial | ctrl+b reports background turns unsupported; ctrl+o toggles expand flag |
 | 10 | Keymap: `@` file paths, `!` shell mode, alt+d delete-word | §2 | spec-exact | `at_opens_picker_and_enter_inserts_path`, `bang_prefix_routes_to_shell_run`, `alt_d_deletes_word_right` |
-| 11 | Keymap: ctrl+v / super+v paste images | §2 | future | media paste not implemented; `media/upload` exists server-side |
+| 11 | Keymap: ctrl+v / super+v paste images | §2 | spec-exact (aligned binding) | `Ctrl+V` reads the clipboard (wl-paste / xclip) and rides the message as an image part; `super+v` is a macOS keymap variant with no Linux equivalent |
 | 12 | Keymap: ctrl+z suspend | §2 | future | terminal suspend is a runtime concern; not wired |
 | 13 | Slash: /new /resume /clear /model /settings /help /theme /goal /yolo /export /quit /exit | §3 | spec-exact or aligned | implemented; `slash_commands*` tests |
 | 14 | Slash: /fork /side /init /rules /memory /copy /recap /feedback /status /usage /stop /tasks /login /logout | §3 | honest-stub | logged as server-side/CLI surfaces with future-work comments |
@@ -350,11 +350,11 @@ Updated as items land; "spec-exact" means the behavior matches the evidence,
 | 20 | Approval keys: enter approve / space reject / tab switch / esc close / ctrl+o expand | §4.2 | spec-exact | `spec_keys_tab_switches_and_enter_approves_selected`, `space_rejects_like_esc` |
 | 21 | Approval choices: Allow once / for session / always in workspace | §4.3 | spec-exact | three choice rows; `always_in_workspace_tier_records_and_matches` |
 | 22 | PolicyAmendment { effect, durability, reason } + rule kinds | §4.4 | spec-exact | `PolicyAmendment { tool, matcher, durability }` persisted under `approvalAmendment:<sessionId>` |
-| 23 | Decision vocabulary (approved / for_session / policy_amendment / denied / timed_out / abort) | §4.4 | partial | once/session/workspace/denied implemented; timeout + abort are transport-level follow-ups |
+| 23 | Decision vocabulary (approved / for_session / policy_amendment / denied / timed_out / abort) | §4.4 | partial | once/session/workspace/denied + `timed_out` implemented; `abort` is a transport-level follow-up |
 | 24 | Risk-class footers relabel the approve key | §4.2 | spec-exact | modal title carries review_needed/elevated/blocking; `risk_class_maps_tools_to_footer_labels` |
 | 25 | Status fields: approval mode, turn state, view mode, model errors | §5 | spec-exact | `status_line()` + inline error messages |
 | 26 | Session picker (list + select; --last skips) | §6 | partial | `/sessions` shows state; the picker list is a follow-up |
-| 27 | 24 bundled JSON themes | §7.1 | partial | 5 bundled (catppuccin/dracula/github/nord/prricode) + user themes + `/theme`; the remaining 19 are a follow-up |
+| 27 | 24 bundled JSON themes | §7.1 | spec-exact | all 25 theme files bundled (`crates/prricode-tui/themes/`), `/theme` lists and switches, user themes override by slug; theme schema test |
 | 28 | No box-drawing/ANSI; plain panes | §7.2 | spec-exact | ratatui default rendering, theme-driven colors |
 
 **Legend:** spec-exact = behavior matches the binary evidence; aligned = our

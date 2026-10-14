@@ -1,8 +1,8 @@
 //! TUI application state and event handling (pure logic, unit-tested).
 //!
-//! The keymap follows the Reference TUI evidence: Return submits the composer,
-//! Ctrl+J inserts a newline, Ctrl+R/P/N walk history, Ctrl+G edits in
-//! $EDITOR, Ctrl+L clears, Alt+B/F move by word, Ctrl+K/Y kill/yank, Alt+D
+//! The keymap follows the terminal-agent evidence: Return submits the
+//! composer, Ctrl+J inserts a newline, Ctrl+R/P/N walk history, Ctrl+G edits
+//! in $EDITOR, Ctrl+L clears, Alt+B/F move by word, Ctrl+K/Y kill/yank, Alt+D
 //! deletes a word, Alt+Enter queues, Ctrl+B backgrounds, Ctrl+O expands the
 //! last tool output, Esc cancels, and approvals answer y (allow once) /
 //! s (allow for session) / a (always in this workspace) / n (deny).
@@ -286,7 +286,7 @@ pub enum UiEvent {
     Log(String),
 }
 
-/// Terminal key actions, mirroring the Reference composer keymap.
+/// Terminal key actions, mirroring the reference composer keymap.
 #[derive(Debug, Implementation, PartialEq, Eq)]
 pub enum KeyAction {
     Char(char),
