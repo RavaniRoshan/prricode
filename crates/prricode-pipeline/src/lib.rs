@@ -41,9 +41,11 @@ pub struct StageEvent {
     pub detail: String,
 }
 
+/// The product-builder pipeline: the stage runner and the persistence the
+/// stages and callers (TUI, server) share.
 pub struct Pipeline {
-    runner: Arc<prricode_agent::AgentRunner>,
-    persistence: Arc<prricode_persistence::Persistence>,
+    pub runner: Arc<prricode_agent::AgentRunner>,
+    pub persistence: Arc<prricode_persistence::Persistence>,
 }
 
 impl Pipeline {

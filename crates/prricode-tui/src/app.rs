@@ -4,7 +4,7 @@
 //! Ctrl+J inserts a newline, Ctrl+R/P/N walk history, Ctrl+G edits in
 //! $EDITOR, Ctrl+L clears, Alt+B/F move by word, Ctrl+K/Y kill/yank, Esc
 //! cancels, and approvals answer y (allow once) / a (allow for session) /
-//! n (deny).
+//! n (deny). Product-builder pipeline gates answer the same y/n keys.
 
 use prricode_core::ApprovalMode;
 use prricode_provider::ProviderKind;
@@ -31,6 +31,14 @@ pub struct PendingApproval {
     pub summary: String,
 }
 
+/// Product-builder pipeline rail state: the current stage label plus the
+/// confirmation gate awaiting an answer, if any.
+#[derive(Debug, Clone)]
+pub struct PipelineView {
+    pub stage: String,
+    pub gate: Option<String>,
+}
+
 /// Events delivered from the agent task to the UI.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
@@ -46,6 +54,15 @@ pub enum UiEvent {
         approval_id: String,
         kind: String,
         summary: String,
+    },
+    PipelineInterview {
+        question: String,
+    },
+    PipelineGate {
+        gate: String,
+    },
+    PipelineStageChanged {
+        stage: String,
     },
     TurnStarted,
     TurnEnded {
@@ -89,6 +106,7 @@ pub struct App {
     pub streaming: String,
     pub status: String,
     pub pending_approval: Option<PendingApproval>,
+    pub pipeline: Option<PipelineView>,
     pub scroll: u16,
     pub should_quit: bool,
     pub input_tokens: u64,
@@ -99,6 +117,7 @@ pub struct App {
     history_index: Option<usize>,
     kill_ring: String,
     session_auto_approve: Vec<String>,
+    interview_active: bool,
 }
 
 impl App {
@@ -119,6 +138,7 @@ impl App {
             streaming: String::new(),
             status: "idle".to_string(),
             pending_approval: None,
+            pipeline: None,
             scroll: 0,
             should_quit: false,
             input_tokens: 0,
@@ -129,10 +149,13 @@ impl App {
             history_index: None,
             kill_ring: String::new(),
             session_auto_approve: Vec::new(),
+            interview_active: false,
         }
     }
 
-    pub fn status_line(&self) -> String {
+    /// The status line without the pipeline rail; the UI styles the rail
+    /// as its own segment.
+    pub fn status_base_line(&self) -> String {
         format!(
             "{} / {} | {} | turn: {} | tokens: {}in/{}out",
             self.provider.id(),
@@ -142,6 +165,17 @@ impl App {
             self.input_tokens,
             self.output_tokens,
         )
+    }
+
+    pub fn status_line(&self) -> String {
+        let mut line = self.status_base_line();
+        if let Some(pipeline) = &self.pipeline {
+            line.push_str(&format!(" · stage: {}", pipeline.stage));
+            if let Some(gate) = &pipeline.gate {
+                line.push_str(&format!(" · gate: {gate}"));
+            }
+        }
+        line
     }
 
     fn char_len(&self) -> usize {
@@ -186,6 +220,30 @@ impl App {
                     return;
                 }
                 _ => return,
+            }
+        }
+        // Pending pipeline gate: y confirms, n/Esc rejects (approval-key path).
+        if let Some(gate) = self.pipeline.as_ref().and_then(|p| p.gate.clone()) {
+            match action {
+                KeyAction::Char('y') => {
+                    let _ = commands.send(UiCommand::PipelineConfirm {
+                        stage: gate.clone(),
+                        ok: true,
+                    });
+                    self.clear_pipeline_gate();
+                    self.push_system(format!("pipeline: confirmed {gate}"));
+                    return;
+                }
+                KeyAction::Char('n') | KeyAction::Esc => {
+                    let _ = commands.send(UiCommand::PipelineConfirm {
+                        stage: gate.clone(),
+                        ok: false,
+                    });
+                    self.clear_pipeline_gate();
+                    self.push_system(format!("pipeline: rejected {gate}"));
+                    return;
+                }
+                _ => {}
             }
         }
         match action {
@@ -454,8 +512,50 @@ impl App {
                         );
                     }
                 }
+                "concept" => {
+                    self.pipeline = Some(PipelineView {
+                        stage: "concept".to_string(),
+                        gate: None,
+                    });
+                    self.interview_active = false;
+                    let _ = commands.send(UiCommand::PipelineConcept {
+                        idea: arg.to_string(),
+                    });
+                    self.push_system(format!("pipeline: starting concept — {arg}"));
+                }
+                "spec" => {
+                    let _ = commands.send(UiCommand::PipelineAdvance {
+                        stage: "specify".to_string(),
+                    });
+                    self.push_system("pipeline: advancing to spec".to_string());
+                }
+                "plan" => {
+                    let _ = commands.send(UiCommand::PipelineAdvance {
+                        stage: "plan".to_string(),
+                    });
+                    self.push_system("pipeline: advancing to plan".to_string());
+                }
+                "build" => {
+                    let _ = commands.send(UiCommand::PipelineAdvance {
+                        stage: "build".to_string(),
+                    });
+                    self.push_system("pipeline: starting build".to_string());
+                }
                 other => self.push_system(format!("unknown command: /{other} (try /help)")),
             }
+            return;
+        }
+        // An active clarifier interview turns a plain message into the
+        // interview answer instead of a new agent turn.
+        if self.interview_active {
+            self.messages.push(TurnMessage {
+                role: Role::User,
+                text: text.to_string(),
+            });
+            self.status = "answering…".to_string();
+            let _ = commands.send(UiCommand::PipelineAnswer {
+                answer: text.to_string(),
+            });
             return;
         }
         self.messages.push(TurnMessage {
@@ -509,6 +609,40 @@ impl App {
                     self.status = "approval required".to_string();
                 }
             }
+            UiEvent::PipelineInterview { question } => {
+                self.interview_active = true;
+                let stage = self
+                    .pipeline
+                    .as_ref()
+                    .map(|p| p.stage.clone())
+                    .unwrap_or_else(|| "clarify".to_string());
+                self.pipeline = Some(PipelineView { stage, gate: None });
+                self.status = "clarifying…".to_string();
+                self.messages.push(TurnMessage {
+                    role: Role::Assistant,
+                    text: question,
+                });
+            }
+            UiEvent::PipelineGate { gate } => {
+                self.interview_active = false;
+                let stage = self
+                    .pipeline
+                    .as_ref()
+                    .map(|p| p.stage.clone())
+                    .unwrap_or_else(|| "concept".to_string());
+                self.pipeline = Some(PipelineView {
+                    stage,
+                    gate: Some(gate.clone()),
+                });
+                self.status = "confirmation required".to_string();
+                self.push_system(format!(
+                    "pipeline gate: {gate} — press y to confirm, n to reject"
+                ));
+            }
+            UiEvent::PipelineStageChanged { stage } => {
+                self.pipeline = Some(PipelineView { stage, gate: None });
+                self.push_system(format!("pipeline stage: {}", self.pipeline_stage()));
+            }
             UiEvent::TurnStarted => {
                 self.turn_active = true;
                 self.status = "thinking…".to_string();
@@ -538,6 +672,22 @@ impl App {
                 text,
             });
         }
+    }
+
+    /// The rail's stage label, defaulting to the concept stage.
+    fn pipeline_stage(&self) -> String {
+        self.pipeline
+            .as_ref()
+            .map(|p| p.stage.clone())
+            .unwrap_or_else(|| "concept".to_string())
+    }
+
+    /// Answer a pending gate and clear it from the rail.
+    fn clear_pipeline_gate(&mut self) {
+        if let Some(pipeline) = self.pipeline.as_mut() {
+            pipeline.gate = None;
+        }
+        self.status = "thinking…".to_string();
     }
 
     fn push_system(&mut self, text: String) {
@@ -749,6 +899,54 @@ mod tests {
             .iter()
             .any(|m| m.role == Role::Assistant && m.text == "hello"));
         assert!(app.streaming.is_empty());
+    }
+
+    #[test]
+    fn slash_commands_start_and_advance_the_pipeline() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        for c in "/concept an rss briefing service".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::PipelineConcept { .. }
+        ));
+
+        // While an interview is active, a plain message answers it.
+        app.apply_ui_event(
+            UiEvent::PipelineInterview {
+                question: "Who is the primary user?".into(),
+            },
+            &tx,
+        );
+        for c in "commuters".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::PipelineAnswer { .. }
+        ));
+    }
+
+    #[test]
+    fn pipeline_rail_shows_stage_and_gate() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::PipelineGate {
+                gate: "spec-confirmation".into(),
+            },
+            &tx,
+        );
+        assert!(app.pipeline.is_some());
+        assert_eq!(
+            app.pipeline.as_ref().unwrap().gate.as_deref(),
+            Some("spec-confirmation")
+        );
+        assert!(app.status_line().contains("spec-confirmation"));
     }
 
     #[test]

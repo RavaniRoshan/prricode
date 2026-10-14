@@ -86,21 +86,37 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     ])
     .split(area);
 
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "prricode",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("session {}", &app.session_id.to_string()[..8]),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("  "),
-        Span::styled(app.status_line(), Style::default().fg(Color::Yellow)),
-    ]))
+    let header = Paragraph::new(Line::from({
+        let mut spans = vec![
+            Span::styled(
+                "prricode",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("session {}", &app.session_id.to_string()[..8]),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw("  "),
+            Span::styled(app.status_base_line(), Style::default().fg(Color::Yellow)),
+        ];
+        // Product-builder pipeline rail, styled as its own segments.
+        if let Some(pipeline) = &app.pipeline {
+            spans.push(Span::styled(
+                format!(" · stage: {}", pipeline.stage),
+                Style::default().fg(Color::Cyan),
+            ));
+            if let Some(gate) = &pipeline.gate {
+                spans.push(Span::styled(
+                    format!(" · gate: {gate}"),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        spans
+    }))
     .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 
