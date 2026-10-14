@@ -408,9 +408,24 @@ pub fn parse_chat_response(provider: &str, body: &Value) -> ProviderResult<ChatR
         .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|c| c.first())
-        .ok_or_else(|| ProviderError::Parse {
-            provider: provider.to_string(),
-            details: "response has no choices".to_string(),
+        .ok_or_else(|| {
+            // Some gateways answer HTTP 200 with an error object instead of an
+            // error status; carry the provider's own reason when it did.
+            if let Some(err) = body.get("error") {
+                let message = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error");
+                let code = err.get("code").map(|c| c.to_string()).unwrap_or_default();
+                return ProviderError::Parse {
+                    provider: provider.to_string(),
+                    details: format!("provider error (code {code}): {message}"),
+                };
+            }
+            ProviderError::Parse {
+                provider: provider.to_string(),
+                details: "response has no choices".to_string(),
+            }
         })?;
     let message = choice.get("message").ok_or_else(|| ProviderError::Parse {
         provider: provider.to_string(),

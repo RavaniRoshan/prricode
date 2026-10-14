@@ -70,6 +70,43 @@ Clients may be granted (and must respect) these capability flags:
 | `session/compact` | summarize older history to reclaim context |
 | `session/userShell` | run a shell command in the session workspace |
 
+### Session and turn params
+
+**`session/start`** params:
+
+| field | type | notes |
+|---|---|---|
+| `commandId` | `CommandId` | required; idempotency key for the call |
+| `workspaceRoot` | string | optional; the session workspace |
+| `modelId` | string | optional; starting model for the session |
+| `providerId` | `ProviderId` | optional; overrides the server's provider |
+| `approvalMode` | `ApprovalMode` | optional; `closed` (default), `open`, `auto`, `suggestive` |
+| `sessionId` | `SessionId` | optional; resume an id instead of minting one |
+| `config` | `{ mcpServers }` | optional; per-session MCP servers |
+
+Result: `{ sessionId, ... }`.
+
+**`session/setModel`** params — a full model selection, not a bare model id:
+
+| field | type | notes |
+|---|---|---|
+| `commandId` | `CommandId` | required |
+| `sessionId` | `SessionId` | required |
+| `model` | `ModelSelection` | required; all four fields required |
+
+`ModelSelection` is `{ modelId, providerId, profileId, displayLabel }`.
+`providerId` is one of `echo`, `ollama`, `ollama-cloud`, `openrouter`,
+`kilo`, `openai`, `custom`. `profileId` is a client-chosen slot label (e.g.
+`"default"`); `model-profile` lists the models a provider exposes so a client
+can fill the selection in. The call answers with the stored selection and
+emits the `session/modelChanged` notification (`{ sessionId, modelId }`).
+
+**`turn/start`** params: `{ commandId, sessionId, input: [TurnInputPart, …] }`
+with optional `displayText`, `reasoningEffort`, `workspaceRoots`. The turn
+streams `turn/item` notifications (assistant text deltas, `toolUse`,
+`toolResult`, user echo) and ends with `turn/completed`
+(`{ sessionId, turnId, content, inputTokens, outputTokens }`).
+
 ### Turns
 | method | purpose |
 |---|---|
@@ -226,6 +263,8 @@ Standard JSON-RPC codes plus these prricode-specific codes:
 - `SessionItem` — `{ id, kind, role?, content? }`; content parts are
   `text`, `toolUse` (`{ name, input }`), or `toolResult` (content parts).
 - `ApprovalMode` — `closed`, `open`, `auto`, `suggestive`.
+- `ModelSelection` — `{ modelId, providerId, profileId, displayLabel }`; all
+  four fields required (see `session/setModel`).
 - `ReasoningEffort` — `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`.
 - `ComputerUsePermission` — `granted`, `missing`, `unknown`.
 - `ComputerUseSetupPhase` — `dormant`, `inProgress`, `restartRequired`, `readyForTarget`, `stopped`.

@@ -46,7 +46,7 @@ pub struct Cli {
     pub data_dir: Option<PathBuf>,
 }
 
-#[derive(Copy, Implementation, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Copy, Implementation, PartialEq, Eq, ValueEnum)]
 pub enum ProviderArg {
     Echo,
     Ollama,
@@ -57,7 +57,7 @@ pub enum ProviderArg {
     Custom,
 }
 
-#[derive(Copy, Implementation, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Copy, Implementation, PartialEq, Eq, ValueEnum)]
 pub enum ReasoningEffortArg {
     None,
     Minimal,
@@ -69,7 +69,7 @@ pub enum ReasoningEffortArg {
     Ultra,
 }
 
-#[derive(Copy, Implementation, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Copy, Implementation, PartialEq, Eq, ValueEnum)]
 pub enum ApprovalModeArg {
     Closed,
     Open,
@@ -236,6 +236,7 @@ pub enum AuthAction {
     Refresh,
     /// Store a credential for a provider (key via --key-env or stdin)
     Token {
+        #[arg(id = "auth-provider")]
         provider: String,
         #[arg(long)]
         key_env: Option<String>,
@@ -279,5 +280,94 @@ impl ApprovalModeArg {
             Self::Auto => ApprovalMode::Auto,
             Self::Suggestive => ApprovalMode::Suggestive,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_debug_assert_passes() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn auth_token_takes_a_provider_positional() {
+        let cli = Cli::parse_from([
+            "prricode",
+            "auth",
+            "token",
+            "openrouter",
+            "--key-env",
+            "OPENROUTER_API_KEY",
+        ]);
+        match cli.command {
+            Some(Command::Auth {
+                action: AuthAction::Token { provider, key_env },
+            }) => {
+                assert_eq!(provider, "openrouter");
+                assert_eq!(key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+            }
+            other => {
+                let _ = other;
+                panic!("expected `auth token`, got another command")
+            }
+        }
+    }
+
+    #[test]
+    fn auth_status_parses() {
+        let cli = Cli::parse_from(["prricode", "auth", "status"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Auth {
+                action: AuthAction::Status
+            })
+        ));
+    }
+
+    #[test]
+    fn login_provider_positional_parses() {
+        let cli = Cli::parse_from(["prricode", "login", "kilo"]);
+        match cli.command {
+            Some(Command::Login { provider }) => assert_eq!(provider.as_deref(), Some("kilo")),
+            other => {
+                let _ = other;
+                panic!("expected `login`, got another command")
+            }
+        }
+    }
+
+    #[test]
+    fn global_provider_flag_still_works_next_to_subcommands() {
+        let cli = Cli::parse_from(["prricode", "--provider", "openrouter", "exec", "hi"]);
+        assert_eq!(cli.provider, ProviderArg::Openrouter);
+        match cli.command {
+            Some(Command::Exec { prompt, .. }) => assert_eq!(prompt, "hi"),
+            other => {
+                let _ = other;
+                panic!("expected `exec`, got another command")
+            }
+        }
+    }
+
+    #[test]
+    fn exec_accepts_model_and_approval_globals() {
+        let cli = Cli::parse_from([
+            "prricode",
+            "--provider",
+            "ollama",
+            "--model",
+            "qwen2.5-coder:3b",
+            "--approval-mode",
+            "open",
+            "exec",
+            "go",
+        ]);
+        assert_eq!(cli.provider, ProviderArg::Ollama);
+        assert_eq!(cli.model.as_deref(), Some("qwen2.5-coder:3b"));
+        assert_eq!(cli.approval_mode, Some(ApprovalModeArg::Open));
     }
 }
