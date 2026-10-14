@@ -134,6 +134,10 @@ impl Persistence {
         Ok(rusqlite::Connection::open(&self.db_path)?)
     }
 
+    pub fn data_dir(&self) -> &Path {
+        Path::new(&self.db_path).parent().unwrap_or(Path::new("."))
+    }
+
     pub fn save_session(&self, session: &SessionRecord) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(

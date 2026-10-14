@@ -109,6 +109,10 @@ The engine that exists today (agent loop, tools, sandbox, workflow, sessions)
 is the foundation; the spec, verification, ship, and operate stages are the
 roadmap.
 
+v0.1 covers Concept → Clarify → Specify → Plan → Build-with-gates — an
+EARS-checked spec, a wave-scheduled task graph, and a gated build in a per-run
+git worktree.
+
 - [`docs/PRD.md`](docs/PRD.md) — the full product requirements document
 - [`docs/PRD-onepager.md`](docs/PRD-onepager.md) — the positioning card
 

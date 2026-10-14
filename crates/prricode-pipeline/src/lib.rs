@@ -58,6 +58,33 @@ impl Pipeline {
             persistence,
         }
     }
+
+    pub fn run_dir(&self, session_id: &str) -> std::path::PathBuf {
+        self.persistence.data_dir().join("runs").join(session_id)
+    }
+
+    /// Per-run workspace: a git worktree when the current directory is inside
+    /// a git repository, otherwise a fresh directory.
+    pub async fn prepare_worktree(&self, session_id: &str) -> anyhow::Result<std::path::PathBuf> {
+        let run_dir = self.run_dir(session_id);
+        std::fs::create_dir_all(&run_dir)?;
+        let inside_git = std::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if inside_git {
+            let status = std::process::Command::new("git")
+                .args(["worktree", "add", "--detach"])
+                .arg(&run_dir)
+                .status()?;
+            if status.success() {
+                return Ok(run_dir);
+            }
+            tracing::warn!("git worktree add failed; using a plain directory");
+        }
+        Ok(run_dir)
+    }
 }
 
 pub mod build;
@@ -82,5 +109,24 @@ mod tests {
         };
         assert_eq!(event.stage, PipelineStage::Specify);
         assert!(matches!(event.kind, StageEventKind::Artifact { .. }));
+    }
+
+    #[tokio::test]
+    async fn prepare_worktree_returns_a_usable_directory() {
+        let dir = std::env::temp_dir().join(format!("pricode-run-{}", std::process::id()));
+        let persistence = Arc::new(prricode_persistence::Persistence::new(&dir).unwrap());
+        let (events_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let approvals = Arc::new(prricode_agent::ApprovalEngine::new());
+        let provider: Arc<dyn prricode_provider::ModelProvider> =
+            Arc::new(prricode_provider::EchoProvider);
+        let runner = Arc::new(
+            prricode_agent::AgentRunner::new(provider, approvals)
+                .with_events(events_tx)
+                .with_persistence(Arc::clone(&persistence)),
+        );
+        let pipeline = Pipeline::new(runner, persistence);
+        let worktree = pipeline.prepare_worktree("session-1").await.unwrap();
+        assert!(worktree.exists() && worktree.is_dir());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

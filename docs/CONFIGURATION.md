@@ -55,6 +55,22 @@ keys are only sent to the provider you select.
 |---|---|
 | Config | `~/.config/prricode/config.toml` (override: `$PRRICODE_CONFIG`) |
 | Database, uploads | `~/.local/share/prricode/` (override: `--data-dir`) |
+| Product Builder run worktrees | `<data-dir>/runs/<session-id>/` (a git worktree when run inside a git repository, otherwise a plain directory) |
+
+## Product Builder stack presets
+
+The Build stage scaffolds from one of five presets, chosen during the Clarify
+interview, or a freely-molded custom stack:
+
+| Preset | Stack |
+|---|---|
+| TAN stack | TanStack Start + Postgres + Drizzle |
+| Next.js | Next.js full-stack: App Router + Postgres + Prisma |
+| MERN | MongoDB + Express + React + Node |
+| FastAPI | Python + FastAPI + Postgres |
+| Static + API | Static site generator + serverless functions directory |
+
+See `docs/ARCHITECTURE.md` for how the presets feed the Specify stage prompt.
 
 ## Examples
 
