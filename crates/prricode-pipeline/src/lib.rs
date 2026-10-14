@@ -57,6 +57,7 @@ impl Pipeline {
 
 pub mod clarify;
 pub mod specify;
+pub mod plan;
 
 #[cfg(test)]
 mod tests {

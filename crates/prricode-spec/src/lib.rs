@@ -63,6 +63,8 @@ pub enum SpecError {
     Cycle { at: String },
     #[error("task {task} depends on unknown task {dep}")]
     UnknownDep { task: String, dep: String },
+    #[error("requirement {id} has no task covering it")]
+    Uncovered { id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
