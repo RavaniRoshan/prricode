@@ -80,6 +80,26 @@ follow-up.
 | FastAPI | Python + FastAPI + Postgres |
 | Static + API | Static site generator + serverless functions directory |
 
+## prricode auth — the credential store
+
+prricode's own auth surface is a credential store at
+`~/.config/prricode/credentials.toml` with owner-only (0600) permissions:
+
+```bash
+prricode auth token kilo --key-env KILO_API_KEY   # or: echo "$KEY" | prricode auth token kilo
+prricode auth status                              # shows stored providers (never values)
+prricode auth token kilo --key-env X              # re-store
+```
+
+Resolution order for provider credentials: CLI `--api-key` > environment
+(`KILO_API_KEY`, …) > `api_key` in `config.toml` > the credential store.
+The store is never committed and never printed.
+
+External browser/device OAuth (`accountLogin/*`, `auth/deviceLogin`,
+`auth/supersedeLoginCredential`, `subscription/activate`,
+`mcpServer/oauthLogin*`) is present on the protocol wire but **flagged off**:
+it answers `enabled: false` with a pointer at `prricode auth token`.
+
 ## Deploy credentials (v0.3)
 
 Deploy credentials are collected interactively, per product, and are

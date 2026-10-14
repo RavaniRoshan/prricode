@@ -234,7 +234,12 @@ pub enum McpAction {
 pub enum AuthAction {
     Status,
     Refresh,
-    Token,
+    /// Store a credential for a provider (key via --key-env or stdin)
+    Token {
+        provider: String,
+        #[arg(long)]
+        key_env: Option<String>,
+    },
 }
 
 impl ProviderArg {

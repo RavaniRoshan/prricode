@@ -6,6 +6,7 @@
 //! provider keeps the binary fully usable offline.
 
 mod config;
+mod credentials;
 mod echo;
 mod ollama;
 mod openai_compat;
@@ -14,6 +15,10 @@ mod openai_compat;
 mod tests;
 
 pub use config::{config_path, load_config, ProviderConfig, ProviderSettings, PrricodeConfig};
+pub use credentials::{
+    get as credential_get, providers as credential_providers, remove as credential_remove,
+    set as credential_set, CredentialStore,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -153,7 +153,8 @@ pub fn resolve(
                 .clone()
                 .or_else(|| preset_api_key_env(kind).map(String::from))?;
             env.get(&var).cloned()
-        });
+        })
+        .or_else(|| super::credentials::get(kind.id()));
 
     let mut headers = preset_headers(kind);
     for (k, v) in settings.headers.iter() {
