@@ -48,6 +48,8 @@ never blocked, which is what lets a client answer `approval/requested` with
 | `prricode-skills` | SKILL.md loading, import, prompt rendering |
 | `prricode-mcp` | MCP stdio client (initialize, tools/list, tools/call) |
 | `prricode-voice` | STT/TTS traits + OpenAI-compatible `/audio/*` implementations |
+| `prricode-spec` | Product Builder domain: concept, EARS requirements, Core-4 spec, stack presets, task graph (no IO) |
+| `prricode-pipeline` | Product Builder stage orchestration over `AgentRunner` + gated build over `WorkflowEngine` |
 
 ## The TUI
 
@@ -60,6 +62,44 @@ Ctrl+G editor, Alt+B/F word moves, Ctrl+K/Y kill/yank, Ctrl+L clear, Esc/
 Ctrl+C interrupt, and three-way approvals (allow once / allow for session /
 deny). Slash commands: `/model`, `/sessions`, `/new`, `/resume`, `/clear`,
 `/approval`, `/provider`, `/settings`, `/help`, `/quit`.
+
+## Product Builder pipeline
+
+Two crates at a clean seam. `prricode-spec` is the pure domain layer — no IO,
+no network, no tokio: concept intake, the Clarify interview state machine, EARS
+requirements, the layered Core-4 spec, the five stack presets, and the
+dependency-ordered task graph with wave scheduling. `prricode-pipeline` is the
+thin orchestrator that drives those stages over the same `AgentRunner` the
+server and TUI already use, and runs the Build stage over
+`prricode-workflow`'s engine.
+
+```
+Concept ──► Clarify ──► Specify ──► Plan ──► Build
+              │            │            │         │
+              │ interview  │ EARS gate  │ trace-  │ waves over the workflow
+              │ (one ques- │ (spec must │ ability │ engine: tasks in a wave
+              │ tion at a  │ be EARS)   │ gate    │ run concurrently;
+              │ time)      │            │ (every  │ pause/cancel/budget
+              │            │            │ req has │ gates between waves
+              │            │            │ a task) │
+```
+
+Human approval gates sit at exactly two boundaries: concept confirmation and
+spec confirmation. Everything else exits on a machine-checkable verdict.
+
+Each run gets its own workspace: `Pipeline::prepare_worktree` creates
+`<data-dir>/runs/<session-id>/` as a git worktree off the current workspace
+when the process runs inside a git repository (`git worktree add --detach`),
+and a plain directory otherwise; the Build stage's turns run with that path as
+their workspace root. See `docs/CONFIGURATION.md` for the preset list and
+storage locations.
+
+Server surface (additive, see `docs/PROTOCOL.md`): `pipeline/conceptSet`
+starts a run and emits the first interview question as a `turn/item`
+notification; `pipeline/specRead` returns the latest spec and stage;
+`pipeline/planRead` returns the wave plan. Pipeline state persists per session
+in the `settings` table under `pipeline:<sessionId>`. The TUI drives the same
+stages in-process (`/concept`, `/spec`, `/plan`, `/build`).
 
 ## Storage
 
