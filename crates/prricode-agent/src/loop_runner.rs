@@ -65,6 +65,10 @@ pub struct AgentRunner {
     mcp: Option<Arc<McpRegistry>>,
     mcp_tool_cache: Mutex<HashMap<String, Vec<prricode_mcp::McpTool>>>,
     self_weak: Mutex<Option<Weak<AgentRunner>>>,
+    /// When set, this registry replaces the default toolset for every turn —
+    /// the isolation primitive for subagent turns (the adversarial verifier)
+    /// that must run with fewer capabilities than the parent runner.
+    tool_registry: Option<Arc<ToolRegistry>>,
 }
 
 /// Handle used to cancel a running turn.
@@ -108,6 +112,7 @@ impl AgentRunner {
             mcp: None,
             mcp_tool_cache: Mutex::new(HashMap::new()),
             self_weak: Mutex::new(None),
+            tool_registry: None,
         }
     }
 
@@ -147,6 +152,38 @@ impl AgentRunner {
     pub fn with_mcp(mut self, registry: Arc<McpRegistry>) -> Self {
         self.mcp = Some(registry);
         self
+    }
+
+    /// Restrict every turn of this runner to a caller-supplied tool registry:
+    /// the turn loop offers exactly these tools instead of building the
+    /// default session toolset.
+    pub fn with_tool_registry(mut self, registry: ToolRegistry) -> Self {
+        self.tool_registry = Some(Arc::new(registry));
+        self
+    }
+
+    /// Derive a sibling runner for an isolated subagent turn: the same
+    /// provider, approvals, persistence and default model, but a
+    /// caller-supplied tool registry in place of the default toolset. The
+    /// derived runner carries no event stream and no workflow/MCP
+    /// extensions: an isolated judge must not share the parent's
+    /// capabilities.
+    pub fn derive_with_registry(&self, registry: ToolRegistry) -> Self {
+        let mut derived = AgentRunner::new(Arc::clone(&self.provider), Arc::clone(&self.approvals));
+        derived.persistence = self.persistence.clone();
+        derived.max_iterations = self.max_iterations;
+        derived.default_model = self.default_model.clone();
+        derived.tool_registry = Some(Arc::new(registry));
+        derived
+    }
+
+    /// The tool names this runner offers: the restricted registry when one
+    /// is set, otherwise the default session toolset.
+    pub fn tool_names(&self) -> Vec<String> {
+        match &self.tool_registry {
+            Some(registry) => registry.names(),
+            None => self.build_registry(false).names(),
+        }
     }
 
     /// Cache the tool definitions of every connected MCP server so the
@@ -258,13 +295,16 @@ impl AgentRunner {
     }
 
     /// Run a subagent turn: same loop, no event stream (the parent relays
-    /// progress through its own items).
+    /// progress through its own items). A restricted tool registry carries
+    /// over to the internal runner, so an isolated turn keeps its granted
+    /// toolset.
     pub async fn run_subagent(&self, input: TurnInput) -> anyhow::Result<TurnOutcome> {
         let mut runner = AgentRunner::new(Arc::clone(&self.provider), Arc::clone(&self.approvals));
         runner.max_iterations = self.max_iterations;
         runner.persistence = self.persistence.clone();
         runner.default_model = self.default_model.clone();
         runner.extra_tools = self.extra_tools.clone();
+        runner.tool_registry = self.tool_registry.clone();
         runner.run_turn_inner(input, None).await
     }
 
@@ -276,7 +316,13 @@ impl AgentRunner {
         let session_id = input.session_id.clone();
         let turn_id = input.turn_id.clone();
         let goal_active = input.goal.is_some();
-        let registry = Arc::new(self.build_registry(goal_active));
+        // A restricted registry replaces the default toolset wholesale: the
+        // goal, task, MCP and workflow tools of a full session are not part
+        // of a granted registry.
+        let registry = match &self.tool_registry {
+            Some(registry) => Arc::clone(registry),
+            None => Arc::new(self.build_registry(goal_active)),
+        };
         let ctx = ToolContext {
             workspace_root: input.workspace_root.clone(),
             approvals: Arc::clone(&self.approvals),
@@ -786,6 +832,96 @@ fn parse_text_tool_call(block: &str, known: &[String]) -> Option<ToolCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prricode_provider::{ChatResponse, ProviderKind, ProviderResult, Usage};
+
+    /// Provider that answers with the names of the tools it was offered —
+    /// the only way a test can see which registry a turn actually ran with.
+    struct ToolListingProvider;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for ToolListingProvider {
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Echo
+        }
+
+        async fn list_models(&self) -> ProviderResult<Vec<prricode_provider::ModelInfo>> {
+            Ok(vec![])
+        }
+
+        async fn chat(&self, request: &ChatRequest) -> ProviderResult<ChatResponse> {
+            Ok(ChatResponse {
+                message: AssistantMessage {
+                    content_parts: vec![ContentPart::text(
+                        request
+                            .tools
+                            .iter()
+                            .map(|tool| tool.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    )],
+                    tool_calls: vec![],
+                },
+                usage: Usage::default(),
+                finish_reason: "stop".into(),
+                cost_usd: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            request: &ChatRequest,
+            events: mpsc::UnboundedSender<StreamEvent>,
+        ) -> ProviderResult<ChatResponse> {
+            let response = self.chat(request).await?;
+            let text = response.message.text();
+            if !text.is_empty() {
+                let _ = events.send(StreamEvent::TextDelta(text));
+            }
+            let _ = events.send(StreamEvent::Done);
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn derived_runner_grants_only_its_registrys_tools_to_subagents() {
+        let approvals = Arc::new(ApprovalEngine::new());
+        let provider: Arc<dyn ModelProvider> = Arc::new(ToolListingProvider);
+        let base = AgentRunner::new(provider, approvals);
+        let derived = base.derive_with_registry(
+            ToolRegistryBuilder::new()
+                .with_tool(ReadFileTool)
+                .with_tool(GlobTool)
+                .with_tool(GrepTool)
+                .build(),
+        );
+        // The derived runner reports the granted toolset; the base runner
+        // keeps the default one (shell, write_file, and friends).
+        assert_eq!(derived.tool_names(), vec!["glob", "grep", "read_file"]);
+        let defaults = base.tool_names();
+        assert!(defaults.contains(&"shell".to_string()));
+        assert!(defaults.contains(&"write_file".to_string()));
+
+        // run_subagent builds its own internal runner: the restricted
+        // registry must survive that hop, so the isolated turn sees only
+        // the granted tools and never the default toolset.
+        let outcome = derived
+            .run_subagent(TurnInput {
+                session_id: "derived-test".into(),
+                model: String::new(),
+                approval_mode: ApprovalMode::Open,
+                workspace_root: std::env::temp_dir(),
+                data_dir: std::env::temp_dir(),
+                history: vec![],
+                user_content: vec![ContentPart::text("what can you do?")],
+                goal: None,
+                skills_prompt: None,
+                max_iterations: 1,
+                turn_id: "turn-derived".into(),
+            })
+            .await
+            .expect("subagent turn runs");
+        assert_eq!(outcome.content, "glob,grep,read_file");
+    }
 
     fn known() -> Vec<String> {
         ["shell", "write_file", "read_file", "goal_complete"]

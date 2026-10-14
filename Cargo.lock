@@ -1239,12 +1239,14 @@ name = "prricode-pipeline"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures-util",
  "prricode-agent",
  "prricode-core",
  "prricode-persistence",
  "prricode-provider",
  "prricode-spec",
+ "prricode-verify",
  "prricode-workflow",
  "serde",
  "serde_json",
