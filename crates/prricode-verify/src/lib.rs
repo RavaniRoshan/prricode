@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod gates;
+pub mod verifier;
 
 /// One executed verification gate: a command run against the workspace.
 #[derive(Debug, Implementation, Serialize, Deserialize)]
