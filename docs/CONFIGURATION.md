@@ -59,8 +59,11 @@ keys are only sent to the provider you select.
 
 ## Product Builder stack presets
 
-The Build stage scaffolds from one of five presets, chosen during the Clarify
-interview, or a freely-molded custom stack:
+The spec domain defines five stack presets, but v0.1 passes no preset into the
+pipeline: no preset is chosen during the Clarify interview. The Specify stage's
+agent molds the stack from the concept itself (its prompt asks for the simplest
+stack that fits the concept). Preset-guided selection during the pipeline is a
+follow-up.
 
 | Preset | Stack |
 |---|---|
@@ -69,8 +72,6 @@ interview, or a freely-molded custom stack:
 | MERN | MongoDB + Express + React + Node |
 | FastAPI | Python + FastAPI + Postgres |
 | Static + API | Static site generator + serverless functions directory |
-
-See `docs/ARCHITECTURE.md` for how the presets feed the Specify stage prompt.
 
 ## Examples
 
