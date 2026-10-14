@@ -12,6 +12,52 @@ pub struct Skill {
     pub instructions: String,
     pub location: PathBuf,
     pub source: SkillSource,
+    /// Runnable helpers under the skill's `scripts/` directory.
+    pub scripts: Vec<PathBuf>,
+}
+
+impl Skill {
+    /// The interpreter command prefix for a script, from its shebang.
+    /// `#!/usr/bin/env python3` -> `["/usr/bin/env", "python3"]`; `#!/bin/bash` -> bash;
+    /// no shebang -> the file is executed directly (it must be executable).
+    pub fn interpreter_for(script: &Path) -> Vec<String> {
+        let text = std::fs::read_to_string(script).unwrap_or_default();
+        if let Some(first) = text.lines().next() {
+            if let Some(shebang) = first.strip_prefix("#!") {
+                let parts: Vec<String> = shebang.split_whitespace().map(String::from).collect();
+                if !parts.is_empty() {
+                    // `#!/usr/bin/env python3` keeps env-as-interpreter.
+                    return parts;
+                }
+            }
+        }
+        vec![script.to_string_lossy().to_string()]
+    }
+
+    /// The documented argv contract: `<interpreter> <script> <args...>`,
+    /// mirroring the prricode's skill-script invocation.
+    pub fn script_command(&self, script_name: &str, args: &[String]) -> Option<Vec<String>> {
+        let script = self
+            .scripts
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy() == script_name)
+                    .unwrap_or(false)
+            })
+            .cloned()?;
+        let mut command = Self::interpreter_for(&script);
+        command.push(script.to_string_lossy().to_string());
+        command.extend(args.iter().cloned());
+        Some(command)
+    }
+
+    pub fn script_names(&self) -> Vec<String> {
+        self.scripts
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +128,7 @@ pub fn parse_skill_md(text: &str, location: &Path, source: SkillSource) -> Skill
             instructions,
             location: location.to_path_buf(),
             source,
+            scripts: Vec::new(),
         };
     }
     let instructions = text.to_string();
@@ -97,6 +144,7 @@ pub fn parse_skill_md(text: &str, location: &Path, source: SkillSource) -> Skill
         instructions,
         location: location.to_path_buf(),
         source,
+        scripts: Vec::new(),
     }
 }
 
@@ -126,7 +174,9 @@ pub fn load_skills(home_dir: &Path, cwd: &Path) -> Vec<Skill> {
         for path in paths {
             let file = path.join("SKILL.md");
             if let Ok(text) = std::fs::read_to_string(&file) {
-                skills.push(parse_skill_md(&text, &file, source));
+                let mut skill = parse_skill_md(&text, &file, source);
+                skill.scripts = discover_scripts(&path);
+                skills.push(skill);
             }
         }
     }
@@ -232,6 +282,56 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> SkillResult<()> {
     Ok(())
 }
 
+/// Runnable helpers directly under `<skill>/scripts/`, sorted.
+pub fn discover_scripts(skill_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(skill_dir.join("scripts")) else {
+        return Vec::new();
+    };
+    let mut scripts: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    scripts.sort();
+    scripts
+}
+
+/// Output of a skill-script execution.
+#[derive(Debug, Clone)]
+pub struct ScriptOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+/// Execute a skill script through the sandbox with the documented contract:
+/// the interpreter comes from the script's shebang, the skill directory is the
+/// workspace root so relative data paths resolve, and there is no network.
+pub async fn run_skill_script(
+    skill: &Skill,
+    script_name: &str,
+    args: &[String],
+    workspace_root: &Path,
+) -> anyhow::Result<ScriptOutput> {
+    let command = skill.script_command(script_name, args).ok_or_else(|| {
+        anyhow::anyhow!("skill '{}' has no script named {script_name}", skill.name)
+    })?;
+    let spec = prricode_sandbox::SandboxSpec {
+        workspace_root: workspace_root.to_path_buf(),
+        allow_network: false,
+        timeout: std::time::Duration::from_secs(120),
+    };
+    let full = command.join(" ");
+    let output = prricode_sandbox::run_command(&full, &spec).await?;
+    Ok(ScriptOutput {
+        exit_code: output.exit_code,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        timed_out: output.timed_out,
+    })
+}
+
 /// Render active skills into a system-prompt fragment.
 pub fn render_skills_prompt(skills: &[Skill], active: &[String]) -> String {
     let mut out = String::new();
@@ -282,6 +382,56 @@ mod tests {
         let prompt = render_skills_prompt(&skills, &["my-skill".to_string()]);
         assert!(prompt.contains("Do the thing."));
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test]
+    async fn executes_a_bundled_skill_script_through_the_sandbox() {
+        // The bundled wordcount skill ships scripts/wordcount.py with an
+        // `#!/usr/bin/env python3` shebang; the prricode's contract
+        // is `<interpreter> <script> <args>` executed in the skill directory.
+        let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .to_path_buf();
+        let skills = load_skills(Path::new("/nonexistent-home"), &cwd);
+        let skill = skills
+            .iter()
+            .find(|s| s.name == "wordcount")
+            .expect("bundled wordcount skill loads");
+        assert_eq!(skill.script_names(), vec!["wordcount.py".to_string()]);
+        // The shebang drives the interpreter.
+        assert_eq!(
+            Skill::interpreter_for(&skill.scripts[0]),
+            vec!["/usr/bin/env".to_string(), "python3".to_string()]
+        );
+        let data_dir = std::env::temp_dir().join(format!("skill-script-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let data_file = data_dir.join("sample.txt");
+        std::fs::write(&data_file, "one two three four five").unwrap();
+        let output = run_skill_script(
+            skill,
+            "wordcount.py",
+            &[data_file.to_string_lossy().to_string()],
+            &data_dir,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert_eq!(output.stdout.trim(), "words 5");
+        let output = run_skill_script(
+            skill,
+            "wordcount.py",
+            &[
+                "--lines".to_string(),
+                data_file.to_string_lossy().to_string(),
+            ],
+            &data_dir,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.stdout.trim(), "lines 1");
+        std::fs::remove_dir_all(&data_dir).ok();
     }
 
     #[test]

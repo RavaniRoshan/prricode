@@ -1329,9 +1329,12 @@ dependencies = [
 name = "prricode-skills"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "prricode-sandbox",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
