@@ -54,6 +54,9 @@ pub enum ShipEventKind {
     /// A health probe failed, with the reopened issue's url when one was
     /// opened (a workspace with no GitHub remote opens none).
     HealthFailed { name: String, issue: Option<String> },
+    /// The recorded rollback ran after a failed health check because the
+    /// operator armed auto-rollback at confirm time; `ok` is its outcome.
+    DeployRolledBack { ok: bool, detail: String },
 }
 
 /// Where the deploy half of the stage is.
@@ -97,7 +100,12 @@ pub enum PendingInput {
 pub enum ShipAnswer {
     /// The deploy decision: `confirmed` runs the plan, otherwise the
     /// deploy is skipped and the flow finishes with the ship record.
-    DeployChoice { confirmed: bool },
+    /// `auto_rollback` arms autonomous rollback on a later health failure
+    /// (asked at deploy-confirmation time; default no).
+    DeployChoice {
+        confirmed: bool,
+        auto_rollback: bool,
+    },
     /// The value for the credential the flow is collecting.
     SecretValue { name: String, value: String },
 }
@@ -121,6 +129,10 @@ pub struct ShipFlow {
     pending_secret: Option<CredentialRequest>,
     /// Index of the next credential in the plan's list.
     next_credential: usize,
+    /// Armed at deploy-confirmation time: when the operate pass's health
+    /// check fails, run the plan's rollback command without a round-trip
+    /// through the operator. Default no.
+    auto_rollback: bool,
 }
 
 impl ShipFlow {
@@ -137,6 +149,7 @@ impl ShipFlow {
             secrets: HashMap::new(),
             pending_secret: None,
             next_credential: 0,
+            auto_rollback: false,
         }
     }
 
@@ -222,11 +235,23 @@ impl ShipFlow {
     /// only the pending input moves the flow.
     pub fn answer(&mut self, answer: ShipAnswer) {
         match (self.stage, answer) {
-            (ShipStage::DeployWait, ShipAnswer::DeployChoice { confirmed: true }) => {
+            (
+                ShipStage::DeployWait,
+                ShipAnswer::DeployChoice {
+                    confirmed: true,
+                    auto_rollback,
+                },
+            ) => {
                 self.next_credential = 0;
+                self.auto_rollback = auto_rollback;
                 self.stage = ShipStage::SecretWait;
             }
-            (ShipStage::DeployWait, ShipAnswer::DeployChoice { confirmed: false }) => {
+            (
+                ShipStage::DeployWait,
+                ShipAnswer::DeployChoice {
+                    confirmed: false, ..
+                },
+            ) => {
                 let target = self
                     .plan
                     .as_ref()
@@ -332,6 +357,59 @@ impl ShipFlow {
         .unwrap_or(None);
         let _ = self.log("health", &format!("{name} failed: {}", probe.detail));
         let _ = ui_tx.send(ShipEventKind::HealthFailed { name, issue });
+        // Autonomous rollback: when the operator armed it at confirm time, the
+        // flow runs the recorded rollback command on a failed health check
+        // without a round-trip through the operator.
+        if self.auto_rollback {
+            self.run_rollback(ui_tx).await;
+        }
+    }
+
+    /// Run the plan's recorded rollback command after a failed health check,
+    /// through the sandbox with no network and a 120s budget. The outcome is
+    /// recorded in the operate log and reported as a `DeployRolledBack`
+    /// event; it never fails the flow.
+    async fn run_rollback(&mut self, ui_tx: &UnboundedSender<ShipEventKind>) {
+        let target = self
+            .plan
+            .as_ref()
+            .map(|plan| plan.target.implementation())
+            .unwrap_or_else(|| "release".to_string());
+        let command = self
+            .plan
+            .as_ref()
+            .map(|plan| plan.rollback.trim().to_string())
+            .unwrap_or_default();
+        if command.is_empty() {
+            let detail = format!("no rollback command recorded for target {target}");
+            let _ = self.log("rollback", &detail);
+            let _ = ui_tx.send(ShipEventKind::DeployRolledBack { ok: false, detail });
+            return;
+        }
+        let spec = prricode_sandbox::SandboxSpec {
+            workspace_root: self.workspace.implementation(),
+            allow_network: false,
+            timeout: std::time::Duration::from_secs(120),
+        };
+        let (ok, detail) = match prricode_sandbox::run_command(&command, &spec).await {
+            Ok(output) if output.timed_out => {
+                (false, format!("rollback for {target} timed out after 120s"))
+            }
+            Ok(output) if output.exit_code == 0 => (
+                true,
+                format!("rollback for {target} ran `{command}` (exit 0)"),
+            ),
+            Ok(output) => (
+                false,
+                format!(
+                    "rollback for {target} failed: `{command}` exited {}",
+                    output.exit_code
+                ),
+            ),
+            Err(e) => (false, format!("rollback for {target} could not run: {e}")),
+        };
+        let _ = self.log("rollback", &detail);
+        let _ = ui_tx.send(ShipEventKind::DeployRolledBack { ok, detail });
     }
 
     /// Append one operate-log event, redacted at the boundary. The detail
@@ -559,7 +637,10 @@ mod tests {
         assert!(drain(&mut ui_rx).is_empty());
 
         // Confirming asks for the first credential, in event order.
-        flow.answer(ShipAnswer::DeployChoice { confirmed: true });
+        flow.answer(ShipAnswer::DeployChoice {
+            confirmed: true,
+            auto_rollback: false,
+        });
         assert_eq!(flow.stage(), ShipStage::SecretWait);
         assert_eq!(
             flow.poll(&ui_tx).await,
@@ -591,7 +672,10 @@ mod tests {
 
         assert_eq!(flow.poll(&ui_tx).await, Some(PendingInput::DeployChoice));
         drain(&mut ui_rx);
-        flow.answer(ShipAnswer::DeployChoice { confirmed: false });
+        flow.answer(ShipAnswer::DeployChoice {
+            confirmed: false,
+            auto_rollback: false,
+        });
 
         // Done immediately: no credential, no commands, no health pass.
         assert_eq!(flow.stage(), ShipStage::Done);
@@ -624,7 +708,10 @@ mod tests {
 
         // Confirm the vercel plan and hand over the credential value...
         flow.poll(&ui_tx).await;
-        flow.answer(ShipAnswer::DeployChoice { confirmed: true });
+        flow.answer(ShipAnswer::DeployChoice {
+            confirmed: true,
+            auto_rollback: false,
+        });
         flow.poll(&ui_tx).await;
         flow.answer(ShipAnswer::SecretValue {
             name: "VERCEL_TOKEN".to_string(),
@@ -690,7 +777,10 @@ mod tests {
         let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
 
         flow.poll(&ui_tx).await;
-        flow.answer(ShipAnswer::DeployChoice { confirmed: true });
+        flow.answer(ShipAnswer::DeployChoice {
+            confirmed: true,
+            auto_rollback: false,
+        });
         flow.poll(&ui_tx).await;
         flow.answer(ShipAnswer::SecretValue {
             name: "VERCEL_TOKEN".to_string(),
@@ -711,6 +801,7 @@ mod tests {
                 ShipEventKind::DeployDone { .. } => "deploy-done",
                 ShipEventKind::HealthOk { .. } => "health-ok",
                 ShipEventKind::HealthFailed { .. } => "health-failed",
+                ShipEventKind::DeployRolledBack { .. } => "rolled-back",
                 ShipEventKind::ShipReady { .. } => "ship-ready",
             })
             .collect();
@@ -727,6 +818,86 @@ mod tests {
         assert!(logged
             .iter()
             .all(|event| !event.detail.contains("vercel: not found")));
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    /// A plan whose rollback command writes a marker file into the workspace:
+    /// the observable proof that the recorded rollback actually ran.
+    fn marker_rollback_plan(marker: &Path) -> DeployPlan {
+        DeployPlan {
+            target: "probe".to_string(),
+            reason: "probe plan".to_string(),
+            required_credentials: Vec::new(),
+            commands: vec!["true".to_string()],
+            rollback: format!("echo rolled-back > '{}'", marker.display()),
+            release_id_regex: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_rollback_runs_the_recorded_command_on_a_failed_health_check() {
+        // A plan whose recorded rollback writes a marker file; the health
+        // probe fails (the recorded tag does not resolve), and with
+        // auto-rollback armed the flow runs that rollback command itself.
+        let dir = temp_dir("rollback-on");
+        let data_dir = temp_dir("rollback-on-data");
+        let marker = dir.join("auto-rollback.marker");
+        let mut record = ShipRecord::new("run-rollback-on");
+        record.tag = Some("v-does-not-resolve".to_string());
+        let mut flow = ShipFlow::new(record, &dir, &data_dir);
+        flow.plan = Some(marker_rollback_plan(&marker));
+        flow.auto_rollback = true;
+        flow.stage = ShipStage::Operate;
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        assert_eq!(flow.poll(&ui_tx).await, None);
+        assert_eq!(flow.stage(), ShipStage::Done);
+
+        // The rollback command ran inside the sandbox and wrote the marker.
+        assert!(marker.exists(), "the recorded rollback command must run");
+        // A DeployRolledBack { ok: true } reached the surface...
+        let events = drain(&mut ui_rx);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ShipEventKind::DeployRolledBack { ok: true, .. })));
+        // ...and the operate log records the rollback outcome.
+        let logged = operate::read_operate_log(&data_dir, "run-rollback-on").unwrap();
+        assert!(logged
+            .iter()
+            .any(|event| event.kind == "rollback" && event.detail.contains("probe")));
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn no_auto_rollback_means_the_rollback_command_does_not_run() {
+        // Same failed health check, but auto-rollback was left off (default
+        // no): the failure is surfaced, yet nothing undoes the deploy.
+        let dir = temp_dir("rollback-off");
+        let data_dir = temp_dir("rollback-off-data");
+        let marker = dir.join("auto-rollback.marker");
+        let mut record = ShipRecord::new("run-rollback-off");
+        record.tag = Some("v-does-not-resolve".to_string());
+        let mut flow = ShipFlow::new(record, &dir, &data_dir);
+        flow.plan = Some(marker_rollback_plan(&marker));
+        flow.auto_rollback = false;
+        flow.stage = ShipStage::Operate;
+
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        assert_eq!(flow.poll(&ui_tx).await, None);
+        assert_eq!(flow.stage(), ShipStage::Done);
+
+        // The health check failed (surfaced) but no rollback ran.
+        assert!(
+            !marker.exists(),
+            "no rollback command may run when disabled"
+        );
+        assert!(!drain(&mut ui_rx)
+            .iter()
+            .any(|event| matches!(event, ShipEventKind::DeployRolledBack { .. })));
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&data_dir).ok();

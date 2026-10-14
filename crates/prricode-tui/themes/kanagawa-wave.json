@@ -1,0 +1,24 @@
+{
+  "display_name": "Kanagawa Wave",
+  "foreground": "#dcd7ba",
+  "background": "#1f1f28",
+  "accent": "#957fb8",
+  "source_model": "kanagawa",
+  "license": "MIT",
+  "colors": {
+    "user": "#98bb6c",
+    "assistant": "#7e9cd8",
+    "tool": "#957fb8",
+    "system": "#727169",
+    "status": "#e6c384",
+    "session": "#727169",
+    "rail_stage": "#957fb8",
+    "rail_gate": "#e46876",
+    "rail_ok": "#98bb6c",
+    "approval": "#e46876",
+    "approval_border": "#d27e99",
+    "footer_key": "#e6c384",
+    "footer_command": "#7e9cd8",
+    "error": "#e46876"
+  }
+}

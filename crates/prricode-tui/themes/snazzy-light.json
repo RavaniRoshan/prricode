@@ -1,0 +1,24 @@
+{
+  "display_name": "Snazzy Light",
+  "foreground": "#383a42",
+  "background": "#fafafa",
+  "accent": "#f4478b",
+  "source_model": "snazzy",
+  "license": "MIT",
+  "colors": {
+    "user": "#12a150",
+    "assistant": "#1e88e5",
+    "tool": "#d63af9",
+    "system": "#9a9a9a",
+    "status": "#d4a800",
+    "session": "#bdbdbd",
+    "rail_stage": "#f4478b",
+    "rail_gate": "#e5343b",
+    "rail_ok": "#12a150",
+    "approval": "#e5343b",
+    "approval_border": "#e5343b",
+    "footer_key": "#d4a800",
+    "footer_command": "#1e88e5",
+    "error": "#e5343b"
+  }
+}

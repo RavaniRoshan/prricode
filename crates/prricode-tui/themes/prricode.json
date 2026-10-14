@@ -3,6 +3,7 @@
   "foreground": "white",
   "background": "default",
   "accent": "cyan",
+  "source_model": "prricode",
   "license": "MIT",
   "colors": {
     "user": "green",

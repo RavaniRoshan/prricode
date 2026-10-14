@@ -47,11 +47,106 @@ pub enum ComputerUseError {
     Input(String),
     #[error("unsupported action: {0}")]
     UnsupportedAction(String),
+    #[error("unsupported: {0}")]
+    Unsupported(String),
     #[error("permission required: {0}")]
     Permission(String),
 }
 
 pub type ComputerUseResult<T> = Result<T, ComputerUseError>;
+
+/// How this host can capture a screenshot right now: the X11 path (XGetImage
+/// through scrot/import/xwd, which also works under XWayland) or a Wayland
+/// screencopy through `grim`. Wayland has no portable capture API, so that
+/// path exists only where `grim` is installed; otherwise it degrades to a
+/// clear `Unsupported` error rather than a silent wrong capture.
+#[derive(Debug, Implementation, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureMethod {
+    /// X11 screenshot (the tested path).
+    X11,
+    /// Wayland screencopy via `grim`.
+    WaylandGrim,
+}
+
+/// Whether a (non-empty) `WAYLAND_DISPLAY` names a compositor.
+fn wayland_display_set() -> bool {
+    std::env::var("WAYLAND_DISPLAY")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .is_some()
+}
+
+/// Whether the `grim` screencopy tool is on PATH. Presence is decided by
+/// whether the binary can be spawned at all — `grim --help` exits without
+/// touching the compositor — never by running a real capture.
+pub fn grim_on_path() -> bool {
+    match std::process::Command::new("grim").arg("--help").output() {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
+}
+
+/// Decide the Wayland capture method from two honest facts. Returns the
+/// `grim` screencopy method only when a Wayland display is present AND `grim`
+/// is on PATH; otherwise a clear `Unsupported` naming the missing piece.
+fn decide_wayland(has_display: bool, has_grim: bool) -> ComputerUseResult<CaptureMethod> {
+    if !has_display {
+        return Err(ComputerUseError::Unsupported(
+            "no Wayland display (WAYLAND_DISPLAY is unset) — there is nothing to screencopy".into(),
+        ));
+    }
+    if !has_grim {
+        return Err(ComputerUseError::Unsupported(
+            "Wayland capture needs `grim` on PATH — install grim (from wlroots) to screenshot under Wayland".into(),
+        ));
+    }
+    Ok(CaptureMethod::WaylandGrim)
+}
+
+/// Probe the Wayland screenshot path from the environment. It reports the
+/// `grim` screencopy method when Wayland is reachable and `grim` is installed,
+/// and otherwise returns the exact reason the Wayland path is unavailable.
+pub fn probe_wayland() -> ComputerUseResult<CaptureMethod> {
+    decide_wayland(wayland_display_set(), grim_on_path())
+}
+
+/// The screenshot method this host can actually use right now: a Wayland
+/// `grim` screencopy when that path is available, else the X11 path when a
+/// DISPLAY is set, else no display at all. X11 stays the tested path; Wayland
+/// is chosen only when it is genuinely available.
+pub fn screenshot_method() -> ComputerUseResult<CaptureMethod> {
+    if decide_wayland(wayland_display_set(), grim_on_path()).is_ok() {
+        return Ok(CaptureMethod::WaylandGrim);
+    }
+    if std::env::var("DISPLAY")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .is_some()
+    {
+        return Ok(CaptureMethod::X11);
+    }
+    Err(ComputerUseError::NoDisplay(
+        "neither a Wayland display with grim nor an X11 DISPLAY is available".into(),
+    ))
+}
+
+/// Capture the screen through `grim` (Wayland screencopy), returning the PNG
+/// bytes it writes to stdout. Callers reach this only when `probe_wayland`
+/// reported `WaylandGrim`, so it never runs where grim is absent.
+pub fn grim_screenshot() -> ComputerUseResult<Vec<u8>> {
+    let output = Command::new("grim")
+        .arg("-")
+        .output()
+        .map_err(|e| ComputerUseError::Screenshot(e.to_string()))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err(ComputerUseError::Screenshot(
+            "grim produced no image — is a Wayland compositor running?".to_string(),
+        ));
+    }
+    Ok(output.stdout)
+}
 
 /// Actions the computer tool accepts (Anthropic-style vocabulary).
 #[derive(Debug, Implementation, Serialize, Deserialize)]
@@ -330,5 +425,49 @@ mod tests {
         let action: ComputerAction =
             serde_json::from_str(r#"{"action":"type","text":"hi"}"#).unwrap();
         assert!(matches!(action, ComputerAction::Type { text } if text == "hi"));
+    }
+
+    #[test]
+    fn decide_wayland_covers_every_combination() {
+        // grim present + Wayland display → the grim screencopy method.
+        assert!(matches!(
+            decide_wayland(true, true),
+            Ok(CaptureMethod::WaylandGrim)
+        ));
+        // grim missing → an Unsupported that names grim.
+        assert!(matches!(
+            decide_wayland(true, false),
+            Err(ComputerUseError::Unsupported(msg)) if msg.contains("grim")
+        ));
+        // No Wayland display at all → an Unsupported that says so.
+        assert!(matches!(
+            decide_wayland(false, true),
+            Err(ComputerUseError::Unsupported(msg)) if msg.contains("WAYLAND_DISPLAY")
+        ));
+        assert!(matches!(
+            decide_wayland(false, false),
+            Err(ComputerUseError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn on_this_x11_host_the_probe_reports_x11_and_wayland_degrades() {
+        // This workstation sets WAYLAND_DISPLAY but does not install grim, so
+        // the Wayland path degrades with a clear reason while X11 (XWayland)
+        // remains the tested path.
+        if wayland_display_set() && !grim_on_path() {
+            match probe_wayland() {
+                Err(ComputerUseError::Unsupported(msg)) => {
+                    assert!(msg.contains("grim"), "{msg}")
+                }
+                other => panic!("expected unsupported-with-grim, got {other:?}"),
+            }
+            if std::env::var("DISPLAY")
+                .map(|d| !d.is_empty())
+                .unwrap_or(false)
+            {
+                assert!(matches!(screenshot_method(), Ok(CaptureMethod::X11)));
+            }
+        }
     }
 }

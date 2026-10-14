@@ -1,0 +1,24 @@
+{
+  "display_name": "Synthwave '84",
+  "foreground": "#f7f7f7",
+  "background": "#241b2f",
+  "accent": "#ff7edb",
+  "source_model": "synthwave-84",
+  "license": "MIT",
+  "colors": {
+    "user": "#72f1b8",
+    "assistant": "#03edf9",
+    "tool": "#ff7edb",
+    "system": "#848bbd",
+    "status": "#fede5d",
+    "session": "#495495",
+    "rail_stage": "#ff7edb",
+    "rail_gate": "#fe4450",
+    "rail_ok": "#72f1b8",
+    "approval": "#fe4450",
+    "approval_border": "#fe4450",
+    "footer_key": "#fede5d",
+    "footer_command": "#03edf9",
+    "error": "#fe4450"
+  }
+}

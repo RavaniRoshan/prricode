@@ -1,0 +1,24 @@
+{
+  "display_name": "Ayu Light",
+  "foreground": "#5c6773",
+  "background": "#fafafa",
+  "accent": "#ff9940",
+  "source_model": "ayu",
+  "license": "MIT",
+  "colors": {
+    "user": "#86b300",
+    "assistant": "#399ee6",
+    "tool": "#f29718",
+    "system": "#abb0b6",
+    "status": "#f29718",
+    "session": "#abb0b6",
+    "rail_stage": "#ff9940",
+    "rail_gate": "#f07171",
+    "rail_ok": "#86b300",
+    "approval": "#f07171",
+    "approval_border": "#f07171",
+    "footer_key": "#f29718",
+    "footer_command": "#399ee6",
+    "error": "#f07171"
+  }
+}

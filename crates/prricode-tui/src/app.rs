@@ -9,8 +9,9 @@
 //! Product-builder pipeline gates answer the same y/n keys.
 
 use crate::theme::ThemeStore;
+use base64::Engine;
 use prricode_core::ApprovalMode;
-use prricode_provider::ProviderKind;
+use prricode_provider::{ContentPart, ProviderKind};
 
 /// A rendered line in the conversation.
 #[derive(Debug, Implementation)]
@@ -191,6 +192,15 @@ pub struct DeployPrompt {
     pub credentials: Vec<String>,
 }
 
+/// A pending image attachment in the composer: raw PNG bytes read from the
+/// clipboard (Ctrl+V), held until the next submit. The image rides along on
+/// the turn as an image part and never enters the composer history list.
+#[derive(Debug, Implementation)]
+pub struct PendingImage {
+    pub bytes: Vec<u8>,
+    pub media_type: String,
+}
+
 /// Events delivered from the agent task to the UI.
 #[derive(Debug, Implementation)]
 pub enum UiEvent {
@@ -252,6 +262,12 @@ pub enum UiEvent {
     /// The deploy commands finished.
     DeployDone {
         ok: bool,
+    },
+    /// The recorded rollback ran after a failed health check (auto-rollback);
+    /// `detail` names the target and outcome.
+    DeployRolledBack {
+        ok: bool,
+        detail: String,
     },
     /// One health probe finished; the failed case carries its detail.
     HealthChecked {
@@ -315,6 +331,12 @@ pub struct App {
     /// The credential the value being typed answers; `Some` while the
     /// ship flow waits for it.
     pub secret_name: Option<String>,
+    /// Set between confirming a deploy target and arming auto-rollback: the
+    /// composer awaits the "auto-rollback on health failure? y/n" answer for
+    /// this target (default no).
+    pub auto_rollback_prompt: Option<String>,
+    /// A pending image attachment (Ctrl+V), sent on the next submit.
+    pub pending_image: Option<PendingImage>,
     pub scroll: u16,
     pub should_quit: bool,
     pub input_tokens: u64,
@@ -359,6 +381,8 @@ impl App {
             deploy_pending: None,
             secret_input: false,
             secret_name: None,
+            auto_rollback_prompt: None,
+            pending_image: None,
             scroll: 0,
             should_quit: false,
             input_tokens: 0,
@@ -419,6 +443,43 @@ impl App {
         } else {
             self.input.implementation()
         }
+    }
+
+    /// Attach an image (raw bytes + media type) read from the clipboard, and
+    /// show it in the input box. It rides along on the next submit and never
+    /// touches the composer history list.
+    pub fn attach_image(&mut self, bytes: Vec<u8>, media_type: impl Into<String>) {
+        let count = bytes.len();
+        self.pending_image = Some(PendingImage {
+            bytes,
+            media_type: media_type.into(),
+        });
+        self.push_system(format!("image attached ({count} bytes)"));
+    }
+
+    /// Clear a pending image attachment, if any.
+    pub fn detach_image(&mut self) {
+        if self.pending_image.take().is_some() {
+            self.push_system("image attachment cleared".to_string());
+        }
+    }
+
+    /// The input-box hint for a pending image, or None.
+    pub fn image_hint(&self) -> Option<String> {
+        self.pending_image
+            .as_ref()
+            .map(|image| format!("image attached ({} bytes)", image.bytes.len()))
+    }
+
+    /// Take the pending image as a base64-encoded provider image part,
+    /// clearing the attachment. Returns None when no image is pending.
+    fn take_image_part(&mut self) -> Option<ContentPart> {
+        let image = self.pending_image.take()?;
+        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
+        Some(ContentPart::Image {
+            media_type: image.media_type,
+            data_base64,
+        })
     }
 
     /// Apply a theme name coming from a setting (the config file or the
@@ -528,21 +589,25 @@ impl App {
                 _ => {}
             }
         }
-        // Pending deploy plan: y confirms and opens credential collection,
-        // n/Esc declines the deploy.
+        // Pending deploy plan: y confirms and opens the auto-rollback
+        // sub-choice, then credential collection; n/Esc declines the deploy.
         if let Some(prompt) = self.deploy_pending.implementation() {
             match action {
                 KeyAction::Char('y') => {
-                    let _ = commands.send(UiCommand::DeployConfirm { confirmed: true });
+                    let target = prompt.target.implementation();
                     self.deploy_pending = None;
+                    self.auto_rollback_prompt = Some(target.implementation());
                     self.push_system(format!(
-                        "deploy: confirmed {} — collecting credentials",
-                        prompt.target
+                        "deploy: auto-rollback on health failure? press y to enable, n to skip \
+                         (default no) for {target}"
                     ));
                     return;
                 }
                 KeyAction::Char('n') | KeyAction::Esc => {
-                    let _ = commands.send(UiCommand::DeployConfirm { confirmed: false });
+                    let _ = commands.send(UiCommand::DeployConfirm {
+                        confirmed: false,
+                        auto_rollback: false,
+                    });
                     self.deploy_pending = None;
                     self.push_system(format!(
                         "deploy: declined {} — operating without a deploy",
@@ -552,6 +617,31 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        // Auto-rollback sub-choice, asked right after confirming the deploy
+        // target: y arms it, anything else leaves it off (default no).
+        if let Some(target) = self.auto_rollback_prompt.implementation() {
+            match action {
+                KeyAction::Char('y') => {
+                    let _ = commands.send(UiCommand::DeployConfirm {
+                        confirmed: true,
+                        auto_rollback: true,
+                    });
+                    self.auto_rollback_prompt = None;
+                    self.push_system(format!(
+                        "deploy: confirming {target} with auto-rollback on health failure"
+                    ));
+                }
+                _ => {
+                    let _ = commands.send(UiCommand::DeployConfirm {
+                        confirmed: true,
+                        auto_rollback: false,
+                    });
+                    self.auto_rollback_prompt = None;
+                    self.push_system(format!("deploy: confirming {target} without auto-rollback"));
+                }
+            }
+            return;
         }
         // Secret collection: the composer holds the value, renders it
         // masked, and Enter forwards it to the agent task as a DeploySecret
@@ -682,15 +772,17 @@ impl App {
             }
             // The external editor and history could carry a typed secret
             // outside the composer buffer; both are disabled while one is
-            // being entered.
+            // being entered. Pasting an image mid-secret is likewise refused.
             KeyAction::Ctrl('g')
             | KeyAction::Ctrl('r')
             | KeyAction::Ctrl('p')
             | KeyAction::Ctrl('n')
+            | KeyAction::Ctrl('v')
                 if self.secret_input =>
             {
                 self.push_system(
-                    "deploy: editor and history are disabled while entering a secret".to_string(),
+                    "deploy: editor, history, and image paste are disabled while entering a secret"
+                        .to_string(),
                 );
             }
             KeyAction::Ctrl('r') => self.history_prev(commands),
@@ -750,6 +842,12 @@ impl App {
             KeyAction::Ctrl('o') => {
                 self.expand_last_tool = !self.expand_last_tool;
             }
+            KeyAction::Ctrl('v') => match read_clipboard_image() {
+                Some((media_type, bytes)) => self.attach_image(bytes, media_type),
+                None => self.push_system(
+                    "no image on the clipboard (needs wl-paste or xclip on PATH)".to_string(),
+                ),
+            },
             KeyAction::Left => self.cursor = self.cursor.saturating_sub(1),
             KeyAction::Right => self.cursor = (self.cursor + 1).min(self.char_len()),
             KeyAction::Home | KeyAction::Ctrl('a') => self.cursor = 0,
@@ -758,6 +856,12 @@ impl App {
             KeyAction::Down => self.scroll = self.scroll.saturating_sub(1),
             KeyAction::PageUp => self.scroll = self.scroll.saturating_add(10),
             KeyAction::PageDown => self.scroll = self.scroll.saturating_sub(10),
+            // Esc clears a pending image attachment when nothing else is
+            // active (a running turn still cancels with Esc, and the
+            // secret/deploy takes of Esc are handled above).
+            KeyAction::Esc if self.pending_image.is_some() && !self.turn_active => {
+                self.detach_image();
+            }
             KeyAction::Esc if self.turn_active => {
                 let _ = commands.send(UiCommand::Cancel);
                 self.push_system("interrupting…".to_string());
@@ -1128,7 +1232,13 @@ impl App {
         });
         self.streaming.clear();
         self.status = "thinking…".to_string();
-        let _ = commands.send(UiCommand::Submit(text.to_string()));
+        // A pending image rides along on the turn as an image part; it is
+        // never written to the composer history (only the text is pushed).
+        let image = self.take_image_part();
+        let _ = commands.send(UiCommand::Submit {
+            text: text.to_string(),
+            image,
+        });
     }
 
     pub fn apply_ui_event(
@@ -1329,6 +1439,14 @@ impl App {
                     "deploy: finished with failing commands".to_string()
                 });
             }
+            UiEvent::DeployRolledBack { ok, detail } => {
+                self.status = "rolled back".into();
+                self.push_system(if ok {
+                    format!("deploy: rolled back — {detail}")
+                } else {
+                    format!("deploy: rollback failed — {detail}")
+                });
+            }
             UiEvent::HealthChecked { name, ok, detail } => {
                 self.count_health(ok);
                 self.push_system(match (ok, detail) {
@@ -1482,6 +1600,30 @@ impl App {
     }
 }
 
+/// Read an image from the clipboard: prefer `wl-paste` (Wayland), fall back to
+/// `xclip` (X11). Returns the PNG bytes and media type when one is present,
+/// else None so the composer can degrade gracefully.
+pub(crate) fn read_clipboard_image() -> Option<(String, Vec<u8>)> {
+    if let Some(bytes) = clipboard_bytes("wl-paste", &["--type", "image/png"]) {
+        return Some(("image/png".to_string(), bytes));
+    }
+    if let Some(bytes) = clipboard_bytes(
+        "xclip",
+        &["-selection", "clipboard", "-t", "image/png", "-o"],
+    ) {
+        return Some(("image/png".to_string(), bytes));
+    }
+    None
+}
+
+/// Spawn one clipboard reader and return its raw bytes when it succeeds with
+/// non-empty output, else None (a missing tool, an empty clipboard, or a
+/// non-zero exit all degrade to None).
+fn clipboard_bytes(cmd: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let output = std::process::Command::new(cmd).args(args).output().ok()?;
+    (output.status.success() && !output.stdout.is_empty()).then_some(output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1515,7 +1657,7 @@ mod tests {
             .any(|m| m.role == Role::User && m.text == "hi"));
         assert!(matches!(
             rx.try_recv().unwrap(),
-            super::super::UiCommand::Submit(_)
+            super::super::UiCommand::Submit { .. }
         ));
     }
 
@@ -2092,6 +2234,146 @@ mod tests {
     }
 
     #[test]
+    fn theme_command_switches_one_of_the_newly_added_themes() {
+        // `/theme <slug>` on a newly bundled palette repaints and persists it.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        for c in "/theme gruvbox-dark-medium".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert_eq!(app.theme_store.active_slug(), "gruvbox-dark-medium");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::SetTheme { .. }
+        ));
+        assert!(app.messages.iter().any(|m| m.role == Role::System
+            && m.text.contains("Gruvbox Dark Medium (gruvbox-dark-medium)")));
+    }
+
+    #[test]
+    fn attach_and_detach_image_transitions() {
+        let mut app = new_app();
+        assert!(app.image_hint().is_none());
+        // Attaching shows the byte count in the input box and the conversation.
+        app.attach_image(vec![0x89, b'P', b'N', b'G'], "image/png");
+        assert_eq!(
+            app.image_hint().as_deref(),
+            Some("image attached (4 bytes)")
+        );
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System && m.text.contains("image attached (4 bytes)")));
+        // Detaching clears it exactly once.
+        app.detach_image();
+        assert!(app.image_hint().is_none());
+        let cleared = app
+            .messages
+            .iter()
+            .filter(|m| m.text.contains("image attachment cleared"))
+            .count();
+        assert_eq!(cleared, 1);
+        // Detaching again is a silent no-op.
+        app.detach_image();
+        assert!(app.image_hint().is_none());
+        assert_eq!(
+            app.messages
+                .iter()
+                .filter(|m| m.text.contains("image attachment cleared"))
+                .count(),
+            cleared
+        );
+    }
+
+    #[test]
+    fn submit_carries_the_pasted_image_once_and_never_into_history() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        let bytes = vec![1u8, 2, 3, 4, 5];
+        app.attach_image(bytes.implementation(), "image/png");
+        for c in "what is in this screenshot?".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+
+        // Exactly one Submit carries the image, base64-encoded, exactly once.
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let mut submits = 0usize;
+        let mut image_parts = 0usize;
+        while let Ok(command) = rx.try_recv() {
+            if let super::super::UiCommand::Submit { text, image } = command {
+                submits += 1;
+                assert_eq!(text, "what is in this screenshot?");
+                match image {
+                    Some(prricode_provider::ContentPart::Image {
+                        media_type,
+                        data_base64,
+                    }) => {
+                        image_parts += 1;
+                        assert_eq!(media_type, "image/png");
+                        assert_eq!(data_base64, data_b64);
+                    }
+                    other => panic!("expected an image part, got {other:?}"),
+                }
+            }
+        }
+        assert_eq!(submits, 1, "the submit fires exactly once");
+        assert_eq!(image_parts, 1, "the image rides along exactly once");
+
+        // The attachment is consumed: a later submit without re-attaching has
+        // no image.
+        for c in "another message".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        let mut second_image = false;
+        while let Ok(command) = rx.try_recv() {
+            if let super::super::UiCommand::Submit { image, .. } = command {
+                second_image |= image.is_some();
+            }
+        }
+        assert!(!second_image, "the attachment is one-shot");
+
+        // History holds the typed text only — never the attachment material.
+        assert_eq!(
+            app.history,
+            vec![
+                "what is in this screenshot?".to_string(),
+                "another message".to_string()
+            ]
+        );
+        app.handle_key(KeyAction::Ctrl('r'), &tx);
+        assert!(!app.input.contains(&data_b64));
+    }
+
+    #[test]
+    fn ctrl_v_intercepts_the_key_and_degrades_without_an_image() {
+        // Ctrl+V is intercepted as paste (never inserts a literal 'v'); with
+        // no clipboard image it degrades with a message rather than attaching.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.handle_key(KeyAction::Ctrl('v'), &tx);
+        assert!(
+            !app.input.contains('v'),
+            "the paste key is not typed into the composer"
+        );
+        if app.pending_image.is_none() {
+            assert!(app
+                .messages
+                .iter()
+                .any(|m| m.text.contains("no image on the clipboard")));
+        }
+    }
+
+    #[test]
+    fn clipboard_bytes_degrades_when_the_tool_yields_nothing() {
+        // A missing tool, or one whose output is empty, degrades to None.
+        assert!(clipboard_bytes("definitely-not-a-real-binary-prricode", &[]).is_none());
+        assert!(clipboard_bytes("true", &[]).is_none());
+    }
+
+    #[test]
     fn ship_command_opens_the_release_confirmation_gate() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = new_app();
@@ -2198,7 +2480,7 @@ mod tests {
     }
 
     #[test]
-    fn deploy_prompt_answers_with_deploy_confirm() {
+    fn deploy_prompt_asks_for_auto_rollback_then_confirms() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = new_app();
         app.apply_ui_event(
@@ -2210,14 +2492,32 @@ mod tests {
             &tx,
         );
         assert!(app.deploy_pending.is_some());
-        assert!(app.status_line().contains("deploy: cloudflare"));
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("deploy: proposed cloudflare")));
+        // Confirming the target opens the auto-rollback sub-choice; nothing
+        // is confirmed yet.
         app.handle_key(KeyAction::Char('y'), &tx);
+        assert!(app.deploy_pending.is_none());
+        assert_eq!(app.auto_rollback_prompt.as_deref(), Some("cloudflare"));
+        assert!(rx.try_recv().is_err(), "the deploy is not confirmed yet");
+        // Skipping the sub-choice confirms the deploy without auto-rollback.
+        app.handle_key(KeyAction::Char('n'), &tx);
         match rx.try_recv().unwrap() {
-            super::super::UiCommand::DeployConfirm { confirmed } => assert!(confirmed),
+            super::super::UiCommand::DeployConfirm {
+                confirmed,
+                auto_rollback,
+            } => {
+                assert!(confirmed);
+                assert!(!auto_rollback);
+            }
             _ => panic!("expected DeployConfirm"),
         }
-        assert!(app.deploy_pending.is_none());
-        // Declining answers the same prompt the other way.
+        assert!(app.auto_rollback_prompt.is_none());
+
+        // Arming the sub-choice (default no, so only y enables) confirms with
+        // auto-rollback on.
         app.apply_ui_event(
             UiEvent::DeployProposed {
                 target: "fly".into(),
@@ -2226,11 +2526,68 @@ mod tests {
             },
             &tx,
         );
-        app.handle_key(KeyAction::Char('n'), &tx);
+        app.handle_key(KeyAction::Char('y'), &tx);
+        app.handle_key(KeyAction::Char('y'), &tx);
         match rx.try_recv().unwrap() {
-            super::super::UiCommand::DeployConfirm { confirmed } => assert!(!confirmed),
+            super::super::UiCommand::DeployConfirm {
+                confirmed,
+                auto_rollback,
+            } => {
+                assert!(confirmed);
+                assert!(auto_rollback);
+            }
             _ => panic!("expected DeployConfirm"),
         }
+
+        // Declining the target short-circuits with no auto-rollback question.
+        app.apply_ui_event(
+            UiEvent::DeployProposed {
+                target: "vercel".into(),
+                reason: "vercel.json present".into(),
+                credentials: vec![],
+            },
+            &tx,
+        );
+        app.handle_key(KeyAction::Char('n'), &tx);
+        match rx.try_recv().unwrap() {
+            super::super::UiCommand::DeployConfirm {
+                confirmed,
+                auto_rollback,
+            } => {
+                assert!(!confirmed);
+                assert!(!auto_rollback);
+            }
+            _ => panic!("expected DeployConfirm"),
+        }
+        assert!(app.auto_rollback_prompt.is_none());
+    }
+
+    #[test]
+    fn a_deploy_rollback_event_is_reported_in_the_conversation() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::DeployRolledBack {
+                ok: true,
+                detail: "rollback for vercel ran `vercel rollback` (exit 0)".into(),
+            },
+            &tx,
+        );
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System && m.text.contains("deploy: rolled back")));
+        app.apply_ui_event(
+            UiEvent::DeployRolledBack {
+                ok: false,
+                detail: "rollback for fly timed out after 120s".into(),
+            },
+            &tx,
+        );
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("deploy: rollback failed")));
     }
 
     #[test]
