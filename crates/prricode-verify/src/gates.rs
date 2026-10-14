@@ -53,10 +53,7 @@ impl GatePlan {
                 let pkg = "$(if [ -f pnpm-lock.yaml ]; then echo pnpm; \
                            elif [ -f yarn.lock ]; then echo yarn; else echo npm; fi)";
                 vec![
-                    (
-                        "typecheck".to_string(),
-                        format!("{pkg} run -s typecheck || true"),
-                    ),
+                    ("typecheck".to_string(), format!("{pkg} run -s typecheck")),
                     ("test".to_string(), format!("{pkg} test")),
                 ]
             }
@@ -144,6 +141,32 @@ mod tests {
             "gates must pass in a clean workspace"
         );
         assert!(records.iter().any(|r| r.gate == "test"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn node_typecheck_gate_fails_when_the_typecheck_fails() {
+        // A failing typecheck must be visible as a failed gate: the gate
+        // command may not swallow the non-zero exit.
+        let dir = std::env::temp_dir().join(format!("verify-node-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            "{\n  \"name\": \"probe\",\n  \"scripts\": { \"typecheck\": \"node -e \\\"process.exit(1)\\\"\" }\n}\n",
+        )
+        .unwrap();
+        assert_eq!(StackKind::detect(&dir), StackKind::Node);
+        let plan = GatePlan::for_stack(StackKind::Node);
+        let records = run_gates("run-node", &dir, &plan).await;
+        let typecheck = records
+            .iter()
+            .find(|r| r.gate == "typecheck")
+            .expect("node plan includes a typecheck gate");
+        assert!(
+            !typecheck.passed,
+            "a failing typecheck must fail the gate; evidence tail: {}",
+            typecheck.evidence_tail
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
