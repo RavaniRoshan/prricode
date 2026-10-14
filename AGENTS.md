@@ -101,10 +101,14 @@ identifiers. The protocol surface is our own design.
 
 ## Testing
 
-- Unit + integration: `cargo test --workspace` (173+ tests; scripted
+- Unit + integration: `cargo test --workspace` (180 tests; scripted
   providers, mock HTTP servers, real temp-workspace tool execution).
 - E2E: `tests/e2e.sh` drives `prricode serve` over stdio against local Ollama
   (`qwen2.5-coder:3b`) — session, turn, tool execution, `-32601`.
+- Live-provider verification (manual, network; key in the environment only):
+  `docs/TESTING.md` — catalog, one-off chat, a tool-calling turn over stdio,
+  `session/setModel`, the credential store round-trip, and the TUI. Last run
+  against OpenRouter's free catalog and Kilo's `:free` tier.
 - Computer-use tests run against the live X11 display; the gate runner tests
   execute real cargo in temp workspaces.
 - Never commit a test that fakes a real side effect; degrade with a reason or
@@ -114,6 +118,12 @@ identifiers. The protocol surface is our own design.
 
 Protocol surface, TUI, agent loop, product-builder pipeline through operate,
 verification moat, multi-provider layer, and the full clean-room posture are
-complete and CI-green. Roadmap items remaining (macOS computer-use backend,
-Wayland compositor end-to-end, Houston/Snazzy palette verification, approval
-timeout transport surface) are documented in `docs/ROADMAP.md`.
+complete and CI-green. Live-provider verification is done (see Testing);
+two multi-provider bugs it surfaced are fixed and tested: the `auth token`
+clap arg-id collision, and a gateway error object answered with HTTP 200.
+
+Every agent-facing surface is reachable from the TUI (`docs/TUI-GUIDE.md`);
+the config file and env vars are the optional equivalents
+(`docs/CONFIGURATION.md`). Roadmap items remaining (macOS computer-use
+backend, Wayland compositor end-to-end, Houston/Snazzy palette verification,
+approval timeout transport surface) are documented in `docs/ROADMAP.md`.
