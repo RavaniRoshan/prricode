@@ -115,7 +115,13 @@ pub async fn run_build(
             pending.push(runner.run_subagent(TurnInput {
                 session_id: session_id.to_string(),
                 model: String::new(),
-                approval_mode: ApprovalMode::Auto,
+                // The build runs open: the plan gate is the human consent
+                // point for these edits, the turns work in a disposable
+                // worktree, and the per-task gates are what judge the result.
+                // With `Auto` every write/shell call is Sensitive and would
+                // wait out the approval timeout before being denied, so an
+                // autonomous build could never finish a wave.
+                approval_mode: ApprovalMode::Open,
                 workspace_root: workspace.to_path_buf(),
                 data_dir: data_dir.to_path_buf(),
                 history: vec![],

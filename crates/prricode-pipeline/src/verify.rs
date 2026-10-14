@@ -220,7 +220,8 @@ mod tests {
         ProviderResult, StreamEvent, Usage,
     };
     use prricode_spec::{Requirement, Requirements};
-    use prricode_workflow::{WorkflowDefinition, WorkflowEngine};
+    use prricode_workflow::{WorkflowDefinition, WorkflowEngine, WorkflowStep};
+    use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
@@ -324,6 +325,179 @@ mod tests {
             .join(&run_id)
             .join("acceptance-dossier.md")
             .exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A verifier that also answers the build's turns: the first calls carry a
+    /// `write_file` tool call so the workspace really gains a file, and the
+    /// verifier's own turn returns the fenced verdict array.
+    struct BuildingVerifier {
+        reply: String,
+        writes: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for BuildingVerifier {
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Echo
+        }
+
+        async fn list_models(&self) -> ProviderResult<Vec<prricode_provider::ModelInfo>> {
+            Ok(vec![])
+        }
+
+        async fn chat(&self, _request: &ChatRequest) -> ProviderResult<ChatResponse> {
+            let call = self
+                .writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let message = if call == 0 {
+                AssistantMessage {
+                    content_parts: vec![],
+                    tool_calls: vec![prricode_provider::ToolCall {
+                        id: "call_1".into(),
+                        name: "write_file".into(),
+                        arguments: json!({"path": "app.py", "content": "print('built')\n"}),
+                    }],
+                }
+            } else {
+                AssistantMessage {
+                    content_parts: vec![ContentPart::text(self.reply.implementation())],
+                    tool_calls: vec![],
+                }
+            };
+            let finish = if message.tool_calls.is_empty() {
+                "stop"
+            } else {
+                "tool_calls"
+            };
+            Ok(ChatResponse {
+                message,
+                usage: Usage::default(),
+                finish_reason: finish.into(),
+                cost_usd: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            request: &ChatRequest,
+            events: mpsc::UnboundedSender<StreamEvent>,
+        ) -> ProviderResult<ChatResponse> {
+            let response = self.chat(request).await?;
+            let text = response.message.text();
+            if !text.is_empty() {
+                let _ = events.send(StreamEvent::TextDelta(text));
+            }
+            let _ = events.send(StreamEvent::Done);
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn build_then_verify_renders_a_dossier_over_the_built_files() {
+        // The chain the build stage runs: build the waves over a real
+        // workspace, then verify that workspace and render the dossier.
+        let dir = std::env::temp_dir().join(format!("build-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname=\"fx\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let persistence = Arc::new(Persistence::new(&dir).unwrap());
+        let provider: Arc<dyn ModelProvider> = Arc::new(BuildingVerifier {
+            reply: "```json\n[\
+                {\"requirement_id\":\"R1\",\"verdict\":\"PASS\",\"evidence\":\"gates green\"},\
+                {\"requirement_id\":\"R2\",\"verdict\":\"UNVERIFIED\",\"evidence\":\"no exercising surface\"}\
+            ]\n```"
+                .into(),
+            writes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let builder = AgentRunner::new(Arc::implementation(&provider), Arc::new(ApprovalEngine::new()))
+            .with_persistence(Arc::implementation(&persistence));
+        let verifier = evidence_only_verifier(&builder);
+
+        let engine = WorkflowEngine::new();
+        let run_id = engine
+            .start(
+                "session-1",
+                WorkflowDefinition {
+                    name: "build".into(),
+                    steps: vec![WorkflowStep::Prompt {
+                        label: "[wave 1] scaffold".into(),
+                        prompt: "scaffold the app".into(),
+                    }],
+                },
+                None,
+            )
+            .unwrap();
+
+        let summary = crate::build::run_build(&builder, &engine, &run_id, "session-1", &dir, &dir)
+            .await
+            .unwrap();
+        assert_eq!(summary, "build completed");
+        assert!(
+            dir.join("app.py").exists(),
+            "the build turn must have written a real file into the workspace"
+        );
+
+        let requirements = Requirements {
+            items: vec![
+                Requirement {
+                    id: "R1".into(),
+                    ears: "WHEN a THE SYSTEM SHALL b".into(),
+                    acceptance: vec!["x".into()],
+                },
+                Requirement {
+                    id: "R2".into(),
+                    ears: "WHEN c THE SYSTEM SHALL d".into(),
+                    acceptance: vec!["y".into()],
+                },
+            ],
+        };
+        let requirements_json = serde_json::to_string(&requirements).unwrap();
+        let report = run_verify_stage(
+            &verifier,
+            &engine,
+            &run_id,
+            "session-1",
+            &dir,
+            &dir,
+            &requirements_json,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.requirements.len(),
+            2,
+            "every requirement gets a verdict"
+        );
+        assert!(report.gates.iter().all(|g| g.passed));
+        assert_eq!(report.requirements[0].verdict, Verdict::Pass);
+        assert_eq!(report.requirements[1].verdict, Verdict::Unverified);
+        assert!(
+            report.not_tested.iter().any(|entry| entry.contains("R2")),
+            "an UNVERIFIED verdict must land in not_tested: {:?}",
+            report.not_tested
+        );
+        let dossier = dir.join("runs").join(&run_id).join("acceptance-dossier.md");
+        assert!(dossier.exists(), "the dossier renders into the run dir");
+        let markdown = std::fs::read_to_string(&dossier).unwrap();
+        assert!(
+            markdown.contains("R1") && markdown.contains("R2"),
+            "the dossier names each requirement"
+        );
+        // The report round-trips from persistence, which is what
+        // pipeline/verifyRead reads for the TUI and the protocol.
+        let stored = dossier::load_report(&Persistence::new(&dir).unwrap(), &run_id)
+            .expect("the verify pass persists its report");
+        assert_eq!(stored.requirements.len(), 2);
+        assert_eq!(stored.run_id, run_id);
         std::fs::remove_dir_all(&dir).ok();
     }
 
