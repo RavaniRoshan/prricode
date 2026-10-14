@@ -865,46 +865,59 @@ impl PrricodeServer {
 
     async fn handle_account_login_start(&self, params: Option<Value>) -> Result<Value> {
         let params: AccountLoginStartParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "started": true }))
+        Ok(oauth_flag_off(
+            params.command_id.unwrap_or_default(),
+            "accountLogin/start",
+        ))
     }
 
     async fn handle_account_login_cancel(&self, params: Option<Value>) -> Result<Value> {
         let params: AccountLoginCancelParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "cancelled": true }))
+        Ok(oauth_flag_off(params.command_id, "accountLogin/cancel"))
     }
 
     async fn handle_device_login(&self, params: Option<Value>) -> Result<Value> {
         let params: DeviceLoginParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({
-            "commandId": params.command_id,
-            "started": true,
-            "verificationUrl": null,
-            "userCode": null,
-        }))
+        Ok(oauth_flag_off(
+            params.command_id.unwrap_or_default(),
+            "auth/deviceLogin",
+        ))
     }
 
     async fn handle_supersede_login_credential(&self, params: Option<Value>) -> Result<Value> {
         let params: SupersedeLoginCredentialParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "superseded": true }))
+        Ok(oauth_flag_off(
+            params.command_id.unwrap_or_default(),
+            "auth/supersedeLoginCredential",
+        ))
     }
 
     async fn handle_mcp_server_oauth_login(&self, params: Option<Value>) -> Result<Value> {
         let params: McpServerOAuthLoginParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "started": true }))
+        Ok(oauth_flag_off(
+            params.command_id.unwrap_or_default(),
+            "mcpServer/oauthLogin",
+        ))
     }
 
     async fn handle_mcp_server_oauth_login_cancel(&self, params: Option<Value>) -> Result<Value> {
         let params: McpServerOAuthLoginCancelParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "cancelled": true }))
+        Ok(oauth_flag_off(
+            params.command_id,
+            "mcpServer/oauthLoginCancel",
+        ))
     }
 
     async fn handle_subscription_activate(&self, params: Option<Value>) -> Result<Value> {
         let params: SubscriptionActivationParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "commandId": params.command_id, "activated": true }))
+        Ok(oauth_flag_off(
+            params.command_id.unwrap_or_default(),
+            "subscription/activate",
+        ))
     }
 
     async fn handle_session_start(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
@@ -2751,6 +2764,18 @@ fn computer_use_state() -> ComputerUseSetupState {
     }
 }
 
+/// Response for the external-OAuth protocol methods, which are present on the
+/// wire but not enabled in this build.
+// future work: external OAuth (browser/device login) — prricode's own
+// credential store (`prricode_provider::credentials`) is the auth surface.
+fn oauth_flag_off(command_id: CommandId, method: &str) -> Value {
+    json!({
+        "commandId": command_id,
+        "enabled": false,
+        "reason": format!("{method} is not enabled in this build; use `prricode auth token <provider>`"),
+    })
+}
+
 fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -2815,6 +2840,40 @@ mod mcp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn external_oauth_methods_are_flagged_off() {
+        let (server, _rx) = PrricodeServer::new(
+            std::env::temp_dir(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        for method in [
+            "accountLogin/start",
+            "accountLogin/cancel",
+            "auth/deviceLogin",
+            "auth/supersedeLoginCredential",
+            "subscription/activate",
+            "mcpServer/oauthLogin",
+            "mcpServer/oauthLoginCancel",
+        ] {
+            let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": { "commandId": "00000000-0000-7000-8000-000000000001" }
+            }))
+            .unwrap();
+            let response = server.handle_request(request).await;
+            let result = response.result.expect("no error");
+            // Never fake success: the flag-off shape says so explicitly.
+            assert_eq!(result["enabled"], serde_json::json!(false), "{method}");
+            assert!(result["reason"]
+                .as_str()
+                .unwrap()
+                .contains("prricode auth token"));
+        }
+    }
 
     #[tokio::test]
     async fn pipeline_methods_are_registered() {

@@ -671,25 +671,48 @@ async fn main() -> Result<()> {
         },
         Command::Auth { action } => match action {
             AuthAction::Status => {
+                println!("credentials (stored, owner-only):");
+                let stored = prricode_provider::credential_providers();
+                if stored.is_empty() {
+                    println!("  none");
+                }
+                for provider in stored {
+                    println!("  {provider}: stored");
+                }
+                println!("environment:");
                 for (label, var) in AUTH_ENV_VARS {
                     let state = if std::env::var(var).is_ok() {
                         "set"
                     } else {
                         "not set"
                     };
-                    println!("{label}: {state} ({var})");
+                    println!("  {label}: {state} ({var})");
                 }
             }
-            AuthAction::Token => {
-                println!("prricode stores no tokens; credentials come from environment variables:");
-                println!("  KILO_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, OLLAMA_API_KEY, OLLAMA_HOST");
-                println!("Run 'prricode auth status' to see which are set.");
+            AuthAction::Token { provider, key_env } => {
+                // Store a credential: read the key from the environment variable
+                // named on the command line, or from stdin when piped.
+                let key = match key_env.as_ref().and_then(|var| std::env::var(var).ok()) {
+                    Some(key) => key,
+                    None => {
+                        let mut line = String::new();
+                        if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+                            anyhow::bail!("no key on stdin; pass --key-env <VAR>");
+                        }
+                        line.trim().to_string()
+                    }
+                };
+                if key.is_empty() {
+                    anyhow::bail!("empty key");
+                }
+                prricode_provider::credential_set(provider, &key)?;
+                println!("stored credential for {provider}");
             }
             AuthAction::Refresh => {
                 println!(
-                    "Nothing to refresh: prricode reads API keys from the environment on every request."
+                    "Nothing to refresh: prricode resolves credentials per request (env > config > store)."
                 );
-                println!("Run 'prricode auth token' for setup guidance.");
+                println!("Run 'prricode auth status' to see what is configured.");
             }
         },
         Command::Login { provider } => match provider {
