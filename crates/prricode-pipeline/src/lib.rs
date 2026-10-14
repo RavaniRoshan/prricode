@@ -58,9 +58,12 @@ impl Pipeline {
     }
 }
 
+pub mod build;
 pub mod clarify;
 pub mod plan;
 pub mod specify;
+
+pub use build::{graph_to_definition, run_build};
 
 #[cfg(test)]
 mod tests {
