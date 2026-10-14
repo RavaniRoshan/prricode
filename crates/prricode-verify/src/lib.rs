@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod gates;
+
 /// One executed verification gate: a command run against the workspace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateRecord {
