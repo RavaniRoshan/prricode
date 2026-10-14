@@ -23,7 +23,7 @@ for surface in prricode_core::internals::inventory() { /* family, members, dispo
 A test asserts every family carries an explicit disposition and that flagged
 entries name their future work, so the inventory cannot silently drift.
 
-**Why this replaces "deliberately not mirrored":** the earlier phrasing left
+**Why this replaces the unaccounted-internals phrasing:** the earlier phrasing left
 internals unaccounted. The inventory makes each one an explicit, greppable
 decision — implemented or flagged — which is what zero-open-gaps means for the
 engine surface.
