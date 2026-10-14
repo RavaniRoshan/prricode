@@ -37,6 +37,35 @@ pub struct PendingApproval {
 pub struct PipelineView {
     pub stage: String,
     pub gate: Option<String>,
+    /// Verify counts once a verification pass has run; `None` before the
+    /// verify stage produces a report.
+    pub verify: Option<VerifyCounts>,
+}
+
+/// Gate and verdict tallies the rail renders as its verify segment.
+#[derive(Debug, Implementation)]
+pub struct VerifyCounts {
+    pub gates_passed: usize,
+    pub gates_total: usize,
+    pub pass: usize,
+    pub fail: usize,
+    pub unverified: usize,
+}
+
+impl PipelineView {
+    /// The rail's verify segment: `verify: gates 3/3 · verdicts 1P/0F/1U`.
+    pub fn verify_segment(&self) -> Option<String> {
+        self.verify.as_ref().map(|verify| {
+            format!(
+                "verify: gates {}/{} · verdicts {}P/{}F/{}U",
+                verify.gates_passed,
+                verify.gates_total,
+                verify.pass,
+                verify.fail,
+                verify.unverified
+            )
+        })
+    }
 }
 
 /// Events delivered from the agent task to the UI.
@@ -63,6 +92,15 @@ pub enum UiEvent {
     },
     PipelineStageChanged {
         stage: String,
+    },
+    /// The verify stage finished: rail counts plus the rendered dossier path.
+    VerifyDone {
+        report_path: String,
+        gates_passed: usize,
+        gates_total: usize,
+        pass: usize,
+        fail: usize,
+        unverified: usize,
     },
     TurnStarted,
     TurnEnded {
@@ -107,6 +145,8 @@ pub struct App {
     pub status: String,
     pub pending_approval: Option<PendingApproval>,
     pub pipeline: Option<PipelineView>,
+    /// The rendered acceptance dossier's path, set by the verify stage.
+    dossier_path: Option<String>,
     pub scroll: u16,
     pub should_quit: bool,
     pub input_tokens: u64,
@@ -139,6 +179,7 @@ impl App {
             status: "idle".to_string(),
             pending_approval: None,
             pipeline: None,
+            dossier_path: None,
             scroll: 0,
             should_quit: false,
             input_tokens: 0,
@@ -173,6 +214,9 @@ impl App {
             line.push_str(&format!(" · stage: {}", pipeline.stage));
             if let Some(gate) = &pipeline.gate {
                 line.push_str(&format!(" · gate: {gate}"));
+            }
+            if let Some(verify) = pipeline.verify_segment() {
+                line.push_str(&format!(" · {verify}"));
             }
         }
         line
@@ -516,6 +560,7 @@ impl App {
                     self.pipeline = Some(PipelineView {
                         stage: "concept".to_string(),
                         gate: None,
+                        verify: None,
                     });
                     self.interview_active = false;
                     let _ = commands.send(UiCommand::PipelineConcept {
@@ -541,6 +586,7 @@ impl App {
                     });
                     self.push_system("pipeline: starting build".to_string());
                 }
+                "dossier" => self.open_dossier(),
                 other => self.push_system(format!("unknown command: /{other} (try /help)")),
             }
             return;
@@ -616,7 +662,11 @@ impl App {
                     .as_ref()
                     .map(|p| p.stage.implementation())
                     .unwrap_or_else(|| "clarify".to_string());
-                self.pipeline = Some(PipelineView { stage, gate: None });
+                self.pipeline = Some(PipelineView {
+                    stage,
+                    gate: None,
+                    verify: None,
+                });
                 self.status = "clarifying…".to_string();
                 self.messages.push(TurnMessage {
                     role: Role::Assistant,
@@ -633,6 +683,7 @@ impl App {
                 self.pipeline = Some(PipelineView {
                     stage,
                     gate: Some(gate.implementation()),
+                    verify: None,
                 });
                 self.status = "confirmation required".to_string();
                 self.push_system(format!(
@@ -640,8 +691,41 @@ impl App {
                 ));
             }
             UiEvent::PipelineStageChanged { stage } => {
-                self.pipeline = Some(PipelineView { stage, gate: None });
+                self.pipeline = Some(PipelineView {
+                    stage,
+                    gate: None,
+                    verify: None,
+                });
                 self.push_system(format!("pipeline stage: {}", self.pipeline_stage()));
+            }
+            UiEvent::VerifyDone {
+                report_path,
+                gates_passed,
+                gates_total,
+                pass,
+                fail,
+                unverified,
+            } => {
+                self.dossier_path = Some(report_path);
+                let stage = self
+                    .pipeline
+                    .as_ref()
+                    .map(|p| p.stage.implementation())
+                    .unwrap_or_else(|| "build".to_string());
+                self.pipeline = Some(PipelineView {
+                    stage,
+                    gate: None,
+                    verify: Some(VerifyCounts {
+                        gates_passed,
+                        gates_total,
+                        pass,
+                        fail,
+                        unverified,
+                    }),
+                });
+                self.push_system(format!(
+                    "verify: gates {gates_passed}/{gates_total} · verdicts {pass}P/{fail}F/{unverified}U — /dossier opens the report"
+                ));
             }
             UiEvent::TurnStarted => {
                 self.turn_active = true;
@@ -661,6 +745,36 @@ impl App {
                 self.output_tokens += output;
             }
             UiEvent::Log(message) => self.push_system(message),
+        }
+    }
+
+    /// Open the rendered acceptance dossier: log its path, then page it with
+    /// `$PAGER` (or `less`) when one is available. A missing report — none
+    /// produced yet, or a file that is gone — is a graceful log line that
+    /// prints the path, never an error.
+    fn open_dossier(&mut self) {
+        let Some(path) = self.dossier_path.implementation() else {
+            self.push_system(
+                "dossier: no verification report yet — /build runs the verify stage".to_string(),
+            );
+            return;
+        };
+        if !std::path::Path::new(&path).exists() {
+            self.push_system(format!("dossier: no file at {path}"));
+            return;
+        }
+        self.push_system(format!("dossier: {path}"));
+        let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+        let mut parts = pager.split_whitespace();
+        let command = parts.next().unwrap_or("less");
+        let args: Vec<&str> = parts.collect();
+        if std::process::Command::new(command)
+            .args(args)
+            .arg(&path)
+            .status()
+            .is_err()
+        {
+            self.push_system(format!("dossier: no pager available — open {path} by hand"));
         }
     }
 
@@ -947,6 +1061,54 @@ mod tests {
             Some("spec-confirmation")
         );
         assert!(app.status_line().contains("spec-confirmation"));
+    }
+
+    #[test]
+    fn verify_done_event_updates_the_rail_counts() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::VerifyDone {
+                report_path: "/tmp/runs/run-1/acceptance-dossier.md".into(),
+                gates_passed: 3,
+                gates_total: 3,
+                pass: 1,
+                fail: 0,
+                unverified: 1,
+            },
+            &tx,
+        );
+        assert!(app
+            .status_line()
+            .contains("verify: gates 3/3 · verdicts 1P/0F/1U"));
+        assert_eq!(
+            app.dossier_path.as_deref(),
+            Some("/tmp/runs/run-1/acceptance-dossier.md")
+        );
+    }
+
+    #[test]
+    fn dossier_command_logs_a_missing_report_gracefully() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        // No verification report has been produced yet.
+        for c in "/dossier".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System && m.text.contains("no verification report")));
+        // A report path whose file is gone logs the path, and never opens it.
+        app.dossier_path = Some("/nonexistent/prricode/acceptance-dossier.md".into());
+        for c in "/dossier".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(app.messages.iter().any(|m| m.role == Role::System
+            && m.text
+                .contains("/nonexistent/prricode/acceptance-dossier.md")));
     }
 
     #[test]

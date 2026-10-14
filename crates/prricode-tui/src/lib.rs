@@ -15,16 +15,17 @@ use prricode_persistence::Persistence;
 use prricode_pipeline::{
     build::{graph_to_definition, run_build},
     clarify::Clarifier,
-    plan, specify, Pipeline, PipelineStage,
+    plan, run_verify_stage, specify, verify, Pipeline, PipelineStage, VerifyEventKind,
 };
 use prricode_provider::{
     create_provider, load_config, resolve_settings, AssistantMessage, ChatMessage, ContentPart,
     ModelProvider, ProviderKind,
 };
 use prricode_spec::{Concept, Spec, TaskGraph};
+use prricode_verify::Verdict;
 use prricode_workflow::WorkflowEngine;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -580,6 +581,10 @@ struct PipelineFlow {
     concept_confirmed: bool,
     spec_confirmed: bool,
     building: bool,
+    /// The current build's workflow run id, persisted with the pipeline
+    /// state so the server's `pipeline/verifyRead` resolves this session's
+    /// verification report by run id.
+    run_id: Option<String>,
     /// Specify and plan share one in-flight claim: a late specify must not
     /// regenerate the spec while a plan is consuming it.
     stage_in_flight: bool,
@@ -595,6 +600,7 @@ impl PipelineFlow {
         self.concept_confirmed = false;
         self.spec_confirmed = false;
         self.building = false;
+        self.run_id = None;
         self.stage_in_flight = false;
         self.stage = PipelineStage::Clarify.label().to_string();
     }
@@ -659,6 +665,7 @@ fn persist_pipeline(pipeline: &Pipeline, session_id: &str, flow: &PipelineFlow) 
         "concept": flow.concept.as_ref().and_then(|c| serde_json::to_value(c).ok()),
         "spec": flow.spec.as_ref().and_then(|s| serde_json::to_value(s).ok()),
         "waves": waves,
+        "runId": flow.run_id,
     });
     if let Err(e) = pipeline
         .persistence
@@ -869,6 +876,13 @@ async fn run_build_stage(ctx: StageCtx) {
             return;
         }
     };
+    {
+        // Record the run id so the verify pass and pipeline/verifyRead can
+        // resolve this session's dossier.
+        let mut flow = ctx.flow.lock().unwrap();
+        flow.run_id = Some(run_id.implementation());
+        persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
+    }
     // The build turns work in a per-run worktree so concurrent waves never
     // race on the launch workspace; fall back to the launch workspace only
     // when the worktree could not be prepared.
@@ -896,6 +910,7 @@ async fn run_build_stage(ctx: StageCtx) {
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                 "pipeline: build finished — {summary}"
             )));
+            run_verify_after_build(&ctx, &engine, &run_id, &build_workspace).await;
         }
         // A run that stops mid-wave reads as paused/cancelled, not failed.
         Err(e) => {
@@ -904,6 +919,93 @@ async fn run_build_stage(ctx: StageCtx) {
             )));
         }
     }
+}
+
+/// The verify pass after a successful build: run the verify stage on the
+/// build's workspace, relay one log line per gate and verdict plus the
+/// dossier's path, and finish with the `VerifyDone` rail counts.
+async fn run_verify_after_build(
+    ctx: &StageCtx,
+    engine: &WorkflowEngine,
+    run_id: &str,
+    workspace: &Path,
+) {
+    let requirements_json = {
+        let flow = ctx.flow.lock().unwrap();
+        let Some(spec) = flow.spec.as_ref() else {
+            let _ = ctx.ui_tx.send(UiEvent::Log(
+                "pipeline: verify skipped — no spec to verify".to_string(),
+            ));
+            return;
+        };
+        match serde_json::to_string(&spec.requirements) {
+            Ok(json) => json,
+            Err(e) => {
+                let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                    "pipeline: verify skipped — spec requirements do not serialize: {e}"
+                )));
+                return;
+            }
+        }
+    };
+    // The verifier runs on the evidence-only runner derived from the
+    // pipeline runner: it reads the workspace, never writes or executes.
+    let verifier = verify::evidence_only_verifier(&ctx.pipeline.runner);
+    let report = match run_verify_stage(
+        &verifier,
+        engine,
+        run_id,
+        &ctx.session_id,
+        workspace,
+        &ctx.data_dir,
+        &requirements_json,
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(e) => {
+            let _ = ctx
+                .ui_tx
+                .send(UiEvent::Log(format!("pipeline: verify failed — {e}")));
+            return;
+        }
+    };
+    let dossier_path = ctx
+        .data_dir
+        .join("runs")
+        .join(run_id)
+        .join("acceptance-dossier.md");
+    for event in verify::report_events(&report, &dossier_path) {
+        let _ = ctx.ui_tx.send(match event {
+            VerifyEventKind::GateResult { gate, passed } => UiEvent::Log(format!(
+                "verify: gate {gate} {}",
+                if passed { "passed" } else { "FAILED" }
+            )),
+            VerifyEventKind::Verdict {
+                requirement_id,
+                verdict,
+            } => UiEvent::Log(format!("verify: {requirement_id} — {verdict}")),
+            VerifyEventKind::DossierReady { path } => {
+                UiEvent::Log(format!("verify: dossier ready — {path}"))
+            }
+        });
+    }
+    let gates_passed = report.gates.iter().filter(|gate| gate.passed).count();
+    let tally = |verdict: Verdict| {
+        report
+            .requirements
+            .iter()
+            .filter(|v| v.verdict == verdict)
+            .count()
+    };
+    let _ = ctx.ui_tx.send(UiEvent::VerifyDone {
+        report_path: dossier_path.display().to_string(),
+        gates_passed,
+        gates_total: report.gates.len(),
+        pass: tally(Verdict::Pass),
+        fail: tally(Verdict::Fail),
+        unverified: tally(Verdict::Unverified),
+    });
 }
 
 #[cfg(test)]

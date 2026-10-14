@@ -71,6 +71,10 @@ struct PipelineState {
     spec: Option<Value>,
     #[serde(default)]
     waves: Vec<Vec<String>>,
+    /// The current build's workflow run id, set once a build starts; the
+    /// session's verification report resolves through it when present.
+    #[serde(default)]
+    run_id: Option<String>,
 }
 
 /// Convert agent events to JSON-RPC notifications on the wire.
@@ -565,6 +569,7 @@ impl PrricodeServer {
             "pipeline/conceptSet" => self.handle_pipeline_concept_set(params).await,
             "pipeline/specRead" => self.handle_pipeline_spec_read(params).await,
             "pipeline/planRead" => self.handle_pipeline_plan_read(params).await,
+            "pipeline/verifyRead" => self.handle_pipeline_verify_read(params).await,
             _ => Err(JsonRpcError::method_not_found(format!("unknown method: {method}")).into()),
         }
     }
@@ -2127,6 +2132,40 @@ impl PrricodeServer {
         let state = self.pipeline_state(&params.session_id.to_string());
         Ok(json!({ "waves": state.waves, "stage": Self::pipeline_stage_label(&state) }))
     }
+
+    /// Read the session's verification report.
+    ///
+    /// Resolution order: the run id stored in the session's pipeline state
+    /// (set by the TUI when a build starts) when its run has a dossier;
+    /// otherwise the most recent persisted `dossier:<runId>` row. v0.2
+    /// does not scope dossier rows by session, so a session that never ran
+    /// verification reads the latest report in the data dir instead of its
+    /// own — and a data dir with no dossier at all reads `null`.
+    async fn handle_pipeline_verify_read(&self, params: Option<Value>) -> Result<Value> {
+        let params: PipelineVerifyReadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let state = self.pipeline_state(&params.session_id.to_string());
+        let report = state
+            .run_id
+            .as_deref()
+            .and_then(|run_id| prricode_verify::dossier::load_report(&self.persistence, run_id))
+            .or_else(|| Self::latest_dossier_report(&self.persistence));
+        Ok(json!({ "report": report }))
+    }
+
+    /// The most recent persisted verification report: dossier rows are keyed
+    /// by uuid v7 run id, so the lexicographically greatest `dossier:<runId>`
+    /// key names the latest run.
+    fn latest_dossier_report(
+        persistence: &Persistence,
+    ) -> Option<prricode_verify::VerificationReport> {
+        let run_id = persistence
+            .list_settings()
+            .ok()?
+            .into_iter()
+            .filter_map(|(key, _)| key.strip_prefix("dossier:").map(String::from))
+            .max()?;
+        prricode_verify::dossier::load_report(persistence, &run_id)
+    }
 }
 
 fn parse_history_tool_calls(content: &Value) -> Vec<ToolCall> {
@@ -2368,6 +2407,12 @@ pub struct PipelineSpecReadParams {
 #[derive(Debug, Implementation, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelinePlanReadParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Implementation, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineVerifyReadParams {
     pub session_id: SessionId,
 }
 
@@ -2678,5 +2723,70 @@ mod tests {
         .unwrap();
         let response = server.handle_request(request).await;
         assert!(response.error.is_none(), "pipeline/specRead must not error");
+    }
+
+    #[tokio::test]
+    async fn pipeline_verify_read_returns_null_for_an_unknown_session() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "prricode-server-verify-null-{}",
+            std::process::id()
+        ));
+        let (server, _rx) =
+            PrricodeServer::new(data_dir, Box::new(prricode_provider::EchoProvider), None);
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "pipeline/verifyRead",
+            "params": { "sessionId": "00000000-0000-7000-8000-000000000001" }
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        assert!(
+            response.error.is_none(),
+            "pipeline/verifyRead must not error for an unknown session"
+        );
+        assert_eq!(
+            response.result.expect("ok result")["report"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_verify_read_returns_the_latest_persisted_report() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "prricode-server-verify-read-{}",
+            std::process::id()
+        ));
+        let report = prricode_verify::VerificationReport {
+            run_id: "run-42".into(),
+            gates: vec![],
+            requirements: vec![prricode_verify::GateVerdict {
+                requirement_id: "R1".into(),
+                verdict: prricode_verify::Verdict::Pass,
+                evidence: "tests green".into(),
+            }],
+            not_tested: vec![],
+            residual_risk: vec![],
+        };
+        prricode_verify::dossier::persist_report(&Persistence::new(&data_dir).unwrap(), &report)
+            .unwrap();
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "pipeline/verifyRead",
+            "params": { "sessionId": "00000000-0000-7000-8000-000000000002" }
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        assert!(response.error.is_none());
+        let result = response.result.expect("ok result");
+        assert_eq!(result["report"]["run_id"], "run-42");
+        assert_eq!(result["report"]["requirements"][0]["verdict"], "pass");
+        std::fs::remove_dir_all(&data_dir).ok();
     }
 }

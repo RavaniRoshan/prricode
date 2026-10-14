@@ -114,6 +114,12 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ));
             }
+            if let Some(verify) = pipeline.verify_segment() {
+                spans.push(Span::styled(
+                    format!(" · {verify}"),
+                    Style::default().fg(Color::Green),
+                ));
+            }
         }
         spans
     }))

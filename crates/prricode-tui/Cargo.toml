@@ -10,6 +10,7 @@ prricode-persistence = { path = "../prricode-persistence" }
 prricode-agent = { path = "../prricode-agent" }
 prricode-spec = { path = "../prricode-spec" }
 prricode-pipeline = { path = "../prricode-pipeline" }
+prricode-verify = { path = "../prricode-verify" }
 prricode-workflow = { path = "../prricode-workflow" }
 ratatui = "0.29"
 crossterm = "0.28"
