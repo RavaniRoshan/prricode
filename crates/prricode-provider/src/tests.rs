@@ -284,6 +284,29 @@ fn chat_response_parsing() {
 }
 
 #[test]
+fn chat_response_surfaces_a_top_level_provider_error() {
+    // Some gateways answer HTTP 200 with an error object instead of an HTTP
+    // error status; the parse error must carry the provider's own reason.
+    let body = json!({
+        "error": {
+            "message": "Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (16/16)",
+            "code": 502,
+            "metadata": {"error_type": "provider_unavailable"}
+        }
+    });
+    let err = parse_chat_response("openrouter", &body).unwrap_err();
+    let shown = format!("{err}");
+    assert!(
+        shown.contains("ResourceExhausted"),
+        "error should carry the upstream reason, got: {shown}"
+    );
+    assert!(
+        shown.contains("openrouter"),
+        "error should name the provider, got: {shown}"
+    );
+}
+
+#[test]
 fn chat_response_parsing_object_arguments() {
     let body = json!({
         "choices": [{
