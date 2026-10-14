@@ -59,6 +59,10 @@ pub enum SpecError {
     NotEars { id: String },
     #[error("requirement {id} has no acceptance criteria")]
     NoAcceptance { id: String },
+    #[error("task graph has a cycle at {at}")]
+    Cycle { at: String },
+    #[error("task {task} depends on unknown task {dep}")]
+    UnknownDep { task: String, dep: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +155,67 @@ impl StackPreset {
             Self::FastApi => "fastapi full-project template with SQLAlchemy + Alembic migrations",
             Self::StaticApi => "static site generator plus a serverless functions directory",
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskNode {
+    pub id: String,
+    pub label: String,
+    pub prompt: String,
+    pub depends_on: Vec<String>,
+    pub requirement_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskGraph {
+    pub nodes: Vec<TaskNode>,
+}
+
+impl TaskGraph {
+    pub fn waves(&self) -> Result<Vec<Vec<TaskNode>>, SpecError> {
+        let ids: Vec<&String> = self.nodes.iter().map(|n| &n.id).collect();
+        for node in &self.nodes {
+            for dep in &node.depends_on {
+                if !ids.contains(&dep) {
+                    return Err(SpecError::UnknownDep {
+                        task: node.id.clone(),
+                        dep: dep.clone(),
+                    });
+                }
+            }
+        }
+        let mut placed: Vec<String> = Vec::new();
+        let mut remaining: Vec<&TaskNode> = self.nodes.iter().collect();
+        let mut waves = Vec::new();
+        while !remaining.is_empty() {
+            let (ready, blocked): (Vec<&TaskNode>, Vec<&TaskNode>) = remaining
+                .into_iter()
+                .partition(|n| n.depends_on.iter().all(|d| placed.contains(d)));
+            if ready.is_empty() {
+                let stuck = blocked.first().map(|n| n.id.clone()).unwrap_or_default();
+                return Err(SpecError::Cycle { at: stuck });
+            }
+            for node in &ready {
+                placed.push(node.id.clone());
+            }
+            let wave: Vec<TaskNode> = ready.into_iter().cloned().collect();
+            waves.push(wave);
+            remaining = blocked;
+        }
+        Ok(waves)
+    }
+
+    pub fn traceability(&self) -> Vec<String> {
+        let mut seen = Vec::new();
+        for node in &self.nodes {
+            if let Some(req) = &node.requirement_id {
+                if !seen.contains(req) {
+                    seen.push(req.clone());
+                }
+            }
+        }
+        seen
     }
 }
 
@@ -252,5 +317,51 @@ mod tests {
             .description()
             .to_lowercase()
             .contains("fastapi"));
+    }
+
+    fn node(id: &str, deps: &[&str], req: Option<&str>) -> TaskNode {
+        TaskNode {
+            id: id.into(),
+            label: id.into(),
+            prompt: format!("do {id}"),
+            depends_on: deps.iter().map(|d| d.to_string()).collect(),
+            requirement_id: req.map(String::from),
+        }
+    }
+
+    #[test]
+    fn waves_group_independent_tasks_and_gate_dependents() {
+        let graph = TaskGraph {
+            nodes: vec![
+                node("scaffold", &[], None),
+                node("model", &["scaffold"], Some("R1")),
+                node("ui", &["scaffold"], Some("R2")),
+                node("wire", &["model", "ui"], Some("R3")),
+            ],
+        };
+        let waves = graph.waves().unwrap();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0].len(), 1);
+        assert_eq!(waves[1].len(), 2); // model + ui run concurrently
+        assert_eq!(waves[2][0].id, "wire");
+        assert_eq!(
+            graph.traceability(),
+            vec!["R1".to_string(), "R2".to_string(), "R3".to_string()]
+        );
+    }
+
+    #[test]
+    fn graph_rejects_cycles_and_unknown_deps() {
+        let cyclic = TaskGraph {
+            nodes: vec![node("a", &["b"], None), node("b", &["a"], None)],
+        };
+        assert!(matches!(cyclic.waves(), Err(SpecError::Cycle { .. })));
+        let dangling = TaskGraph {
+            nodes: vec![node("a", &["ghost"], None)],
+        };
+        assert!(matches!(
+            dangling.waves(),
+            Err(SpecError::UnknownDep { .. })
+        ));
     }
 }
