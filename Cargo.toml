@@ -15,6 +15,7 @@ members = [
     "crates/prricode-voice",
     "crates/prricode-tui",
     "crates/prricode-spec",
+    "crates/prricode-pipeline",
 ]
 
 [workspace.package]
