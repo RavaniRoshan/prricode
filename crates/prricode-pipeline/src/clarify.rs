@@ -42,14 +42,35 @@ impl Clarifier {
         }
         if self.concept.audience.is_empty() {
             self.concept.audience = answer;
-            self.concept.ambiguities.retain(|a| a != "audience");
         } else if self.concept.value.is_empty() {
             self.concept.value = answer;
-            self.concept.ambiguities.retain(|a| a != "value");
         } else if self.concept.success_criteria.is_empty() {
             self.concept.success_criteria.push(answer);
         } else if self.concept.non_goals.is_empty() {
             self.concept.non_goals.push(answer);
+        }
+        self.clear_settled_markers();
+    }
+
+    /// The interview question that clears an ambiguity marker. The exit path
+    /// uses it to re-ask a marker the field-driven interview skipped past.
+    pub fn question_for_marker(marker: &str) -> Option<&'static str> {
+        QUESTIONS
+            .iter()
+            .find(|(_, m)| *m == marker)
+            .map(|(question, _)| *question)
+    }
+
+    /// Markers track field state, not interview history: drop each marker
+    /// once its field is settled. `Concept::from_idea` seeds an "audience"
+    /// marker over an already-filled audience, so clearing markers only in
+    /// their own apply branch would leave that marker stale forever.
+    fn clear_settled_markers(&mut self) {
+        if !self.concept.audience.is_empty() {
+            self.concept.ambiguities.retain(|a| a != "audience");
+        }
+        if !self.concept.value.is_empty() {
+            self.concept.ambiguities.retain(|a| a != "value");
         }
     }
 }
@@ -94,5 +115,28 @@ mod tests {
         assert!(clarifier.next_question().is_none());
         assert!(clarifier.concept.is_ready());
         assert_eq!(clarifier.concept.audience, "commuters");
+    }
+
+    #[test]
+    fn a_fully_interviewed_from_idea_concept_is_ready() {
+        // `from_idea` fills audience up front and seeds both the "audience"
+        // and "value" markers; the markers must not outlive their fields or
+        // `is_ready` never flips for a fully-interviewed concept.
+        let mut clarifier = Clarifier::new(Concept::from_idea(
+            "a service that turns RSS feeds into podcast briefings for commuters",
+        ));
+        assert_eq!(
+            clarifier.next_question().as_deref(),
+            Some("What is the core value they get?")
+        );
+        let mut answers = 0;
+        while let Some(_question) = clarifier.next_question() {
+            clarifier.apply("daily audio briefings for commuters");
+            answers += 1;
+            assert!(answers <= 3, "interview must terminate");
+        }
+        assert_eq!(answers, 3);
+        assert!(clarifier.concept.ambiguities.is_empty());
+        assert!(clarifier.concept.is_ready());
     }
 }
