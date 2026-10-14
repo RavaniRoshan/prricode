@@ -55,6 +55,8 @@ impl Pipeline {
     }
 }
 
+pub mod clarify;
+
 #[cfg(test)]
 mod tests {
     use super::*;
