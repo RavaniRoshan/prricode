@@ -230,7 +230,7 @@ fn render_approval(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     render_main(frame, app, area);
     if let Some(approval) = &app.pending_approval {
         let theme = palette(app);
-        let popup = centered_rect(74, 8, area);
+        let popup = centered_rect(74, 13, area);
         frame.render_widget(Clear, popup);
         let text = vec![
             Line::from(vec![Span::styled(
@@ -246,35 +246,45 @@ fn render_approval(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             ]),
             Line::from(Span::raw(approval.summary.clone())),
             Line::from(""),
+        ]
+        .into_iter()
+        .chain((0..approval.choices.len()).map(|i| {
+            let selected = i == approval.choice_index;
+            let marker = if selected { "> " } else { "  " };
             Line::from(vec![
                 Span::styled(
-                    "[y]",
-                    Style::default().fg(theme.user).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" allow once  "),
-                Span::styled(
-                    "[s]",
-                    Style::default()
-                        .fg(theme.assistant)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" allow for session  "),
-                Span::styled(
-                    "[a]",
+                    marker,
                     Style::default()
                         .fg(theme.rail_stage)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" always in workspace  "),
                 Span::styled(
-                    "[n]",
+                    approval.choices[i],
+                    if selected {
+                        Style::default().fg(theme.user).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.system)
+                    },
+                ),
+            ])
+        }))
+        .chain([
+            Line::from(""),
+            // Spec section 4.2 footer: the approve key relabels per risk class.
+            Line::from(vec![
+                Span::styled(
+                    format!(
+                        "enter approve {}",
+                        crate::app::RiskClass::for_tool(&approval.kind).label()
+                    ),
                     Style::default()
-                        .fg(theme.approval)
+                        .fg(theme.rail_stage)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" deny"),
+                Span::raw("  -  space reject  -  tab switch  -  esc close"),
             ]),
-        ];
+        ])
+        .collect::<Vec<_>>();
         let popup_widget = Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
