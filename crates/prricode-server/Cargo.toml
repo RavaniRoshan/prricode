@@ -8,6 +8,8 @@ prricode-core = { path = "../prricode-core" }
 prricode-agent = { path = "../prricode-agent" }
 prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
+prricode-pipeline = { path = "../prricode-pipeline" }
+prricode-spec = { path = "../prricode-spec" }
 prricode-computer-use = { path = "../prricode-computer-use" }
 prricode-skills = { path = "../prricode-skills" }
 prricode-workflow = { path = "../prricode-workflow" }

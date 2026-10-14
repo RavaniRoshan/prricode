@@ -94,6 +94,39 @@ Clients may be granted (and must respect) these capability flags:
 | `workflow/pause` / `workflow/resume` | pause/resume a run |
 | `workflow/childControl` | `skip` or `retry` a child step (with `attempt`) |
 
+### Pipeline
+The product-builder pipeline (concept -> clarify -> specify -> plan -> build).
+Pipeline state persists per session in the settings table under the
+`pipeline:<sessionId>` key.
+
+| method | purpose |
+|---|---|
+| `pipeline/conceptSet` | start the pipeline from a raw idea; returns the concept plus the first clarifier question |
+| `pipeline/specRead` | read the latest spec draft and the current stage |
+| `pipeline/planRead` | read the wave-scheduled task plan and the current stage |
+
+`pipeline/conceptSet` params: `{ sessionId, idea }` (optional `commandId`).
+Result: `{ commandId, concept, question }` — `concept` is the Concept JSON
+(`problem`, `audience`, `value`, `nonGoals`, `successCriteria`, `ambiguities`,
+`stack`); `question` is the first clarifier question, or `null` when the
+concept is already unambiguous. The question also arrives as a notification
+(see below).
+
+`pipeline/specRead` params: `{ sessionId }`. Result: `{ spec, stage }` — `spec`
+is the latest Spec JSON (`concept`, `requirements`, `design`, `tasks`,
+`version`), or an empty draft (version 1, no requirements) when the pipeline
+has not started; `stage` is the current stage label (`concept`, `clarify`,
+`specify`, `plan`, `build`).
+
+`pipeline/planRead` params: `{ sessionId }`. Result: `{ waves, stage }` —
+`waves` is an array of waves, each an array of task ids in dependency order
+(empty until the plan exists); `stage` is the current stage label.
+
+Pipeline notifications ride the existing `turn/item` notification: each
+pipeline item carries `kind: "pipeline_question"`, `role: "assistant"`, a
+`stage` label (`pipeline:<stage>`, e.g. `clarify`), and text content holding
+the clarifier question. Clients must ignore unknown notifications.
+
 ### Approvals
 | method | purpose |
 |---|---|
