@@ -56,6 +56,12 @@ prricode exec "say hi" --provider kilo --model liquid/lfm-2.5-2.6b:free
 prricode exec "say hi" --provider ollama --model qwen2.5-coder:3b
 ```
 
+The gate-runner tests execute real toolchains in temp workspaces — the Rust
+path (cargo) is deterministic everywhere; the Node gate test needs node on
+PATH (absent → exit 127, still a failing gate, so the failure mode is safe).
+The Python gate path is exercised via unit-level plans; pytest presence on
+the host decides which command runs.
+
 ## CI
 
 `.github/workflows/ci.yml` has two jobs:
