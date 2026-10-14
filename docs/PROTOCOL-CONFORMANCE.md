@@ -108,8 +108,17 @@ All 18 subcommands (`resume`, `exec`, `config`, `export`, `trace`,
 `model-profile`, `skills`, `voice`, `plugins`, `sandbox`, `schema`, `serve`,
 `session-message`, `mcp`, `auth`, `login`, `logout`, `init`) parse and execute.
 Real behavior: TOML config read/write, skill discovery and import, bwrap
-probing, env-var auth introspection, SQLite session export/trace/resume, plugin
-and marketplace management, MCP server registry, starter-config scaffolding.
+probing, **prricode's own credential store** (`auth token/status`), SQLite
+session export/trace/resume, plugin and marketplace management, MCP server
+registry, starter-config scaffolding.
+
+**Delta from the public build (marked):** the latest public
+release (the release, sha256-verified against the channel manifest) ships **12**
+subcommands and `untrusted|on-request|never` approval modes; the 18-subcommand
+surface and `closed|open|auto|suggestive` modes come from the protocol specification,
+which was taken from a earlier build. Our CLI is a superset of the public
+one and matches the mapped one; the prior-mapping claims are not re-verifiable
+against any available artifact.
 
 ### Capabilities — 6 declared
 
