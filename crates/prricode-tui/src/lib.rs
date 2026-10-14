@@ -250,10 +250,19 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         match answered {
                             Some((Some(question), _)) => AnswerOutcome::Interview { question },
                             Some((None, concept)) => {
-                                flow.concept = Some(concept);
-                                flow.stage = PipelineStage::Concept.label().to_string();
-                                persist_pipeline(&pipeline, &session_id, &flow);
-                                AnswerOutcome::ConceptReady
+                                // Exit gate: the concept gate opens only on a
+                                // ready concept; a leftover ambiguity marker
+                                // keeps the interview open on its question.
+                                if concept.is_ready() {
+                                    flow.concept = Some(concept);
+                                    flow.stage = PipelineStage::Concept.label().to_string();
+                                    persist_pipeline(&pipeline, &session_id, &flow);
+                                    AnswerOutcome::ConceptReady
+                                } else {
+                                    AnswerOutcome::Interview {
+                                        question: remaining_question(&concept),
+                                    }
+                                }
                             }
                             None => AnswerOutcome::NoInterview,
                         }
@@ -596,6 +605,19 @@ enum AnswerOutcome {
     Interview { question: String },
     ConceptReady,
     NoInterview,
+}
+
+/// The question that clears a not-ready concept's first remaining ambiguity
+/// marker. Domain invariants make the markerless case unreachable (the
+/// field-driven interview exhausts every field before it stops asking), so it
+/// gets a hold question instead of opening the concept gate.
+fn remaining_question(concept: &Concept) -> String {
+    concept
+        .ambiguities
+        .iter()
+        .find_map(|marker| Clarifier::question_for_marker(marker))
+        .map(str::to_string)
+        .unwrap_or_else(|| "Tell me more about this concept before we confirm it.".to_string())
 }
 
 /// Shared context for a spawned pipeline stage turn.
