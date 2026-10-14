@@ -136,4 +136,12 @@ this goal).
 
 ---
 
-**Queue — CLOSED: Gap 1 (visual spec + themes + approval tiers + keybindings + commands + checklist), Gap 2 (internals), Gap 3 (skill runtime), Gap 4 (auth). REMAINING: Gap 5 (macOS roadmap in docs/ROADMAP.md), Gap 6 (CLI subcommand delta in the conformance report), then the final full-gate run.
+**CLOSED — all gaps.** Gap 1 (visual spec + TUI implementation + checklist),
+Gap 2 (internals disposition), Gap 3 (skill-script runtime per the Runtime
+ruling: interpreter subprocess through the sandbox, no embedded V8 — the
+latest public binary contains none and executes skill scripts as
+`python3 <helper>` subprocesses), Gap 4 (auth: prricode's credential store +
+external OAuth flagged off), Gap 5 (macOS computer-use in docs/ROADMAP.md),
+Gap 6 (CLI subcommand delta basis in the conformance report).
+Final gates: build clean, clippy -D warnings zero, fmt clean, 157 workspace
+tests, full Ollama e2e PASS.
