@@ -1,5 +1,6 @@
 //! Product Builder pipeline: stages Concept -> Clarify -> Specify -> Plan ->
-//! Build-with-gates, orchestrated over the existing AgentRunner.
+//! Build-with-gates -> Ship (release, agent-arranged deploy, operate),
+//! orchestrated over the existing AgentRunner.
 
 use std::sync::Arc;
 
@@ -90,10 +91,12 @@ impl Pipeline {
 pub mod build;
 pub mod clarify;
 pub mod plan;
+pub mod ship;
 pub mod specify;
 pub mod verify;
 
 pub use build::{graph_to_definition, run_build};
+pub use ship::{ShipEventKind, ShipStage};
 pub use verify::{run_verify_stage, VerifyEventKind};
 
 #[cfg(test)]
