@@ -57,6 +57,24 @@ skill unless the destination is removed first.
 - `skill/import` — `{source, dryRun, force}`; returns `imported`, `name`, `dest`.
 - `skill/setActivation` — `{activation, scope, selector}`; persisted per session.
 
+## Skill scripts (runtime contract)
+
+A skill may ship executable helpers under `scripts/`. The runtime contract,
+mirroring the prricode's skill-script invocation:
+
+```
+<interpreter> <skill-dir>/scripts/<helper> <args...>
+```
+
+- The interpreter comes from the script's **shebang**
+  (`#!/usr/bin/env python3` → `env python3`; `#!/bin/bash` → bash; no shebang →
+  the file must be executable and is run directly).
+- Scripts execute through **`prricode-sandbox`** with no network and a 120s
+  timeout; the caller's workspace root is where data files resolve.
+- Loaded skills expose `scripts` and `script_command()`; the bundled
+  `wordcount` skill (`skills/wordcount/`) is the reference example and is
+  executed end-to-end in its tests.
+
 ## Authoring tips
 
 - One skill, one job. Name it after the job.
