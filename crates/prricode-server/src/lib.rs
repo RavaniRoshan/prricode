@@ -570,6 +570,8 @@ impl PrricodeServer {
             "pipeline/specRead" => self.handle_pipeline_spec_read(params).await,
             "pipeline/planRead" => self.handle_pipeline_plan_read(params).await,
             "pipeline/verifyRead" => self.handle_pipeline_verify_read(params).await,
+            "pipeline/shipRead" => self.handle_pipeline_ship_read(params).await,
+            "pipeline/operateRead" => self.handle_pipeline_operate_read(params).await,
             _ => Err(JsonRpcError::method_not_found(format!("unknown method: {method}")).into()),
         }
     }
@@ -2166,6 +2168,101 @@ impl PrricodeServer {
             .max()?;
         prricode_verify::dossier::load_report(persistence, &run_id)
     }
+
+    /// Read the session's latest ship record.
+    ///
+    /// Resolution mirrors `pipeline/verifyRead`: the `runId` stored in the
+    /// session's pipeline state when that run has a persisted
+    /// `ship:<runId>` row, otherwise the most recent such row. A session
+    /// (or data dir) with no ship reads `null`. The record carries no
+    /// deploy material: credential values never leave the deploy child
+    /// process's environment.
+    async fn handle_pipeline_ship_read(&self, params: Option<Value>) -> Result<Value> {
+        let params: PipelineShipReadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let ship = self
+            .latest_ship_record(&params.session_id.to_string())
+            .map(|record| serde_json::to_value(&record).unwrap_or(Value::Null))
+            .unwrap_or(Value::Null);
+        Ok(json!({ "ship": ship }))
+    }
+
+    /// The session's latest ship record: its run's row when one exists, else
+    /// the most recent `ship:<runId>` row in the data dir (ship rows are
+    /// keyed by uuid v7 run id, so the lexicographically greatest key names
+    /// the latest run, exactly as the dossier rows do).
+    fn latest_ship_record(&self, session_id: &str) -> Option<prricode_ship::ShipRecord> {
+        let state = self.pipeline_state(session_id);
+        if let Some(run_id) = state.run_id.as_deref() {
+            if let Some(record) = Self::ship_record(&self.persistence, run_id) {
+                return Some(record);
+            }
+        }
+        let run_id = self
+            .persistence
+            .list_settings()
+            .ok()?
+            .into_iter()
+            .filter_map(|(key, _)| key.strip_prefix("ship:").map(String::from))
+            .max()?;
+        Self::ship_record(&self.persistence, &run_id)
+    }
+
+    fn ship_record(persistence: &Persistence, run_id: &str) -> Option<prricode_ship::ShipRecord> {
+        persistence
+            .get_setting(&format!("ship:{run_id}"))
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+    }
+
+    /// Read the session's operate log entries.
+    ///
+    /// The log lives at `<data_dir>/operate/<runId>.jsonl`, where the run id
+    /// resolves exactly as the ship stage persists it (the pipeline state's
+    /// runId, else the session id); when that run has no log, the most
+    /// recent log in the operate directory is read instead — the same
+    /// "latest for session" resolution `verifyRead` applies to dossiers. A
+    /// data dir with no log at all reads an empty list.
+    async fn handle_pipeline_operate_read(&self, params: Option<Value>) -> Result<Value> {
+        let params: PipelineOperateReadParams =
+            serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session_id = params.session_id.to_string();
+        let state = self.pipeline_state(&session_id);
+        let run_id = state
+            .run_id
+            .clone()
+            .filter(|run_id| !run_id.is_empty())
+            .unwrap_or_else(|| session_id.clone());
+        let events =
+            prricode_ship::operate::read_operate_log(&self.data_dir, &run_id).unwrap_or_default();
+        if !events.is_empty() {
+            return Ok(json!({ "events": events }));
+        }
+        let latest = Self::latest_operate_run_id(&self.data_dir)
+            .and_then(|run_id| {
+                prricode_ship::operate::read_operate_log(&self.data_dir, &run_id).ok()
+            })
+            .unwrap_or_default();
+        Ok(json!({ "events": latest }))
+    }
+
+    /// The most recent operate log's run id: the lexicographically greatest
+    /// `<runId>.jsonl` file name in the data dir's operate directory, mirroring
+    /// the latest-row resolution for ship and dossier rows.
+    fn latest_operate_run_id(data_dir: &std::path::Path) -> Option<String> {
+        std::fs::read_dir(data_dir.join("operate"))
+            .ok()?
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension()?.to_str()? != "jsonl" {
+                    return None;
+                }
+                let stem = path.file_stem()?.to_string_lossy().to_string();
+                (!stem.is_empty()).then_some(stem)
+            })
+            .max()
+    }
 }
 
 fn parse_history_tool_calls(content: &Value) -> Vec<ToolCall> {
@@ -2413,6 +2510,18 @@ pub struct PipelinePlanReadParams {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PipelineVerifyReadParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineShipReadParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineOperateReadParams {
     pub session_id: SessionId,
 }
 
@@ -2787,6 +2896,142 @@ mod tests {
         let result = response.result.expect("ok result");
         assert_eq!(result["report"]["run_id"], "run-42");
         assert_eq!(result["report"]["requirements"][0]["verdict"], "pass");
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn pipeline_ship_read_returns_null_for_an_unknown_session() {
+        let data_dir =
+            std::env::temp_dir().join(format!("prricode-server-ship-null-{}", std::process::id()));
+        let (server, _rx) =
+            PrricodeServer::new(data_dir, Box::new(prricode_provider::EchoProvider), None);
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "pipeline/shipRead",
+            "params": { "sessionId": "00000000-0000-7000-8000-000000000001" }
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        assert!(
+            response.error.is_none(),
+            "pipeline/shipRead must not error for an unknown session"
+        );
+        assert_eq!(
+            response.result.expect("ok result")["ship"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_operate_read_returns_empty_for_an_unknown_session() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "prricode-server-operate-null-{}",
+            std::process::id()
+        ));
+        let (server, _rx) =
+            PrricodeServer::new(data_dir, Box::new(prricode_provider::EchoProvider), None);
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "pipeline/operateRead",
+            "params": { "sessionId": "00000000-0000-7000-8000-000000000001" }
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        assert!(
+            response.error.is_none(),
+            "pipeline/operateRead must not error for an unknown session"
+        );
+        assert_eq!(
+            response.result.expect("ok result")["events"],
+            serde_json::json!([])
+        );
+    }
+
+    #[tokio::test]
+    async fn pipeline_ship_read_returns_the_latest_persisted_record() {
+        let data_dir =
+            std::env::temp_dir().join(format!("prricode-server-ship-read-{}", std::process::id()));
+        let mut record = prricode_ship::ShipRecord::new("run-ship-42");
+        record.repo = "acme/probe".into();
+        record.tag = Some("v2026-10-14-abcdef01".into());
+        record.install_steps = vec!["cargo run".into()];
+        Persistence::new(&data_dir)
+            .unwrap()
+            .set_setting("ship:run-ship-42", &serde_json::to_string(&record).unwrap())
+            .unwrap();
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.clone(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "pipeline/shipRead",
+            "params": { "sessionId": "00000000-0000-7000-8000-000000000002" }
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        assert!(response.error.is_none());
+        let result = response.result.expect("ok result");
+        assert_eq!(result["ship"]["run_id"], "run-ship-42");
+        assert_eq!(result["ship"]["repo"], "acme/probe");
+        assert_eq!(result["ship"]["tag"], "v2026-10-14-abcdef01");
+        assert_eq!(result["ship"]["install_steps"][0], "cargo run");
+        // The record has no field that could carry deploy material.
+        assert!(result["ship"].get("requiredCredentials").is_none());
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn pipeline_operate_read_returns_the_sessions_log_events() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "prricode-server-operate-read-{}",
+            std::process::id()
+        ));
+        let event = |kind: &str, detail: &str| {
+            prricode_ship::OperateEvent::new("run-operate-1", kind, detail)
+        };
+        prricode_ship::operate::append_operate_log(
+            &data_dir,
+            "run-operate-1",
+            &event("ship", "shipped acme/probe as v1"),
+        )
+        .unwrap();
+        prricode_ship::operate::append_operate_log(
+            &data_dir,
+            "run-operate-1",
+            &event("health", "release ok: exit code 0"),
+        )
+        .unwrap();
+        let persistence = Persistence::new(&data_dir).unwrap();
+        persistence
+            .set_setting(
+                "pipeline:00000000-0000-7000-8000-000000000003",
+                r#"{"stage":"ship","runId":"run-operate-1"}"#,
+            )
+            .unwrap();
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.clone(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "pipeline/operateRead",
+            "params": { "sessionId": "00000000-0000-7000-8000-000000000003" }
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        assert!(response.error.is_none());
+        let result = response.result.expect("ok result");
+        let events = result["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["kind"], "ship");
+        assert_eq!(events[1]["kind"], "health");
         std::fs::remove_dir_all(&data_dir).ok();
     }
 }

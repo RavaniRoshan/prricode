@@ -1297,6 +1297,7 @@ dependencies = [
  "prricode-persistence",
  "prricode-pipeline",
  "prricode-provider",
+ "prricode-ship",
  "prricode-skills",
  "prricode-spec",
  "prricode-verify",

@@ -40,6 +40,9 @@ pub struct PipelineView {
     /// Verify counts once a verification pass has run; `None` before the
     /// verify stage produces a report.
     pub verify: Option<VerifyCounts>,
+    /// Ship/operate counts once a release shipped; `None` before the ship
+    /// stage runs.
+    pub ship: Option<ShipCounts>,
 }
 
 /// Gate and verdict tallies the rail renders as its verify segment.
@@ -50,6 +53,17 @@ pub struct VerifyCounts {
     pub pass: usize,
     pub fail: usize,
     pub unverified: usize,
+}
+
+/// Ship, deploy, and health tallies the rail renders as its ship segment.
+#[derive(Debug, Clone)]
+pub struct ShipCounts {
+    /// The released tag, once the ship stage ran.
+    pub tag: Option<String>,
+    /// The proposed deploy target, once a plan is on the table.
+    pub deploy: Option<String>,
+    pub health_ok: usize,
+    pub health_total: usize,
 }
 
 impl PipelineView {
@@ -66,6 +80,29 @@ impl PipelineView {
             )
         })
     }
+
+    /// The rail's ship segment:
+    /// `ship: v… · deploy: cloudflare · health: 2/2`.
+    pub fn ship_segment(&self) -> Option<String> {
+        self.ship.as_ref().map(|ship| {
+            format!(
+                "ship: {} · deploy: {} · health: {}/{}",
+                ship.tag.as_deref().unwrap_or("—"),
+                ship.deploy.as_deref().unwrap_or("—"),
+                ship.health_ok,
+                ship.health_total,
+            )
+        })
+    }
+}
+
+/// A deploy plan awaiting the operator's choice: the target, why it was
+/// proposed, and the exact credentials the plan will ask for.
+#[derive(Debug, Clone)]
+pub struct DeployPrompt {
+    pub target: String,
+    pub reason: String,
+    pub credentials: Vec<String>,
 }
 
 /// Events delivered from the agent task to the UI.
@@ -101,6 +138,36 @@ pub enum UiEvent {
         pass: usize,
         fail: usize,
         unverified: usize,
+    },
+    /// The ship stage released the workspace: its tag, the release URL, and
+    /// the install steps to show.
+    ShipReady {
+        tag: String,
+        release_url: Option<String>,
+        install_steps: Vec<String>,
+    },
+    /// A deploy plan is on the table: the target, why it was proposed, and
+    /// the exact credentials it will ask for. The operator answers y/n.
+    DeployProposed {
+        target: String,
+        reason: String,
+        credentials: Vec<String>,
+    },
+    /// The plan asked for one credential value: the composer switches to
+    /// masked secret-input mode until it is submitted.
+    DeploySecret {
+        name: String,
+        purpose: String,
+    },
+    /// The deploy commands finished.
+    DeployDone {
+        ok: bool,
+    },
+    /// One health probe finished; the failed case carries its detail.
+    HealthChecked {
+        name: String,
+        ok: bool,
+        detail: Option<String>,
     },
     TurnStarted,
     TurnEnded {
@@ -147,6 +214,16 @@ pub struct App {
     pub pipeline: Option<PipelineView>,
     /// The rendered acceptance dossier's path, set by the verify stage.
     dossier_path: Option<String>,
+    /// The deploy plan awaiting the operator's choice, set when the ship
+    /// flow proposes one.
+    pub deploy_pending: Option<DeployPrompt>,
+    /// Masked secret collection: while set, the composer holds one
+    /// credential value, renders it as `*` per character, and only ever
+    /// sends it out as a `DeploySecret` command.
+    pub secret_input: bool,
+    /// The credential the value being typed answers; `Some` while the
+    /// ship flow waits for it.
+    pub secret_name: Option<String>,
     pub scroll: u16,
     pub should_quit: bool,
     pub input_tokens: u64,
@@ -180,6 +257,9 @@ impl App {
             pending_approval: None,
             pipeline: None,
             dossier_path: None,
+            deploy_pending: None,
+            secret_input: false,
+            secret_name: None,
             scroll: 0,
             should_quit: false,
             input_tokens: 0,
@@ -218,8 +298,21 @@ impl App {
             if let Some(verify) = pipeline.verify_segment() {
                 line.push_str(&format!(" · {verify}"));
             }
+            if let Some(ship) = pipeline.ship_segment() {
+                line.push_str(&format!(" · {ship}"));
+            }
         }
         line
+    }
+
+    /// The composer text: masked to one `*` per character while a secret
+    /// value is being collected, so the value never renders.
+    pub fn composer_text(&self) -> String {
+        if self.secret_input {
+            "*".repeat(self.input.chars().count())
+        } else {
+            self.input.clone()
+        }
     }
 
     fn char_len(&self) -> usize {
@@ -290,6 +383,74 @@ impl App {
                 _ => {}
             }
         }
+        // Pending deploy plan: y confirms and opens credential collection,
+        // n/Esc declines the deploy.
+        if let Some(prompt) = self.deploy_pending.clone() {
+            match action {
+                KeyAction::Char('y') => {
+                    let _ = commands.send(UiCommand::DeployConfirm { confirmed: true });
+                    self.deploy_pending = None;
+                    self.push_system(format!(
+                        "deploy: confirmed {} — collecting credentials",
+                        prompt.target
+                    ));
+                    return;
+                }
+                KeyAction::Char('n') | KeyAction::Esc => {
+                    let _ = commands.send(UiCommand::DeployConfirm { confirmed: false });
+                    self.deploy_pending = None;
+                    self.push_system(format!(
+                        "deploy: declined {} — operating without a deploy",
+                        prompt.target
+                    ));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Secret collection: the composer holds the value, renders it
+        // masked, and Enter forwards it to the agent task as a DeploySecret
+        // command. The value never lands in messages or history, and the
+        // composer is cleared on submit.
+        if self.secret_input {
+            match action {
+                KeyAction::Enter => {
+                    let value = std::mem::take(&mut self.input);
+                    self.cursor = 0;
+                    self.history_index = None;
+                    self.secret_input = false;
+                    let name = self.secret_name.clone().unwrap_or_default();
+                    if value.trim().is_empty() {
+                        // The flow still waits for this credential.
+                        self.push_system(format!(
+                            "deploy: no value entered for {name} — /deploy to retry"
+                        ));
+                        return;
+                    }
+                    let _ = commands.send(UiCommand::DeploySecret {
+                        name: name.clone(),
+                        value,
+                    });
+                    self.secret_name = None;
+                    self.push_system(format!(
+                        "deploy: value for {name} sent — masked, never stored"
+                    ));
+                    return;
+                }
+                // Abandon the entry: the half-typed value must not survive
+                // into the plain-text composer.
+                KeyAction::Esc => {
+                    self.secret_input = false;
+                    self.input.clear();
+                    self.cursor = 0;
+                    self.push_system(
+                        "deploy: secret entry cancelled — /deploy to retype".to_string(),
+                    );
+                    return;
+                }
+                _ => {}
+            }
+        }
         match action {
             KeyAction::Char(c) => {
                 let idx = self.byte_index();
@@ -340,6 +501,19 @@ impl App {
                 } else {
                     self.should_quit = true;
                 }
+            }
+            // The external editor and history could carry a typed secret
+            // outside the composer buffer; both are disabled while one is
+            // being entered.
+            KeyAction::Ctrl('g')
+            | KeyAction::Ctrl('r')
+            | KeyAction::Ctrl('p')
+            | KeyAction::Ctrl('n')
+                if self.secret_input =>
+            {
+                self.push_system(
+                    "deploy: editor and history are disabled while entering a secret".to_string(),
+                );
             }
             KeyAction::Ctrl('r') => self.history_prev(commands),
             KeyAction::Ctrl('p') => self.history_prev(commands),
@@ -561,6 +735,7 @@ impl App {
                         stage: "concept".to_string(),
                         gate: None,
                         verify: None,
+                        ship: None,
                     });
                     self.interview_active = false;
                     let _ = commands.send(UiCommand::PipelineConcept {
@@ -585,6 +760,36 @@ impl App {
                         stage: "build".to_string(),
                     });
                     self.push_system("pipeline: starting build".to_string());
+                }
+                "ship" => {
+                    let _ = commands.send(UiCommand::ShipStart);
+                    self.push_system(
+                        "ship: starting — the release needs a confirmation".to_string(),
+                    );
+                }
+                "deploy" => {
+                    if let Some(name) = self.secret_name.clone() {
+                        // The flow is waiting for this credential: re-open
+                        // the masked entry instead of starting anything.
+                        self.secret_input = true;
+                        self.push_system(format!(
+                            "deploy: enter {name} — the value is masked and never stored"
+                        ));
+                    } else if let Some(prompt) = &self.deploy_pending {
+                        self.push_system(format!(
+                            "deploy: {} proposed ({}) — press y to confirm, n to decline",
+                            prompt.target, prompt.reason
+                        ));
+                    } else {
+                        self.push_system(
+                            "deploy: no deploy in play — /ship ships, then proposes a plan"
+                                .to_string(),
+                        );
+                    }
+                }
+                "operate" => {
+                    let _ = commands.send(UiCommand::OperateRun);
+                    self.push_system("operate: running a health pass".to_string());
                 }
                 "dossier" => self.open_dossier(),
                 other => self.push_system(format!("unknown command: /{other} (try /help)")),
@@ -666,6 +871,7 @@ impl App {
                     stage,
                     gate: None,
                     verify: None,
+                    ship: None,
                 });
                 self.status = "clarifying…".to_string();
                 self.messages.push(TurnMessage {
@@ -684,6 +890,7 @@ impl App {
                     stage,
                     gate: Some(gate.clone()),
                     verify: None,
+                    ship: None,
                 });
                 self.status = "confirmation required".to_string();
                 self.push_system(format!(
@@ -695,6 +902,7 @@ impl App {
                     stage,
                     gate: None,
                     verify: None,
+                    ship: None,
                 });
                 self.push_system(format!("pipeline stage: {}", self.pipeline_stage()));
             }
@@ -722,10 +930,92 @@ impl App {
                         fail,
                         unverified,
                     }),
+                    ship: None,
                 });
                 self.push_system(format!(
                     "verify: gates {gates_passed}/{gates_total} · verdicts {pass}P/{fail}F/{unverified}U — /dossier opens the report"
                 ));
+            }
+            UiEvent::ShipReady {
+                tag,
+                release_url,
+                install_steps,
+            } => {
+                self.set_ship(ShipCounts {
+                    tag: Some(tag.clone()),
+                    deploy: None,
+                    health_ok: 0,
+                    health_total: 0,
+                });
+                self.status = "shipped".to_string();
+                self.push_system(format!("ship: released {tag}"));
+                if let Some(url) = release_url {
+                    self.push_system(format!("ship: release — {url}"));
+                }
+                if !install_steps.is_empty() {
+                    self.push_system(format!(
+                        "ship: install steps\n{}",
+                        install_steps
+                            .iter()
+                            .map(|step| format!("- {step}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                }
+            }
+            UiEvent::DeployProposed {
+                target,
+                reason,
+                credentials,
+            } => {
+                self.deploy_pending = Some(DeployPrompt {
+                    target: target.clone(),
+                    reason: reason.clone(),
+                    credentials: credentials.clone(),
+                });
+                self.set_ship_deploy(Some(target.clone()));
+                self.status = "confirmation required".to_string();
+                self.push_system(format!(
+                    "deploy: proposed {target} — {reason}; asks for {}",
+                    if credentials.is_empty() {
+                        "no credentials".to_string()
+                    } else {
+                        credentials.join(", ")
+                    }
+                ));
+                self.push_system("deploy: press y to confirm, n to decline".to_string());
+            }
+            UiEvent::DeploySecret { name, purpose } => {
+                self.interview_active = false;
+                self.deploy_pending = None;
+                self.secret_input = true;
+                self.secret_name = Some(name.clone());
+                self.status = "secret required".to_string();
+                self.push_system(format!("deploy: {name} — {purpose}"));
+                self.push_system(format!(
+                    "deploy: type the value for {name} and press Return (masked, never stored)"
+                ));
+            }
+            UiEvent::DeployDone { ok } => {
+                self.deploy_pending = None;
+                self.status = if ok {
+                    "idle".into()
+                } else {
+                    "deploy failed".into()
+                };
+                self.push_system(if ok {
+                    "deploy: finished ok".to_string()
+                } else {
+                    "deploy: finished with failing commands".to_string()
+                });
+            }
+            UiEvent::HealthChecked { name, ok, detail } => {
+                self.count_health(ok);
+                self.push_system(match (ok, detail) {
+                    (true, _) => format!("health: {name} ok"),
+                    (false, Some(detail)) => format!("health: {name} FAILED — {detail}"),
+                    (false, None) => format!("health: {name} FAILED"),
+                });
             }
             UiEvent::TurnStarted => {
                 self.turn_active = true;
@@ -802,6 +1092,48 @@ impl App {
             pipeline.gate = None;
         }
         self.status = "thinking…".to_string();
+    }
+
+    /// The rail view, created on first use so ship events can arrive
+    /// before any pipeline event did.
+    fn rail(&mut self) -> &mut PipelineView {
+        let stage = self.pipeline_stage();
+        self.pipeline.get_or_insert(PipelineView {
+            stage,
+            gate: None,
+            verify: None,
+            ship: None,
+        })
+    }
+
+    /// Replace the rail's ship segment, keeping the rest of the rail.
+    fn set_ship(&mut self, ship: ShipCounts) {
+        self.rail().ship = Some(ship);
+    }
+
+    /// Record the proposed deploy target on the rail.
+    fn set_ship_deploy(&mut self, target: Option<String>) {
+        let ship = self.rail().ship.get_or_insert(ShipCounts {
+            tag: None,
+            deploy: None,
+            health_ok: 0,
+            health_total: 0,
+        });
+        ship.deploy = target;
+    }
+
+    /// Count one finished health probe on the rail.
+    fn count_health(&mut self, ok: bool) {
+        let ship = self.rail().ship.get_or_insert(ShipCounts {
+            tag: None,
+            deploy: None,
+            health_ok: 0,
+            health_total: 0,
+        });
+        ship.health_total += 1;
+        if ok {
+            ship.health_ok += 1;
+        }
     }
 
     fn push_system(&mut self, text: String) {
@@ -1126,5 +1458,189 @@ mod tests {
             rx.try_recv().unwrap(),
             super::super::UiCommand::Cancel
         ));
+    }
+
+    #[test]
+    fn ship_command_opens_the_release_confirmation_gate() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        for c in "/ship".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::ShipStart
+        ));
+        // The release gate arrives from the agent task and renders on the
+        // rail; the y/n keys answer it through the pipeline confirm path.
+        app.apply_ui_event(
+            UiEvent::PipelineGate {
+                gate: "ship-confirmation".into(),
+            },
+            &tx,
+        );
+        assert_eq!(
+            app.pipeline.as_ref().unwrap().gate.as_deref(),
+            Some("ship-confirmation")
+        );
+        app.handle_key(KeyAction::Char('y'), &tx);
+        match rx.try_recv().unwrap() {
+            super::super::UiCommand::PipelineConfirm { stage, ok } => {
+                assert_eq!(stage, "ship-confirmation");
+                assert!(ok);
+            }
+            _ => panic!("expected PipelineConfirm for the ship gate"),
+        }
+    }
+
+    #[test]
+    fn secret_collection_masks_input_and_never_persists_the_value() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::DeploySecret {
+                name: "CLOUDFLARE_API_TOKEN".into(),
+                purpose: "authenticate the deploy CLI for this deploy".into(),
+            },
+            &tx,
+        );
+        assert!(app.secret_input);
+        for c in "s3cret-value".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        // The composer renders one mask character per character typed...
+        assert_eq!(app.composer_text(), "*".repeat("s3cret-value".len()));
+        // ...while the real value only ever lives in the composer buffer.
+        assert_eq!(app.input, "s3cret-value");
+
+        app.handle_key(KeyAction::Enter, &tx);
+        // The value went out as a DeploySecret command and nowhere else.
+        match rx.try_recv().unwrap() {
+            super::super::UiCommand::DeploySecret { name, value } => {
+                assert_eq!(name, "CLOUDFLARE_API_TOKEN");
+                assert_eq!(value, "s3cret-value");
+            }
+            _ => panic!("expected DeploySecret"),
+        }
+        // The composer is cleared and the mode is off after submit.
+        assert!(app.input.is_empty());
+        assert!(!app.secret_input);
+        // The value never lands in messages...
+        assert!(app
+            .messages
+            .iter()
+            .all(|m| !m.text.contains("s3cret-value")));
+        // ...and never in history: a recall recovers nothing.
+        app.handle_key(KeyAction::Ctrl('r'), &tx);
+        assert!(!app.input.contains("s3cret-value"));
+    }
+
+    #[test]
+    fn esc_abandons_a_secret_entry_and_clears_the_value() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::DeploySecret {
+                name: "FLY_API_TOKEN".into(),
+                purpose: "authenticate the fly CLI for this deploy".into(),
+            },
+            &tx,
+        );
+        for c in "half-typed".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Esc, &tx);
+        // The mode is off and the half-typed value is cleared...
+        assert!(!app.secret_input);
+        assert!(app.input.is_empty());
+        // ...nothing was sent, and the flow still waits for the value.
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.secret_name.as_deref(), Some("FLY_API_TOKEN"));
+        // /deploy re-opens the masked entry for the same credential.
+        for c in "/deploy".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(app.secret_input);
+        assert_eq!(app.secret_name.as_deref(), Some("FLY_API_TOKEN"));
+    }
+
+    #[test]
+    fn deploy_prompt_answers_with_deploy_confirm() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::DeployProposed {
+                target: "cloudflare".into(),
+                reason: "wrangler.toml present".into(),
+                credentials: vec!["CLOUDFLARE_API_TOKEN".into()],
+            },
+            &tx,
+        );
+        assert!(app.deploy_pending.is_some());
+        assert!(app.status_line().contains("deploy: cloudflare"));
+        app.handle_key(KeyAction::Char('y'), &tx);
+        match rx.try_recv().unwrap() {
+            super::super::UiCommand::DeployConfirm { confirmed } => assert!(confirmed),
+            _ => panic!("expected DeployConfirm"),
+        }
+        assert!(app.deploy_pending.is_none());
+        // Declining answers the same prompt the other way.
+        app.apply_ui_event(
+            UiEvent::DeployProposed {
+                target: "fly".into(),
+                reason: "fly.toml present".into(),
+                credentials: vec![],
+            },
+            &tx,
+        );
+        app.handle_key(KeyAction::Char('n'), &tx);
+        match rx.try_recv().unwrap() {
+            super::super::UiCommand::DeployConfirm { confirmed } => assert!(!confirmed),
+            _ => panic!("expected DeployConfirm"),
+        }
+    }
+
+    #[test]
+    fn ship_rail_segment_tracks_the_release_deploy_and_health() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::ShipReady {
+                tag: "v2026-10-14-abcdef01".into(),
+                release_url: Some("https://example.invalid/releases/tagged".into()),
+                install_steps: vec!["cargo run".into()],
+            },
+            &tx,
+        );
+        assert!(app
+            .status_line()
+            .contains("ship: v2026-10-14-abcdef01 · deploy: — · health: 0/0"));
+        // The release URL and install steps are shown in the conversation.
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("https://example.invalid/releases/tagged")));
+        assert!(app.messages.iter().any(|m| m.text.contains("cargo run")));
+        // A proposed deploy fills the deploy segment; probes tally health.
+        app.apply_ui_event(
+            UiEvent::DeployProposed {
+                target: "cloudflare".into(),
+                reason: "wrangler.toml".into(),
+                credentials: vec!["CLOUDFLARE_API_TOKEN".into()],
+            },
+            &tx,
+        );
+        assert!(app.status_line().contains("deploy: cloudflare"));
+        app.apply_ui_event(
+            UiEvent::HealthChecked {
+                name: "release".into(),
+                ok: true,
+                detail: None,
+            },
+            &tx,
+        );
+        assert!(app.status_line().contains("health: 1/1"));
     }
 }
