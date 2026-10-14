@@ -2,9 +2,9 @@
 //! reopen a GitHub issue when a probe fails.
 //!
 //! A health probe is either an HTTP GET (2s timeout, 2xx/3xx is healthy)
-//! or a command (exit 0 is healthy). Everything the log, the issue body,
-//! and the probe detail carry is redacted first: the operate artifacts
-//! record that a deploy happened, never the secret material.
+//! or a command (exit 0 is healthy). Everything the log, the issue title
+//! and body, and the probe detail carry is redacted first: the operate
+//! artifacts record that a deploy happened, never the secret material.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -87,6 +87,7 @@ pub fn read_operate_log(data_dir: &Path, run_id: &str) -> Result<Vec<OperateEven
 /// issue URL, or None when there is nothing to open it on (no GitHub
 /// remote), no `gh` on PATH, or the `gh` call itself failed: a failed
 /// reopen is recorded in the operate log and never fails the pipeline.
+/// The issue's title is redacted exactly as its body is.
 pub async fn reopen_issue_on_failure(
     workspace: &Path,
     run_id: &str,
@@ -159,16 +160,24 @@ async fn reopen_attempt(
     if !crate::release::gh_on_path().await {
         return ReopenAttempt::skipped("gh is not on PATH");
     }
-    let body = issue_body(run_id, title, evidence);
-    let spawned = Command::new("gh")
-        .args(["issue", "create", "--title", title, "--body", &body])
-        .current_dir(workspace)
+    let spawned = issue_command(workspace, run_id, title, evidence)
         .output()
         .await;
     match spawned {
         Err(e) => ReopenAttempt::failed(&deploy::redact_patterns(&e.to_string())),
         Ok(output) => attempt_from_output(Some(output)),
     }
+}
+
+/// The `gh issue create` invocation for one reopen. The title and body it
+/// carries come from [`issue_args`], so both are redacted: a title can
+/// carry a token exactly as a body can.
+fn issue_command(workspace: &Path, run_id: &str, title: &str, evidence: &str) -> Command {
+    let (title, body) = issue_args(run_id, title, evidence);
+    let mut command = Command::new("gh");
+    command.args(["issue", "create", "--title", &title, "--body", &body]);
+    command.current_dir(workspace);
+    command
 }
 
 /// Map a finished (or missing) `gh` invocation onto the attempt outcome.
@@ -194,6 +203,13 @@ fn issue_body(run_id: &str, title: &str, evidence: &str) -> String {
         "## What failed\n\n{title}\n\n## Run\n\n{run_id}\n\n## Evidence\n\n```\n{}\n```\n",
         deploy::redact_patterns(evidence.trim())
     )
+}
+
+/// The title and body one `gh issue create` carries, both redacted: a
+/// title can carry a token exactly as a body can.
+fn issue_args(run_id: &str, title: &str, evidence: &str) -> (String, String) {
+    let title = deploy::redact_patterns(title);
+    (title.implementation(), issue_body(run_id, &title, evidence))
 }
 
 async fn check_url(result: &mut HealthResult, url: &str) -> Result<()> {
@@ -502,5 +518,56 @@ mod tests {
             !body.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
             "{body}"
         );
+    }
+
+    #[test]
+    fn issue_args_redact_the_title_as_well_as_the_body() {
+        let (title, body) = issue_args(
+            "run-reopen-4",
+            "health check failed for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "evidence",
+        );
+
+        assert!(
+            !title.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{title}"
+        );
+        assert!(title.contains("[REDACTED]"), "{title}");
+        assert!(title.contains("health check failed"), "{title}");
+        assert!(
+            !body.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn the_issue_command_redacts_the_title_it_passes_to_gh() {
+        // The command line itself must carry the redacted title: the body
+        // is redacted already, and the title is too.
+        let workspace = temp_dir("issue-command");
+        let command = issue_command(
+            &workspace,
+            "run-reopen-5",
+            "operate failed: ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "evidence",
+        );
+        let args: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg.contains("[REDACTED]")),
+            "{args:?}"
+        );
+
+        std::fs::remove_dir_all(&workspace).ok();
     }
 }
