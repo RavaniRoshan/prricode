@@ -89,7 +89,7 @@ internals with no protocol presence.
 **Closure:** each is either implemented (the ones the pipeline actually needs:
 agent lineage/reminders) or carries a flagged-off code path with a
 `// future work:` comment naming it. `docs/PROTOCOL-CONFORMANCE.md` loses the
-"deliberately not mirrored" paragraph; this register tracks each item.
+unaccounted-internals paragraph; this register tracks each item.
 
 **Disposition:** implement-or-flag (goal item 4).
 
