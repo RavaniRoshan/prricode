@@ -70,7 +70,8 @@ pub async fn run_build(
         let prefix = match run.definition.steps.get(run.current_step) {
             Some(WorkflowStep::Prompt { label, .. }) => wave_prefix(label).to_string(),
             Some(WorkflowStep::Child { .. }) => {
-                // Nested runs are not executed in this build; skip past.
+                // Nested workflow children are not executed in this version;
+                // skip past.
                 if engine.advance(run_id)? {
                     return Ok("build completed".into());
                 }
