@@ -76,11 +76,20 @@ mod tests {
             stack: None,
         };
         let mut clarifier = Clarifier::new(concept);
-        assert_eq!(clarifier.next_question().as_deref(), Some("Who is the primary user of this product?"));
+        assert_eq!(
+            clarifier.next_question().as_deref(),
+            Some("Who is the primary user of this product?")
+        );
         clarifier.apply("commuters");
-        assert_eq!(clarifier.next_question().as_deref(), Some("What is the core value they get?"));
+        assert_eq!(
+            clarifier.next_question().as_deref(),
+            Some("What is the core value they get?")
+        );
         clarifier.apply("daily audio briefings");
-        assert_eq!(clarifier.next_question().as_deref(), Some("What single success criterion says it works?"));
+        assert_eq!(
+            clarifier.next_question().as_deref(),
+            Some("What single success criterion says it works?")
+        );
         clarifier.apply("a user receives a briefing every morning");
         assert!(clarifier.next_question().is_none());
         assert!(clarifier.concept.is_ready());

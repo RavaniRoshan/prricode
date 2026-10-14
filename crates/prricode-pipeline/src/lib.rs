@@ -51,13 +51,16 @@ impl Pipeline {
         runner: Arc<prricode_agent::AgentRunner>,
         persistence: Arc<prricode_persistence::Persistence>,
     ) -> Self {
-        Self { runner, persistence }
+        Self {
+            runner,
+            persistence,
+        }
     }
 }
 
 pub mod clarify;
-pub mod specify;
 pub mod plan;
+pub mod specify;
 
 #[cfg(test)]
 mod tests {
@@ -67,7 +70,9 @@ mod tests {
     fn stage_events_carry_stage_and_kind() {
         let event = StageEvent {
             stage: PipelineStage::Specify,
-            kind: StageEventKind::Artifact { name: "requirements.md".into() },
+            kind: StageEventKind::Artifact {
+                name: "requirements.md".into(),
+            },
             detail: "4 requirements validated".into(),
         };
         assert_eq!(event.stage, PipelineStage::Specify);
