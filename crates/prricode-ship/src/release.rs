@@ -84,8 +84,15 @@ pub async fn ship_release(
     // tag-only path stops here.
     let mut release_url = None;
     if note.is_none() {
-        let dossier = release_notes(workspace, &tag, run_id, repo.as_deref(), &install_steps, has_readme)
-            .await?;
+        let dossier = release_notes(
+            workspace,
+            &tag,
+            run_id,
+            repo.as_deref(),
+            &install_steps,
+            has_readme,
+        )
+        .await?;
         let out = Command::new("gh")
             .args(["release", "create", &tag])
             .arg("--title")
@@ -172,7 +179,9 @@ async fn push_branch_and_tag(workspace: &Path, branch: &str, tag: &str) -> (bool
 
 /// The remote repo as owner/name; None when there is no GitHub remote.
 async fn detect_remote(workspace: &Path) -> Option<String> {
-    let out = git(workspace, &["remote", "get-url", "origin"]).await.ok()?;
+    let out = git(workspace, &["remote", "get-url", "origin"])
+        .await
+        .ok()?;
     if !out.success {
         return None;
     }
@@ -241,7 +250,10 @@ async fn gh_authenticated() -> bool {
 fn install_artifacts(stack: StackKind) -> (String, Vec<String>) {
     let (label, quickstart) = match stack {
         StackKind::Node => ("Node.js", "pnpm install && pnpm dev"),
-        StackKind::Python => ("Python", "pip install -r requirements.txt && python3 -m <app>"),
+        StackKind::Python => (
+            "Python",
+            "pip install -r requirements.txt && python3 -m <app>",
+        ),
         StackKind::Rust => ("Rust", "cargo run"),
         StackKind::Unknown => ("unknown", ""),
     };
