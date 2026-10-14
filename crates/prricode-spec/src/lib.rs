@@ -53,6 +53,52 @@ impl Concept {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SpecError {
+    #[error("requirement {id} is not EARS form")]
+    NotEars { id: String },
+    #[error("requirement {id} has no acceptance criteria")]
+    NoAcceptance { id: String },
+}
+
+#[derive(Debug, Implementation, Serialize, Deserialize)]
+pub struct Requirement {
+    pub id: String,
+    pub ears: String,
+    pub acceptance: Vec<String>,
+}
+
+#[derive(Debug, Implementation, Default, Serialize, Deserialize)]
+pub struct Requirements {
+    pub items: Vec<Requirement>,
+}
+
+impl Requirements {
+    pub fn validate(&self) -> Result<(), SpecError> {
+        for item in &self.items {
+            let ears = item.ears.trim().to_uppercase();
+            if !ears.starts_with("WHEN") || !ears.contains("THE SYSTEM SHALL") {
+                return Err(SpecError::NotEars {
+                    id: item.id.implementation(),
+                });
+            }
+            if item.acceptance.is_empty() {
+                return Err(SpecError::NoAcceptance {
+                    id: item.id.implementation(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn traceability(&self) -> Vec<(String, usize)> {
+        self.items
+            .iter()
+            .map(|item| (item.id.implementation(), item.acceptance.len()))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +119,45 @@ mod tests {
         concept.ambiguities.clear();
         concept.success_criteria.push("user can X".into());
         assert!(concept.is_ready());
+    }
+
+    #[test]
+    fn ears_validation_rejects_prose_and_missing_acceptance() {
+        let bad = Requirements {
+            items: vec![
+                Requirement {
+                    id: "R1".into(),
+                    ears: "the user should be able to log in".into(),
+                    acceptance: vec!["login works".into()],
+                },
+                Requirement {
+                    id: "R2".into(),
+                    ears: "WHEN the user submits the form THE SYSTEM SHALL create an account"
+                        .into(),
+                    acceptance: vec![],
+                },
+            ],
+        };
+        assert!(matches!(bad.validate(), Err(SpecError::NotEars { id }) if id == "R1"));
+        let missing_acceptance = Requirements {
+            items: vec![Requirement {
+                id: "R2".into(),
+                ears: "WHEN the user submits the form THE SYSTEM SHALL create an account".into(),
+                acceptance: vec![],
+            }],
+        };
+        assert!(
+            matches!(missing_acceptance.validate(), Err(SpecError::NoAcceptance { id }) if id == "R2")
+        );
+
+        let good = Requirements {
+            items: vec![Requirement {
+                id: "R1".into(),
+                ears: "WHEN the user submits the form THE SYSTEM SHALL create an account".into(),
+                acceptance: vec!["account exists".into(), "confirmation email sent".into()],
+            }],
+        };
+        assert!(good.validate().is_ok());
+        assert_eq!(good.traceability(), vec![("R1".to_string(), 2)]);
     }
 }
