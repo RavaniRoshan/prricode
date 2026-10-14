@@ -8,6 +8,7 @@ serde = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+regex = { workspace = true }
 prricode-verify = { path = "../prricode-verify" }
 
 [dev-dependencies]

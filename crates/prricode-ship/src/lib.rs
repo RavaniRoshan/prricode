@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod deploy;
 pub mod release;
 
 /// One shipped release: where it went, what it is called, and how to run it.
@@ -54,6 +55,11 @@ pub struct DeployPlan {
     pub required_credentials: Vec<CredentialRequest>,
     pub commands: Vec<String>,
     pub rollback: String,
+    /// How the release id is read out of the deploy output. The documented
+    /// convention is a command that prints `release_id: <id>`; the field
+    /// holds the matching pattern and is `None` for a plan whose commands
+    /// do not print one (nothing is extracted).
+    pub release_id_regex: Option<String>,
 }
 
 /// One credential a deploy needs. Requests live in deploy plans only; they
@@ -194,6 +200,7 @@ mod tests {
             required_credentials: vec![CredentialRequest::new("SSH_KEY", "reach the host", true)],
             commands: vec!["scp artifact host:/srv".to_string()],
             rollback: "redeploy the previous artifact".to_string(),
+            release_id_regex: None,
         };
         assert_eq!(plan.required_credentials.len(), 1);
         assert!(plan.required_credentials[0].secret);
