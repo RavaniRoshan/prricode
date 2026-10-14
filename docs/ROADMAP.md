@@ -13,9 +13,10 @@ today so the gap is explicit.
   input injection; `computerUseSetup/check` reports the real permission state
   (Accessibility + Screen Recording in System Settings). The Linux backend and
   its tests stay as they are; the trait seam already exists.
-- **Wayland screen capture.** Under a pure Wayland session without XWayland,
-  screenshots go through `grim`/`wlr-screencopy`; input via `wlrctl`/portal
-  (xdg-desktop-portal RemoteDesktop). Declared unsupported until then.
+- **Wayland screen capture.** The `grim` path is probed and wired; a pure
+  Wayland session without XWayland now captures via `grim` (screencopy), and
+  input via `wlrctl`/portal (xdg-desktop-portal RemoteDesktop) is the
+  remaining piece.
 
 ## Voice
 
@@ -32,26 +33,30 @@ today so the gap is explicit.
 
 ## TUI deltas
 
-- **The remaining 19 themes** — five of the reference set's 24 are bundled;
-  the JSON theme format is identical, so bundling the rest is a data task.
+- **Theme set: COMPLETE** — all 24 reference themes + the house theme are
+  bundled and switchable via `/theme` (two palettes, Houston and Snazzy Light,
+  are best-effort pending upstream verification).
+- **Image paste (ctrl+v): COMPLETE** — wl-paste/xclip clipboard capture,
+  attach/detach in the composer, image parts ride the turn; attachments never
+  enter composer history.
 - **`?` shortcut overlay on an empty composer** — `/help` toggles the panel
   today; the literal key-when-empty binding is a follow-up.
-- **Image paste (ctrl+v)** — `media/upload` exists server-side; composer
-  clipboard integration is the follow-up.
 - **Session picker list** — `/sessions` shows state today; a navigable picker
   of stored sessions is the follow-up.
 
 ## Verification
 
-- **Autonomous rollback execution** — the ship stage records the rollback
-  command and the previous release id; executing it on health-check failure
-  without a prompt is the operate stage's last step.
+- **Autonomous rollback execution: COMPLETE** — armed at deploy-confirmation
+  (default off); a failed health check runs the recorded rollback command
+  through the sandbox and records the outcome in the operate log.
+- **Approval timeout: COMPLETE** — configurable via
+  `PRRICODE_APPROVAL_TIMEOUT_SECS` (default 600s), resolving as `timed_out`.')
+- **Property-based test generation** — the verifier judges from concrete
+  evidence today; generating property tests from EARS requirements text
+  (fast-check/hypothesis) is the stronger oracle.
 - **Property-based test generation** — the verifier judges from concrete
   evidence today; generating property tests from EARS requirements text
   (fast-check/hypothesis) is the stronger oracle.
 
 ## Protocol
 
-- **Approval timeout and abort decisions** — the `timed_out`/`aborted`
-  decision variants exist in the spec's vocabulary; the transport-level
-  timeout is not implemented.
