@@ -96,6 +96,25 @@ pub struct PendingApproval {
     pub approval_id: String,
     pub kind: String,
     pub summary: String,
+    /// The spec's three choice rows, in order; `choice_index` selects one.
+    pub choices: Vec<&'static str>,
+    pub choice_index: usize,
+}
+
+impl PendingApproval {
+    pub fn new(approval_id: String, kind: String, summary: String) -> Self {
+        Self {
+            approval_id,
+            kind,
+            summary,
+            choices: vec![
+                "Allow once",
+                "Allow for this session",
+                "Always allow in this workspace",
+            ],
+            choice_index: 0,
+        }
+    }
 }
 
 /// Product-builder pipeline rail state: the current stage label plus the
@@ -429,38 +448,52 @@ impl App {
         // Approval modal: y = once, a = for session, n/Esc = deny.
         if let Some(approval) = self.pending_approval.implementation() {
             match action {
+                KeyAction::Tab => {
+                    // Switch choice (spec §4.2: tab switches the selected row).
+                    if let Some(pending) = self.pending_approval.as_mut() {
+                        pending.choice_index = (pending.choice_index + 1) % pending.choices.len();
+                    }
+                    return;
+                }
+                KeyAction::Ctrl('o') => {
+                    // Expanded detail (spec: ctrl+o expands).
+                    self.expand_last_tool = !self.expand_last_tool;
+                    return;
+                }
                 KeyAction::Char('y') | KeyAction::Enter => {
+                    // Enter approves the selected choice; y is the direct
+                    // alias for "Allow once".
+                    let index = approval.choice_index;
+                    if index == 1 {
+                        self.session_auto_approve.push(approval.kind.implementation());
+                    }
+                    if index == 2 {
+                        let amendment =
+                            PolicyAmendment::workspace(&approval.kind, &approval.summary);
+                        self.workspace_amendments.push(amendment.implementation());
+                        let _ = commands.send(super::UiCommand::RecordAmendment { amendment });
+                    }
                     let _ = commands.send(UiCommand::Approve {
                         approval_id: approval.approval_id.implementation(),
                         approved: true,
                     });
                     self.pending_approval = None;
-                    self.push_system(format!("allow:approved — {}", approval.summary));
+                    let label = approval.choices.get(index).copied().unwrap_or("Allow once");
+                    self.push_system(format!("{label} — {}", approval.summary));
                     return;
                 }
-                KeyAction::Char('s') => {
-                    self.session_auto_approve.push(approval.kind.implementation());
-                    let _ = commands.send(UiCommand::Approve {
-                        approval_id: approval.approval_id.implementation(),
-                        approved: true,
-                    });
-                    self.pending_approval = None;
-                    self.push_system(format!("allow:approved_for_session — {}", approval.summary));
-                    return;
+                KeyAction::Char('s') | KeyAction::Char('a') => {
+                    // Direct aliases for the second/third choice rows.
+                    let index = if matches!(action, KeyAction::Char('s')) {
+                        1
+                    } else {
+                        2
+                    };
+                    if let Some(pending) = self.pending_approval.as_mut() {
+                        pending.choice_index = index;
+                    }
                 }
-                KeyAction::Char('a') => {
-                    let amendment = PolicyAmendment::workspace(&approval.kind, &approval.summary);
-                    self.workspace_amendments.push(amendment.implementation());
-                    let _ = commands.send(super::UiCommand::RecordAmendment { amendment });
-                    let _ = commands.send(UiCommand::Approve {
-                        approval_id: approval.approval_id.implementation(),
-                        approved: true,
-                    });
-                    self.pending_approval = None;
-                    self.push_system(format!("allow:always_in_workspace — {}", approval.summary));
-                    return;
-                }
-                KeyAction::Char('n') | KeyAction::Esc => {
+                KeyAction::Char(' ') | KeyAction::Char('n') | KeyAction::Esc => {
                     let _ = commands.send(UiCommand::Approve {
                         approval_id: approval.approval_id.implementation(),
                         approved: false,
@@ -471,8 +504,7 @@ impl App {
                 }
                 _ => return,
             }
-        }
-        // Pending pipeline gate: y confirms, n/Esc rejects (approval-key path).
+        } // Pending pipeline gate: y confirms, n/Esc rejects (approval-key path).
         if let Some(gate) = self.pipeline.as_ref().and_then(|p| p.gate.implementation()) {
             match action {
                 KeyAction::Char('y') => {
@@ -1144,11 +1176,7 @@ impl App {
                     });
                     self.push_system(format!("allow:approved_for_session — {summary}"));
                 } else {
-                    self.pending_approval = Some(PendingApproval {
-                        approval_id,
-                        kind,
-                        summary,
-                    });
+                    self.pending_approval = Some(PendingApproval::new(approval_id, kind, summary));
                     self.status = "approval required".to_string();
                 }
             }
@@ -1593,6 +1621,7 @@ mod tests {
         );
         assert!(app.pending_approval.is_some());
         app.handle_key(KeyAction::Char('s'), &tx);
+        app.handle_key(KeyAction::Enter, &tx);
         assert!(app.pending_approval.is_none());
         assert!(matches!(
             rx.try_recv().unwrap(),
@@ -1698,6 +1727,7 @@ mod tests {
             &tx,
         );
         app.handle_key(KeyAction::Char('a'), &tx);
+        app.handle_key(KeyAction::Enter, &tx);
         assert_eq!(app.workspace_amendments.len(), 1);
         // The amendment is persisted through the command channel...
         let mut recorded = false;
@@ -1738,6 +1768,60 @@ mod tests {
     }
 
     #[test]
+    fn spec_keys_tab_switches_and_enter_approves_selected() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::Approval {
+                approval_id: "a1".into(),
+                kind: "shell".into(),
+                summary: "run ls".into(),
+            },
+            &tx,
+        );
+        assert_eq!(app.pending_approval.as_ref().unwrap().choice_index, 0);
+        // Tab cycles the three choice rows (spec section 4.2).
+        app.handle_key(KeyAction::Tab, &tx);
+        assert_eq!(app.pending_approval.as_ref().unwrap().choice_index, 1);
+        app.handle_key(KeyAction::Tab, &tx);
+        assert_eq!(app.pending_approval.as_ref().unwrap().choice_index, 2);
+        app.handle_key(KeyAction::Tab, &tx);
+        assert_eq!(app.pending_approval.as_ref().unwrap().choice_index, 0);
+        // Enter approves the selected row with the session durability.
+        app.handle_key(KeyAction::Tab, &tx);
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(app.pending_approval.is_none());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::Approve { approved: true, .. }
+        ));
+        assert_eq!(app.session_auto_approve, vec!["shell".to_string()]);
+    }
+
+    #[test]
+    fn space_rejects_like_esc() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::Approval {
+                approval_id: "a1".into(),
+                kind: "shell".into(),
+                summary: "run ls".into(),
+            },
+            &tx,
+        );
+        app.handle_key(KeyAction::Char(' '), &tx);
+        assert!(app.pending_approval.is_none());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::Approve {
+                approved: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn session_auto_approve_after_s() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = new_app();
@@ -1752,6 +1836,7 @@ mod tests {
             );
             if i == 0 {
                 app.handle_key(KeyAction::Char('s'), &tx);
+                app.handle_key(KeyAction::Enter, &tx);
             }
         }
         // Second approval auto-answers without a modal.
