@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod release;
+
 /// One shipped release: where it went, what it is called, and how to run it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShipRecord {
