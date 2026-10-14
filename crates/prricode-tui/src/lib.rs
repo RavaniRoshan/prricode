@@ -344,8 +344,8 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                                 "confirm the spec gate first (press y)",
                             ),
                             "build" => (
-                                flow.graph.is_some(),
-                                "no plan yet — confirm the spec to generate one",
+                                flow.graph.is_some() && !flow.building,
+                                "no plan yet — confirm the spec to generate one, or a build is already running",
                             ),
                             _ => (false, "unknown pipeline stage"),
                         }
@@ -568,6 +568,7 @@ struct PipelineFlow {
     graph: Option<TaskGraph>,
     concept_confirmed: bool,
     spec_confirmed: bool,
+    building: bool,
 }
 
 impl PipelineFlow {
@@ -579,6 +580,7 @@ impl PipelineFlow {
         self.graph = None;
         self.concept_confirmed = false;
         self.spec_confirmed = false;
+        self.building = false;
         self.stage = PipelineStage::Clarify.label().to_string();
     }
 }
@@ -784,8 +786,19 @@ async fn run_plan_stage(ctx: StageCtx) {
 /// The Build stage: task graph waves execute as concurrent agent turns.
 async fn run_build_stage(ctx: StageCtx) {
     let graph = {
-        let flow = ctx.flow.lock().unwrap();
-        flow.graph.clone()
+        let mut flow = ctx.flow.lock().unwrap();
+        if flow.building {
+            let _ = ctx.ui_tx.send(UiEvent::Log(
+                "pipeline: a build is already running".to_string(),
+            ));
+            return;
+        }
+        let graph = flow.graph.clone();
+        if graph.is_some() {
+            // Claim the build under the same lock the readiness check uses.
+            flow.building = true;
+        }
+        graph
     };
     let Some(graph) = graph else {
         let _ = ctx
@@ -798,13 +811,14 @@ async fn run_build_stage(ctx: StageCtx) {
     let run_id = match engine.start(&ctx.session_id, graph_to_definition(&graph), None) {
         Ok(run_id) => run_id,
         Err(e) => {
+            ctx.flow.lock().unwrap().building = false;
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                 "pipeline: build could not start — {e}"
             )));
             return;
         }
     };
-    match run_build(
+    let outcome = run_build(
         &ctx.pipeline.runner,
         &engine,
         &run_id,
@@ -812,8 +826,9 @@ async fn run_build_stage(ctx: StageCtx) {
         &ctx.workspace_root,
         &ctx.data_dir,
     )
-    .await
-    {
+    .await;
+    ctx.flow.lock().unwrap().building = false;
+    match outcome {
         Ok(summary) => {
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                 "pipeline: build finished — {summary}"
