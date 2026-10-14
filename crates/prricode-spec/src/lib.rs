@@ -99,6 +99,31 @@ impl Requirements {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Spec {
+    pub concept: Concept,
+    pub requirements: Requirements,
+    pub design: String,
+    pub tasks: String,
+    pub version: u32,
+}
+
+const STALE_MARKER: &str = "\n\n[stale: requirements changed — regenerate]";
+
+impl Spec {
+    pub fn regenerate(&mut self, requirements: Requirements) {
+        self.requirements = requirements;
+        self.version += 1;
+        if !self.design.contains("[stale:") {
+            self.design.push_str(STALE_MARKER);
+        }
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.design.contains("[stale:")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +184,29 @@ mod tests {
         };
         assert!(good.validate().is_ok());
         assert_eq!(good.traceability(), vec![("R1".to_string(), 2)]);
+    }
+
+    #[test]
+    fn spec_regeneration_bumps_version_and_marks_stale() {
+        let mut spec = Spec {
+            concept: Concept::from_idea("idea"),
+            requirements: Requirements::default(),
+            design: "# Design\noriginal".into(),
+            tasks: "# Tasks".into(),
+            version: 1,
+        };
+        spec.regenerate(Requirements {
+            items: vec![Requirement {
+                id: "R1".into(),
+                ears: "WHEN x THE SYSTEM SHALL y".into(),
+                acceptance: vec!["z".into()],
+            }],
+        });
+        assert_eq!(spec.version, 2);
+        assert!(spec.design.contains("[stale:"));
+        // Idempotent marker: a second regeneration does not duplicate it.
+        spec.regenerate(Requirements::default());
+        assert_eq!(spec.design.matches("[stale:").count(), 1);
+        assert_eq!(spec.version, 3);
     }
 }
