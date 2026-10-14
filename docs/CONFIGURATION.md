@@ -84,7 +84,7 @@ artifact. Per-target variable names the agent asks for:
 |---|---|---|
 | Cloudflare (`wrangler.toml`) | `CLOUDFLARE_API_TOKEN` | `wrangler deploy` |
 | Fly.io (`fly.toml`) | `FLY_API_TOKEN` | `fly deploy` |
-| Vercel (`vercel.json`) | `VERCEL_TOKEN` | `vercel deploy` |
+| Vercel (`vercel.json`) | `VERCEL_TOKEN` | `vercel deploy --prod` |
 | Heroku (`Procfile`) | `HEROKU_API_KEY` | `git push heroku main` |
 | anything else | — | manual: the operator names the target and runs it by hand |
 
