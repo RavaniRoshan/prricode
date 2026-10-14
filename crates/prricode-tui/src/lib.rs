@@ -336,11 +336,13 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         let flow = flow.lock().unwrap();
                         match stage.as_str() {
                             "specify" => (
-                                flow.concept.is_some() && flow.concept_confirmed,
+                                flow.concept.is_some() && flow.concept_confirmed && !flow.stage_in_flight,
                                 "confirm the concept gate first (answer the interview, then press y)",
                             ),
                             "plan" => (
-                                flow.spec.is_some() && flow.spec_confirmed,
+                                flow.spec.is_some()
+                                    && flow.spec_confirmed
+                                    && !flow.stage_in_flight,
                                 "confirm the spec gate first (press y)",
                             ),
                             "build" => (
@@ -569,6 +571,9 @@ struct PipelineFlow {
     concept_confirmed: bool,
     spec_confirmed: bool,
     building: bool,
+    /// Specify and plan share one in-flight claim: a late specify must not
+    /// regenerate the spec while a plan is consuming it.
+    stage_in_flight: bool,
 }
 
 impl PipelineFlow {
@@ -581,6 +586,7 @@ impl PipelineFlow {
         self.concept_confirmed = false;
         self.spec_confirmed = false;
         self.building = false;
+        self.stage_in_flight = false;
         self.stage = PipelineStage::Clarify.label().to_string();
     }
 }
@@ -688,14 +694,22 @@ fn message_text(message: &ChatMessage) -> String {
 /// The Specify stage: a confirmed concept becomes a validated Core-4 spec.
 async fn run_specify_stage(ctx: StageCtx) {
     let concept = {
-        let flow = ctx.flow.lock().unwrap();
-        flow.concept.clone()
-    };
-    let Some(concept) = concept else {
-        let _ = ctx
-            .ui_tx
-            .send(UiEvent::Log("pipeline: no concept to specify".to_string()));
-        return;
+        let mut flow = ctx.flow.lock().unwrap();
+        if flow.stage_in_flight {
+            let _ = ctx.ui_tx.send(UiEvent::Log(
+                "pipeline: a spec/plan stage is already in flight".to_string(),
+            ));
+            return;
+        }
+        let Some(concept) = flow.concept.clone() else {
+            let _ = ctx
+                .ui_tx
+                .send(UiEvent::Log("pipeline: no concept to specify".to_string()));
+            return;
+        };
+        // Claim the launch in the same critical section as the re-check.
+        flow.stage_in_flight = true;
+        concept
     };
     let preset = concept.stack.as_ref().and_then(|stack| stack.preset);
     set_stage(&ctx, PipelineStage::Specify.label()).await;
@@ -703,6 +717,7 @@ async fn run_specify_stage(ctx: StageCtx) {
     let outcome = match ctx.pipeline.runner.run_subagent(input).await {
         Ok(outcome) => outcome,
         Err(e) => {
+            ctx.flow.lock().unwrap().stage_in_flight = false;
             let _ = ctx
                 .ui_tx
                 .send(UiEvent::Log(format!("pipeline: specify failed — {e}")));
@@ -716,6 +731,7 @@ async fn run_specify_stage(ctx: StageCtx) {
                 let mut flow = ctx.flow.lock().unwrap();
                 let spec = flow.spec.get_or_insert_with(|| Spec::draft(concept));
                 spec.regenerate(requirements);
+                flow.stage_in_flight = false;
                 persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
             }
             let _ = ctx.ui_tx.send(UiEvent::PipelineGate {
@@ -726,6 +742,7 @@ async fn run_specify_stage(ctx: StageCtx) {
             )));
         }
         Err(e) => {
+            ctx.flow.lock().unwrap().stage_in_flight = false;
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                 "pipeline: spec rejected by the EARS gate — {e}"
             )));
@@ -736,20 +753,29 @@ async fn run_specify_stage(ctx: StageCtx) {
 /// The Plan stage: a confirmed spec becomes a wave-scheduled task graph.
 async fn run_plan_stage(ctx: StageCtx) {
     let requirements = {
-        let flow = ctx.flow.lock().unwrap();
-        flow.spec.as_ref().map(|spec| spec.requirements.clone())
-    };
-    let Some(requirements) = requirements else {
-        let _ = ctx
-            .ui_tx
-            .send(UiEvent::Log("pipeline: no spec to plan".to_string()));
-        return;
+        let mut flow = ctx.flow.lock().unwrap();
+        if flow.stage_in_flight {
+            let _ = ctx.ui_tx.send(UiEvent::Log(
+                "pipeline: a spec/plan stage is already in flight".to_string(),
+            ));
+            return;
+        }
+        let Some(requirements) = flow.spec.as_ref().map(|spec| spec.requirements.clone()) else {
+            let _ = ctx
+                .ui_tx
+                .send(UiEvent::Log("pipeline: no spec to plan".to_string()));
+            return;
+        };
+        // Claim the launch in the same critical section as the re-check.
+        flow.stage_in_flight = true;
+        requirements
     };
     set_stage(&ctx, PipelineStage::Plan.label()).await;
     let input = stage_turn_input(&ctx, plan::plan_prompt(&requirements));
     let outcome = match ctx.pipeline.runner.run_subagent(input).await {
         Ok(outcome) => outcome,
         Err(e) => {
+            ctx.flow.lock().unwrap().stage_in_flight = false;
             let _ = ctx
                 .ui_tx
                 .send(UiEvent::Log(format!("pipeline: plan failed — {e}")));
@@ -759,6 +785,7 @@ async fn run_plan_stage(ctx: StageCtx) {
     match plan::parse_task_graph(&outcome.content) {
         Ok(graph) => {
             if let Err(e) = plan::validate_traceability(&graph, &requirements) {
+                ctx.flow.lock().unwrap().stage_in_flight = false;
                 let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                     "pipeline: plan rejected by the traceability gate — {e}"
                 )));
@@ -769,6 +796,7 @@ async fn run_plan_stage(ctx: StageCtx) {
             {
                 let mut flow = ctx.flow.lock().unwrap();
                 flow.graph = Some(graph);
+                flow.stage_in_flight = false;
                 persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
             }
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
@@ -776,6 +804,7 @@ async fn run_plan_stage(ctx: StageCtx) {
             )));
         }
         Err(e) => {
+            ctx.flow.lock().unwrap().stage_in_flight = false;
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                 "pipeline: plan failed to parse — {e}"
             )));
@@ -840,5 +869,72 @@ async fn run_build_stage(ctx: StageCtx) {
                 "pipeline: build paused/cancelled mid-wave — {e}"
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stage_ctx(
+        pipeline: &Arc<Pipeline>,
+        flow: &Arc<Mutex<PipelineFlow>>,
+    ) -> (StageCtx, mpsc::UnboundedReceiver<UiEvent>) {
+        let (ui_tx, rx) = mpsc::unbounded_channel();
+        (
+            StageCtx {
+                pipeline: Arc::clone(pipeline),
+                flow: Arc::clone(flow),
+                ui_tx,
+                session_id: "test-session".to_string(),
+                model: "echo".to_string(),
+                approval_mode: ApprovalMode::Auto,
+                workspace_root: std::env::temp_dir(),
+                data_dir: std::env::temp_dir(),
+            },
+            rx,
+        )
+    }
+
+    fn echo_pipeline(data_dir: &std::path::Path) -> Arc<Pipeline> {
+        let persistence = Arc::new(Persistence::new(data_dir).unwrap());
+        let provider: Arc<dyn ModelProvider> = Arc::new(prricode_provider::EchoProvider);
+        let runner = Arc::new(AgentRunner::new(provider, Arc::new(ApprovalEngine::new())));
+        Arc::new(Pipeline::new(runner, persistence))
+    }
+
+    #[tokio::test]
+    async fn second_specify_launch_is_refused_while_one_is_in_flight() {
+        let data_dir =
+            std::env::temp_dir().join(format!("prricode-tui-test-{}", std::process::id()));
+        let pipeline = echo_pipeline(&data_dir);
+
+        let flow = Arc::new(Mutex::new(PipelineFlow::default()));
+        flow.lock().unwrap().concept = Some(Concept::from_idea("an rss briefing service"));
+        flow.lock().unwrap().concept_confirmed = true;
+        // A first stage launch is in flight and owns the claim.
+        flow.lock().unwrap().stage_in_flight = true;
+
+        let (ctx, mut rx) = stage_ctx(&pipeline, &flow);
+        run_specify_stage(ctx).await;
+
+        // The refused launch must leave the in-flight owner's claim intact...
+        assert!(flow.lock().unwrap().stage_in_flight);
+        // ...must not advance the rail or regenerate anything, and must say why.
+        let mut stage_changes = 0;
+        let mut logs = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                UiEvent::PipelineStageChanged { .. } => stage_changes += 1,
+                UiEvent::Log(text) => logs.push(text),
+                _ => {}
+            }
+        }
+        assert_eq!(stage_changes, 0);
+        assert!(
+            logs.iter().any(|l| l.contains("already in flight")),
+            "expected a refusal log, got {logs:?}"
+        );
+        std::fs::remove_dir_all(&data_dir).ok();
     }
 }
