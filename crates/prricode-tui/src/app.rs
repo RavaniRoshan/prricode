@@ -64,6 +64,33 @@ impl FilePicker {
     }
 }
 
+/// Risk classes from the spec's approval footers; they relabel the modal.
+#[derive(Debug, Implementation, Copy, PartialEq, Eq)]
+pub enum RiskClass {
+    ReviewNeeded,
+    Elevated,
+    Blocking,
+}
+
+impl RiskClass {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ReviewNeeded => "review needed",
+            Self::Elevated => "elevated",
+            Self::Blocking => "blocking",
+        }
+    }
+
+    pub fn for_tool(tool: &str) -> Self {
+        match tool {
+            // Computer control and shell writes are the irreversible classes.
+            "computer" => Self::Blocking,
+            "shell" | "write_file" | "edit_file" => Self::Elevated,
+            _ => Self::ReviewNeeded,
+        }
+    }
+}
+
 #[derive(Debug, Implementation)]
 pub struct PendingApproval {
     pub approval_id: String,
@@ -824,7 +851,15 @@ impl App {
             };
             match command {
                 "quit" | "exit" | "q" => self.should_quit = true,
-                "help" | "h" | "?" => self.show_help = !self.show_help,
+                "help" | "h" | "?" => {
+                    self.show_help = !self.show_help;
+                    if self.show_help {
+                        self.push_system(
+                            "commands: /model /sessions /new /resume /clear /approval /provider                              /concept /spec /plan /build /ship /deploy /operate /dossier /theme                              /goal /yolo /compact — keys: Enter send, Ctrl+J newline, Alt+Enter                              queue, @ files, ! shell, Esc cancel, /quit quits"
+                                .to_string(),
+                        );
+                    }
+                }
                 "model" => {
                     if arg.is_empty() {
                         self.push_system(format!("current model: {}", self.model));
@@ -983,6 +1018,60 @@ impl App {
                             self.theme_store.available_slugs().join(", ")
                         ));
                     }
+                }
+                "yolo" => {
+                    // Toggle unattended approval: open <-> previous mode.
+                    let next = if self.approval_mode == ApprovalMode::Open {
+                        ApprovalMode::Closed
+                    } else {
+                        ApprovalMode::Open
+                    };
+                    self.approval_mode = next;
+                    let _ = commands.send(UiCommand::SetApprovalMode(next));
+                    self.push_system(format!(
+                        "approval mode: {} (yolo {})",
+                        format!("{next:?}").to_lowercase(),
+                        if next == ApprovalMode::Open {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ));
+                }
+                "goal" => {
+                    // View/set the session goal. Setting is a pipeline command;
+                    // viewing reads the pipeline state when a run is active.
+                    if arg.is_empty() {
+                        match self.pipeline.as_ref() {
+                            Some(view) if view.stage != "idle" => {
+                                self.push_system(format!(
+                                    "pipeline stage: {} — goal work runs through the pipeline",
+                                    view.stage
+                                ));
+                            }
+                            _ => self.push_system(
+                                "no active goal; set one with the server's goal/set".to_string(),
+                            ),
+                        }
+                    } else {
+                        self.push_system(format!(
+                            "goal requested: {arg} — persistent goals are set via the protocol (goal/set)"
+                        ));
+                    }
+                }
+                "compact" => {
+                    // Context compaction is a server-side operation.
+                    // future work: TUI-side compaction once sessions are local.
+                    self.push_system("compaction runs on the server (session/compact)".to_string());
+                }
+                "message" | "ts" | "ps" => {
+                    // Cross-session messaging and task/process listings are
+                    // server-side surfaces.
+                    // future work: wire to the protocol methods when the TUI
+                    // owns a session id on the server side.
+                    self.push_system(format!(
+                        "/{command} is a server-side surface — not available in this build"
+                    ));
                 }
                 other => self.push_system(format!("unknown command: /{other} (try /help)")),
             }
@@ -1691,6 +1780,60 @@ mod tests {
             .iter()
             .any(|m| m.role == Role::Assistant && m.text == "hello"));
         assert!(app.streaming.is_empty());
+    }
+
+    #[test]
+    fn yolo_toggles_open_and_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        assert_eq!(app.approval_mode, ApprovalMode::Closed);
+        for c in "/yolo".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert_eq!(app.approval_mode, ApprovalMode::Open);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::SetApprovalMode(ApprovalMode::Open)
+        ));
+        for c in "/yolo".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert_eq!(app.approval_mode, ApprovalMode::Closed);
+    }
+
+    #[test]
+    fn server_side_commands_are_honest_stubs() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        for command in ["/compact", "/message x", "/ts", "/ps"] {
+            for c in command.chars() {
+                app.handle_key(KeyAction::Char(c), &tx);
+            }
+            app.handle_key(KeyAction::Enter, &tx);
+        }
+        // Each explains where the surface lives; none fakes success.
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("session/compact")));
+        // All three server-side stubs say the same honest thing.
+        let stubs = app
+            .messages
+            .iter()
+            .filter(|m| m.text.contains("not available in this build"))
+            .count();
+        assert_eq!(stubs, 3);
+    }
+
+    #[test]
+    fn risk_class_maps_tools_to_footer_labels() {
+        assert_eq!(RiskClass::for_tool("computer"), RiskClass::Blocking);
+        assert_eq!(RiskClass::for_tool("shell"), RiskClass::Elevated);
+        assert_eq!(RiskClass::for_tool("write_file"), RiskClass::Elevated);
+        assert_eq!(RiskClass::for_tool("mcp__x__y"), RiskClass::ReviewNeeded);
+        assert_eq!(RiskClass::Blocking.label(), "blocking");
     }
 
     #[test]

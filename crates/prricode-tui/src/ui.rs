@@ -279,7 +279,10 @@ fn render_approval(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.approval_border))
-                .title("approve?"),
+                .title(format!(
+                    "approve? — {}",
+                    crate::app::RiskClass::for_tool(&approval.kind).label()
+                )),
         );
         frame.render_widget(popup_widget, popup);
     }
