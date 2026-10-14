@@ -127,6 +127,23 @@ mod tests {
         let pipeline = Pipeline::new(runner, persistence);
         let worktree = pipeline.prepare_worktree("session-1").await.unwrap();
         assert!(worktree.exists() && worktree.is_dir());
+        // Inside a git repository `prepare_worktree` registers a real worktree
+        // in the host repo's `.git`; unregister it so `git worktree list` is
+        // unchanged by the test run.
+        let removed = tokio::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&worktree)
+            .status()
+            .await
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !removed {
+            tokio::process::Command::new("git")
+                .args(["worktree", "prune"])
+                .status()
+                .await
+                .ok();
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }
