@@ -97,13 +97,15 @@ Clients may be granted (and must respect) these capability flags:
 ### Pipeline
 The product-builder pipeline (concept -> clarify -> specify -> plan -> build).
 Pipeline state persists per session in the settings table under the
-`pipeline:<sessionId>` key.
+`pipeline:<sessionId>` key; once a build starts, that state also carries the
+build's `runId`, which resolves the session's verification report.
 
 | method | purpose |
 |---|---|
 | `pipeline/conceptSet` | start the pipeline from a raw idea; returns the concept plus the first clarifier question |
 | `pipeline/specRead` | read the latest spec draft and the current stage |
 | `pipeline/planRead` | read the wave-scheduled task plan and the current stage |
+| `pipeline/verifyRead` | read the session's verification report (gates, verdicts, residual risk, not-tested) |
 
 `pipeline/conceptSet` params: `{ sessionId, idea }` (optional `commandId`).
 Result: `{ commandId, concept, question }` — `concept` is the Concept JSON
@@ -121,6 +123,17 @@ has not started; `stage` is the current stage label (`concept`, `clarify`,
 `pipeline/planRead` params: `{ sessionId }`. Result: `{ waves, stage }` —
 `waves` is an array of waves, each an array of task ids in dependency order
 (empty until the plan exists); `stage` is the current stage label.
+
+`pipeline/verifyRead` params: `{ sessionId }`. Result: `{ report }` — the
+verification report (`run_id`, `gates`, `requirements`, `not_tested`,
+`residual_risk`; gate entries carry `command`, `exit_code`, `passed`,
+`evidence_tail`, `duration_ms`; requirement entries carry `requirement_id`,
+`verdict` (`pass`/`fail`/`unverified`), `evidence`) or `null`. Resolution:
+the `runId` stored in the session's pipeline state when that run has a
+persisted dossier, otherwise the most recent `dossier:<runId>` row in the
+data dir (v0.2 does not scope dossiers by session). The rendered
+`acceptance-dossier.md` for a run lives in its run directory; the TUI opens
+it from the verify rail with `/dossier`.
 
 Pipeline notifications ride the existing `turn/item` notification: each
 pipeline item carries `kind: "pipeline_question"`, `role: "assistant"`, a
