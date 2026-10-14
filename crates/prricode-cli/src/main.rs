@@ -747,8 +747,23 @@ async fn main() -> Result<()> {
                 println!("  prricode login ollama       # OLLAMA_HOST (local; no key needed)");
             }
         },
-        Command::Logout => {
-            println!("prricode keeps no credentials of its own; unset the environment variables:");
+        Command::Logout { provider } => {
+            let named = provider.implementation();
+            let targets: Vec<String> = match named.as_deref() {
+                Some(name) => vec![name.to_ascii_lowercase()],
+                None => prricode_provider::credentials::providers(),
+            };
+            if targets.is_empty() {
+                println!("No stored credentials to remove.");
+            }
+            for name in &targets {
+                match prricode_provider::credentials::remove(name) {
+                    Ok(true) => println!("Removed the stored credential for {name}."),
+                    Ok(false) => println!("No stored credential for {name}."),
+                    Err(e) => println!("Could not remove the credential for {name}: {e}"),
+                }
+            }
+            println!("prricode keeps no credentials of its own beyond that store; unset the environment variables too:");
             println!(
                 "  unset KILO_API_KEY OPENROUTER_API_KEY OPENAI_API_KEY OLLAMA_API_KEY OLLAMA_HOST"
             );

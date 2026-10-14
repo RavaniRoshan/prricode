@@ -96,7 +96,8 @@ prricode's own auth surface is a credential store at
 ```bash
 prricode auth token kilo --key-env KILO_API_KEY   # or: echo "$KEY" | prricode auth token kilo
 prricode auth status                              # shows stored providers (never values)
-prricode auth token kilo --key-env X              # re-store
+prricode logout openrouter                        # drop one stored credential
+prricode logout                                   # drop every stored credential
 ```
 
 Resolution order for provider credentials: CLI `--api-key` > environment
