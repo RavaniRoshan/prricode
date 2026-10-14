@@ -10,6 +10,7 @@ prricode-agent = { path = "../prricode-agent" }
 prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
 prricode-workflow = { path = "../prricode-workflow" }
+prricode-verify = { path = "../prricode-verify" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures-util = { workspace = true }
@@ -17,3 +18,6 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }

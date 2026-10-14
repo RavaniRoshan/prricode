@@ -1,14 +1,18 @@
 //! Adversarial verifier: an isolated model turn judges each requirement
 //! against the run's gate evidence.
 //!
-//! Isolation is structural. `verify` never touches the builder session: it
-//! runs one `run_subagent` turn, which constructs its own headless runner
-//! (no event stream, no pipeline state) and is handed an empty history, so
-//! the verifier never receives the builder session's history or the
-//! pipeline's `TurnInput.history`. A judge that cannot see how the code was
-//! written can still contradict it — that is the point.
+//! Isolation is structural, in two layers. First, `verify` runs one
+//! `run_subagent` turn, which constructs its own headless runner (no event
+//! stream, no pipeline state) and is handed an empty history, so the
+//! verifier never receives the builder session's history or the pipeline's
+//! `TurnInput.history`. Second, the caller hands `verify` a runner built
+//! with the evidence-only toolset (see [`evidence_only_registry`]) and
+//! `verify` refuses any runner holding more: a judge that cannot see how
+//! the code was written can still contradict it — that is the point.
 
-use prricode_agent::{AgentRunner, TurnInput};
+use prricode_agent::{
+    AgentRunner, GlobTool, GrepTool, ReadFileTool, ToolRegistry, ToolRegistryBuilder, TurnInput,
+};
 use prricode_core::ApprovalMode;
 use prricode_provider::{repair_json, ChatMessage, ContentPart};
 use prricode_spec::Requirements;
@@ -23,14 +27,50 @@ cannot see its author. For EACH requirement return a verdict: PASS (evidence dem
 FAIL (evidence contradicts it), UNVERIFIED (evidence insufficient). Cite the evidence you used. \
 Output ONLY a fenced JSON array: [{requirement_id, verdict, evidence}].";
 
+/// The tools the verifier may use: read the workspace, never write to it,
+/// never run commands. A runner offering anything else is refused.
+const EVIDENCE_TOOLS: [&str; 3] = ["glob", "grep", "read_file"];
+
 /// Errors the adversarial verifier can produce: the model's output could
-/// not be parsed (or coverage failed), or the provider call failed.
+/// not be parsed (or coverage failed), the runner is not evidence-only, or
+/// the provider call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
     #[error("verifier output parse error: {0}")]
     Parse(String),
+    #[error("verifier runner is not evidence-only: {0}")]
+    Isolation(String),
     #[error("verifier provider error: {0}")]
     Provider(String),
+}
+
+/// The evidence-only toolset the verifier runs with: read_file, glob, grep.
+pub fn evidence_only_registry() -> ToolRegistry {
+    ToolRegistryBuilder::new()
+        .with_tool(ReadFileTool)
+        .with_tool(GlobTool)
+        .with_tool(GrepTool)
+        .build()
+}
+
+/// Refuse a runner that is not evidence-only: the judge must not be able to
+/// write code, run commands, or reach the network while judging.
+fn ensure_evidence_only(runner: &AgentRunner) -> Result<(), VerifyError> {
+    let tools = runner.tool_names();
+    let unexpected: Vec<&str> = tools
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !EVIDENCE_TOOLS.contains(name))
+        .collect();
+    if unexpected.is_empty() {
+        Ok(())
+    } else {
+        Err(VerifyError::Isolation(format!(
+            "expected exactly [{}], got [{}]",
+            EVIDENCE_TOOLS.join(", "),
+            tools.join(", ")
+        )))
+    }
 }
 
 /// The verifier's messages: the adversarial role, the requirements to
@@ -111,11 +151,16 @@ pub fn coverage_check(
 
 /// Run the adversarial verifier: one isolated subagent turn whose answer is
 /// parsed into per-requirement verdicts, with full coverage enforced.
+///
+/// `runner` must be evidence-only (see [`evidence_only_registry`]); any
+/// runner holding more of a toolset is refused with
+/// [`VerifyError::Isolation`] before the turn starts.
 pub async fn verify(
     runner: &AgentRunner,
     requirements: &Requirements,
     evidence: &str,
 ) -> Result<Vec<GateVerdict>, VerifyError> {
+    ensure_evidence_only(runner)?;
     let user_content: Vec<ContentPart> = verifier_prompt(requirements, evidence)
         .into_iter()
         .flat_map(|message| message.content)
@@ -288,6 +333,13 @@ mod tests {
         }
     }
 
+    /// CARRIED RULING: the verifier runs on an evidence-only runner —
+    /// read_file, glob, grep; never the default toolset's shell/write_file.
+    fn evidence_only_runner(provider: Arc<dyn ModelProvider>) -> AgentRunner {
+        AgentRunner::new(provider, Arc::new(ApprovalEngine::new()))
+            .with_tool_registry(evidence_only_registry())
+    }
+
     #[tokio::test]
     async fn verifier_returns_verdicts_and_enforces_coverage() {
         // A scripted provider whose single reply is a fenced JSON verdict array.
@@ -354,7 +406,7 @@ mod tests {
         let provider: Arc<dyn ModelProvider> = Arc::new(ScriptedVerifier {
             reply: reply.into(),
         });
-        let runner = AgentRunner::new(provider, Arc::new(ApprovalEngine::new()));
+        let runner = evidence_only_runner(provider);
         let verdicts = verify(&runner, &requirements, "gate evidence: build ok")
             .await
             .unwrap();
@@ -365,7 +417,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_rejects_a_verdict_set_that_misses_a_requirement() {
+    async fn verify_refuses_a_runner_that_is_not_evidence_only() {
+        // The isolation property is enforced, not conventional: a runner
+        // still holding the default toolset (shell, write_file) is refused
+        // before the turn starts.
         let requirements = two_requirements();
         let reply =
             "```json\n[{\"requirement_id\":\"R1\",\"verdict\":\"PASS\",\"evidence\":\"e\"}]\n```";
@@ -373,6 +428,32 @@ mod tests {
             reply: reply.into(),
         });
         let runner = AgentRunner::new(provider, Arc::new(ApprovalEngine::new()));
+        let err = verify(&runner, &requirements, "evidence")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerifyError::Isolation(_)),
+            "expected an isolation refusal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn evidence_only_registry_grants_read_tools_only() {
+        assert_eq!(
+            evidence_only_registry().names(),
+            vec!["glob", "grep", "read_file"]
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_a_verdict_set_that_misses_a_requirement() {
+        let requirements = two_requirements();
+        let reply =
+            "```json\n[{\"requirement_id\":\"R1\",\"verdict\":\"PASS\",\"evidence\":\"e\"}]\n```";
+        let provider: Arc<dyn ModelProvider> = Arc::new(ScriptedVerifier {
+            reply: reply.into(),
+        });
+        let runner = evidence_only_runner(provider);
         let err = verify(&runner, &requirements, "evidence")
             .await
             .unwrap_err();
