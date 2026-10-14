@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod dossier;
 pub mod gates;
 pub mod verifier;
 

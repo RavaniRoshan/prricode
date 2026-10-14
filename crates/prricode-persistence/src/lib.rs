@@ -105,6 +105,18 @@ CREATE TABLE IF NOT EXISTS usage_records (
     cost REAL NOT NULL DEFAULT 0,
     recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS gate_records (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    gate TEXT NOT NULL,
+    command TEXT NOT NULL,
+    exit_code INTEGER NOT NULL,
+    passed INTEGER NOT NULL,
+    evidence_tail TEXT NOT NULL DEFAULT '',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 "#;
 
 #[derive(Debug)]
@@ -330,6 +342,49 @@ impl Persistence {
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.flatten().collect())
     }
+
+    // ---- gate records ----
+
+    pub fn save_gate_record(&self, record: &GateRecordRow) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO gate_records (id, run_id, gate, command, exit_code, passed, evidence_tail, duration_ms, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))",
+            (
+                &record.id,
+                &record.run_id,
+                &record.gate,
+                &record.command,
+                &record.exit_code,
+                &record.passed,
+                &record.evidence_tail,
+                &record.duration_ms,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn list_gate_records(&self, run_id: &str) -> Result<Vec<GateRecordRow>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, gate, command, exit_code, passed, evidence_tail, duration_ms, created_at
+             FROM gate_records WHERE run_id=?1 ORDER BY created_at ASC, rowid ASC"
+        )?;
+        let rows = stmt.query_map([run_id], |row| {
+            Ok(GateRecordRow {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                gate: row.get(2)?,
+                command: row.get(3)?,
+                exit_code: row.get(4)?,
+                passed: row.get(5)?,
+                evidence_tail: row.get(6)?,
+                duration_ms: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?;
+        Ok(rows.flatten().collect())
+    }
 }
 
 #[derive(Debug, Implementation, Serialize, Deserialize)]
@@ -359,6 +414,21 @@ pub struct ItemRecord {
     pub kind: String,
     pub role: Option<String>,
     pub content: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// One persisted verification gate execution.
+#[derive(Debug, Implementation, Serialize, Deserialize)]
+pub struct GateRecordRow {
+    pub id: String,
+    pub run_id: String,
+    pub gate: String,
+    pub command: String,
+    pub exit_code: i32,
+    pub passed: bool,
+    pub evidence_tail: String,
+    pub duration_ms: u64,
     #[serde(default)]
     pub created_at: String,
 }

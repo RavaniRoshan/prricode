@@ -1348,9 +1348,11 @@ dependencies = [
 name = "prricode-verify"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "prricode-agent",
  "prricode-core",
+ "prricode-persistence",
  "prricode-provider",
  "prricode-sandbox",
  "prricode-spec",
