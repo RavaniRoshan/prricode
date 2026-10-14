@@ -31,28 +31,41 @@ pub fn spec_prompt(concept: &Concept, preset: Option<StackPreset>) -> Vec<ChatMe
         stack,
     );
     prompt.push('\n');
-    vec![ChatMessage::system_text(
-        "You are the Specify stage of a product builder. You emit machine-checkable specs.",
-    ), ChatMessage {
-        role: Role::User,
-        content: vec![ContentPart::text(prompt)],
-        tool_call_id: None,
-        tool_calls: vec![],
-    }]
+    vec![
+        ChatMessage::system_text(
+            "You are the Specify stage of a product builder. You emit machine-checkable specs.",
+        ),
+        ChatMessage {
+            role: Role::User,
+            content: vec![ContentPart::text(prompt)],
+            tool_call_id: None,
+            tool_calls: vec![],
+        },
+    ]
 }
 
 pub fn parse_requirements(model_text: &str) -> Result<Requirements, SpecError> {
-    let start = model_text.find('[').ok_or(SpecError::NotEars { id: "<none>".into() })?;
-    let end = model_text.rfind(']').ok_or(SpecError::NotEars { id: "<none>".into() })?;
+    let start = model_text.find('[').ok_or(SpecError::NotEars {
+        id: "<none>".into(),
+    })?;
+    let end = model_text.rfind(']').ok_or(SpecError::NotEars {
+        id: "<none>".into(),
+    })?;
     let slice = &model_text[start..=end];
     let value = parse_json_slice(slice);
-    let array = value.as_array().ok_or(SpecError::NotEars { id: "<none>".into() })?;
+    let array = value.as_array().ok_or(SpecError::NotEars {
+        id: "<none>".into(),
+    })?;
     let items: Vec<Requirement> = array
         .iter()
         .enumerate()
         .filter_map(|(i, item)| {
             Some(Requirement {
-                id: item.get("id")?.as_str().unwrap_or(&format!("R{}", i + 1)).to_string(),
+                id: item
+                    .get("id")?
+                    .as_str()
+                    .unwrap_or(&format!("R{}", i + 1))
+                    .to_string(),
                 ears: item.get("ears")?.as_str()?.to_string(),
                 acceptance: item
                     .get("acceptance")?
@@ -64,7 +77,9 @@ pub fn parse_requirements(model_text: &str) -> Result<Requirements, SpecError> {
         })
         .collect();
     if items.is_empty() {
-        return Err(SpecError::NotEars { id: "<none>".into() });
+        return Err(SpecError::NotEars {
+            id: "<none>".into(),
+        });
     }
     let requirements = Requirements { items };
     requirements.validate()?;
@@ -82,10 +97,18 @@ mod tests {
         concept.audience = "commuters".into();
         concept.value = "audio briefings".into();
         let messages = spec_prompt(&concept, Some(prricode_spec::StackPreset::TanStack));
-        let joined: String = messages.iter().map(|m| m.content.iter().map(|p| match p {
-            prricode_provider::ContentPart::Text(t) => t.implementation(),
-            _ => String::new(),
-        }).collect::<String>()).collect();
+        let joined: String = messages
+            .iter()
+            .map(|m| {
+                m.content
+                    .iter()
+                    .map(|p| match p {
+                        prricode_provider::ContentPart::Text(t) => t.implementation(),
+                        _ => String::new(),
+                    })
+                    .collect::<String>()
+            })
+            .collect();
         assert!(joined.contains("commuters"));
         assert!(joined.contains("TAN stack"));
         assert!(joined.to_uppercase().contains("WHEN"));
