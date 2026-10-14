@@ -1,5 +1,13 @@
 # Configuration
 
+> **The terminal is the interface.** Everything on this page can be set from
+> the TUI instead of a file: `/model` and `/provider` switch the brain live,
+> `/approval` and `/yolo` set the approval policy, `/theme` picks the palette,
+> `/goal` sets the objective. The config file and environment variables below
+> are the *optional* equivalents — for those who prefer files, or for CI where
+> there is no TUI. The TUI reads them at startup, so either surface works.
+> Full command and key reference: [`docs/TUI-GUIDE.md`](TUI-GUIDE.md).
+
 prricode resolves settings in this order, first match wins:
 
 1. CLI flags (`--provider`, `--model`, `--base-url`, `--api-key`, `--api-key-env`)
@@ -44,11 +52,11 @@ Per-provider keys: `base_url`, `api_key` (inline; prefer `api_key_env`),
 (extra HTTP headers).
 
 Top-level key: `theme` — the TUI theme slug to start with (e.g.
-`theme = "dracula"`). The TUI's `/theme` command lists the bundled themes
-(`prricode` plus five extras), switches the palette, and remembers the last
-choice, which wins over the config file. User themes live in
-`~/.config/prricode/themes/*.json` (or the directory `$PRRICODE_CONFIG`
-points into) and override a bundled theme of the same slug.
+`theme = "dracula"`). The TUI's `/theme` command lists the 25 bundled themes,
+switches the palette, and remembers the last choice, which wins over the
+config file. User themes live in `~/.config/prricode/themes/*.json` (or the
+directory `$PRRICODE_CONFIG` points into) and override a bundled theme of the
+same slug. See `docs/TUI-GUIDE.md`.
 
 ## Secrets
 
