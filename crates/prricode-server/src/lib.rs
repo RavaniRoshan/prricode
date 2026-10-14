@@ -1,5 +1,6 @@
 //! JSON-RPC server over stdio: session lifecycle, turns, goals, approvals,
-//! computer-use setup, tasks, skills, models, usage, and media.
+//! computer-use setup, tasks, skills, models, usage, media, and the
+//! product-builder pipeline.
 
 use anyhow::Result;
 use prricode_agent::{
@@ -9,6 +10,9 @@ use prricode_core::protocol::*;
 use prricode_core::types::*;
 use prricode_core::*;
 use prricode_persistence::*;
+use prricode_pipeline::clarify::Clarifier;
+use prricode_pipeline::PipelineStage;
+use prricode_spec::{Concept, Spec};
 // Explicit imports shadow same-named types (ContentPart) from the core globs above.
 use prricode_provider::{
     AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider, ToolCall,
@@ -54,6 +58,19 @@ struct MediaUploadState {
     chunks_received: u32,
     chunk_count: u32,
     bytes: Vec<u8>,
+}
+
+/// Product-builder pipeline state, persisted per session as JSON in the
+/// settings table under the `pipeline:<sessionId>` key.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct PipelineState {
+    stage: String,
+    #[serde(default)]
+    concept: Option<Value>,
+    #[serde(default)]
+    spec: Option<Value>,
+    #[serde(default)]
+    waves: Vec<Vec<String>>,
 }
 
 /// Convert agent events to JSON-RPC notifications on the wire.
@@ -545,6 +562,9 @@ impl PrricodeServer {
             "log/page" => self.handle_log_page(params).await,
             "peer/admission" => self.handle_peer_admission(None).await,
             "tool/configuration" => self.handle_tool_configuration(None).await,
+            "pipeline/conceptSet" => self.handle_pipeline_concept_set(params).await,
+            "pipeline/specRead" => self.handle_pipeline_spec_read(params).await,
+            "pipeline/planRead" => self.handle_pipeline_plan_read(params).await,
             _ => Err(JsonRpcError::method_not_found(format!("unknown method: {method}")).into()),
         }
     }
@@ -2034,6 +2054,79 @@ impl PrricodeServer {
         let params: TurnUnqueueParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(json!({ "commandId": params.command_id, "unqueued": true }))
     }
+
+    // ---------- pipeline (product builder) ----------
+
+    fn pipeline_setting_key(session_id: &str) -> String {
+        format!("pipeline:{session_id}")
+    }
+
+    fn pipeline_state(&self, session_id: &str) -> PipelineState {
+        self.persistence
+            .get_setting(&Self::pipeline_setting_key(session_id))
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_pipeline_state(&self, session_id: &str, state: &PipelineState) -> Result<()> {
+        self.persistence.set_setting(
+            &Self::pipeline_setting_key(session_id),
+            &serde_json::to_string(state)?,
+        )
+    }
+
+    fn pipeline_stage_label(state: &PipelineState) -> String {
+        if state.stage.is_empty() {
+            PipelineStage::Concept.label().to_string()
+        } else {
+            state.stage.clone()
+        }
+    }
+
+    async fn handle_pipeline_concept_set(&self, params: Option<Value>) -> Result<Value> {
+        let params: PipelineConceptSetParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session_id = params.session_id.to_string();
+        let concept = Concept::from_idea(&params.idea);
+        let question = Clarifier::new(concept.clone()).next_question();
+        let mut state = self.pipeline_state(&session_id);
+        state.stage = PipelineStage::Clarify.label().to_string();
+        state.concept = Some(serde_json::to_value(&concept)?);
+        self.save_pipeline_state(&session_id, &state)?;
+        if let Some(question) = &question {
+            let _ = self.events_tx.send(AgentEvent::Item {
+                session_id: session_id.clone(),
+                item: json!({
+                    "kind": "pipeline_question",
+                    "role": "assistant",
+                    "stage": PipelineStage::Clarify.label(),
+                    "content": [{ "type": "text", "text": question }],
+                }),
+            });
+        }
+        Ok(json!({
+            "commandId": params.command_id,
+            "concept": concept,
+            "question": question,
+        }))
+    }
+
+    async fn handle_pipeline_spec_read(&self, params: Option<Value>) -> Result<Value> {
+        let params: PipelineSpecReadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let state = self.pipeline_state(&params.session_id.to_string());
+        let spec = match &state.spec {
+            Some(spec) => spec.clone(),
+            None => serde_json::to_value(Spec::draft(Concept::from_idea("")))?,
+        };
+        Ok(json!({ "spec": spec, "stage": Self::pipeline_stage_label(&state) }))
+    }
+
+    async fn handle_pipeline_plan_read(&self, params: Option<Value>) -> Result<Value> {
+        let params: PipelinePlanReadParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let state = self.pipeline_state(&params.session_id.to_string());
+        Ok(json!({ "waves": state.waves, "stage": Self::pipeline_stage_label(&state) }))
+    }
 }
 
 fn parse_history_tool_calls(content: &Value) -> Vec<ToolCall> {
@@ -2256,6 +2349,26 @@ pub struct ConversationRewindEvaluateParams {
 #[serde(rename_all = "camelCase")]
 pub struct LocalSessionMessageParams {
     pub command_id: Option<CommandId>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineConceptSetParams {
+    pub command_id: Option<CommandId>,
+    pub idea: String,
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineSpecReadParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelinePlanReadParams {
+    pub session_id: SessionId,
 }
 
 // ---------- request param types ----------
@@ -2540,5 +2653,30 @@ mod mcp {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+// ---------- tests ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pipeline_methods_are_registered() {
+        let (server, _rx) = PrricodeServer::new(
+            std::env::temp_dir(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "pipeline/specRead",
+            "params": { "sessionId": "00000000-0000-7000-8000-000000000001" }
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        assert!(response.error.is_none(), "pipeline/specRead must not error");
     }
 }
