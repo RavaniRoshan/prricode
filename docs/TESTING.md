@@ -62,6 +62,11 @@ PATH (absent → exit 127, still a failing gate, so the failure mode is safe).
 The Python gate path is exercised via unit-level plans; pytest presence on
 the host decides which command runs.
 
+Ship/operate tests are local-only: ship runs against temp git repos with no
+remote, deploy execution is tested with local commands (exit codes, redaction,
+release-id extraction), and the `gh` paths degrade to tag-only/skip in test
+environments. No test performs a real deploy or network call.
+
 ## CI
 
 `.github/workflows/ci.yml` has two jobs:
