@@ -107,7 +107,9 @@ skill and runs it.
 
 **Disposition:** implement via subprocess (see Runtime ruling).
 
-## Gap 4 — Auth (goal item 5)
+## Gap 4 — Auth — CLOSED (auth commit)
+
+Credential store + CLI auth commands implemented; OAuth methods flagged off with future-work comments.
 
 **Closure:** prricode's own credential flow (env + config, already 80% there
 from the provider layer) is formalized as `prricode auth`; the External OAuth
