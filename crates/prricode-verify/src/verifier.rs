@@ -17,6 +17,7 @@ use prricode_core::ApprovalMode;
 use prricode_provider::{repair_json, ChatMessage, ContentPart};
 use prricode_spec::Requirements;
 use serde_json::Value;
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::{GateVerdict, Verdict};
@@ -159,6 +160,7 @@ pub async fn verify(
     runner: &AgentRunner,
     requirements: &Requirements,
     evidence: &str,
+    workspace: &Path,
 ) -> Result<Vec<GateVerdict>, VerifyError> {
     ensure_evidence_only(runner)?;
     let user_content: Vec<ContentPart> = verifier_prompt(requirements, evidence)
@@ -170,7 +172,7 @@ pub async fn verify(
             session_id: format!("verify-{}", Uuid::now_v7()),
             model: String::new(),
             approval_mode: ApprovalMode::Open,
-            workspace_root: std::env::temp_dir(),
+            workspace_root: workspace.to_path_buf(),
             data_dir: std::env::temp_dir(),
             // No builder history: the judge starts from a blank slate.
             history: vec![],
@@ -407,9 +409,14 @@ mod tests {
             reply: reply.into(),
         });
         let runner = evidence_only_runner(provider);
-        let verdicts = verify(&runner, &requirements, "gate evidence: build ok")
-            .await
-            .unwrap();
+        let verdicts = verify(
+            &runner,
+            &requirements,
+            "gate evidence: build ok",
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
         assert_eq!(verdicts.len(), 2);
         assert_eq!(verdicts[0].verdict, Verdict::Pass);
         // Unknown verdict strings degrade to UNVERIFIED, never to a drop.
@@ -428,7 +435,7 @@ mod tests {
             reply: reply.into(),
         });
         let runner = AgentRunner::new(provider, Arc::new(ApprovalEngine::new()));
-        let err = verify(&runner, &requirements, "evidence")
+        let err = verify(&runner, &requirements, "evidence", Path::new("/tmp"))
             .await
             .unwrap_err();
         assert!(
@@ -454,7 +461,7 @@ mod tests {
             reply: reply.into(),
         });
         let runner = evidence_only_runner(provider);
-        let err = verify(&runner, &requirements, "evidence")
+        let err = verify(&runner, &requirements, "evidence", Path::new("/tmp"))
             .await
             .unwrap_err();
         assert!(matches!(err, VerifyError::Parse(msg) if msg == "uncovered: R2"));

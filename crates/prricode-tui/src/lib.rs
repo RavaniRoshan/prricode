@@ -910,7 +910,12 @@ async fn run_build_stage(ctx: StageCtx) {
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                 "pipeline: build finished — {summary}"
             )));
-            run_verify_after_build(&ctx, &engine, &run_id, &build_workspace).await;
+            // Only verify a completed build: cancelled/paused runs read as
+            // Ok with a non-completed summary (build.rs) and an incomplete
+            // workspace would burn a verifier turn on red gates.
+            if summary == "build completed" {
+                run_verify_after_build(&ctx, &engine, &run_id, &build_workspace).await;
+            }
         }
         // A run that stops mid-wave reads as paused/cancelled, not failed.
         Err(e) => {

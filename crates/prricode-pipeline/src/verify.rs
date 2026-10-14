@@ -86,7 +86,7 @@ pub async fn run_verify_stage(
 
     // (3) the adversarial verifier pass — isolated context, evidence-only
     // tools, one turn, every requirement covered or it is an error.
-    let verdicts = verifier::verify(runner, &requirements, &evidence).await?;
+    let verdicts = verifier::verify(runner, &requirements, &evidence, workspace).await?;
 
     let mut report = VerificationReport {
         run_id: run_id.to_string(),
