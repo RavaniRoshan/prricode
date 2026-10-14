@@ -1,0 +1,24 @@
+{
+  "display_name": "Catppuccin Latte",
+  "foreground": "#4c4f69",
+  "background": "#eff1f5",
+  "accent": "#8839ef",
+  "source_model": "catppuccin",
+  "license": "MIT",
+  "colors": {
+    "user": "#40a02b",
+    "assistant": "#1e66f5",
+    "tool": "#ea76cb",
+    "system": "#9ca0b0",
+    "status": "#df8e1d",
+    "session": "#9ca0b0",
+    "rail_stage": "#8839ef",
+    "rail_gate": "#d20f39",
+    "rail_ok": "#40a02b",
+    "approval": "#d20f39",
+    "approval_border": "#e64553",
+    "footer_key": "#fe640b",
+    "footer_command": "#1e66f5",
+    "error": "#d20f39"
+  }
+}

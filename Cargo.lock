@@ -1245,6 +1245,7 @@ dependencies = [
  "prricode-core",
  "prricode-persistence",
  "prricode-provider",
+ "prricode-sandbox",
  "prricode-ship",
  "prricode-spec",
  "prricode-verify",
@@ -1351,6 +1352,7 @@ name = "prricode-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "crossterm",
  "prricode-agent",
  "prricode-core",

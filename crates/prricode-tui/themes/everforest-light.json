@@ -1,0 +1,24 @@
+{
+  "display_name": "Everforest Light",
+  "foreground": "#5c6a72",
+  "background": "#fdf6e3",
+  "accent": "#8da101",
+  "source_model": "everforest",
+  "license": "MIT",
+  "colors": {
+    "user": "#8da101",
+    "assistant": "#3a94c5",
+    "tool": "#df69ba",
+    "system": "#939f91",
+    "status": "#dfa000",
+    "session": "#a6b0a0",
+    "rail_stage": "#8da101",
+    "rail_gate": "#f85552",
+    "rail_ok": "#8da101",
+    "approval": "#f85552",
+    "approval_border": "#f57d26",
+    "footer_key": "#dfa000",
+    "footer_command": "#3a94c5",
+    "error": "#f85552"
+  }
+}

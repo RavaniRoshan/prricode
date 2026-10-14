@@ -184,10 +184,14 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             ),
         )
     } else {
-        (
-            app.input.clone(),
-            "input  (Enter send · Esc cancel · /help)".to_string(),
-        )
+        // A pending image paste shows in the input box; the hint is cleared
+        // with Esc and replaced by another Ctrl+V.
+        let title = if let Some(hint) = app.image_hint() {
+            format!("input  (Enter send · {hint} — Esc clears · Ctrl+V replace)")
+        } else {
+            "input  (Enter send · Esc cancel · Ctrl+V paste image · /help)".to_string()
+        };
+        (app.input.clone(), title)
     };
     let input = Paragraph::new(composer.as_str())
         .style(Style::default().fg(theme.foreground))

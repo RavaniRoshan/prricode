@@ -969,4 +969,105 @@ mod tests {
         let calls = extract_text_tool_calls(text, &known());
         assert_eq!(calls.len(), 1);
     }
+
+    /// Provider that emits one sensitive `shell` tool call, then a final text
+    /// answer — enough to drive the approval path end to end.
+    struct DenyingProvider {
+        turn: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for DenyingProvider {
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Echo
+        }
+
+        async fn list_models(&self) -> ProviderResult<Vec<prricode_provider::ModelInfo>> {
+            Ok(vec![])
+        }
+
+        async fn chat(&self, _request: &ChatRequest) -> ProviderResult<ChatResponse> {
+            let turn = self.turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let message = if turn == 0 {
+                AssistantMessage {
+                    content_parts: vec![],
+                    tool_calls: vec![ToolCall {
+                        id: "call-1".into(),
+                        name: "shell".into(),
+                        arguments: json!({ "command": "echo hi" }),
+                    }],
+                }
+            } else {
+                AssistantMessage {
+                    content_parts: vec![ContentPart::text("done")],
+                    tool_calls: vec![],
+                }
+            };
+            Ok(ChatResponse {
+                message,
+                usage: Usage::default(),
+                finish_reason: "stop".into(),
+                cost_usd: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            request: &ChatRequest,
+            events: mpsc::UnboundedSender<StreamEvent>,
+        ) -> ProviderResult<ChatResponse> {
+            let response = self.chat(request).await?;
+            let text = response.message.text();
+            if !text.is_empty() {
+                let _ = events.send(StreamEvent::TextDelta(text));
+            }
+            let _ = events.send(StreamEvent::Done);
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_approval_denies_the_tool_call() {
+        // Closed mode prompts for the sensitive shell call; nobody decides,
+        // so the engine's timeout resolves it as denied and the loop's tool
+        // result reads as a denial.
+        let (events, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let approvals = std::sync::Arc::new(
+            ApprovalEngine::new().with_timeout(std::time::Duration::from_millis(50)),
+        );
+        let provider: Arc<dyn ModelProvider> = Arc::new(DenyingProvider {
+            turn: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let runner = AgentRunner::new(provider, approvals).with_events(events);
+
+        let outcome = runner
+            .run_turn(TurnInput {
+                session_id: "session-approval-timeout".into(),
+                model: String::new(),
+                approval_mode: ApprovalMode::Closed,
+                workspace_root: std::env::temp_dir(),
+                data_dir: std::env::temp_dir(),
+                history: vec![],
+                user_content: vec![ContentPart::text("run echo hi")],
+                goal: None,
+                skills_prompt: None,
+                max_iterations: 4,
+                turn_id: "turn-approval-timeout".into(),
+            })
+            .await
+            .expect("turn runs to completion despite the denial");
+
+        assert_eq!(outcome.content, "done");
+
+        // The shell call reads as an error tool result, i.e. a denial.
+        let mut denied = false;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::Item { item, .. } = event {
+                let is_denial = item.get("kind").and_then(|k| k.as_str()) == Some("tool_result")
+                    && item.get("isError").and_then(|e| e.as_bool()) == Some(true);
+                denied |= is_denial;
+            }
+        }
+        assert!(denied, "the timed-out approval must deny the tool call");
+    }
 }

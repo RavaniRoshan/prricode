@@ -11,6 +11,7 @@ prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
 prricode-workflow = { path = "../prricode-workflow" }
 prricode-ship = { path = "../prricode-ship" }
+prricode-sandbox = { path = "../prricode-sandbox" }
 prricode-verify = { path = "../prricode-verify" }
 serde = { workspace = true }
 serde_json = { workspace = true }

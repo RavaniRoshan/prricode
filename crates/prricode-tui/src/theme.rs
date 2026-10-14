@@ -396,4 +396,84 @@ mod tests {
         assert!(store.set_by_slug("tokyo night"));
         assert_eq!(store.active_slug(), "tokyo-night");
     }
+
+    #[test]
+    fn every_bundled_theme_carries_the_full_required_key_set() {
+        // Every bundled theme JSON parses, carries the full schema the
+        // reference document names, and still loads through the runtime
+        // ThemeFile schema: display name, base colors, source model, license,
+        // and every per-role color.
+        const TOP_LEVEL: &[&str] = &[
+            "display_name",
+            "foreground",
+            "background",
+            "accent",
+            "source_model",
+            "license",
+            "colors",
+        ];
+        const ROLES: &[&str] = &[
+            "user",
+            "assistant",
+            "tool",
+            "system",
+            "status",
+            "session",
+            "rail_stage",
+            "rail_gate",
+            "rail_ok",
+            "approval",
+            "approval_border",
+            "footer_key",
+            "footer_command",
+            "error",
+        ];
+        let dir = bundled_themes_dir();
+        let mut count = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let slug = path.file_stem().unwrap().to_string_lossy().to_string();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("theme {slug}: {e}"));
+            for key in TOP_LEVEL {
+                assert!(value.get(key).is_some(), "theme {slug} is missing `{key}`");
+            }
+            let colors = value.get("colors").unwrap();
+            for role in ROLES {
+                assert!(
+                    colors.get(*role).is_some(),
+                    "theme {slug} colors is missing `{role}`"
+                );
+            }
+            // It loads through the schema the renderer actually uses.
+            serde_json::from_str::<ThemeFile>(&text)
+                .unwrap_or_else(|e| panic!("theme {slug} fails the ThemeFile schema: {e}"));
+            count += 1;
+        }
+        assert!(
+            count >= 24,
+            "expected the bundled set to cover the documented 24 themes, found {count}"
+        );
+    }
+
+    #[test]
+    fn a_sample_of_newly_added_themes_switch() {
+        let mut store = ThemeStore::load(&bundled_themes_dir(), Path::new("/nonexistent/themes"));
+        for slug in [
+            "gruvbox-dark-medium",
+            "gruvbox-light-medium",
+            "catppuccin-latte",
+            "monokai",
+            "rose-pine-moon",
+            "synthwave-84",
+        ] {
+            assert!(store.set_by_slug(slug), "theme {slug} should switch");
+            assert_eq!(store.active_slug(), slug);
+            assert!(!store.active().display_name.is_empty());
+        }
+    }
 }

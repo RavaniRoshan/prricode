@@ -35,7 +35,11 @@ use tokio::sync::mpsc;
 
 /// Commands the UI sends to the agent task.
 pub enum UiCommand {
-    Submit(String),
+    Submit {
+        text: String,
+        /// A pending pasted image, base64-encoded, sent exactly once.
+        image: Option<ContentPart>,
+    },
     Cancel,
     Approve {
         approval_id: String,
@@ -74,9 +78,12 @@ pub enum UiCommand {
     /// gate, and a deploy plan is proposed once the release is out.
     ShipStart,
     /// The operator's answer to a proposed deploy plan: confirmed runs the
-    /// plan's commands, otherwise the deploy is skipped.
+    /// plan's commands, otherwise the deploy is skipped. `auto_rollback`
+    /// arms autonomous rollback when the later health check fails (default
+    /// no); it is asked at deploy-confirmation time.
     DeployConfirm {
         confirmed: bool,
+        auto_rollback: bool,
     },
     /// One credential value for the plan the ship flow is collecting. The
     /// value is env-only: it is forwarded here and never persisted.
@@ -165,7 +172,7 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
         let mut model = agent_launch.model.clone().unwrap_or_default();
         let mut approval_mode = agent_launch.approval_mode;
         let mut active_turn: Option<TurnHandle> = None;
-        let mut queued: Option<String> = None;
+        let mut queued: Option<(String, Option<ContentPart>)> = None;
         // Product-builder pipeline: the stage runner plus per-session flow
         // state shared with the spawned stage tasks.
         let pipeline = Arc::new(Pipeline::new(
@@ -187,8 +194,8 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                 forward_event(&event, &ui_tx, &mut active_turn);
             }
             if active_turn.is_none() {
-                if let Some(text) = queued.take() {
-                    let _ = cmd_tx_agent.send(UiCommand::Submit(text));
+                if let Some((text, image)) = queued.take() {
+                    let _ = cmd_tx_agent.send(UiCommand::Submit { text, image });
                 }
             }
 
@@ -212,9 +219,9 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
             let Some(command) = command else { continue };
 
             match command {
-                UiCommand::Submit(text) => {
+                UiCommand::Submit { text, image } => {
                     if active_turn.is_some() {
-                        queued = Some(text);
+                        queued = Some((text, image));
                         continue;
                     }
                     let record = prricode_persistence::SessionRecord {
@@ -249,7 +256,7 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         }),
                         data_dir: agent_data_dir.clone(),
                         history,
-                        user_content: vec![ContentPart::text(text)],
+                        user_content: submit_user_content(text, image),
                         goal,
                         skills_prompt: None,
                         max_iterations: 25,
@@ -540,14 +547,20 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         gate: "ship-confirmation".to_string(),
                     });
                 }
-                UiCommand::DeployConfirm { confirmed } => {
+                UiCommand::DeployConfirm {
+                    confirmed,
+                    auto_rollback,
+                } => {
                     let Some(answers) = ship_answers.as_ref() else {
                         let _ = ui_tx.send(UiEvent::Log(
                             "deploy: no deploy flow is waiting — /ship first".to_string(),
                         ));
                         continue;
                     };
-                    let _ = answers.send(ShipAnswer::DeployChoice { confirmed });
+                    let _ = answers.send(ShipAnswer::DeployChoice {
+                        confirmed,
+                        auto_rollback,
+                    });
                 }
                 UiCommand::DeploySecret { name, value } => {
                     let Some(answers) = ship_answers.as_ref() else {
@@ -613,6 +626,17 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
     })();
     ui::restore_terminal()?;
     result
+}
+
+/// The user content for one composer submit: the typed text, plus exactly one
+/// pasted image part when the composer carried an attachment. The image is
+/// appended once so the turn sees it exactly once.
+fn submit_user_content(text: String, image: Option<ContentPart>) -> Vec<ContentPart> {
+    let mut parts = vec![ContentPart::text(text)];
+    if let Some(image) = image {
+        parts.push(image);
+    }
+    parts
 }
 
 fn forward_event(
@@ -942,7 +966,10 @@ async fn run_ship_flow(mut ctx: ShipCtx) {
                          deploy by hand, then /operate to check health)"
                             .to_string(),
                     ));
-                    flow.answer(ShipAnswer::DeployChoice { confirmed: false });
+                    flow.answer(ShipAnswer::DeployChoice {
+                        confirmed: false,
+                        auto_rollback: false,
+                    });
                 }
                 other => emit_ship_event(&ctx.ui_tx, &flow, other),
             }
@@ -1001,6 +1028,9 @@ fn emit_ship_event(ui_tx: &mpsc::UnboundedSender<UiEvent>, flow: &ShipFlow, even
                 ok: false,
                 detail: issue,
             });
+        }
+        ShipEventKind::DeployRolledBack { ok, detail } => {
+            let _ = ui_tx.send(UiEvent::DeployRolledBack { ok, detail });
         }
         // The ship half reports through ShipReady before the flow starts.
         ShipEventKind::ShipReady { .. } => {}
@@ -1675,7 +1705,10 @@ mod tests {
         let mut events = Vec::new();
         await_event(&mut events, &mut ui_rx, "proposed").await;
         answer_tx
-            .send(ShipAnswer::DeployChoice { confirmed: true })
+            .send(ShipAnswer::DeployChoice {
+                confirmed: true,
+                auto_rollback: false,
+            })
             .unwrap();
         await_event(&mut events, &mut ui_rx, "secret").await;
         assert!(events.iter().any(
