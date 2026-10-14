@@ -95,10 +95,12 @@ Clients may be granted (and must respect) these capability flags:
 | `workflow/childControl` | `skip` or `retry` a child step (with `attempt`) |
 
 ### Pipeline
-The product-builder pipeline (concept -> clarify -> specify -> plan -> build).
+The product-builder pipeline (concept -> clarify -> specify -> plan -> build ->
+ship, with the agent-arranged deploy and the operate log after the release).
 Pipeline state persists per session in the settings table under the
 `pipeline:<sessionId>` key; once a build starts, that state also carries the
-build's `runId`, which resolves the session's verification report.
+build's `runId`, which resolves the session's verification report, ship
+record, and operate log.
 
 | method | purpose |
 |---|---|
@@ -106,6 +108,8 @@ build's `runId`, which resolves the session's verification report.
 | `pipeline/specRead` | read the latest spec draft and the current stage |
 | `pipeline/planRead` | read the wave-scheduled task plan and the current stage |
 | `pipeline/verifyRead` | read the session's verification report (gates, verdicts, residual risk, not-tested) |
+| `pipeline/shipRead` | read the session's latest ship record (repo, tag, release URL, install steps) |
+| `pipeline/operateRead` | read the session's operate log (ship, deploy, rollback, health events) |
 
 `pipeline/conceptSet` params: `{ sessionId, idea }` (optional `commandId`).
 Result: `{ commandId, concept, question }` — `concept` is the Concept JSON
@@ -134,6 +138,24 @@ persisted dossier, otherwise the most recent `dossier:<runId>` row in the
 data dir (v0.2 does not scope dossiers by session). The rendered
 `acceptance-dossier.md` for a run lives in its run directory; the TUI opens
 it from the verify rail with `/dossier`.
+
+`pipeline/shipRead` params: `{ sessionId }`. Result: `{ ship }` — the latest
+`ShipRecord` (`run_id`, `repo`, `release_url`, `tag`, `install_steps`,
+`rolled_back_from`, `created_at`) or `null`. Resolution: the `runId` stored
+in the session's pipeline state when that run has a persisted
+`ship:<runId>` row, otherwise the most recent such row (v0.3 does not scope
+ship rows by session, matching `verifyRead`). The record has no field that
+could carry deploy material: credential values never leave the deploy child
+process's environment, are never persisted, and never reach this method.
+
+`pipeline/operateRead` params: `{ sessionId }`. Result: `{ events }` — the
+operate log entries, oldest first (`run_id`, `kind`, `detail`, `at`), read
+from `<data_dir>/operate/<runId>.jsonl`. The run id resolves exactly as the
+ship record's (the pipeline state's `runId`, else the session id), with the
+most recent log in the data dir's operate directory as the fallback, so a
+session that never operated reads an empty list rather than an error. The
+log records that a ship, deploy, rollback, or health check happened — never
+the secret material; every detail is redacted at the boundary.
 
 Pipeline notifications ride the existing `turn/item` notification: each
 pipeline item carries `kind: "pipeline_question"`, `role: "assistant"`, a

@@ -15,7 +15,9 @@ use prricode_persistence::Persistence;
 use prricode_pipeline::{
     build::{graph_to_definition, run_build},
     clarify::Clarifier,
-    plan, run_verify_stage, specify, verify, Pipeline, PipelineStage, VerifyEventKind,
+    plan, run_verify_stage,
+    ship::{run_ship_stage, ShipAnswer, ShipEventKind, ShipFlow, ShipStage},
+    specify, verify, Pipeline, PipelineStage, VerifyEventKind,
 };
 use prricode_provider::{
     create_provider, load_config, resolve_settings, AssistantMessage, ChatMessage, ContentPart,
@@ -33,13 +35,43 @@ use tokio::sync::mpsc;
 pub enum UiCommand {
     Submit(String),
     Cancel,
-    Approve { approval_id: String, approved: bool },
-    SetModel { model: String },
+    Approve {
+        approval_id: String,
+        approved: bool,
+    },
+    SetModel {
+        model: String,
+    },
     SetApprovalMode(ApprovalMode),
-    PipelineConcept { idea: String },
-    PipelineAnswer { answer: String },
-    PipelineConfirm { stage: String, ok: bool },
-    PipelineAdvance { stage: String },
+    PipelineConcept {
+        idea: String,
+    },
+    PipelineAnswer {
+        answer: String,
+    },
+    PipelineConfirm {
+        stage: String,
+        ok: bool,
+    },
+    PipelineAdvance {
+        stage: String,
+    },
+    /// Start the ship stage: the release runs behind the confirmation
+    /// gate, and a deploy plan is proposed once the release is out.
+    ShipStart,
+    /// The operator's answer to a proposed deploy plan: confirmed runs the
+    /// plan's commands, otherwise the deploy is skipped.
+    DeployConfirm {
+        confirmed: bool,
+    },
+    /// One credential value for the plan the ship flow is collecting. The
+    /// value is env-only: it is forwarded here and never persisted.
+    DeploySecret {
+        name: String,
+        value: String,
+    },
+    /// Run a standalone operate health pass.
+    OperateRun,
 }
 
 /// Where to start the interactive session.
@@ -123,6 +155,9 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
             Arc::implementation(&agent_persistence),
         ));
         let flow = Arc::new(Mutex::new(PipelineFlow::default()));
+        // The running ship flow's answer half: the loop forwards the deploy
+        // confirmation and the collected credential values to the flow task.
+        let mut ship_answers: Option<mpsc::UnboundedSender<ShipAnswer>> = None;
         let stage_workspace = agent_launch
             .workspace_root
             .implementation()
@@ -335,6 +370,26 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                                 },
                             );
                         }
+                        "ship-confirmation" => {
+                            let (workspace, dossier) = {
+                                let flow = flow.lock().unwrap();
+                                ship_target(&flow, &stage_workspace, &agent_data_dir)
+                            };
+                            let (answer_tx, answer_rx) = mpsc::unbounded_channel();
+                            ship_answers = Some(answer_tx);
+                            spawn_stage(
+                                run_ship_flow,
+                                ShipCtx {
+                                    pipeline: Arc::implementation(&pipeline),
+                                    ui_tx: ui_tx.implementation(),
+                                    session_id: session_id.implementation(),
+                                    workspace,
+                                    data_dir: agent_data_dir.implementation(),
+                                    dossier_path: dossier,
+                                    answer_rx,
+                                },
+                            );
+                        }
                         other => {
                             let _ = ui_tx
                                 .send(UiEvent::Log(format!("pipeline: no gate named {other}")));
@@ -382,6 +437,70 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         "build" => spawn_stage(run_build_stage, ctx),
                         _ => {}
                     }
+                }
+                UiCommand::ShipStart => {
+                    // A finished flow drops its answer half: retire it so the
+                    // next ship can start.
+                    if ship_answers.as_ref().is_some_and(|tx| tx.is_closed()) {
+                        ship_answers = None;
+                    }
+                    if ship_answers.is_some() {
+                        let _ = ui_tx.send(UiEvent::Log(
+                            "ship: a ship/deploy flow is already running".to_string(),
+                        ));
+                        continue;
+                    }
+                    let (workspace, building) = {
+                        let flow = flow.lock().unwrap();
+                        (
+                            flow.build_workspace
+                                .implementation()
+                                .unwrap_or_else(|| stage_workspace.implementation()),
+                            flow.building,
+                        )
+                    };
+                    if building {
+                        let _ = ui_tx.send(UiEvent::Log(
+                            "ship: a build is still running — wait for it to finish".to_string(),
+                        ));
+                        continue;
+                    }
+                    // The release is irreversible: open the confirmation
+                    // gate first, exactly as the spec and concept gates do.
+                    let _ = ui_tx.send(UiEvent::Log(format!(
+                        "ship: will release the workspace {} — press y to confirm, n to cancel",
+                        workspace.display()
+                    )));
+                    let _ = ui_tx.send(UiEvent::PipelineGate {
+                        gate: "ship-confirmation".to_string(),
+                    });
+                }
+                UiCommand::DeployConfirm { confirmed } => {
+                    let Some(answers) = ship_answers.as_ref() else {
+                        let _ = ui_tx.send(UiEvent::Log(
+                            "deploy: no deploy flow is waiting — /ship first".to_string(),
+                        ));
+                        continue;
+                    };
+                    let _ = answers.send(ShipAnswer::DeployChoice { confirmed });
+                }
+                UiCommand::DeploySecret { name, value } => {
+                    let Some(answers) = ship_answers.as_ref() else {
+                        let _ = ui_tx.send(UiEvent::Log(
+                            "deploy: no deploy flow is waiting — /ship first".to_string(),
+                        ));
+                        continue;
+                    };
+                    // The value only ever travels this one hop; nothing
+                    // persists it.
+                    let _ = answers.send(ShipAnswer::SecretValue { name, value });
+                }
+                UiCommand::OperateRun => {
+                    let workspace = {
+                        let flow = flow.lock().unwrap();
+                        ship_target(&flow, &stage_workspace, &agent_data_dir).0
+                    };
+                    operate_pass(&ui_tx, &agent_persistence, &session_id, &workspace).await;
                 }
             }
         }
@@ -585,6 +704,9 @@ struct PipelineFlow {
     /// state so the server's `pipeline/verifyRead` resolves this session's
     /// verification report by run id.
     run_id: Option<String>,
+    /// The workspace the build ran in (its worktree), released by the ship
+    /// stage.
+    build_workspace: Option<PathBuf>,
     /// Specify and plan share one in-flight claim: a late specify must not
     /// regenerate the spec while a plan is consuming it.
     stage_in_flight: bool,
@@ -601,6 +723,7 @@ impl PipelineFlow {
         self.spec_confirmed = false;
         self.building = false;
         self.run_id = None;
+        self.build_workspace = None;
         self.stage_in_flight = false;
         self.stage = PipelineStage::Clarify.label().to_string();
     }
@@ -638,11 +761,229 @@ struct StageCtx {
     data_dir: PathBuf,
 }
 
-fn spawn_stage<F>(stage: fn(StageCtx) -> F, ctx: StageCtx)
+fn spawn_stage<C, F>(stage: fn(C) -> F, ctx: C)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     tokio::spawn(stage(ctx));
+}
+
+/// The workspace the ship stage releases (the build's worktree when a build
+/// ran, else the launch workspace) and the v0.2 dossier to attach to the
+/// release notes.
+fn ship_target(
+    flow: &PipelineFlow,
+    fallback: &Path,
+    data_dir: &Path,
+) -> (PathBuf, Option<PathBuf>) {
+    let workspace = flow
+        .build_workspace
+        .implementation()
+        .unwrap_or_else(|| fallback.to_path_buf());
+    let dossier = flow.run_id.as_ref().map(|run_id| {
+        data_dir
+            .join("runs")
+            .join(run_id)
+            .join("acceptance-dossier.md")
+    });
+    (workspace, dossier)
+}
+
+/// The session's run id from its persisted pipeline state, else the session
+/// id itself — the resolution the ship stage persists and reads by.
+fn resolve_run_id(persistence: &Persistence, session_id: &str) -> String {
+    persistence
+        .get_setting(&format!("pipeline:{session_id}"))
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|state| {
+            state
+                .get("runId")
+                .and_then(|run_id| run_id.as_str())
+                .map(str::to_string)
+        })
+        .filter(|run_id| !run_id.is_empty())
+        .unwrap_or_else(|| session_id.to_string())
+}
+
+/// Context for the ship flow task: the release plus the step-driven deploy
+/// flow, whose steps the operator answers on the answer channel.
+struct ShipCtx {
+    pipeline: Arc<Pipeline>,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    session_id: String,
+    workspace: PathBuf,
+    data_dir: PathBuf,
+    dossier_path: Option<PathBuf>,
+    /// The operator's answers, forwarded by the agent loop.
+    answer_rx: mpsc::UnboundedReceiver<ShipAnswer>,
+}
+
+/// The ship stage's surface half: release the workspace, then drive the
+/// deploy flow step by step — each step's events become UI events, and each
+/// pending input waits for the operator's answer. The flow ends when it is
+/// done, the deploy is declined, or the answer channel closes.
+async fn run_ship_flow(mut ctx: ShipCtx) {
+    let record = match run_ship_stage(
+        &ctx.pipeline.runner,
+        &ctx.pipeline.persistence,
+        &ctx.session_id,
+        &ctx.workspace,
+        &ctx.data_dir,
+        ctx.dossier_path.as_deref(),
+    )
+    .await
+    {
+        Ok(record) => record,
+        Err(e) => {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!("ship: failed — {e}")));
+            return;
+        }
+    };
+    let _ = ctx.ui_tx.send(UiEvent::ShipReady {
+        tag: record.tag.implementation().unwrap_or_else(|| "untagged".to_string()),
+        release_url: record.release_url.implementation(),
+        install_steps: record.install_steps.implementation(),
+    });
+
+    let mut flow = ShipFlow::new(record, &ctx.workspace, &ctx.data_dir);
+    let (ship_tx, mut ship_rx) = mpsc::unbounded_channel::<ShipEventKind>();
+    while flow.stage() != ShipStage::Done {
+        let pending = flow.poll(&ship_tx).await;
+        while let Ok(event) = ship_rx.try_recv() {
+            match event {
+                // A manual plan has no commands to run — the operator would
+                // deploy by hand — so the TUI refuses the deploy with a log
+                // line and the flow short-circuits to done.
+                ShipEventKind::DeployProposed { target, .. } if target == "manual" => {
+                    let _ = ctx.ui_tx.send(UiEvent::Log(
+                        "deploy: refused — the plan target is manual (no commands to run; \
+                         deploy by hand, then /operate to check health)"
+                            .to_string(),
+                    ));
+                    flow.answer(ShipAnswer::DeployChoice { confirmed: false });
+                }
+                other => emit_ship_event(&ctx.ui_tx, &flow, other),
+            }
+        }
+        // The event handling above may have finished the flow already.
+        if flow.stage() == ShipStage::Done {
+            break;
+        }
+        // A step that ran work needs no answer; keep driving the flow.
+        if pending.is_none() {
+            continue;
+        }
+        // The flow ignores answers that do not match the pending input, so
+        // whatever arrives is safe to forward.
+        match ctx.answer_rx.recv().await {
+            Some(answer) => flow.answer(answer),
+            // The UI went away: stop driving the flow.
+            None => break,
+        }
+    }
+}
+
+/// Translate one ship-flow event into the UI events the surfaces render.
+fn emit_ship_event(ui_tx: &mpsc::UnboundedSender<UiEvent>, flow: &ShipFlow, event: ShipEventKind) {
+    match event {
+        ShipEventKind::DeployProposed {
+            target,
+            credentials,
+        } => {
+            let reason = flow
+                .plan()
+                .map(|plan| plan.reason.implementation())
+                .unwrap_or_else(|| "detected from the workspace".to_string());
+            let _ = ui_tx.send(UiEvent::DeployProposed {
+                target,
+                reason,
+                credentials,
+            });
+        }
+        ShipEventKind::DeploySecretRequested { name, purpose, .. } => {
+            let _ = ui_tx.send(UiEvent::DeploySecret { name, purpose });
+        }
+        ShipEventKind::DeployDone { ok } => {
+            let _ = ui_tx.send(UiEvent::DeployDone { ok });
+        }
+        ShipEventKind::HealthOk { name } => {
+            let _ = ui_tx.send(UiEvent::HealthChecked {
+                name,
+                ok: true,
+                detail: None,
+            });
+        }
+        ShipEventKind::HealthFailed { name, issue } => {
+            let _ = ui_tx.send(UiEvent::HealthChecked {
+                name,
+                ok: false,
+                detail: issue,
+            });
+        }
+        // The ship half reports through ShipReady before the flow starts.
+        ShipEventKind::ShipReady { .. } => {}
+    }
+}
+
+/// One standalone operate health pass: read the session's ship record and
+/// probe that its release tag still resolves in the build workspace. The
+/// probe is local and dependency-free; a session that never shipped says
+/// so instead of probing.
+async fn operate_pass(
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+    persistence: &Persistence,
+    session_id: &str,
+    workspace: &Path,
+) {
+    let run_id = resolve_run_id(persistence, session_id);
+    let tag = persistence
+        .get_setting(&format!("ship:{run_id}"))
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|record| {
+            record
+                .get("tag")
+                .and_then(|tag| tag.as_str())
+                .map(str::to_string)
+        });
+    let Some(tag) = tag else {
+        let _ = ui_tx.send(UiEvent::Log(
+            "operate: nothing shipped for this session yet — /ship first".to_string(),
+        ));
+        return;
+    };
+    let probe = format!(
+        "git -C '{}' rev-parse --verify 'refs/tags/{tag}'",
+        workspace.display()
+    );
+    match tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&probe)
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            let _ = ui_tx.send(UiEvent::HealthChecked {
+                name: "release".to_string(),
+                ok: true,
+                detail: Some(format!("tag {tag} resolves")),
+            });
+        }
+        Ok(output) => {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let _ = ui_tx.send(UiEvent::HealthChecked {
+                name: "release".to_string(),
+                ok: false,
+                detail: Some(format!("tag {tag} does not resolve: {detail}")),
+            });
+        }
+        Err(e) => {
+            let _ = ui_tx.send(UiEvent::Log(format!("operate: probe could not run — {e}")));
+        }
+    }
 }
 
 /// Persist the pipeline state under the server's `pipeline:<sessionId>`
@@ -895,6 +1236,11 @@ async fn run_build_stage(ctx: StageCtx) {
             ctx.workspace_root.implementation()
         }
     };
+    {
+        // Record the workspace the ship stage releases, alongside the run id.
+        let mut flow = ctx.flow.lock().unwrap();
+        flow.build_workspace = Some(build_workspace.implementation());
+    }
     let outcome = run_build(
         &ctx.pipeline.runner,
         &engine,
@@ -1076,6 +1422,219 @@ mod tests {
             logs.iter().any(|l| l.contains("already in flight")),
             "expected a refusal log, got {logs:?}"
         );
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("prricode-tui-ship-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A git repo with a Rust project and no deploy markers: the plan
+    /// target is manual, so the TUI refuses the deploy.
+    fn git_workspace(name: &str) -> std::path::PathBuf {
+        let dir = temp_dir(name);
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("README.md"), "# probe\n").unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["config", "user.email", "ship@example.com"]);
+        git(&dir, &["config", "user.name", "ship test"]);
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[tokio::test]
+    async fn a_manual_plan_short_circuits_the_deploy_with_a_log() {
+        // A git workspace with no deploy markers proposes the manual plan:
+        // there are no commands to run, so the TUI refuses the deploy with
+        // a log line and the flow finishes with the ship record alone.
+        let dir = git_workspace("manual");
+        let data_dir = temp_dir("manual-data");
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let (_answer_tx, answer_rx) = mpsc::unbounded_channel();
+        let ctx = ShipCtx {
+            pipeline: echo_pipeline(&data_dir),
+            ui_tx,
+            session_id: "session-manual".to_string(),
+            workspace: dir.implementation(),
+            data_dir: data_dir.implementation(),
+            dossier_path: None,
+            answer_rx,
+        };
+
+        // The answer channel is never written to: the task can only return
+        // because nothing waited for an operator answer.
+        run_ship_flow(ctx).await;
+
+        let mut ship_ready = false;
+        let mut logs = Vec::new();
+        let mut proposed = 0;
+        while let Ok(event) = ui_rx.try_recv() {
+            match event {
+                UiEvent::ShipReady { .. } => ship_ready = true,
+                UiEvent::Log(text) => logs.push(text),
+                UiEvent::DeployProposed { .. } => proposed += 1,
+                _ => {}
+            }
+        }
+        // The release shipped, its record on the rail...
+        assert!(ship_ready, "the release must report ready, got {logs:?}");
+        // ...the manual plan was refused with a log line, never proposed...
+        assert!(
+            logs.iter().any(|l| l.contains("manual")),
+            "expected a manual-plan refusal log, got {logs:?}"
+        );
+        assert_eq!(proposed, 0, "a manual plan must not be proposed to the UI");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    /// Drain the UI event stream until an event of kind `wanted` arrives,
+    /// keeping every event seen meanwhile in `events`.
+    async fn await_event(
+        events: &mut Vec<UiEvent>,
+        rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+        wanted: &str,
+    ) {
+        loop {
+            while let Ok(event) = rx.try_recv() {
+                let hit = matches!(&event, UiEvent::DeployProposed { .. } if wanted == "proposed")
+                    || matches!(&event, UiEvent::DeploySecret { .. } if wanted == "secret");
+                events.push(event);
+                if hit {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_deploy_collects_the_secret_and_runs_through_operate() {
+        // A shipped git workspace whose marker proposes the vercel plan: the
+        // deploy CLI is not on PATH, so the commands fail, but the flow still
+        // reaches the health pass — the full sequence, in order.
+        let dir = git_workspace("deploy");
+        std::fs::write(dir.join("vercel.json"), "{}\n").unwrap();
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "marker"]);
+        let data_dir = temp_dir("deploy-data");
+        let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
+        let (answer_tx, answer_rx) = mpsc::unbounded_channel();
+        let ctx = ShipCtx {
+            pipeline: echo_pipeline(&data_dir),
+            ui_tx,
+            session_id: "session-deploy".to_string(),
+            workspace: dir.implementation(),
+            data_dir: data_dir.implementation(),
+            dossier_path: None,
+            answer_rx,
+        };
+        let flow_task = tokio::spawn(run_ship_flow(ctx));
+
+        // The plan is proposed; confirm it, then hand over the credential.
+        let mut events = Vec::new();
+        await_event(&mut events, &mut ui_rx, "proposed").await;
+        answer_tx
+            .send(ShipAnswer::DeployChoice { confirmed: true })
+            .unwrap();
+        await_event(&mut events, &mut ui_rx, "secret").await;
+        assert!(events.iter().any(
+            |event| matches!(event, UiEvent::DeploySecret { name, .. } if name == "VERCEL_TOKEN")
+        ));
+        let secret = "s3cret-deploy-token-value";
+        answer_tx
+            .send(ShipAnswer::SecretValue {
+                name: "VERCEL_TOKEN".to_string(),
+                value: secret.to_string(),
+            })
+            .unwrap();
+        flow_task.await.unwrap();
+        while let Ok(event) = ui_rx.try_recv() {
+            events.push(event);
+        }
+
+        // The commands ran and failed (no vercel on PATH), then the health
+        // pass verified the shipped tag: the whole sequence, in order.
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|event| match event {
+                UiEvent::ShipReady { .. } => "ship-ready",
+                UiEvent::DeployProposed { .. } => "proposed",
+                UiEvent::DeploySecret { .. } => "secret",
+                UiEvent::DeployDone { ok } => {
+                    if *ok {
+                        "deploy-ok"
+                    } else {
+                        "deploy-failed"
+                    }
+                }
+                UiEvent::HealthChecked { ok, .. } => {
+                    if *ok {
+                        "health-ok"
+                    } else {
+                        "health-failed"
+                    }
+                }
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "ship-ready",
+                "proposed",
+                "secret",
+                "deploy-failed",
+                "health-ok"
+            ]
+        );
+        // The value never lands in any persisted row or the operate log.
+        for (key, value) in Persistence::new(&data_dir)
+            .unwrap()
+            .list_settings()
+            .unwrap()
+        {
+            assert!(
+                !value.contains(secret),
+                "settings row {key} carries the secret: {value}"
+            );
+        }
+        let operate_dir = data_dir.join("operate");
+        if let Ok(entries) = std::fs::read_dir(&operate_dir) {
+            for entry in entries.flatten() {
+                let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                assert!(
+                    !text.contains(secret),
+                    "{} carries the secret",
+                    entry.path().display()
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&data_dir).ok();
     }
 }

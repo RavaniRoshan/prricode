@@ -120,6 +120,12 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
                     Style::default().fg(Color::Green),
                 ));
             }
+            if let Some(ship) = pipeline.ship_segment() {
+                spans.push(Span::styled(
+                    format!(" · {ship}"),
+                    Style::default().fg(Color::Green),
+                ));
+            }
         }
         spans
     }))
@@ -157,17 +163,32 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         .scroll((offset as u16, 0));
     frame.render_widget(conversation, chunks[1]);
 
-    // Input.
-    let input = Paragraph::new(app.input.as_str())
+    // Input. While a secret value is being collected the composer renders
+    // one mask character per character typed, so the value never shows.
+    let (composer, title) = if app.secret_input {
+        (
+            app.composer_text(),
+            format!(
+                "secret: {}  (Enter submit · Esc cancel — masked)",
+                app.secret_name.as_deref().unwrap_or("value")
+            ),
+        )
+    } else {
+        (
+            app.input.implementation(),
+            "input  (Enter send · Esc cancel · /help)".to_string(),
+        )
+    };
+    let input = Paragraph::new(composer.as_str())
         .style(Style::default().fg(Color::White))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("input  (Enter send · Esc cancel · /help)"),
-        );
+        .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(input, chunks[2]);
     // Cursor follows the composer cursor (clamped to the visible line).
-    let visible = app.input.chars().take(app.cursor).collect::<String>();
+    let visible = app
+        .composer_text()
+        .chars()
+        .take(app.cursor)
+        .collect::<String>();
     let (row, column) = visible
         .rsplit_once('\n')
         .map(|(_, tail)| (1, tail.chars().count() as u16))
