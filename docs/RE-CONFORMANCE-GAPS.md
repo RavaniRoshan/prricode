@@ -80,7 +80,9 @@ theirs); (c) a checklist mapping every spec item → code location + test.
 
 **Disposition:** implement (goal item 2).
 
-## Gap 2 — Internal types not mirrored (goal item 4)
+## Gap 2 — Internal types (goal item 4) — CLOSED (ec40bbb)
+
+`prricode_core::internals` dispositions all 251 binary families (implemented / flagged-with-future-work); the unaccounted-internals grep is empty.
 
 **Evidence:** 364 `struct X with N elements` Debug names in the release
 (AgentSpawn*, BranchSeed*, CodeMode*, reminder/inbox records, …) — runtime
@@ -93,7 +95,9 @@ unaccounted-internals paragraph; this register tracks each item.
 
 **Disposition:** implement-or-flag (goal item 4).
 
-## Gap 3 — Skill/plugin runtime (goal item 3, re-ruled)
+## Gap 3 — Skill/plugin runtime — CLOSED (3c0f88c)
+
+Shebang-interpreter script execution through the sandboxed shell tool with the documented argv contract; bundled wordcount skill + e2e test.
 
 **Closure:** `prricode-skills` gains script execution: a skill may ship
 `scripts/`; the agent invokes them via the sandboxed shell tool with the
