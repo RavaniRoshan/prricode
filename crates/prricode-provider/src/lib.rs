@@ -6,7 +6,7 @@
 //! provider keeps the binary fully usable offline.
 
 mod config;
-mod credentials;
+pub mod credentials;
 mod echo;
 mod ollama;
 mod openai_compat;

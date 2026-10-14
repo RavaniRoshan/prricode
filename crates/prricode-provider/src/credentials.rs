@@ -74,10 +74,15 @@ pub fn get(provider: &str) -> Option<String> {
 
 /// Remove a credential; returns true when one was removed.
 pub fn remove(provider: &str) -> anyhow::Result<bool> {
-    let mut store = load();
+    remove_at(&credentials_path(), provider)
+}
+
+/// Remove from an explicit path (the testable seam).
+pub fn remove_at(path: &std::path::Path, provider: &str) -> anyhow::Result<bool> {
+    let mut store = load_at(path);
     let removed = store.providers.remove(provider).is_some();
     if removed {
-        save(&store)?;
+        save_at(&store, path)?;
     }
     Ok(removed)
 }
@@ -122,5 +127,40 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn remove_at_drops_only_the_named_provider() {
+        let path = temp_store("remove");
+        let _ = std::fs::remove_file(&path);
+        let mut store = CredentialStore::default();
+        store.providers.insert("openrouter".into(), "or-key".into());
+        store.providers.insert("kilo".into(), "kilo-key".into());
+        save_at(&store, &path).unwrap();
+
+        assert!(remove_at(&path, "openrouter").unwrap());
+        let after = load_at(&path);
+        assert!(
+            !after.providers.contains_key("openrouter"),
+            "named provider must be gone"
+        );
+        assert_eq!(
+            after.providers.get("kilo").map(String::as_str),
+            Some("kilo-key"),
+            "other providers must survive"
+        );
+
+        assert!(
+            !remove_at(&path, "openrouter").unwrap(),
+            "a second removal reports false"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn remove_at_on_a_missing_file_reports_false() {
+        let path = temp_store("missing");
+        let _ = std::fs::remove_file(&path);
+        assert!(!remove_at(&path, "openrouter").unwrap());
     }
 }

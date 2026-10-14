@@ -159,7 +159,11 @@ pub enum Command {
         provider: Option<String>,
     },
     /// Logout
-    Logout,
+    Logout {
+        /// Drop this provider's stored credential; with no provider, all of them.
+        #[arg(id = "logout-provider")]
+        provider: Option<String>,
+    },
     /// Initialize project
     Init {
         #[arg(long)]
@@ -336,6 +340,29 @@ mod tests {
             other => {
                 let _ = other;
                 panic!("expected `login`, got another command")
+            }
+        }
+    }
+
+    #[test]
+    fn logout_takes_an_optional_provider_positional() {
+        let cli = Cli::parse_from(["prricode", "logout", "openrouter"]);
+        match cli.command {
+            Some(Command::Logout { provider }) => {
+                assert_eq!(provider.as_deref(), Some("openrouter"))
+            }
+            other => {
+                let _ = other;
+                panic!("expected `logout`, got another command")
+            }
+        }
+        // With no provider it still parses (removes every stored credential).
+        let cli = Cli::parse_from(["prricode", "logout"]);
+        match cli.command {
+            Some(Command::Logout { provider }) => assert_eq!(provider, None),
+            other => {
+                let _ = other;
+                panic!("expected `logout`, got another command")
             }
         }
     }
