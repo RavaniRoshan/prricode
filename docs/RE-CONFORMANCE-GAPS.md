@@ -36,7 +36,33 @@ subprocess adds zero user effort (python3/node are prerequisites of the skills
 themselves). Flag: `skills.runtime = "subprocess"` documented in
 `docs/ARCHITECTURE.md`; a future embedded-runtime option stays a roadmap item.
 
-## Gap 1 — Visual TUI spec (goal item 2)
+## Gap 1 — Visual TUI spec (goal item 2) — SPEC EXTRACTED ✅ (implementation next)
+
+`docs/VISUAL-SPEC.md` (318 lines, commit `face055`) now documents, with
+per-claim evidence (string excerpts, the keymap rodata table at vaddr
+`0x5590048`, four bounded disassembly regions): the ~30-command slash table,
+the full keymap (all our bindings verified verbatim plus ~10 more:
+alt+enter queue/steer, ctrl+b background, ctrl+o expand, `@` file paths,
+`!` shell mode, alt+d delete-word), the approval modal's three durability
+tiers (allow once / for session / **always in this workspace**) backed by a
+`PolicyAmendment{effect, durability, reason}` model with
+`shell_command_exact_raw`/`argv_prefix` matchers, the status/rail fields, the
+session picker semantics, and the style evidence: **no box-drawing frames, no
+ANSI bytes, no sidebar — a single transcript pane plus modal drawers, with 24
+bundled JSON themes** (Ayu, Catppuccin, Dracula, … Tokyo Night) carrying
+TextMate scope maps. Internal crate paths leaked in the binary confirm the
+pane+modal architecture (`crates/tui/src/render/panels/settings_overlay.rs`).
+Three risk-class footer variants (`review_needed`/`elevated`/`blocking`) relabel
+the approve key.
+
+**Remaining for Gap 1:** (b) implement the spec deltas in our TUI — theme
+system (24 themes, JSON-loaded), the approval durability tiers + policy
+amendment, the ~10 missing keybindings, the extra slash commands
+(`/compact`, `/goal`, `/yolo`, `/message`, `/ts`, `/ps`), the risk-class
+footers — aligned with our design language; (c) the spec→implementation→test
+checklist.
+
+## Gap 1 archive — original evidence list
 
 **Evidence (the release strings):** keymap (`ctrl+j` newline, `ctrl+r` history
 search, `ctrl+g` edit in `$VISUAL`/`$EDITOR`, `alt+b/f` word moves, `ctrl+k/y`
