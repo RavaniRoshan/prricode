@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 serde = { workspace = true }
 uuid = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+prricode-verify = { path = "../prricode-verify" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
