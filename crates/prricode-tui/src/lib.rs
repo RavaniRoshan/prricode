@@ -45,6 +45,10 @@ pub enum UiCommand {
         model: String,
     },
     SetApprovalMode(ApprovalMode),
+    /// Persist an "always allow in this workspace" policy amendment.
+    RecordAmendment {
+        amendment: crate::app::PolicyAmendment,
+    },
     PipelineConcept {
         idea: String,
     },
@@ -266,6 +270,15 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                 }
                 UiCommand::SetModel { model: new_model } => model = new_model,
                 UiCommand::SetApprovalMode(mode) => approval_mode = mode,
+                UiCommand::RecordAmendment { amendment } => {
+                    // Durable "always allow in this workspace" rule.
+                    if let Err(e) = agent_persistence.set_setting(
+                        &format!("approvalAmendment:{}", session_id),
+                        &serde_json::to_string(&amendment).unwrap_or_default(),
+                    ) {
+                        tracing::warn!("amendment persist failed: {e}");
+                    }
+                }
                 UiCommand::PipelineConcept { idea } => {
                     let concept = Concept::from_idea(&idea);
                     let question = Clarifier::new(concept.clone()).next_question();

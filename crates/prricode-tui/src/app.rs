@@ -27,6 +27,30 @@ pub enum Role {
     System,
 }
 
+/// A persisted "always allow in this workspace" rule, mirroring the spec's
+/// PolicyAmendment { effect, durability, reason } with command matchers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicyAmendment {
+    pub tool: String,
+    /// Prefix of the call summary this amendment covers (e.g. a shell command).
+    pub matcher: String,
+    pub durability: String,
+}
+
+impl PolicyAmendment {
+    pub fn workspace(tool: &str, matcher: &str) -> Self {
+        Self {
+            tool: tool.to_string(),
+            matcher: matcher.to_string(),
+            durability: "workspace".to_string(),
+        }
+    }
+
+    pub fn matches(&self, tool: &str, summary: &str) -> bool {
+        self.tool == tool && summary.starts_with(&self.matcher)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingApproval {
     pub approval_id: String,
@@ -239,6 +263,8 @@ pub struct App {
     history_index: Option<usize>,
     kill_ring: String,
     session_auto_approve: Vec<String>,
+    /// "Always allow in this workspace" rules (spec durability tier 3).
+    workspace_amendments: Vec<PolicyAmendment>,
     interview_active: bool,
 }
 
@@ -279,6 +305,7 @@ impl App {
             history_index: None,
             kill_ring: String::new(),
             session_auto_approve: Vec::new(),
+            workspace_amendments: Vec::new(),
             interview_active: false,
         }
     }
@@ -360,7 +387,7 @@ impl App {
                     self.push_system(format!("allow:approved — {}", approval.summary));
                     return;
                 }
-                KeyAction::Char('a') => {
+                KeyAction::Char('s') => {
                     self.session_auto_approve.push(approval.kind.clone());
                     let _ = commands.send(UiCommand::Approve {
                         approval_id: approval.approval_id.clone(),
@@ -368,6 +395,18 @@ impl App {
                     });
                     self.pending_approval = None;
                     self.push_system(format!("allow:approved_for_session — {}", approval.summary));
+                    return;
+                }
+                KeyAction::Char('a') => {
+                    let amendment = PolicyAmendment::workspace(&approval.kind, &approval.summary);
+                    self.workspace_amendments.push(amendment.clone());
+                    let _ = commands.send(super::UiCommand::RecordAmendment { amendment });
+                    let _ = commands.send(UiCommand::Approve {
+                        approval_id: approval.approval_id.clone(),
+                        approved: true,
+                    });
+                    self.pending_approval = None;
+                    self.push_system(format!("allow:always_in_workspace — {}", approval.summary));
                     return;
                 }
                 KeyAction::Char('n') | KeyAction::Esc => {
@@ -896,7 +935,18 @@ impl App {
                 summary,
             } => {
                 self.flush_stream();
-                if self.session_auto_approve.contains(&kind) {
+                if let Some(_amendment) = self
+                    .workspace_amendments
+                    .iter()
+                    .find(|a| a.matches(&kind, &summary))
+                {
+                    // "Always allow in this workspace" rule matched.
+                    let _ = commands.send(super::UiCommand::Approve {
+                        approval_id,
+                        approved: true,
+                    });
+                    self.push_system(format!("allow:always_in_workspace — {summary}"));
+                } else if self.session_auto_approve.contains(&kind) {
                     // Approved for this session earlier; answer directly.
                     let _ = commands.send(super::UiCommand::Approve {
                         approval_id,
@@ -1346,7 +1396,7 @@ mod tests {
             &tx,
         );
         assert!(app.pending_approval.is_some());
-        app.handle_key(KeyAction::Char('a'), &tx);
+        app.handle_key(KeyAction::Char('s'), &tx);
         assert!(app.pending_approval.is_none());
         assert!(matches!(
             rx.try_recv().unwrap(),
@@ -1355,7 +1405,59 @@ mod tests {
     }
 
     #[test]
-    fn session_auto_approve_after_a() {
+    fn always_in_workspace_tier_records_and_matches() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.apply_ui_event(
+            UiEvent::Approval {
+                approval_id: "a1".into(),
+                kind: "shell".into(),
+                summary: "run cargo test".into(),
+            },
+            &tx,
+        );
+        app.handle_key(KeyAction::Char('a'), &tx);
+        assert_eq!(app.workspace_amendments.len(), 1);
+        // The amendment is persisted through the command channel...
+        let mut recorded = false;
+        let mut approved = false;
+        while let Ok(command) = rx.try_recv() {
+            match command {
+                super::super::UiCommand::RecordAmendment { amendment } => {
+                    assert_eq!(amendment.tool, "shell");
+                    assert_eq!(amendment.durability, "workspace");
+                    recorded = true;
+                }
+                super::super::UiCommand::Approve { .. } => approved = true,
+                _ => {}
+            }
+        }
+        assert!(recorded && approved);
+        // A matching later call auto-answers...
+        app.apply_ui_event(
+            UiEvent::Approval {
+                approval_id: "a2".into(),
+                kind: "shell".into(),
+                summary: "run cargo test".into(),
+            },
+            &tx,
+        );
+        assert!(app.pending_approval.is_none());
+        // ...but a different command still prompts.
+        app.apply_ui_event(
+            UiEvent::Approval {
+                approval_id: "a3".into(),
+                kind: "shell".into(),
+                summary: "run rm -rf build".into(),
+            },
+            &tx,
+        );
+        assert!(app.pending_approval.is_some());
+        app.handle_key(KeyAction::Char('n'), &tx);
+    }
+
+    #[test]
+    fn session_auto_approve_after_s() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = new_app();
         for i in 0..2 {
@@ -1368,7 +1470,7 @@ mod tests {
                 &tx,
             );
             if i == 0 {
-                app.handle_key(KeyAction::Char('a'), &tx);
+                app.handle_key(KeyAction::Char('s'), &tx);
             }
         }
         // Second approval auto-answers without a modal.
