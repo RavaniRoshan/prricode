@@ -1,6 +1,7 @@
 //! Terminal setup, event polling, and rendering.
 
 use crate::app::{App, KeyAction, Role};
+use crate::theme::Theme;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -8,13 +9,19 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 use std::io::Stdout;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
+
+/// The active theme's palette. Every color the renderer draws comes from
+/// here, so `/theme` restyles the whole surface.
+fn palette(app: &App) -> &Theme {
+    app.theme_store.active()
+}
 
 pub fn init_terminal() -> anyhow::Result<Term> {
     enable_raw_mode()?;
@@ -78,6 +85,7 @@ pub fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
 }
 
 fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let theme = palette(app);
     let chunks = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(5),
@@ -91,39 +99,41 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             Span::styled(
                 "prricode",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::styled(
                 format!("session {}", &app.session_id.to_string()[..8]),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.session),
             ),
             Span::raw("  "),
-            Span::styled(app.status_base_line(), Style::default().fg(Color::Yellow)),
+            Span::styled(app.status_base_line(), Style::default().fg(theme.status)),
         ];
         // Product-builder pipeline rail, styled as its own segments.
         if let Some(pipeline) = &app.pipeline {
             spans.push(Span::styled(
                 format!(" · stage: {}", pipeline.stage),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme.rail_stage),
             ));
             if let Some(gate) = &pipeline.gate {
                 spans.push(Span::styled(
                     format!(" · gate: {gate}"),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.rail_gate)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             if let Some(verify) = pipeline.verify_segment() {
                 spans.push(Span::styled(
                     format!(" · {verify}"),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(theme.rail_ok),
                 ));
             }
             if let Some(ship) = pipeline.ship_segment() {
                 spans.push(Span::styled(
                     format!(" · {ship}"),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(theme.rail_ok),
                 ));
             }
         }
@@ -136,10 +146,10 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     let mut lines: Vec<Line<'_>> = Vec::new();
     for message in app.rendered_messages() {
         let (prefix, style) = match message.role {
-            Role::User => ("you › ", Style::default().fg(Color::Green)),
-            Role::Assistant => ("agent › ", Style::default().fg(Color::Blue)),
-            Role::Tool => ("tool › ", Style::default().fg(Color::Magenta)),
-            Role::System => ("sys › ", Style::default().fg(Color::DarkGray)),
+            Role::User => ("you › ", Style::default().fg(theme.user)),
+            Role::Assistant => ("agent › ", Style::default().fg(theme.assistant)),
+            Role::Tool => ("tool › ", Style::default().fg(theme.tool)),
+            Role::System => ("sys › ", Style::default().fg(theme.system)),
         };
         for (i, line) in message.text.lines().enumerate() {
             if i == 0 {
@@ -180,7 +190,7 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         )
     };
     let input = Paragraph::new(composer.as_str())
-        .style(Style::default().fg(Color::White))
+        .style(Style::default().fg(theme.foreground))
         .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(input, chunks[2]);
     // Cursor follows the composer cursor (clamped to the visible line).
@@ -201,15 +211,15 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
 
     // Footer.
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled("Esc", Style::default().fg(theme.footer_key)),
         Span::raw(" cancel  "),
-        Span::styled("PgUp/PgDn", Style::default().fg(Color::Yellow)),
+        Span::styled("PgUp/PgDn", Style::default().fg(theme.footer_key)),
         Span::raw(" scroll  "),
-        Span::styled("/model", Style::default().fg(Color::Cyan)),
+        Span::styled("/model", Style::default().fg(theme.footer_command)),
         Span::raw(" switch model  "),
-        Span::styled("/approval", Style::default().fg(Color::Cyan)),
+        Span::styled("/approval", Style::default().fg(theme.footer_command)),
         Span::raw(" approval mode  "),
-        Span::styled("/quit", Style::default().fg(Color::Cyan)),
+        Span::styled("/quit", Style::default().fg(theme.footer_command)),
         Span::raw(" quit"),
     ]));
     frame.render_widget(footer, chunks[3]);
@@ -219,16 +229,19 @@ fn render_approval(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     // Conversation behind the modal.
     render_main(frame, app, area);
     if let Some(approval) = &app.pending_approval {
-        let popup = centered_rect(70, 7, area);
+        let theme = palette(app);
+        let popup = centered_rect(74, 8, area);
         frame.render_widget(Clear, popup);
         let text = vec![
             Line::from(vec![Span::styled(
                 "approval required",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.approval)
+                    .add_modifier(Modifier::BOLD),
             )]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("tool: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("tool: ", Style::default().fg(theme.system)),
                 Span::raw(approval.kind.implementation()),
             ]),
             Line::from(Span::raw(approval.summary.implementation())),
@@ -236,14 +249,28 @@ fn render_approval(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
             Line::from(vec![
                 Span::styled(
                     "[y]",
+                    Style::default().fg(theme.user).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" allow once  "),
+                Span::styled(
+                    "[s]",
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(theme.assistant)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(" approve   "),
+                Span::raw(" allow for session  "),
+                Span::styled(
+                    "[a]",
+                    Style::default()
+                        .fg(theme.rail_stage)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" always in workspace  "),
                 Span::styled(
                     "[n]",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.approval)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" deny"),
             ]),
@@ -251,7 +278,7 @@ fn render_approval(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         let popup_widget = Paragraph::new(text).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red))
+                .border_style(Style::default().fg(theme.approval_border))
                 .title("approve?"),
         );
         frame.render_widget(popup_widget, popup);

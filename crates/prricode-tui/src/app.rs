@@ -2,10 +2,13 @@
 //!
 //! The keymap follows the Reference TUI evidence: Return submits the composer,
 //! Ctrl+J inserts a newline, Ctrl+R/P/N walk history, Ctrl+G edits in
-//! $EDITOR, Ctrl+L clears, Alt+B/F move by word, Ctrl+K/Y kill/yank, Esc
-//! cancels, and approvals answer y (allow once) / a (allow for session) /
-//! n (deny). Product-builder pipeline gates answer the same y/n keys.
+//! $EDITOR, Ctrl+L clears, Alt+B/F move by word, Ctrl+K/Y kill/yank, Alt+D
+//! deletes a word, Alt+Enter queues, Ctrl+B backgrounds, Ctrl+O expands the
+//! last tool output, Esc cancels, and approvals answer y (allow once) /
+//! s (allow for session) / a (always in this workspace) / n (deny).
+//! Product-builder pipeline gates answer the same y/n keys.
 
+use crate::theme::ThemeStore;
 use prricode_core::ApprovalMode;
 use prricode_provider::ProviderKind;
 
@@ -230,6 +233,8 @@ pub struct App {
     pub output_tokens: u64,
     pub turn_active: bool,
     pub show_help: bool,
+    /// Loaded themes plus the active palette the renderer draws with.
+    pub theme_store: ThemeStore,
     history: Vec<String>,
     history_index: Option<usize>,
     kill_ring: String,
@@ -266,6 +271,10 @@ impl App {
             output_tokens: 0,
             turn_active: false,
             show_help: false,
+            theme_store: ThemeStore::load(
+                &crate::theme::bundled_themes_dir(),
+                &crate::theme::user_themes_dir(),
+            ),
             history: Vec::new(),
             history_index: None,
             kill_ring: String::new(),
@@ -313,6 +322,20 @@ impl App {
         } else {
             self.input.implementation()
         }
+    }
+
+    /// Apply a theme name coming from a setting (the config file or the
+    /// persisted last choice): switches when the name is known, otherwise
+    /// keeps the active theme and logs the fallback with what is available.
+    pub fn apply_theme_setting(&mut self, name: &str) {
+        if self.theme_store.set_by_slug(name) {
+            return;
+        }
+        self.push_system(format!(
+            "unknown theme '{name}' — keeping {}; available: {}",
+            self.theme_store.active_slug(),
+            self.theme_store.available_slugs().join(", ")
+        ));
     }
 
     fn char_len(&self) -> usize {
@@ -792,6 +815,35 @@ impl App {
                     self.push_system("operate: running a health pass".to_string());
                 }
                 "dossier" => self.open_dossier(),
+                "theme" => {
+                    if arg.is_empty() {
+                        let available = self
+                            .theme_store
+                            .list()
+                            .iter()
+                            .map(|(slug, name)| {
+                                if *slug == self.theme_store.active_slug() {
+                                    format!("{slug} ({name}, active)")
+                                } else {
+                                    format!("{slug} ({name})")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.push_system(format!("themes: {available}"));
+                    } else if self.theme_store.set_by_slug(arg) {
+                        let theme = self.theme_store.active();
+                        let slug = theme.slug.implementation();
+                        let display = theme.display_name.implementation();
+                        let _ = commands.send(UiCommand::SetTheme { slug: slug.implementation() });
+                        self.push_system(format!("theme: {display} ({slug})"));
+                    } else {
+                        self.push_system(format!(
+                            "unknown theme '{arg}' — available: {}",
+                            self.theme_store.available_slugs().join(", ")
+                        ));
+                    }
+                }
                 other => self.push_system(format!("unknown command: /{other} (try /help)")),
             }
             return;
@@ -1458,6 +1510,63 @@ mod tests {
             rx.try_recv().unwrap(),
             super::super::UiCommand::Cancel
         ));
+    }
+
+    #[test]
+    fn theme_command_switches_lists_and_falls_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        // Switching by slug repaints from the new palette and persists it.
+        for c in "/theme dracula".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert_eq!(app.theme_store.active_slug(), "dracula");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::SetTheme { .. }
+        ));
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System && m.text.contains("Dracula (dracula)")));
+        // With no argument it lists the themes, marking the active one.
+        for c in "/theme".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        let listing = app
+            .messages
+            .iter()
+            .find(|m| m.text.starts_with("themes:"))
+            .expect("a listing line")
+            .text
+            .implementation();
+        assert!(listing.contains("dracula (Dracula, active)"), "{listing}");
+        assert!(listing.contains("prricode (prricode)"), "{listing}");
+        // An unknown name keeps the active theme and says what is available.
+        for c in "/theme no-such-theme".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert_eq!(app.theme_store.active_slug(), "dracula");
+        assert!(app.messages.iter().any(|m| m.role == Role::System
+            && m.text.contains("unknown theme 'no-such-theme'")
+            && m.text.contains("available:")));
+    }
+
+    #[test]
+    fn theme_setting_falls_back_with_a_log() {
+        let mut app = new_app();
+        app.apply_theme_setting("does-not-exist");
+        assert_eq!(app.theme_store.active_slug(), "prricode");
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.role == Role::System && m.text.contains("unknown theme 'does-not-exist'")));
+        // A known name from the setting applies without a log line.
+        app.apply_theme_setting("tokyo-night");
+        assert_eq!(app.theme_store.active_slug(), "tokyo-night");
     }
 
     #[test]

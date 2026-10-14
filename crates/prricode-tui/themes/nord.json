@@ -1,0 +1,24 @@
+{
+  "display_name": "Nord",
+  "foreground": "#eceff4",
+  "background": "#2e3440",
+  "accent": "#88c0d0",
+  "source_model": "nord",
+  "license": "MIT",
+  "colors": {
+    "user": "#a3be8c",
+    "assistant": "#81a1c1",
+    "tool": "#b48ead",
+    "system": "#4c566a",
+    "status": "#ebcb8b",
+    "session": "#4c566a",
+    "rail_stage": "#88c0d0",
+    "rail_gate": "#bf616a",
+    "rail_ok": "#a3be8c",
+    "approval": "#bf616a",
+    "approval_border": "#bf616a",
+    "footer_key": "#ebcb8b",
+    "footer_command": "#81a1c1",
+    "error": "#bf616a"
+  }
+}

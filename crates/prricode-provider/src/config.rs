@@ -39,6 +39,10 @@ pub struct PrricodeConfig {
     pub providers: HashMap<String, ProviderSettings>,
     #[serde(default)]
     pub voice: VoiceSettings,
+    /// Default TUI theme slug (e.g. `dracula`); the TUI's `/theme` command
+    /// lists and switches themes, and remembers the last choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Implementation, Default, Serialize, Deserialize)]
