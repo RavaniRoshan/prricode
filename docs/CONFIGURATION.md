@@ -73,6 +73,24 @@ follow-up.
 | FastAPI | Python + FastAPI + Postgres |
 | Static + API | Static site generator + serverless functions directory |
 
+## Deploy credentials (v0.3)
+
+Deploy credentials are collected interactively, per product, and are
+**never persisted**: they exist only as environment variables of the deploy
+child process, and captured output is redacted before it lands in any
+artifact. Per-target variable names the agent asks for:
+
+| Target (detected from) | Credential | Deploy command |
+|---|---|---|
+| Cloudflare (`wrangler.toml`) | `CLOUDFLARE_API_TOKEN` | `wrangler deploy` |
+| Fly.io (`fly.toml`) | `FLY_API_TOKEN` | `fly deploy` |
+| Vercel (`vercel.json`) | `VERCEL_TOKEN` | `vercel deploy` |
+| Heroku (`Procfile`) | `HEROKU_API_KEY` | `git push heroku main` |
+| anything else | — | manual: the operator names the target and runs it by hand |
+
+The ship path (GitHub release + install steps) needs only an already-configured
+`gh` — no tokens through prricode.
+
 ## Examples
 
 ```bash

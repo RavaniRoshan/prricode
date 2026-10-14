@@ -125,6 +125,30 @@ The verify stage is the pipeline's acceptance layer. Three seams in
 Cheap gates run after each build task; the verifier pass runs once, after the
 build completes (verification economics: PRD §7).
 
+## Ship & Operate (v0.3)
+
+`prricode-ship` holds three seams:
+
+- **Ship** (`release.rs`) — install artifacts (`INSTALL.md`, written only when
+  absent) → commit → tag → push → `gh release create` when `gh` is available,
+  tag-only otherwise. Zero credentials required.
+- **Deploy** (`deploy.rs`) — stack-informed target proposal (wrangler.toml →
+  Cloudflare, fly.toml → Fly, vercel.json → Vercel, Procfile → Heroku,
+  nothing recognizable → a manual plan that asks the operator to name the
+  target). Execution passes credentials as **environment variables of the
+  child process only**; captured output is redacted (secret values, token
+  patterns) before it lands anywhere. Nothing secret is written to SQLite,
+  the spec, the dossier, or git.
+- **Operate** (`operate.rs`) — health checks (URL or command), an append-only
+  JSONL run log at `<data_dir>/operate/<run_id>.jsonl`, and a best-effort
+  `gh issue create` with redacted evidence when a health check fails.
+
+The pipeline's `ShipFlow` is step-driven (propose → operator choice → per-
+credential secret collection → execute → record → health pass): it never
+blocks on operator input, and the TUI drives it the same way it drives the
+concept/spec gates. The TUI masks secret input in the composer and never
+records it. Protocol surface: `pipeline/shipRead`, `pipeline/operateRead`.
+
 ## Storage
 
 SQLite at `~/.local/share/prricode/prricode.db` (override `--data-dir`):
