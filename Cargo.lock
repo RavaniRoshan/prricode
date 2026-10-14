@@ -1310,6 +1310,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "prricode-ship"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "prricode-verify",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "prricode-skills"
 version = "0.1.0"
 dependencies = [
