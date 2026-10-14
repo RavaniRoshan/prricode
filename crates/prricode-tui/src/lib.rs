@@ -869,12 +869,24 @@ async fn run_build_stage(ctx: StageCtx) {
             return;
         }
     };
+    // The build turns work in a per-run worktree so concurrent waves never
+    // race on the launch workspace; fall back to the launch workspace only
+    // when the worktree could not be prepared.
+    let build_workspace = match ctx.pipeline.prepare_worktree(&ctx.session_id).await {
+        Ok(worktree) => worktree,
+        Err(e) => {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: worktree setup failed — building in the launch workspace: {e}"
+            )));
+            ctx.workspace_root.implementation()
+        }
+    };
     let outcome = run_build(
         &ctx.pipeline.runner,
         &engine,
         &run_id,
         &ctx.session_id,
-        &ctx.workspace_root,
+        &build_workspace,
         &ctx.data_dir,
     )
     .await;
