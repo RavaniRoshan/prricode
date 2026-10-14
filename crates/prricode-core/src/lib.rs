@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod internals;
 pub mod protocol;
 pub mod types;
 

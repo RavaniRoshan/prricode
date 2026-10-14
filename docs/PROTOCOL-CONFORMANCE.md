@@ -94,11 +94,13 @@ The binary exposes 364 Debug-visible structs. The prior map counted 345 schema
 types. Our protocol layer implements the type surface that the 69 methods
 transitively need: all params/results/enums in `prricode-core`
 (`types.rs`/`protocol.rs`), the server request types (~90), and provider types.
-The remaining binary structs are internal engine types (agent spawn bindings,
-branch-seed diagnostics, code-mode grants, inbox/reminder records) — runtime
-internals, not protocol schema. They are deliberately not mirrored: they have no
-wire presence in the mapped protocol, and copying internal names would add
-compatibility debt, not conformance.
+The remaining binary structs are internal engine types (364 Debug-visible names,
+251 families). Their disposition is explicit and queryable:
+`prricode_core::internals::inventory()` maps every family to either
+**Implemented** (the concept exists in prricode under our own naming — these
+types had no protocol-wire presence, so mirroring their names would add
+compatibility debt, not conformance) or **Flagged** (a `// future work:` entry
+naming what is not built). See `docs/INTERNALS-DISPOSITION.md`.
 
 ### CLI — 18 subcommands, real bodies
 
