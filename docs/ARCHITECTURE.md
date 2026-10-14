@@ -101,6 +101,30 @@ notification; `pipeline/specRead` returns the latest spec and stage;
 in the `settings` table under `pipeline:<sessionId>`. The TUI drives the same
 stages in-process (`/concept`, `/spec`, `/plan`, `/build`).
 
+## Verification (v0.2)
+
+The verify stage is the pipeline's acceptance layer. Three seams in
+`prricode-verify`:
+
+- **Gates** — `gates.rs` detects the stack (Node/Python/Rust) and runs
+  deterministic gates (`typecheck`/`build`/`test`) through `prricode-sandbox`
+  with no network. Every `GateRecord` is machine-checkable: command, exit
+  code, passed, evidence tail, duration.
+- **Verifier** — an adversarial agent turn with structural isolation: a fresh
+  runner derived with an evidence-only registry (`read_file`/`glob`/`grep` —
+  no shell, no writes), empty history, one iteration. It receives the EARS
+  requirements and the evidence bundle and returns a verdict per requirement
+  (PASS/FAIL/UNVERIFIED with cited evidence). A verdict set missing any
+  requirement is an error, never silently accepted.
+- **Dossier** — `dossier.rs` renders the acceptance dossier (what changed /
+  verified how / evidence / residual risk / not-tested) to
+  `<data_dir>/runs/<run_id>/acceptance-dossier.md` and persists the report
+  (`gate_records` table + `dossier:<run_id>` settings row). The TUI shows it
+  via `/dossier`; the protocol exposes `pipeline/verifyRead`.
+
+Cheap gates run after each build task; the verifier pass runs once, after the
+build completes (verification economics: PRD §7).
+
 ## Storage
 
 SQLite at `~/.local/share/prricode/prricode.db` (override `--data-dir`):

@@ -116,6 +116,11 @@ git worktree.
 - [`docs/PRD.md`](docs/PRD.md) — the full product requirements document
 - [`docs/PRD-onepager.md`](docs/PRD-onepager.md) — the positioning card
 
+The v0.2 verification layer is in: deterministic gates (typecheck/build/test)
+after every build task, an adversarial verifier with structural context
+isolation that returns a per-requirement verdict, and an acceptance dossier
+(`/dossier` in the TUI, `pipeline/verifyRead` over the protocol).
+
 ## Under the hood
 
 ```
