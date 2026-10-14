@@ -49,6 +49,14 @@ pub enum UiCommand {
     RecordAmendment {
         amendment: crate::app::PolicyAmendment,
     },
+    /// '!' shell mode: run a command in the workspace (spec keybinding).
+    ShellRun {
+        command: String,
+    },
+    /// '@' file picker: request workspace paths.
+    GlobRequest {
+        pattern: String,
+    },
     PipelineConcept {
         idea: String,
     },
@@ -270,6 +278,44 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                 }
                 UiCommand::SetModel { model: new_model } => model = new_model,
                 UiCommand::SetApprovalMode(mode) => approval_mode = mode,
+                UiCommand::ShellRun { command } => {
+                    // '!' shell mode: run in the workspace through the sandbox,
+                    // stream the result as a system message (never as a turn).
+                    let workspace = stage_workspace.implementation();
+                    let ui_tx_shell = ui_tx.implementation();
+                    tokio::spawn(async move {
+                        let spec = prricode_sandbox::SandboxSpec {
+                            workspace_root: workspace,
+                            allow_network: false,
+                            timeout: std::time::Duration::from_secs(120),
+                        };
+                        let outcome = prricode_sandbox::run_command(&command, &spec).await;
+                        let message = match outcome {
+                            Ok(output) => {
+                                let mut text = output.stdout;
+                                if !output.stderr.is_empty() {
+                                    text.push_str("\nstderr:\n");
+                                    text.push_str(&output.stderr);
+                                }
+                                format!("$ {command}\n{text}\nexit: {}", output.exit_code)
+                            }
+                            Err(e) => format!("$ {command}\nfailed: {e}"),
+                        };
+                        let _ = ui_tx_shell.send(UiEvent::Log(format!("shell: {message}")));
+                    });
+                }
+                UiCommand::GlobRequest { pattern } => {
+                    // '@' picker: glob the workspace (bounded, no VCS dirs).
+                    let workspace = stage_workspace.implementation();
+                    let ui_tx_glob = ui_tx.implementation();
+                    tokio::spawn(async move {
+                        let full = format!("{}/{}", workspace.display(), pattern);
+                        let mut items: Vec<String> =
+                            walkdir_glob(&full).into_iter().take(200).collect();
+                        items.sort();
+                        let _ = ui_tx_glob.send(UiEvent::FilePickerItems { items });
+                    });
+                }
                 UiCommand::RecordAmendment { amendment } => {
                     // Durable "always allow in this workspace" rule.
                     if let Err(e) = agent_persistence.set_setting(
@@ -1391,6 +1437,43 @@ async fn run_verify_after_build(
         fail: tally(Verdict::Fail),
         unverified: tally(Verdict::Unverified),
     });
+}
+
+/// Bounded filesystem glob for the '@' picker (no VCS/build dirs).
+fn walkdir_glob(pattern: &str) -> Vec<String> {
+    let (root, file_pattern) = match pattern.rsplit_once('/') {
+        Some((root, file)) => (root.to_string(), file.to_string()),
+        None => (".".to_string(), pattern.to_string()),
+    };
+    let regex = regex::Regex::new(&format!(
+        "^{}$",
+        regex::escape(&file_pattern)
+            .replace("\\*", "[^/]*")
+            .replace("\\?", ".")
+    ))
+    .ok();
+    let mut results = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(root)];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            let matches = regex.as_ref().map(|r| r.is_match(&name)).unwrap_or(false);
+            if matches && path.is_file() {
+                results.push(path.to_string_lossy().to_string());
+            }
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    results
 }
 
 #[cfg(test)]
