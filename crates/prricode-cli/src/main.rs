@@ -390,7 +390,7 @@ async fn main() -> Result<()> {
     });
 
     // Bare `prricode` (no subcommand) runs the interactive TUI — the
-    // Reference-compatible default entry point.
+    // default entry point.
     if cli.command.is_none() {
         let launch = prricode_tui::LaunchConfig {
             provider: provider_kind(cli.provider),

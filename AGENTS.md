@@ -97,6 +97,7 @@ identifiers. The protocol surface is our own design.
 | Implementation plans | `docs/plans/` |
 | Roadmap (documented future work) | `docs/ROADMAP.md` |
 | Config/credentials | `docs/CONFIGURATION.md` |
+| TUI guide (terminal-native: every command/setting in the TUI) | `docs/TUI-GUIDE.md` |
 
 ## Testing
 
