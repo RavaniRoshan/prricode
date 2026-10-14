@@ -75,6 +75,8 @@ pub struct WorkflowRun {
     pub token_budget: Option<u64>,
     pub tokens_used: u64,
     pub error: Option<String>,
+    #[serde(default)]
+    pub last_step_summary: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +120,7 @@ impl WorkflowEngine {
             token_budget,
             tokens_used: 0,
             error: None,
+            last_step_summary: None,
         };
         let id = run.id.implementation();
         self.runs.lock().unwrap().insert(id.implementation(), run);
@@ -202,6 +205,11 @@ impl WorkflowEngine {
             });
         }
         run.current_step += 1;
+        if let Some(WorkflowStep::Prompt { label, .. }) =
+            run.definition.steps.get(run.current_step - 1)
+        {
+            run.last_step_summary = Some(label.implementation());
+        }
         if run.current_step >= run.definition.steps.len() {
             run.status = RunStatus::Completed;
             return Ok(true);
@@ -335,5 +343,17 @@ mod tests {
             engine.get("nope"),
             Err(WorkflowError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn advance_records_last_step_summary() {
+        let engine = WorkflowEngine::new();
+        let id = engine.start("s", two_step(), None).unwrap();
+        assert!(engine.get(&id).unwrap().last_step_summary.is_none());
+        engine.advance(&id).unwrap();
+        assert_eq!(
+            engine.get(&id).unwrap().last_step_summary.as_deref(),
+            Some("one")
+        );
     }
 }
