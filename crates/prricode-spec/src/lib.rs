@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Implementation, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Concept {
     pub problem: String,
     pub audience: String,
@@ -252,6 +253,15 @@ mod tests {
         );
         assert!(!concept.problem.is_empty());
         assert!(!concept.audience.is_empty());
+        // Wire shape follows the protocol's camelCase convention.
+        let json = serde_json::to_value(&concept).unwrap();
+        assert!(json.get("nonGoals").is_some());
+        assert!(json.get("successCriteria").is_some());
+        assert!(json.get("non_goals").is_none());
+        assert!(json.get("success_criteria").is_none());
+        let back: Concept = serde_json::from_value(json).unwrap();
+        assert_eq!(back.problem, concept.problem);
+        assert_eq!(back.audience, concept.audience);
     }
 
     #[test]
