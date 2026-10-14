@@ -16,6 +16,7 @@ members = [
     "crates/prricode-tui",
     "crates/prricode-spec",
     "crates/prricode-pipeline",
+    "crates/prricode-verify",
 ]
 
 [workspace.package]
