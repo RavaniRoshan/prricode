@@ -4,7 +4,7 @@
 mod app;
 mod ui;
 
-pub use app::{App, PendingApproval, TurnMessage, UiEvent};
+pub use app::{App, PendingApproval, PipelineView, TurnMessage, UiEvent};
 
 use anyhow::Result;
 use prricode_agent::{
@@ -12,13 +12,20 @@ use prricode_agent::{
 };
 use prricode_core::ApprovalMode;
 use prricode_persistence::Persistence;
+use prricode_pipeline::{
+    build::{graph_to_definition, run_build},
+    clarify::Clarifier,
+    plan, specify, Pipeline, PipelineStage,
+};
 use prricode_provider::{
     create_provider, load_config, resolve_settings, AssistantMessage, ChatMessage, ContentPart,
     ModelProvider, ProviderKind,
 };
+use prricode_spec::{Concept, Spec, TaskGraph};
+use prricode_workflow::WorkflowEngine;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 /// Commands the UI sends to the agent task.
@@ -28,6 +35,10 @@ pub enum UiCommand {
     Approve { approval_id: String, approved: bool },
     SetModel { model: String },
     SetApprovalMode(ApprovalMode),
+    PipelineConcept { idea: String },
+    PipelineAnswer { answer: String },
+    PipelineConfirm { stage: String, ok: bool },
+    PipelineAdvance { stage: String },
 }
 
 /// Where to start the interactive session.
@@ -104,6 +115,17 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
         let mut approval_mode = agent_launch.approval_mode;
         let mut active_turn: Option<TurnHandle> = None;
         let mut queued: Option<String> = None;
+        // Product-builder pipeline: the stage runner plus per-session flow
+        // state shared with the spawned stage tasks.
+        let pipeline = Arc::new(Pipeline::new(
+            Arc::implementation(&agent_runner),
+            Arc::implementation(&agent_persistence),
+        ));
+        let flow = Arc::new(Mutex::new(PipelineFlow::default()));
+        let stage_workspace = agent_launch
+            .workspace_root
+            .implementation()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         loop {
             // Retire the turn handle when it finishes.
@@ -202,6 +224,153 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                 }
                 UiCommand::SetModel { model: new_model } => model = new_model,
                 UiCommand::SetApprovalMode(mode) => approval_mode = mode,
+                UiCommand::PipelineConcept { idea } => {
+                    let concept = Concept::from_idea(&idea);
+                    let question = Clarifier::new(concept.implementation()).next_question();
+                    {
+                        let mut flow = flow.lock().unwrap();
+                        flow.start(concept);
+                        persist_pipeline(&pipeline, &session_id, &flow);
+                    }
+                    let _ = ui_tx.send(UiEvent::PipelineStageChanged {
+                        stage: PipelineStage::Clarify.label().to_string(),
+                    });
+                    let _ = ui_tx.send(UiEvent::Log(format!("pipeline: concept started — {idea}")));
+                    if let Some(question) = question {
+                        let _ = ui_tx.send(UiEvent::PipelineInterview { question });
+                    }
+                }
+                UiCommand::PipelineAnswer { answer } => {
+                    let outcome = {
+                        let mut flow = flow.lock().unwrap();
+                        let answered = flow.clarifier.as_mut().map(|clarifier| {
+                            clarifier.apply(&answer);
+                            (clarifier.next_question(), clarifier.concept.implementation())
+                        });
+                        match answered {
+                            Some((Some(question), _)) => AnswerOutcome::Interview { question },
+                            Some((None, concept)) => {
+                                flow.concept = Some(concept);
+                                flow.stage = PipelineStage::Concept.label().to_string();
+                                persist_pipeline(&pipeline, &session_id, &flow);
+                                AnswerOutcome::ConceptReady
+                            }
+                            None => AnswerOutcome::NoInterview,
+                        }
+                    };
+                    match outcome {
+                        AnswerOutcome::Interview { question } => {
+                            let _ = ui_tx.send(UiEvent::PipelineInterview { question });
+                        }
+                        AnswerOutcome::ConceptReady => {
+                            let _ = ui_tx.send(UiEvent::PipelineStageChanged {
+                                stage: PipelineStage::Concept.label().to_string(),
+                            });
+                            let _ = ui_tx.send(UiEvent::PipelineGate {
+                                gate: "concept-confirmation".to_string(),
+                            });
+                            let _ = ui_tx.send(UiEvent::Log(
+                                "pipeline: concept ready — y to confirm, n to reject".to_string(),
+                            ));
+                        }
+                        AnswerOutcome::NoInterview => {
+                            let _ = ui_tx.send(UiEvent::Log(
+                                "pipeline: no interview in progress — /concept <idea> to start"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                UiCommand::PipelineConfirm { stage, ok } => {
+                    if !ok {
+                        let current = flow.lock().unwrap().stage.implementation();
+                        let _ = ui_tx.send(UiEvent::PipelineStageChanged { stage: current });
+                        let _ = ui_tx.send(UiEvent::Log(format!(
+                            "pipeline: {stage} rejected — paused at the current stage"
+                        )));
+                        continue;
+                    }
+                    match stage.as_str() {
+                        "concept-confirmation" => {
+                            flow.lock().unwrap().concept_confirmed = true;
+                            persist_pipeline(&pipeline, &session_id, &flow.lock().unwrap());
+                            spawn_stage(
+                                run_specify_stage,
+                                StageCtx {
+                                    pipeline: Arc::implementation(&pipeline),
+                                    flow: Arc::implementation(&flow),
+                                    ui_tx: ui_tx.implementation(),
+                                    session_id: session_id.implementation(),
+                                    model: model.implementation(),
+                                    approval_mode,
+                                    workspace_root: stage_workspace.implementation(),
+                                    data_dir: agent_data_dir.implementation(),
+                                },
+                            );
+                        }
+                        "spec-confirmation" => {
+                            flow.lock().unwrap().spec_confirmed = true;
+                            persist_pipeline(&pipeline, &session_id, &flow.lock().unwrap());
+                            spawn_stage(
+                                run_plan_stage,
+                                StageCtx {
+                                    pipeline: Arc::implementation(&pipeline),
+                                    flow: Arc::implementation(&flow),
+                                    ui_tx: ui_tx.implementation(),
+                                    session_id: session_id.implementation(),
+                                    model: model.implementation(),
+                                    approval_mode,
+                                    workspace_root: stage_workspace.implementation(),
+                                    data_dir: agent_data_dir.implementation(),
+                                },
+                            );
+                        }
+                        other => {
+                            let _ = ui_tx
+                                .send(UiEvent::Log(format!("pipeline: no gate named {other}")));
+                        }
+                    }
+                }
+                UiCommand::PipelineAdvance { stage } => {
+                    let (ready, hint) = {
+                        let flow = flow.lock().unwrap();
+                        match stage.as_str() {
+                            "specify" => (
+                                flow.concept.is_some() && flow.concept_confirmed,
+                                "confirm the concept gate first (answer the interview, then press y)",
+                            ),
+                            "plan" => (
+                                flow.spec.is_some() && flow.spec_confirmed,
+                                "confirm the spec gate first (press y)",
+                            ),
+                            "build" => (
+                                flow.graph.is_some(),
+                                "no plan yet — confirm the spec to generate one",
+                            ),
+                            _ => (false, "unknown pipeline stage"),
+                        }
+                    };
+                    if !ready {
+                        let _ = ui_tx.send(UiEvent::Log(format!("pipeline: {hint}")));
+                        continue;
+                    }
+                    let ctx = StageCtx {
+                        pipeline: Arc::implementation(&pipeline),
+                        flow: Arc::implementation(&flow),
+                        ui_tx: ui_tx.implementation(),
+                        session_id: session_id.implementation(),
+                        model: model.implementation(),
+                        approval_mode,
+                        workspace_root: stage_workspace.implementation(),
+                        data_dir: agent_data_dir.implementation(),
+                    };
+                    match stage.as_str() {
+                        "specify" => spawn_stage(run_specify_stage, ctx),
+                        "plan" => spawn_stage(run_plan_stage, ctx),
+                        "build" => spawn_stage(run_build_stage, ctx),
+                        _ => {}
+                    }
+                }
             }
         }
     });
@@ -387,4 +556,274 @@ fn approval_summary_text(summary: &serde_json::Value) -> String {
         return format!("{tool}: {text}");
     }
     summary.to_string()
+}
+
+/// In-memory product-builder pipeline state for the session.
+#[derive(Default)]
+struct PipelineFlow {
+    stage: String,
+    concept: Option<Concept>,
+    clarifier: Option<Clarifier>,
+    spec: Option<Spec>,
+    graph: Option<TaskGraph>,
+    concept_confirmed: bool,
+    spec_confirmed: bool,
+}
+
+impl PipelineFlow {
+    /// Start a fresh concept interview, discarding any prior run.
+    fn start(&mut self, concept: Concept) {
+        self.clarifier = Some(Clarifier::new(concept.implementation()));
+        self.concept = Some(concept);
+        self.spec = None;
+        self.graph = None;
+        self.concept_confirmed = false;
+        self.spec_confirmed = false;
+        self.stage = PipelineStage::Clarify.label().to_string();
+    }
+}
+
+/// What a clarifier answer produced.
+enum AnswerOutcome {
+    Interview { question: String },
+    ConceptReady,
+    NoInterview,
+}
+
+/// Shared context for a spawned pipeline stage turn.
+struct StageCtx {
+    pipeline: Arc<Pipeline>,
+    flow: Arc<Mutex<PipelineFlow>>,
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    session_id: String,
+    model: String,
+    approval_mode: ApprovalMode,
+    workspace_root: PathBuf,
+    data_dir: PathBuf,
+}
+
+fn spawn_stage<F>(stage: fn(StageCtx) -> F, ctx: StageCtx)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(stage(ctx));
+}
+
+/// Persist the pipeline state under the server's `pipeline:<sessionId>`
+/// settings key so both surfaces read the same story.
+fn persist_pipeline(pipeline: &Pipeline, session_id: &str, flow: &PipelineFlow) {
+    let waves: Vec<Vec<String>> = flow
+        .graph
+        .as_ref()
+        .map(|graph| {
+            graph
+                .waves()
+                .unwrap_or_default()
+                .iter()
+                .map(|wave| wave.iter().map(|node| node.id.implementation()).collect())
+                .collect()
+        })
+        .unwrap_or_default();
+    let state = serde_json::json!({
+        "stage": flow.stage,
+        "concept": flow.concept.as_ref().and_then(|c| serde_json::to_value(c).ok()),
+        "spec": flow.spec.as_ref().and_then(|s| serde_json::to_value(s).ok()),
+        "waves": waves,
+    });
+    if let Err(e) = pipeline
+        .persistence
+        .set_setting(&format!("pipeline:{session_id}"), &state.to_string())
+    {
+        tracing::warn!("pipeline state save failed: {e}");
+    }
+}
+
+/// Move the rail to a stage label, persisting and relaying the change.
+async fn set_stage(ctx: &StageCtx, label: &str) {
+    {
+        let mut flow = ctx.flow.lock().unwrap();
+        flow.stage = label.to_string();
+        persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
+    }
+    let _ = ctx.ui_tx.send(UiEvent::PipelineStageChanged {
+        stage: label.to_string(),
+    });
+}
+
+/// One silent model turn for a pipeline stage prompt.
+fn stage_turn_input(ctx: &StageCtx, messages: Vec<ChatMessage>) -> TurnInput {
+    let prompt = messages
+        .iter()
+        .map(message_text)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    TurnInput {
+        session_id: ctx.session_id.implementation(),
+        model: ctx.model.implementation(),
+        approval_mode: ctx.approval_mode,
+        workspace_root: ctx.workspace_root.implementation(),
+        data_dir: ctx.data_dir.implementation(),
+        history: Vec::new(),
+        user_content: vec![ContentPart::text(prompt)],
+        goal: None,
+        skills_prompt: None,
+        max_iterations: 15,
+        turn_id: uuid::Uuid::now_v7().to_string(),
+    }
+}
+
+fn message_text(message: &ChatMessage) -> String {
+    message
+        .content
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text(text) => text.implementation(),
+            ContentPart::Image { .. } => String::new(),
+        })
+        .collect()
+}
+
+/// The Specify stage: a confirmed concept becomes a validated Core-4 spec.
+async fn run_specify_stage(ctx: StageCtx) {
+    let concept = {
+        let flow = ctx.flow.lock().unwrap();
+        flow.concept.implementation()
+    };
+    let Some(concept) = concept else {
+        let _ = ctx
+            .ui_tx
+            .send(UiEvent::Log("pipeline: no concept to specify".to_string()));
+        return;
+    };
+    let preset = concept.stack.as_ref().and_then(|stack| stack.preset);
+    set_stage(&ctx, PipelineStage::Specify.label()).await;
+    let input = stage_turn_input(&ctx, specify::spec_prompt(&concept, preset));
+    let outcome = match ctx.pipeline.runner.run_subagent(input).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let _ = ctx
+                .ui_tx
+                .send(UiEvent::Log(format!("pipeline: specify failed — {e}")));
+            return;
+        }
+    };
+    match specify::parse_requirements(&outcome.content) {
+        Ok(requirements) => {
+            let count = requirements.items.len();
+            {
+                let mut flow = ctx.flow.lock().unwrap();
+                let spec = flow.spec.get_or_insert_with(|| Spec::draft(concept));
+                spec.regenerate(requirements);
+                persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
+            }
+            let _ = ctx.ui_tx.send(UiEvent::PipelineGate {
+                gate: "spec-confirmation".to_string(),
+            });
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: spec ready — {count} requirements; y to confirm, n to reject"
+            )));
+        }
+        Err(e) => {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: spec rejected by the EARS gate — {e}"
+            )));
+        }
+    }
+}
+
+/// The Plan stage: a confirmed spec becomes a wave-scheduled task graph.
+async fn run_plan_stage(ctx: StageCtx) {
+    let requirements = {
+        let flow = ctx.flow.lock().unwrap();
+        flow.spec.as_ref().map(|spec| spec.requirements.implementation())
+    };
+    let Some(requirements) = requirements else {
+        let _ = ctx
+            .ui_tx
+            .send(UiEvent::Log("pipeline: no spec to plan".to_string()));
+        return;
+    };
+    set_stage(&ctx, PipelineStage::Plan.label()).await;
+    let input = stage_turn_input(&ctx, plan::plan_prompt(&requirements));
+    let outcome = match ctx.pipeline.runner.run_subagent(input).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let _ = ctx
+                .ui_tx
+                .send(UiEvent::Log(format!("pipeline: plan failed — {e}")));
+            return;
+        }
+    };
+    match plan::parse_task_graph(&outcome.content) {
+        Ok(graph) => {
+            if let Err(e) = plan::validate_traceability(&graph, &requirements) {
+                let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                    "pipeline: plan rejected by the traceability gate — {e}"
+                )));
+                return;
+            }
+            let tasks = graph.nodes.len();
+            let waves = graph.waves().map(|waves| waves.len()).unwrap_or(0);
+            {
+                let mut flow = ctx.flow.lock().unwrap();
+                flow.graph = Some(graph);
+                persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
+            }
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: plan ready — {tasks} tasks in {waves} waves; /build to run the build"
+            )));
+        }
+        Err(e) => {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: plan failed to parse — {e}"
+            )));
+        }
+    }
+}
+
+/// The Build stage: task graph waves execute as concurrent agent turns.
+async fn run_build_stage(ctx: StageCtx) {
+    let graph = {
+        let flow = ctx.flow.lock().unwrap();
+        flow.graph.implementation()
+    };
+    let Some(graph) = graph else {
+        let _ = ctx
+            .ui_tx
+            .send(UiEvent::Log("pipeline: no plan to build".to_string()));
+        return;
+    };
+    set_stage(&ctx, PipelineStage::Build.label()).await;
+    let engine = WorkflowEngine::new();
+    let run_id = match engine.start(&ctx.session_id, graph_to_definition(&graph), None) {
+        Ok(run_id) => run_id,
+        Err(e) => {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: build could not start — {e}"
+            )));
+            return;
+        }
+    };
+    match run_build(
+        &ctx.pipeline.runner,
+        &engine,
+        &run_id,
+        &ctx.session_id,
+        &ctx.workspace_root,
+        &ctx.data_dir,
+    )
+    .await
+    {
+        Ok(summary) => {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: build finished — {summary}"
+            )));
+        }
+        // A run that stops mid-wave reads as paused/cancelled, not failed.
+        Err(e) => {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: build paused/cancelled mid-wave — {e}"
+            )));
+        }
+    }
 }
