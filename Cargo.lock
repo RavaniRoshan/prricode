@@ -1345,6 +1345,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "prricode-verify"
+version = "0.1.0"
+dependencies = [
+ "prricode-sandbox",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "prricode-voice"
 version = "0.1.0"
 dependencies = [
