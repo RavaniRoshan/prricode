@@ -20,3 +20,4 @@ node_modules/
 # Editor / OS
 .DS_Store
 *.swp
+.superpowers/
