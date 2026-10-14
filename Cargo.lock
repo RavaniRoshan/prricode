@@ -1358,6 +1358,7 @@ dependencies = [
  "prricode-verify",
  "prricode-workflow",
  "ratatui",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
