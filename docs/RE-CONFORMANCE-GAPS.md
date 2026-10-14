@@ -136,5 +136,4 @@ this goal).
 
 ---
 
-**Queue order (updated):** Gap 1a spec ✅, Gap 1b themes ✅ → 1b remainder (approval tiers, keybindings, commands, risk footers, checklist) → Gap 2 (internals) → Gap 3 (runtime) →
-Gap 4 (auth) → Gap 5/6 (docs). Gates rerun after each gap closes.
+**Queue — CLOSED: Gap 1 (visual spec + themes + approval tiers + keybindings + commands + checklist), Gap 2 (internals), Gap 3 (skill runtime), Gap 4 (auth). REMAINING: Gap 5 (macOS roadmap in docs/ROADMAP.md), Gap 6 (CLI subcommand delta in the conformance report), then the final full-gate run.
