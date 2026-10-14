@@ -51,6 +51,19 @@ impl PolicyAmendment {
     }
 }
 
+/// Workspace file-path picker ('@' keybinding).
+#[derive(Debug, Clone, Default)]
+pub struct FilePicker {
+    pub items: Vec<String>,
+    pub index: usize,
+}
+
+impl FilePicker {
+    pub fn selected(&self) -> Option<&String> {
+        self.items.get(self.index)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingApproval {
     pub approval_id: String,
@@ -136,6 +149,10 @@ pub struct DeployPrompt {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     Delta(String),
+    /// '@' file picker results.
+    FilePickerItems {
+        items: Vec<String>,
+    },
     ToolUse {
         name: String,
         summary: String,
@@ -214,6 +231,7 @@ pub enum KeyAction {
     Backspace,
     Delete,
     Enter,
+    Tab,
     Esc,
     Left,
     Right,
@@ -265,6 +283,10 @@ pub struct App {
     session_auto_approve: Vec<String>,
     /// "Always allow in this workspace" rules (spec durability tier 3).
     workspace_amendments: Vec<PolicyAmendment>,
+    /// File-path picker opened by '@' (spec keybinding).
+    file_picker: Option<FilePicker>,
+    /// Ctrl+o: expand the last tool result in a modal.
+    expand_last_tool: bool,
     interview_active: bool,
 }
 
@@ -306,6 +328,8 @@ impl App {
             kill_ring: String::new(),
             session_auto_approve: Vec::new(),
             workspace_amendments: Vec::new(),
+            file_picker: None,
+            expand_last_tool: false,
             interview_active: false,
         }
     }
@@ -513,7 +537,40 @@ impl App {
                 _ => {}
             }
         }
+        // '@' file picker owns the keyboard while open (like the approval
+        // modal). '@' opens it; results arrive via UiEvent::FilePickerItems.
+        if self.file_picker.is_some() {
+            let picker_index = self.file_picker.as_ref().unwrap().index;
+            let items_len = self.file_picker.as_ref().unwrap().items.len();
+            match action {
+                KeyAction::Esc => self.file_picker = None,
+                KeyAction::Up => {
+                    self.file_picker.as_mut().unwrap().index = picker_index.saturating_sub(1);
+                }
+                KeyAction::Down => {
+                    self.file_picker.as_mut().unwrap().index =
+                        (picker_index + 1).min(items_len.saturating_sub(1));
+                }
+                KeyAction::Enter | KeyAction::Tab => {
+                    if let Some(path) = self.file_picker.as_ref().unwrap().selected().cloned() {
+                        let idx = self.byte_index();
+                        self.input.insert_str(idx, &path);
+                        self.cursor += path.chars().count();
+                    }
+                    self.file_picker = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match action {
+            KeyAction::Char('@') => {
+                self.file_picker = Some(FilePicker::default());
+                let _ = commands.send(super::UiCommand::GlobRequest {
+                    pattern: "*".into(),
+                });
+            }
             KeyAction::Char(c) => {
                 let idx = self.byte_index();
                 self.input.insert(idx, c);
@@ -601,6 +658,38 @@ impl App {
             }
             KeyAction::Alt('f') => {
                 self.cursor = (self.cursor + self.word_right_len()).min(self.char_len());
+            }
+            KeyAction::Alt('d') => {
+                // Delete the word to the right of the cursor (spec keymap).
+                let len = self.word_right_len();
+                let start = self.byte_index();
+                let end = self.input[start..]
+                    .chars()
+                    .take(len)
+                    .map(|c| c.len_utf8())
+                    .sum::<usize>()
+                    + start;
+                self.input.replace_range(start..end, "");
+            }
+            KeyAction::Alt('\r') | KeyAction::Alt('\n') => {
+                // Alt+Enter: queue the message behind a running turn.
+                let text = std::mem::take(&mut self.input);
+                self.cursor = 0;
+                if !text.trim().is_empty() {
+                    self.history.push(text.clone());
+                    self.submit(text.as_str(), commands);
+                }
+            }
+            KeyAction::Ctrl('b') => {
+                if self.turn_active {
+                    self.push_system(
+                        "background turns are not supported yet — the turn keeps running; Esc interrupts"
+                            .to_string(),
+                    );
+                }
+            }
+            KeyAction::Ctrl('o') => {
+                self.expand_last_tool = !self.expand_last_tool;
             }
             KeyAction::Left => self.cursor = self.cursor.saturating_sub(1),
             KeyAction::Right => self.cursor = (self.cursor + 1).min(self.char_len()),
@@ -716,6 +805,18 @@ impl App {
         commands: &tokio::sync::mpsc::UnboundedSender<super::UiCommand>,
     ) {
         use super::UiCommand;
+        // '!' shell mode (spec keybinding): run in the workspace, not a turn.
+        if let Some(command) = text.strip_prefix('!') {
+            let command = command.trim().to_string();
+            if !command.is_empty() {
+                self.messages.push(TurnMessage {
+                    role: Role::System,
+                    text: format!("$ {command}"),
+                });
+                let _ = commands.send(UiCommand::ShellRun { command });
+            }
+            return;
+        }
         if let Some(rest) = text.strip_prefix('/') {
             let (command, arg) = match rest.split_once(char::is_whitespace) {
                 Some((command, arg)) => (command, arg.trim()),
@@ -1132,6 +1233,12 @@ impl App {
                 };
                 self.flush_stream();
             }
+            UiEvent::FilePickerItems { items } => {
+                if let Some(picker) = self.file_picker.as_mut() {
+                    picker.items = items;
+                    picker.index = 0;
+                }
+            }
             UiEvent::Usage { input, output } => {
                 self.input_tokens += input;
                 self.output_tokens += output;
@@ -1402,6 +1509,91 @@ mod tests {
             rx.try_recv().unwrap(),
             super::super::UiCommand::Approve { approved: true, .. }
         ));
+    }
+
+    #[test]
+    fn at_opens_picker_and_enter_inserts_path() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.handle_key(KeyAction::Char('@'), &tx);
+        assert!(app.file_picker.is_some());
+        // The agent task gets a glob request...
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::GlobRequest { .. }
+        ));
+        // ...and its results populate the picker.
+        app.apply_ui_event(
+            UiEvent::FilePickerItems {
+                items: vec!["src/main.rs".into(), "src/lib.rs".into()],
+            },
+            &tx,
+        );
+        assert_eq!(app.file_picker.as_ref().unwrap().items.len(), 2);
+        // Esc closes without inserting.
+        app.handle_key(KeyAction::Esc, &tx);
+        assert!(app.file_picker.is_none());
+        assert!(app.input.is_empty());
+        // Reopen, navigate, insert.
+        app.handle_key(KeyAction::Char('@'), &tx);
+        app.apply_ui_event(
+            UiEvent::FilePickerItems {
+                items: vec!["src/main.rs".into(), "src/lib.rs".into()],
+            },
+            &tx,
+        );
+        app.handle_key(KeyAction::Down, &tx);
+        app.handle_key(KeyAction::Enter, &tx);
+        assert_eq!(app.input, "src/lib.rs");
+        assert!(app.file_picker.is_none());
+    }
+
+    #[test]
+    fn bang_prefix_routes_to_shell_run() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        for c in "!ls -la".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            super::super::UiCommand::ShellRun { command } if command == "ls -la"
+        ));
+        // A '!' message is never a normal turn submit.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn alt_d_deletes_word_right() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        for c in "keep drop".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Home, &tx);
+        app.handle_key(KeyAction::Alt('d'), &tx);
+        assert_eq!(app.input, " drop");
+        app.handle_key(KeyAction::Alt('d'), &tx);
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn ctrl_o_toggles_expand_and_ctrl_b_explains() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        assert!(!app.expand_last_tool);
+        app.handle_key(KeyAction::Ctrl('o'), &tx);
+        assert!(app.expand_last_tool);
+        app.handle_key(KeyAction::Ctrl('o'), &tx);
+        assert!(!app.expand_last_tool);
+        // Ctrl+B is honest: no fake backgrounding.
+        app.turn_active = true;
+        app.handle_key(KeyAction::Ctrl('b'), &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("background turns are not supported")));
     }
 
     #[test]
