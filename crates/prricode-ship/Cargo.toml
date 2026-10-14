@@ -12,6 +12,3 @@ regex = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 prricode-verify = { path = "../prricode-verify" }
-
-[dev-dependencies]
-serde_json = { workspace = true }
