@@ -55,7 +55,7 @@ pane+modal architecture (`crates/tui/src/render/panels/settings_overlay.rs`).
 Three risk-class footer variants (`review_needed`/`elevated`/`blocking`) relabel
 the approve key.
 
-**Remaining for Gap 1:** (b) implement the spec deltas in our TUI — theme system DONE (0bb0072, 5 bundled themes, /theme, 141 tests); REMAINING: approval durability tiers + policy
+**Remaining for Gap 1:** (b) implement the spec deltas in our TUI — theme system DONE (0bb0072, 5 bundled themes, /theme, 141 tests); approval durability tiers DONE (5ffba11: y/s/a/n + PolicyAmendment persistence + auto-answer); REMAINING: extra keybindings
 amendment, the ~10 missing keybindings, the extra slash commands
 (`/compact`, `/goal`, `/yolo`, `/message`, `/ts`, `/ps`), the risk-class
 footers — aligned with our design language; (c) the spec→implementation→test
