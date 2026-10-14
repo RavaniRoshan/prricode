@@ -1,0 +1,23 @@
+{
+  "display_name": "prricode",
+  "foreground": "white",
+  "background": "default",
+  "accent": "cyan",
+  "license": "MIT",
+  "colors": {
+    "user": "green",
+    "assistant": "blue",
+    "tool": "magenta",
+    "system": "darkgray",
+    "status": "yellow",
+    "session": "darkgray",
+    "rail_stage": "cyan",
+    "rail_gate": "red",
+    "rail_ok": "green",
+    "approval": "red",
+    "approval_border": "red",
+    "footer_key": "yellow",
+    "footer_command": "cyan",
+    "error": "red"
+  }
+}

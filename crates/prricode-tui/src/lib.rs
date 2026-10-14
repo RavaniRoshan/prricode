@@ -2,9 +2,11 @@
 //! inline tool approvals, and slash commands.
 
 mod app;
+mod theme;
 mod ui;
 
 pub use app::{App, PendingApproval, PipelineView, TurnMessage, UiEvent};
+pub use theme::{Theme, ThemeStore};
 
 use anyhow::Result;
 use prricode_agent::{
@@ -72,6 +74,10 @@ pub enum UiCommand {
     },
     /// Run a standalone operate health pass.
     OperateRun,
+    /// Switch the persisted TUI theme (settings key `theme`).
+    SetTheme {
+        slug: String,
+    },
 }
 
 /// Where to start the interactive session.
@@ -502,6 +508,11 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                     };
                     operate_pass(&ui_tx, &agent_persistence, &session_id, &workspace).await;
                 }
+                UiCommand::SetTheme { slug } => {
+                    if let Err(e) = agent_persistence.set_setting("theme", &slug) {
+                        tracing::warn!("theme save failed: {e}");
+                    }
+                }
             }
         }
     });
@@ -515,6 +526,16 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
             default_model
         },
     );
+    // Theme selection: the config file names a starting theme, and the last
+    // `/theme` choice (persisted under the settings key `theme`) wins over
+    // it. An unknown name falls back to the default with a log line.
+    if let Some(theme) = &config.theme {
+        app.apply_theme_setting(theme);
+    }
+    let persisted_theme = persistence.get_setting("theme").ok().flatten();
+    if let Some(theme) = persisted_theme {
+        app.apply_theme_setting(&theme);
+    }
     let mut terminal = ui::init_terminal()?;
     let result = (|| -> Result<()> {
         loop {

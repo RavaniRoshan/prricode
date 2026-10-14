@@ -43,6 +43,13 @@ Per-provider keys: `base_url`, `api_key` (inline; prefer `api_key_env`),
 `api_key_env` (name of an environment variable), `default_model`, `headers`
 (extra HTTP headers).
 
+Top-level key: `theme` — the TUI theme slug to start with (e.g.
+`theme = "dracula"`). The TUI's `/theme` command lists the bundled themes
+(`prricode` plus five extras), switches the palette, and remembers the last
+choice, which wins over the config file. User themes live in
+`~/.config/prricode/themes/*.json` (or the directory `$PRRICODE_CONFIG`
+points into) and override a bundled theme of the same slug.
+
 ## Secrets
 
 Keep API keys in environment variables or `api_key_env` references. The config
