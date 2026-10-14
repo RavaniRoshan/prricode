@@ -124,6 +124,36 @@ impl Spec {
     }
 }
 
+impl StackPreset {
+    pub const ALL: [StackPreset; 5] = [
+        StackPreset::TanStack,
+        StackPreset::NextJs,
+        StackPreset::Mern,
+        StackPreset::FastApi,
+        StackPreset::StaticApi,
+    ];
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::TanStack => "TAN stack: TanStack Start + Postgres + Drizzle",
+            Self::NextJs => "Next.js full-stack: App Router + Postgres + Prisma",
+            Self::Mern => "MERN: MongoDB + Express + React + Node",
+            Self::FastApi => "FastAPI: Python + FastAPI + Postgres",
+            Self::StaticApi => "Static site + serverless API backend",
+        }
+    }
+
+    pub fn scaffold_hint(&self) -> &'static str {
+        match self {
+            Self::TanStack => "pnpm create @tanstack/start with a Postgres + Drizzle data layer",
+            Self::NextJs => "create-next-app with Prisma and a Postgres datasource",
+            Self::Mern => "express-generator plus React (Vite) with Mongoose",
+            Self::FastApi => "fastapi full-project template with SQLAlchemy + Alembic migrations",
+            Self::StaticApi => "static site generator plus a serverless functions directory",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +238,19 @@ mod tests {
         spec.regenerate(Requirements::default());
         assert_eq!(spec.design.matches("[stale:").count(), 1);
         assert_eq!(spec.version, 3);
+    }
+
+    #[test]
+    fn stack_presets_are_exactly_five_and_described() {
+        assert_eq!(StackPreset::ALL.len(), 5);
+        for preset in StackPreset::ALL {
+            assert!(!preset.description().is_empty());
+            assert!(!preset.scaffold_hint().is_empty());
+        }
+        assert_eq!(StackPreset::ALL[0], StackPreset::TanStack);
+        assert!(StackPreset::FastApi
+            .description()
+            .to_lowercase()
+            .contains("fastapi"));
     }
 }
