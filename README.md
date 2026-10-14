@@ -98,6 +98,20 @@ A JSON-RPC session in three lines:
 Progress streams back as notifications: `turn/item` deltas, `tool_use`,
 `approval/requested`, `turn/completed`.
 
+## The Product Builder
+
+prricode is growing from a coding agent into a **product builder**: concept in,
+running product out. A gated pipeline — Concept → Clarify → Specify → Plan →
+Build → Verify → Ship → Operate — where each stage exits only on a
+machine-checkable verdict, an independent verifier judges work the builder
+never sees, and the reviewable artifact is an acceptance dossier, not a diff.
+The engine that exists today (agent loop, tools, sandbox, workflow, sessions)
+is the foundation; the spec, verification, ship, and operate stages are the
+roadmap.
+
+- [`docs/PRD.md`](docs/PRD.md) — the full product requirements document
+- [`docs/PRD-onepager.md`](docs/PRD-onepager.md) — the positioning card
+
 ## Under the hood
 
 ```
