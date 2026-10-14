@@ -124,8 +124,9 @@ has not started; `stage` is the current stage label (`concept`, `clarify`,
 
 Pipeline notifications ride the existing `turn/item` notification: each
 pipeline item carries `kind: "pipeline_question"`, `role: "assistant"`, a
-`stage` label (`pipeline:<stage>`, e.g. `clarify`), and text content holding
-the clarifier question. Clients must ignore unknown notifications.
+`stage` label carrying the plain stage name (e.g. `"stage":"clarify"`), and
+text content holding the clarifier question. Clients must ignore unknown
+notifications.
 
 ### Approvals
 | method | purpose |
