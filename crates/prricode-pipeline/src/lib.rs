@@ -96,7 +96,7 @@ pub mod specify;
 pub mod verify;
 
 pub use build::{graph_to_definition, run_build};
-pub use ship::{ShipEventKind, ShipStage};
+pub use ship::{run_ship_stage, PendingInput, ShipAnswer, ShipEventKind, ShipFlow, ShipStage};
 pub use verify::{run_verify_stage, VerifyEventKind};
 
 #[cfg(test)]
