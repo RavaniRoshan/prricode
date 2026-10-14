@@ -178,7 +178,7 @@ async fn push_branch_and_tag(workspace: &Path, branch: &str, tag: &str) -> (bool
 }
 
 /// The remote repo as owner/name; None when there is no GitHub remote.
-async fn detect_remote(workspace: &Path) -> Option<String> {
+pub(crate) async fn detect_remote(workspace: &Path) -> Option<String> {
     let out = git(workspace, &["remote", "get-url", "origin"])
         .await
         .ok()?;
@@ -227,7 +227,7 @@ fn is_github_host(host: &str) -> bool {
     )
 }
 
-async fn gh_on_path() -> bool {
+pub(crate) async fn gh_on_path() -> bool {
     Command::new("gh")
         .arg("--version")
         .output()
