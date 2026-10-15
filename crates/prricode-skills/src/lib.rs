@@ -35,7 +35,7 @@ impl Skill {
     }
 
     /// The documented argv contract: `<interpreter> <script> <args...>`,
-    /// mirroring the prricode's skill-script invocation.
+    /// the skill-script invocation contract:
     pub fn script_command(&self, script_name: &str, args: &[String]) -> Option<Vec<String>> {
         let script = self
             .scripts
@@ -387,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn executes_a_bundled_skill_script_through_the_sandbox() {
         // The bundled wordcount skill ships scripts/wordcount.py with an
-        // `#!/usr/bin/env python3` shebang; the prricode's contract
+        // `#!/usr/bin/env python3` shebang; the documented contract
         // is `<interpreter> <script> <args>` executed in the skill directory.
         let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()

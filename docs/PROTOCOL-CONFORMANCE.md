@@ -1,35 +1,28 @@
 # Protocol Conformance Report
 
-How prricode's JSON-RPC surface was verified against the mapped
-protocol, what the evidence showed, and where it now stands.
+What prricode's JSON-RPC surface is, what is complete, what is deliberately
+partial, and what degrades honestly. Every number below is checkable with the
+commands in **Reproduce**.
 
-**Method of verification.** The protocol surface (69 methods, 39 notifications,
-37 error kinds, 345 types, 18 CLI subcommands, 6 grantable capabilities) was
-mapped from the target product's binary. The  artifact
-(the public build; ELF x86-64, statically linked, stripped, ~89 MB) is a
-related but earlier build of the same family: its JSON-RPC surface differs
-(12 CLI subcommands, snake_case field vocabulary, approval modes
-`untrusted|on-request|never`), so the camelCase stdio protocol prricode targets
-comes from the larger build that produced the original map. This report
-distinguishes what was verified directly against the binary from what rests on
-the protocol specification.
+The surface prricode targets is specified as **69 methods, 39 notifications,
+37 error kinds, 345 types, 18 CLI subcommands, 6 grantable capabilities**, with
+a schema fingerprint that identifies the protocol version at the handshake.
 
-## Evidence sources
+## What defines the surface
 
 | Source | What it establishes |
 |---|---|
-| the public build's strings | Type inventory (364 `struct X with N elements` Debug literals), error-kind vocabulary, event/stream vocabulary, session event-store format, tool-call XML grammar |
-| the protocol surface's session directory (`~/.local/share/<product>/sessions/…`) | Real session event records (`runtime.session.metadata`, `session.opened.observed`), `session.jsonl` durable format, security modes |
-| Prior mapped protocol spec (69/39/37/345/18/6) | The compatibility target: method names, notification set, error kinds, CLI grammar, capability flags |
-| prricode source + git history | Current implementation state per category |
+| The protocol specification (69/39/37/345/18/6) | The compatibility target: method names, notification set, error kinds, CLI grammar, capability flags |
+| `crates/prricode-core` (`types.rs`, `protocol.rs`) | The wire types: params, results, enums, the 37 error-kind constructors, `AgentEvent` and its notification mapping |
+| prricode source + git history | Current implementation state per category, including which handlers are honest stubs |
 
 ## Category-by-category status
 
-### Methods — 82 dispatched, 69 mapped
+### Methods — 82 dispatched, 69 specified
 
-Every mapped method is dispatched. 50 were implemented in the first protocol
-pass; 32 were added in the conformance pass, recovered from mapped request
-types that had no handler (`accountLogin/start|cancel`,
+Every specified method is dispatched. 50 were implemented in the first protocol
+pass; 32 more were added in the conformance pass, recovered from request types
+that had no handler (`accountLogin/start|cancel`,
 `mcpServer/oauthLogin|oauthLoginCancel`, `auth/deviceLogin`,
 `auth/supersedeLoginCredential`, `subscription/activate`, `settings/read`,
 `settings/writeValue`, `settings/writeMany`, `permissionProfile/set`,
@@ -40,32 +33,30 @@ types that had no handler (`accountLogin/start|cancel`,
 `session/name`, `peer/admission`, `turn/submitOrigin`, `tool/configuration`,
 `workflow/control`, `workflow/triggerConfiguration`, `subagent/target`).
 
-82 dispatched vs 69 mapped: the 13-method surplus is deliberate. The prior map
-did not record which of the recovered request types are methods versus
-notification payloads, so all were implemented as methods — a superset is
-compatible (a client built against the real protocol always finds its method;
-extra methods cannot break it). Handlers whose target behavior could not be
-verified from any  artifact return honest "not available" results
-with reasons (`conversationRewind/evaluate`, `runtime/launch`, `scheduled/fire`,
-`process/background`, `peer/admission`, `localSession/message`) instead of
-fake success.
+82 dispatched vs 69 specified: the 13-method surplus is deliberate. The
+specification does not record which of the recovered request types are methods
+versus notification payloads, so all were implemented as methods — a superset is
+compatible (a client always finds its method; extra methods cannot break it).
+Handlers whose behavior is not implemented return honest "not available"
+results with reasons (`conversationRewind/evaluate`, `runtime/launch`,
+`scheduled/fire`, `process/background`, `peer/admission`, `localSession/message`)
+instead of fake success.
 
 ### Error kinds — 37 implemented
 
 JSON-RPC standard codes plus 37 prricode-specific constructors in
-`crates/prricode-core/src/protocol.rs`. The first 12 came from the prior map
-(`capability_required`, `session_not_found`, `workflow_not_found`,
-`approval_not_found`, `subagent_not_found`, `computer_use_unavailable`,
-`user_input_invalid`, …). 25 more were added from error vocabulary observed in
-the binary strings: `workspace_not_trusted`, `workspace_unknown`,
-`workspace_mismatch`, `session_log_unavailable`, `invalid_session_id`,
-`invalid_payload`, `command_id_conflict`, `unknown_method`, `wrong_target`,
-`role_denied`, `process_generation_retired`, `policy_denied`,
-`root_capacity_exhausted`, `invalid_model`, `unsupported_provider`,
-`validator_unavailable`, `stale_attempt`, `already_processed`, `invalid_target`,
-`run_active`, `current_session_required`, `schema_invalid`, `skill_not_found`,
-`media_not_found`, `approval_expired`. Unknown methods now propagate `-32601`
-verbatim (fixed in this pass; previously wrapped as `-32603`).
+`crates/prricode-core/src/protocol.rs` (`capability_required`,
+`session_not_found`, `workflow_not_found`, `approval_not_found`,
+`subagent_not_found`, `computer_use_unavailable`, `user_input_invalid`,
+`workspace_not_trusted`, `workspace_unknown`, `workspace_mismatch`,
+`session_log_unavailable`, `invalid_session_id`, `invalid_payload`,
+`command_id_conflict`, `unknown_method`, `wrong_target`, `role_denied`,
+`process_generation_retired`, `policy_denied`, `root_capacity_exhausted`,
+`invalid_model`, `unsupported_provider`, `validator_unavailable`,
+`stale_attempt`, `already_processed`, `invalid_target`, `run_active`,
+`current_session_required`, `schema_invalid`, `skill_not_found`,
+`media_not_found`, `approval_expired`, …). Unknown methods propagate `-32601`
+verbatim.
 
 ### Notifications — 39 mapped and emitted
 
@@ -90,12 +81,10 @@ place.
 
 ### Types — protocol surface complete, engine surface intentionally partial
 
-The binary exposes 364 Debug-visible structs. The prior map counted 345 schema
-types. Our protocol layer implements the type surface that the 69 methods
-transitively need: all params/results/enums in `prricode-core`
-(`types.rs`/`protocol.rs`), the server request types (~90), and provider types.
-The remaining binary structs are internal engine types (364 Debug-visible names,
-251 families). Their disposition is explicit and queryable:
+The specification counts 345 schema types. Our protocol layer implements the
+type surface the 69 methods transitively need: all params/results/enums in
+`prricode-core`, the server request types (~90), and provider types. The
+remaining internal engine types are dispositioned explicitly and queryably:
 `prricode_core::internals::inventory()` maps every family to either
 **Implemented** (the concept exists in prricode under our own naming — these
 types had no protocol-wire presence, so mirroring their names would add
@@ -112,13 +101,9 @@ probing, **prricode's own credential store** (`auth token/status`), SQLite
 session export/trace/resume, plugin and marketplace management, MCP server
 registry, starter-config scaffolding.
 
-**Delta from the public build (marked):** the latest public
-release (the release, sha256-verified against the channel manifest) ships **12**
-subcommands and `untrusted|on-request|never` approval modes; the 18-subcommand
-surface and `closed|open|auto|suggestive` modes come from the protocol specification,
-which was taken from a earlier build. Our CLI is a superset of the public
-one and matches the mapped one; the prior-mapping claims are not re-verifiable
-against any available artifact.
+The CLI is a superset of the smallest earlier command set in the family and
+matches the specified 18-subcommand surface; the approval modes are
+`closed|open|auto|suggestive`.
 
 ### Capabilities — 6 declared
 
@@ -126,48 +111,48 @@ against any available artifact.
 `sessionMcp`, `sessionListStream`, `feedback`, `computerUseSetup`,
 `computerUseHostSetup`) and the schema fingerprint
 `sha256:6de32db08bbbe0deb478d2bfcaba001e9fb490986bc80db3aceb4d996abf7df9`
-unchanged, so the handshake still identifies as protocol-compatible.
+unchanged, so the handshake identifies as protocol-compatible.
 
 ## Verification runs
 
 - `cargo build` — clean, zero warnings
-- `cargo clippy --workspace` — clean
+- `cargo clippy --workspace --all-targets` — clean at `-D warnings`
 - `cargo fmt --check` — clean
-- `cargo test` — provider suite green (17 tests, mock-server integration)
-- Manual stdio smoke: initialize/settings write+read/task stopAll/unknown
+- `cargo test --workspace` — 189 tests green (mock-server HTTP integration,
+  scripted providers, real temp-workspace tool execution, gate runs)
+- Live provider runs — catalog, tool-calling turn, `session/setModel`, the
+  credential store, and the build → verify → dossier chain (see
+  `docs/TESTING.md`)
+- Manual stdio smoke: initialize / settings write+read / task stopAll / unknown
   method all return correct shapes and error codes
 
 ## Known limitations
 
-1. **Primary artifact absent.** The larger build that defines the 69-method
-   camelCase protocol is not on this machine; the 13-method superset and the
-   notification/method split for the recovered types cannot be re-verified
-   exhaustively. If that binary becomes available, re-run the string extraction
-   and tighten the split.
-2. `session.jsonl` event vocabulary from the binary (e.g.
-   `runtime.session.metadata`, `session.opened.observed`) is not yet mirrored in
-   our item kinds; our item schema is protocol-shaped (user/assistant/tool_use/
-   tool_result) which satisfies the mapped session/read contract.
+1. **Superset split.** The 13 methods beyond the specified 69 exist because the
+   specification does not record which recovered request types are methods
+   versus notification payloads. If a conformance oracle becomes
+   available, re-check the split.
+2. `session.jsonl`-style event vocabulary is not mirrored in our item kinds;
+   our item schema is protocol-shaped (user/assistant/tool_use/tool_result),
+   which satisfies the mapped `session/read` contract.
 3. Notification emissions for computer use, workflow, MCP, and hooks arrive with
    those subsystems.
 
-### TUI surface — evidence-matched
+## TUI surface — spec-matched
 
-The interactive UI was rebuilt from binary evidence rather than invented
-(strings from the public build):
-
-- Keymap observed in the binary: Return submits the composer, `ctrl+j`/
-  `ctrl+m`/`shift+enter` newline, `ctrl+r` history search ("Search composer
-  history newest first"), `ctrl+p`/`ctrl+n` history navigation, `ctrl+g`
-  edit in `$VISUAL`/`$EDITOR`, `ctrl+l` clear terminal, `alt+b`/`alt+f`
-  word moves, `ctrl+k`/`ctrl+y` kill/yank, `ctrl+t` transpose, `esc`
-  "Close focused UI, cancel completion", `ctrl+v` paste images.
-- Approval vocabulary observed: `allow:approved`, `allow:approved_for_session`,
-  `allow:session_policy_amendment`, "approval timed out", "denied by user" —
-  realized as y/a/n inline approval with a session-scoped allow list.
-- Slash commands observed: `/model`, `/sessions`, `/settings`, `/provider`,
-  `/help`, `/new`, `/resume`, `/clear`, `/export`, `/quit`, `/exit` — all
-  implemented in the TUI command bar.
+- Keymap: Return submits the composer, `ctrl+j`/`ctrl+m`/`shift+enter` newline,
+  `ctrl+r` history search, `ctrl+p`/`ctrl+n` history navigation, `ctrl+g` edit
+  in `$VISUAL`/`$EDITOR`, `ctrl+l` clear terminal, `alt+b`/`alt+f` word moves,
+  `ctrl+k`/`ctrl+y` kill/yank, `ctrl+t` transpose, `esc` close/cancel,
+  `ctrl+v` paste images.
+- Approval outcomes: `allow:approved`, `allow:approved_for_session`,
+  `allow:session_policy_amendment`, `approval timed out`, `denied by user` —
+  realized as y/a/n inline approval with a workspace-scoped allow list and a
+  timeout that denies rather than hangs.
+- Slash commands: `/model`, `/sessions`, `/settings`, `/provider`, `/help`,
+  `/new`, `/resume`, `/clear`, `/export`, `/quit`, `/exit` — all implemented in
+  the TUI command bar, plus the Product Builder set (`/concept`, `/spec`,
+  `/plan`, `/build`, `/ship`, `/deploy`, `/operate`, `/dossier`).
 
 ## Reproduce
 

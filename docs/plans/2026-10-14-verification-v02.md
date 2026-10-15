@@ -19,7 +19,7 @@
 - Agent-facing artifacts are files: the dossier renders to the run dir; subagents read/write file paths, not parent context.
 - Protocol compatibility: new method `pipeline/verifyRead` is additive; existing shapes and the fingerprint unchanged.
 - CI gates: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` all green at every task boundary.
-- Public repo hygiene: no proprietary product names in code identifiers.
+- Naming: prricode's own identifiers throughout; no third-party product or company names.
 
 ---
 

@@ -57,7 +57,7 @@ never blocked, which is what lets a client answer `approval/requested` with
 (`prricode-tui`, ratatui). It drives the same `AgentRunner` as the server,
 in-process: `UiCommand` flows UI → agent task, `UiEvent` flows agent → UI
 (streaming deltas, tool uses, approval requests, turn lifecycle). The keymap
-mirrors the reference TUI: Return submits, Ctrl+J newline, Ctrl+R/P/N history,
+mirrors the documented keymap: Return submits, Ctrl+J newline, Ctrl+R/P/N history,
 Ctrl+G editor, Alt+B/F word moves, Ctrl+K/Y kill/yank, Ctrl+L clear, Esc/
 Ctrl+C interrupt, and three-way approvals (allow once / allow for session /
 deny). Slash commands: `/model`, `/sessions`, `/new`, `/resume`, `/clear`,

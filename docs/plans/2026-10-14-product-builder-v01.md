@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Rust edition 2021, workspace dependency style: version from `[workspace.dependencies]` in the root `Cargo.toml`, never inline versions in crate manifests.
-- Public repo hygiene: no other product's proprietary names anywhere; prior-art references stay in docs only, never in code identifiers.
+- Naming: prricode's own identifiers and vocabulary throughout; no third-party product or company names in code, docs, or commit messages.
 - Every new crate joins `[workspace] members` in the root `Cargo.toml`.
 - CI gates must stay green: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
 - Protocol compatibility: new JSON-RPC methods are additive; existing method shapes and the schema fingerprint never change.
