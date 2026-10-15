@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="292" viewBox="0 0 1200 292"
+     role="img" aria-labelledby="pipelineTitle pipelineDesc">
+  <title id="pipelineTitle">prricode Product Builder pipeline</title>
+  <desc id="pipelineDesc">Eight stages from concept to operate, connected by chevrons. Each stage exits only on a machine-checkable verdict: the EARS gate on the spec, the typecheck, build and test gates on every build task, and an independent adversarial verifier whose acceptance dossier is the reviewable artifact.</desc>
+
+  <!-- prricode TUI palette: terminal black, cyan accent, green ok, muted role gray -->
+  <rect width="1200" height="304" rx="16" fill="#0B0E14"/>
+
+  <!-- mechanism caption -->
+  <text x="56" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="20" fill="#7A8B99">each stage exits only on a machine-checkable verdict</text>
+
+  <!-- stages -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <!-- row y 78..142 -->
+    <g>
+      <rect x="56"  y="78" width="116" height="64" rx="12" fill="#131A24" stroke="#3D4A5C" stroke-width="1"/>
+      <text x="72"  y="106" font-size="18" fill="#7A8B99">01</text>
+      <text x="72"  y="130" font-size="22" fill="#E8EEF0">Concept</text>
+    </g>
+    <g>
+      <rect x="194" y="78" width="116" height="64" rx="12" fill="#131A24" stroke="#3D4A5C" stroke-width="1"/>
+      <text x="210" y="106" font-size="18" fill="#7A8B99">02</text>
+      <text x="210" y="130" font-size="22" fill="#E8EEF0">Clarify</text>
+    </g>
+    <g>
+      <rect x="332" y="78" width="116" height="64" rx="12" fill="#131A24" stroke="#3D4A5C" stroke-width="1"/>
+      <text x="348" y="106" font-size="18" fill="#7A8B99">03</text>
+      <text x="348" y="130" font-size="22" fill="#E8EEF0">Specify</text>
+    </g>
+    <g>
+      <rect x="470" y="78" width="116" height="64" rx="12" fill="#131A24" stroke="#3D4A5C" stroke-width="1"/>
+      <text x="486" y="106" font-size="18" fill="#7A8B99">04</text>
+      <text x="486" y="130" font-size="22" fill="#E8EEF0">Plan</text>
+    </g>
+    <g>
+      <rect x="608" y="78" width="116" height="64" rx="12" fill="#131A24" stroke="#22D3EE" stroke-width="1.5"/>
+      <text x="624" y="106" font-size="18" fill="#7A8B99">05</text>
+      <text x="624" y="130" font-size="22" fill="#E8EEF0">Build</text>
+    </g>
+    <g>
+      <rect x="746" y="78" width="116" height="64" rx="12" fill="#131A24" stroke="#3FB950" stroke-width="1.5"/>
+      <text x="762" y="106" font-size="18" fill="#7A8B99">06</text>
+      <text x="762" y="130" font-size="22" fill="#E8EEF0">Verify</text>
+    </g>
+    <g>
+      <rect x="884" y="78" width="116" height="64" rx="12" fill="#131A24" stroke="#3D4A5C" stroke-width="1"/>
+      <text x="900" y="106" font-size="18" fill="#7A8B99">07</text>
+      <text x="900" y="130" font-size="22" fill="#E8EEF0">Ship</text>
+    </g>
+    <g>
+      <rect x="1022" y="78" width="116" height="64" rx="12" fill="#131A24" stroke="#3D4A5C" stroke-width="1"/>
+      <text x="1038" y="106" font-size="18" fill="#7A8B99">08</text>
+      <text x="1038" y="130" font-size="22" fill="#E8EEF0">Operate</text>
+    </g>
+
+    <!-- the chevron motif: prricode's message prefix, carrying the flow -->
+    <g stroke="#22D3EE" stroke-width="2.5" stroke-linecap="round" fill="none">
+      <path d="M178 104 L188 110 L178 116"/>
+      <path d="M316 104 L326 110 L316 116"/>
+      <path d="M454 104 L464 110 L454 116"/>
+      <path d="M592 104 L602 110 L592 116"/>
+      <path d="M730 104 L740 110 L730 116"/>
+      <path d="M868 104 L878 110 L868 116"/>
+      <path d="M1006 104 L1016 110 L1006 116"/>
+    </g>
+
+    <!-- verdict callouts: the three machine-checkable exits, staggered so
+         adjacent stages' notes never collide -->
+    <g stroke="#3D4A5C" stroke-width="1">
+      <path d="M390 142 L390 162"/>
+      <path d="M666 142 L666 162"/>
+      <path d="M804 142 L804 162"/>
+    </g>
+    <g font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+      <circle cx="390" cy="176" r="4" fill="#F85149"/>
+      <text x="404" y="182" fill="#7A8B99">EARS gate</text>
+      <circle cx="804" cy="176" r="4" fill="#3FB950"/>
+      <text x="818" y="182" fill="#7A8B99">independent judge</text>
+      <circle cx="666" cy="208" r="4" fill="#22D3EE"/>
+      <text x="680" y="214" fill="#7A8B99">typecheck · build · test</text>
+    </g>
+
+    <!-- the two claims the pipeline exists to make -->
+    <text x="56" y="262" font-size="18" fill="#7A8B99"
+      font-family="ui-monospace, SFMono-Regular, Menlo, monospace">a rejected stage is repaired, not a dead end · the acceptance dossier, not the diff, is what you review</text>
+  </g>
+</svg>
