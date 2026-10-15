@@ -109,7 +109,26 @@ tool-calling turn over stdio (`write_file` → `shell` → tool results → fina
 answer), `session/setModel` + the `session/modelChanged` notification,
 usage aggregation (`usage/read`), the credential store round-trip
 (0600 → resolution without the env var), and the TUI with `/model`,
-`/provider`, `/help` against a live model.
+`/provider`, `/help` against a live model — plus the Product Builder
+pipeline through concept → clarify → specify (the EARS gate rejecting a
+malformed requirement live) → plan → build.
+
+### The build → verify → dossier chain, live
+
+`crates/prricode-pipeline/src/build.rs` carries an `#[ignore]`d test that
+drives the real `run_build` + `run_verify_stage` against a live provider, so
+the whole chain can be re-checked on demand without driving the TUI:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... MODEL='cohere/north-mini-code:free' \
+  cargo test -p prricode-pipeline live_build_wave_writes_files -- --ignored --nocapture
+```
+
+A passing run reports: `build completed` → the live model's `greeting.py` in
+the workspace → the per-task gates actually running (pytest's cache appears)
+→ the verify pass over what was built → the acceptance dossier rendered into
+`<data_dir>/runs/<run_id>/`. The verifier turn is the model's, so an
+occasional malformed reply fails the run; re-run it.
 
 Known limits of the free tiers, not of prricode: OpenRouter's shared free
 pool returns HTTP 429 when the upstream provider is exhausted (Google,

@@ -324,3 +324,163 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod live {
+    use super::*;
+    use prricode_agent::ApprovalEngine;
+    use std::sync::Arc;
+
+    /// Live-provider check for the build stage, ignored by default because it
+    /// burns real quota. Run it with a key in the environment:
+    ///
+    /// ```text
+    /// OPENROUTER_API_KEY=sk-or-... MODEL=nvidia/nemotron-3-super-120b-a12b:free \
+    ///   cargo test -p prricode-pipeline live_build_wave_writes_files -- --ignored --nocapture
+    /// ```
+    ///
+    /// It drives the same `run_build` the TUI drives, against a real model, and
+    /// asserts the turn really produces files in the workspace and that the
+    /// per-task gates run. `sk-test`-style keys and a missing `MODEL` skip it.
+    #[tokio::test]
+    #[ignore = "live provider: needs OPENROUTER_API_KEY and MODEL"]
+    async fn live_build_wave_writes_files() {
+        let key = match std::env::var("OPENROUTER_API_KEY") {
+            Ok(key) if !key.is_empty() && !key.contains("test") => key,
+            _ => {
+                eprintln!("skip: OPENROUTER_API_KEY not set");
+                return;
+            }
+        };
+        let model = match std::env::var("MODEL") {
+            Ok(model) if !model.is_empty() => model,
+            _ => {
+                eprintln!("skip: MODEL not set");
+                return;
+            }
+        };
+
+        let workspace = std::env::temp_dir().join(format!("live-build-{}", std::process::id()));
+        let data_dir = std::env::temp_dir().join(format!("live-build-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&workspace).unwrap();
+        // A seed Python project so the per-task gate plan has a stack to detect
+        // and something to run; the live turn adds greeting.py next to it.
+        std::fs::write(
+            workspace.join("pyproject.toml"),
+            "[project]\nname = \"live-greeting\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.join("tests")).unwrap();
+        std::fs::write(
+            workspace.join("tests/test_greeting.py"),
+            "def test_seed_passes():\n    assert True\n",
+        )
+        .unwrap();
+
+        let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let config = prricode_provider::resolve_settings(
+            prricode_provider::ProviderKind::OpenRouter,
+            None,
+            &std::collections::HashMap::from([("api_key".to_string(), key)]),
+            &env,
+        );
+        let provider: Arc<dyn prricode_provider::ModelProvider> =
+            Arc::from(prricode_provider::create_provider(config));
+        let runner = AgentRunner::new(provider, Arc::new(ApprovalEngine::new()))
+            .with_default_model(model.clone());
+        let engine = WorkflowEngine::new();
+        let run_id = engine
+            .start(
+                "live-session",
+                WorkflowDefinition {
+                    name: "build".into(),
+                    steps: vec![WorkflowStep::Prompt {
+                        label: "[wave 1] scaffold".into(),
+                        prompt: format!(
+                        "Create a file greeting.py in the current directory whose contents are \
+                         exactly `print('hello from a live build')`, then run it with python3 \
+                         and report the output. Use the write_file and shell tools. Model: {model}."
+                    ),
+                    }],
+                },
+                None,
+            )
+            .unwrap();
+
+        let summary = run_build(
+            &runner,
+            &engine,
+            &run_id,
+            "live-session",
+            &workspace,
+            &data_dir,
+        )
+        .await
+        .expect("the build wave runs");
+        eprintln!("build summary: {summary}");
+        assert_eq!(summary, "build completed");
+
+        let produced = std::fs::read_dir(&workspace)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        eprintln!("workspace now holds: {produced:?}");
+        assert!(
+        produced.iter().any(|name| name.ends_with(".py")),
+        "the live build turn must have written a .py file into the workspace, found {produced:?}"
+    );
+
+        let persistence = Persistence::new(&data_dir).unwrap();
+        let records = persistence.list_gate_records(&run_id).unwrap();
+        eprintln!("gate records: {}", records.len());
+        assert!(
+            !records.is_empty(),
+            "the per-task gates run over the built workspace"
+        );
+
+        // Then the verify pass over what was just built: the same stage the TUI
+        // runs after a successful build, ending in the acceptance dossier.
+        let requirements = prricode_spec::Requirements {
+            items: vec![prricode_spec::Requirement {
+                id: "R1".into(),
+                ears: "WHEN the build runs THE SYSTEM SHALL create greeting.py".into(),
+                acceptance: vec!["greeting.py exists".into()],
+            }],
+        };
+        let verifier = crate::verify::evidence_only_verifier(&runner);
+        let report = crate::verify::run_verify_stage(
+            &verifier,
+            &engine,
+            &run_id,
+            "live-session",
+            &workspace,
+            &data_dir,
+            &serde_json::to_string(&requirements).unwrap(),
+        )
+        .await
+        .expect("the verify pass runs over the live build");
+        eprintln!(
+            "verify: {} gates ({} passed), {} verdicts",
+            report.gates.len(),
+            report.gates.iter().filter(|g| g.passed).count(),
+            report.requirements.len()
+        );
+        assert_eq!(
+            report.requirements.len(),
+            1,
+            "the requirement gets a verdict"
+        );
+        let dossier = data_dir
+            .join("runs")
+            .join(&run_id)
+            .join("acceptance-dossier.md");
+        assert!(dossier.exists(), "the dossier renders into the run dir");
+        eprintln!("dossier: {}", dossier.display());
+
+        std::fs::remove_dir_all(&workspace).ok();
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+}
