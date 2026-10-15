@@ -93,6 +93,7 @@ pub mod clarify;
 pub mod plan;
 pub mod ship;
 pub mod specify;
+pub mod survey;
 pub mod verify;
 
 pub use build::{graph_to_definition, run_build};

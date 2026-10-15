@@ -12,6 +12,31 @@ prricode                                    # the TUI (default provider/model fr
 prricode --provider ollama --model qwen2.5-coder:3b   # pre-seed provider/model
 ```
 
+## Running the pipeline on an existing codebase
+
+The pipeline is greenfield by default, but it does not ignore what is already
+in your workspace. When you launch it inside a project that already has a
+manifest (`Cargo.toml`, `pyproject.toml`, `package.json`),
+
+- the **survey** reads the stack, the top-level layout, and how many tests
+  already exist — deterministically, no model call;
+- the **spec** and **plan** prompts carry that survey, so tasks are written
+  against the real files instead of beside them;
+- the plan's first task becomes *read and preserve the existing project*
+  rather than *scaffold a new one*, so you never end up with a second skeleton
+  next to the first;
+- the **gates** already detect the stack, so typecheck/build/test run the
+  project's real commands;
+- the **property gate** counts the suite's own tests, so "at least three
+  tests" is checked against what is actually there.
+
+Launch it from inside the project you want changed:
+
+```bash
+cd ~/code/my-existing-app
+prricode                                   # then: /concept <what you want added>
+```
+
 ## The composer
 
 | Key | Action |

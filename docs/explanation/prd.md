@@ -62,9 +62,12 @@ edit; it is a shipped, verified outcome.
 - Not a spec-documentation tool. Specs are the machine-readable contract that
   the pipeline verifies against — not a deliverable you read.
 - Not brownfield-first in v0.1. Brownfield is the larger market and the harder
-  problem; it is a later milestone, not the initial bet.
-- Not a model provider. Any provider, always (table stakes, not a
-  differentiator — OpenCode, Cline, and OpenHands are already model-agnostic).
+  problem; it is a later milestone, not the initial bet. (v0.1.1 adds the
+  foundation: a deterministic workspace survey that makes the spec, the plan,
+  the gates, and the property tests run against the project that is already
+  there.)
+- Not a model provider. Any provider, always — table stakes, not a
+  differentiator, since the whole executor category is already model-agnostic.
 
 ## 3. Users & scenarios
 
@@ -137,7 +140,7 @@ Specs are living, versioned, machine-checkable artifacts — the source of truth
 for the whole pipeline. Change a requirement and the design, tasks, and
 verification regenerate against it.
 
-**Core (compatible with the Kiro model so its vocabulary is reusable):**
+**Core (the three-file spec model the category converged on, so its vocabulary is reusable):**
 
 - `requirements.md` — user stories + acceptance criteria in **EARS notation**:
   "WHEN [condition] THE SYSTEM SHALL [behaviour]". Each requirement is a
@@ -293,18 +296,18 @@ same surfaces:
 | Verifier is only as good as its oracle | Independent verifier by construction; property tests generated from requirement text, never from the implementation |
 | Verification costs more than the review it replaces | Cost-per-outcome is a first-class metric; verifier model tier is configurable per stage |
 | Teams won't accept unattended deploys | Deploy gate is human-approved by default; every autonomous step produces a checkable artifact |
-| Spec layer is crowded (Kiro, Spec Kit, SpecShip) | We do not compete on documents; the moat is verification + last mile |
+| Spec layer is crowded | We do not compete on documents; the moat is verification + last mile |
 | Autonomy without verification manufactures unreviewed code | The pipeline's core loop is build → independently verify → only then advance |
 | Weak business-layer oracles | Human-gated until a verifiable proxy exists; never automated on vibes |
 
 ## 14. Prior art
 
-| Tool | What it does | Where it stops |
+| Category | What exists | Where it stops |
 |---|---|---|
-| Amazon Kiro | Spec-driven agentic IDE + CLI (GA Nov 2025): requirements/design/tasks, EARS, waves, steering, hooks, property-based testing | Spec + implementation |
-| GitHub Spec Kit | MIT, agent-agnostic specify→plan→tasks→implement toolkit; 30+ agent integrations | Implementation |
-| SpecShip | recon→plan→build→validate→ship with adversarial validators and anti-slop gates | Validation, not operation |
-| Executors (OpenCode, Cline, OpenHands, Aider, Goose) | Agentic coding with swappable models | Code edits / PRs |
+| Spec-driven agentic IDEs and CLIs | requirements / design / tasks files, EARS notation, dependency waves, steering files, hooks, property-based testing | Spec + implementation |
+| Agent-agnostic SDD toolkits | specify → plan → tasks → implement with dozens of agent integrations | Implementation |
+| Adversarial-validation harnesses | recon → plan → build → validate with anti-slop gates | Validation, not operation |
+| Coding executors | agentic coding with swappable models | Code edits / PRs |
 
 **The spec layer is solved. The last mile is not.** prricode differentiates on
 verification economics and the carry-to-production, not on documents.

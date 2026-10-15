@@ -1160,14 +1160,18 @@ async fn run_specify_stage(ctx: StageCtx) {
     };
     let preset = concept.stack.as_ref().and_then(|stack| stack.preset);
     set_stage(&ctx, PipelineStage::Specify.label()).await;
+    // A workspace that already holds a project changes the prompt: the spec
+    // and plan are written against what is there, not for an empty directory.
+    let survey = prricode_pipeline::survey::survey(&ctx.workspace_root);
     // The repair loop lives in the pipeline crate (bounded, gate error fed
     // back to the model); the TUI only surfaces its notices.
-    let requirements = match specify::produce_requirements(
+    let requirements = match specify::produce_requirements_for(
         &ctx.pipeline.runner,
         &concept,
         preset,
         &ctx.model,
         ctx.approval_mode,
+        &survey,
         |notice| {
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                 "pipeline: EARS gate sent it back — {notice}"
@@ -1222,12 +1226,13 @@ async fn run_plan_stage(ctx: StageCtx) {
         requirements
     };
     set_stage(&ctx, PipelineStage::Plan.label()).await;
-    // The repair loop lives in the pipeline crate; the TUI surfaces notices.
-    let graph = match plan::produce_task_graph(
+    let survey = prricode_pipeline::survey::survey(&ctx.workspace_root);
+    let graph = match plan::produce_task_graph_for(
         &ctx.pipeline.runner,
         &requirements,
         &ctx.model,
         ctx.approval_mode,
+        &survey,
         |notice| {
             let _ = ctx.ui_tx.send(UiEvent::Log(format!(
                 "pipeline: traceability gate sent it back — {notice}"

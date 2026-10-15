@@ -6,6 +6,15 @@ use prricode_provider::{repair_json, ChatMessage, ContentPart, Role};
 use prricode_spec::{Requirements, SpecError, TaskGraph, TaskNode};
 
 pub fn plan_prompt(requirements: &Requirements) -> Vec<ChatMessage> {
+    plan_prompt_for(requirements, &crate::survey::WorkspaceSurvey::default())
+}
+
+/// The plan prompt, with the workspace survey's brownfield block appended when
+/// the launch workspace already holds a project.
+pub fn plan_prompt_for(
+    requirements: &Requirements,
+    survey: &crate::survey::WorkspaceSurvey,
+) -> Vec<ChatMessage> {
     let list: Vec<String> = requirements
         .items
         .iter()
@@ -18,14 +27,22 @@ pub fn plan_prompt(requirements: &Requirements) -> Vec<ChatMessage> {
             )
         })
         .collect();
+    // A brownfield workspace must not be scaffolded over: its first task
+    // reads and preserves what is there.
+    let first_task_rule = if survey.is_brownfield() {
+        "the first task reads the existing project and preserves it — never scaffold a second one"
+    } else {
+        "the first task scaffolds the project"
+    };
     let prompt = format!(
         "Turn these requirements into a task graph.\n{}\n\n\
          Output a fenced JSON array of tasks. Each task: {{\"id\":\"scaffold\",\"label\":\"Scaffold\",\"prompt\":\"...\",\"depends_on\":[],\"requirement_id\":\"R1\"}}.\n\
          Rules: at least one task per requirement (requirement_id traces it); ids are short slugs; \
-         depends_on references earlier task ids only; the first task scaffolds the project.\n\
+         depends_on references earlier task ids only; {first_task_rule}.\n\
          Output ONLY the fenced JSON block.",
         list.join("\n"),
     );
+    let prompt = format!("{prompt}{}", survey.prompt_block());
     vec![
         ChatMessage::system_text(
             "You are the Plan stage of a product builder. You emit dependency-ordered task graphs.",
@@ -92,9 +109,30 @@ pub async fn produce_task_graph(
     requirements: &Requirements,
     model: &str,
     approval_mode: prricode_core::ApprovalMode,
+    on_retry: impl FnMut(&str),
+) -> anyhow::Result<TaskGraph> {
+    produce_task_graph_for(
+        runner,
+        requirements,
+        model,
+        approval_mode,
+        &crate::survey::WorkspaceSurvey::default(),
+        on_retry,
+    )
+    .await
+}
+
+/// The plan run against a surveyed workspace: its first task reads and
+/// preserves the existing project instead of scaffolding a second one.
+pub async fn produce_task_graph_for(
+    runner: &prricode_agent::AgentRunner,
+    requirements: &Requirements,
+    model: &str,
+    approval_mode: prricode_core::ApprovalMode,
+    survey: &crate::survey::WorkspaceSurvey,
     mut on_retry: impl FnMut(&str),
 ) -> anyhow::Result<TaskGraph> {
-    let mut messages = plan_prompt(requirements);
+    let mut messages = plan_prompt_for(requirements, survey);
     for attempt in 1..=PLAN_ATTEMPTS {
         let user_content: Vec<ContentPart> =
             messages.iter().flat_map(|m| m.content.clone()).collect();
@@ -275,5 +313,43 @@ mod tests {
             joined.contains("requirement_id"),
             "names the field that fixes coverage"
         );
+    }
+
+    #[test]
+    fn a_brownfield_prompt_plans_around_what_is_there() {
+        let reqs = reqs();
+        let green = message_text(&plan_prompt(&reqs));
+        let mut survey = crate::survey::WorkspaceSurvey::default();
+        assert!(!survey.is_brownfield());
+
+        // A workspace that already holds a project.
+        let dir = std::env::temp_dir().join(format!("brown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "[project]\n").unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/test_a.py"), "def test_x():\n    pass\n").unwrap();
+        survey = crate::survey::survey(&dir);
+        let brown = message_text(&plan_prompt_for(&reqs, &survey));
+
+        assert!(green.contains("the first task scaffolds the project"));
+        assert!(
+            brown.contains("never scaffold a second one"),
+            "a brownfield prompt must forbid scaffolding: {brown}"
+        );
+        assert!(brown.contains("Existing tests: 1"), "{brown}");
+        assert_ne!(green, brown, "the prompts must differ");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn message_text(messages: &[prricode_provider::ChatMessage]) -> String {
+        messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|p| match p {
+                prricode_provider::ContentPart::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }
