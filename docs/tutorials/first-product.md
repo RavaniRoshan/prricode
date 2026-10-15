@@ -6,8 +6,8 @@ plan, a built and tested program, and an acceptance dossier that tells you
 what was verified and what was not.
 
 You do not need to know how the pipeline works to follow this. When you want
-to know *why* it works that way, [`docs/PRD.md`](PRD.md) and
-[`docs/ARCHITECTURE.md`](ARCHITECTURE.md) are the discussion.
+to know *why* it works that way, [`docs/explanation/prd.md`](../explanation/prd.md) and
+[`docs/explanation/architecture.md`](../explanation/architecture.md) are the discussion.
 
 ## What you'll end up with
 
@@ -260,15 +260,15 @@ a bad artifact through quietly.
 
 ## Where to go next
 
-- **I want to do a specific thing** — [`docs/TUI-GUIDE.md`](TUI-GUIDE.md) for
-  every command and key, [`docs/CONFIGURATION.md`](CONFIGURATION.md) for
+- **I want to do a specific thing** — [`docs/how-to/tui-guide.md`](../how-to/tui-guide.md) for
+  every command and key, [`docs/how-to/connect-a-provider.md`](../how-to/connect-a-provider.md) for
   providers, keys, and the credential store.
-- **I want to know how it works** — [`docs/PRD.md`](PRD.md) for the product
-  argument, [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) for the request path and
-  storage, [`docs/ROADMAP.md`](ROADMAP.md) for what is deliberately not built
+- **I want to know how it works** — [`docs/explanation/prd.md`](../explanation/prd.md) for the product
+  argument, [`docs/explanation/architecture.md`](../explanation/architecture.md) for the request path and
+  storage, [`docs/explanation/roadmap.md`](../explanation/roadmap.md) for what is deliberately not built
   yet.
-- **I want the wire details** — [`docs/PROTOCOL.md`](PROTOCOL.md) is the
+- **I want the wire details** — [`docs/reference/protocol.md`](../reference/protocol.md) is the
   reference for driving the same agent over JSON-RPC from your own editor.
 - **Something went wrong** — start with
-  [`docs/TESTING.md`](TESTING.md), which records what the live runs covered and
+  [`docs/how-to/run-the-tests.md`](../how-to/run-the-tests.md), which records what the live runs covered and
   the known limits of free model tiers.

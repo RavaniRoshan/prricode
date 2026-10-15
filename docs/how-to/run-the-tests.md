@@ -94,7 +94,7 @@ Then send `turn/start` with a tool-requiring prompt and expect:
 
 **Model selection over the protocol** takes a full `ModelSelection`
 (`modelId`, `providerId`, `profileId`, `displayLabel` — all four required);
-see `docs/PROTOCOL.md`. `session/setModel` answers with the stored selection
+see `docs/reference/protocol.md`. `session/setModel` answers with the stored selection
 and emits `session/modelChanged`.
 
 **TUI against a live model**: `prricode --provider openrouter --model ...`

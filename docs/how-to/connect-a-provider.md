@@ -6,7 +6,7 @@
 > `/goal` sets the objective. The config file and environment variables below
 > are the *optional* equivalents — for those who prefer files, or for CI where
 > there is no TUI. The TUI reads them at startup, so either surface works.
-> Full command and key reference: [`docs/TUI-GUIDE.md`](TUI-GUIDE.md).
+> Full command and key reference: [`docs/how-to/tui-guide.md`](tui-guide.md).
 
 prricode resolves settings in this order, first match wins:
 
@@ -56,7 +56,7 @@ Top-level key: `theme` — the TUI theme slug to start with (e.g.
 switches the palette, and remembers the last choice, which wins over the
 config file. User themes live in `~/.config/prricode/themes/*.json` (or the
 directory `$PRRICODE_CONFIG` points into) and override a bundled theme of the
-same slug. See `docs/TUI-GUIDE.md`.
+same slug. See `docs/how-to/tui-guide.md`.
 
 ## Secrets
 

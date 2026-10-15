@@ -91,24 +91,29 @@ identifiers. The protocol surface is our own design.
 
 | What | Path |
 |---|---|
-| Protocol reference | `docs/PROTOCOL.md` |
-| Conformance report | `docs/PROTOCOL-CONFORMANCE.md` |
-| Visual/UX spec + implementation checklist | `docs/VISUAL-SPEC.md` |
-| Conformance decisions (closed rulings) | `docs/CONFORMANCE-DECISIONS.md` |
-| Product requirements | `docs/PRD.md`, `docs/PRD-onepager.md` |
+| Docs site (mkdocs-material, published from `main`) | `mkdocs.yml`, `docs/index.md`, `.github/workflows/docs.yml` |
+| Tutorial (start here) | `docs/tutorials/first-product.md` |
+| Protocol reference | `docs/reference/protocol.md` |
+| Conformance report | `docs/reference/protocol-conformance.md` |
+| Visual/UX spec + implementation checklist | `docs/reference/visual-spec.md` |
+| Conformance decisions (closed rulings) | `docs/explanation/conformance-decisions.md` |
+| Launch status (audit, measurement surfaces, preregistered targets) | `docs/explanation/launch-status.md` |
+| Product requirements | `docs/explanation/prd.md`, `docs/explanation/prd-onepager.md` |
 | Implementation plans | `docs/plans/` |
-| Roadmap (documented future work) | `docs/ROADMAP.md` |
-| Config/credentials | `docs/CONFIGURATION.md` |
-| TUI guide (terminal-native: every command/setting in the TUI) | `docs/TUI-GUIDE.md` |
+| Roadmap (documented future work) | `docs/explanation/roadmap.md` |
+| Config/credentials | `docs/how-to/connect-a-provider.md` |
+| TUI guide (terminal-native: every command/setting in the TUI) | `docs/how-to/tui-guide.md` |
+| Test matrix + live-provider verification | `docs/how-to/run-the-tests.md` |
+| Contributing / security | `CONTRIBUTING.md`, `SECURITY.md` |
 
 ## Testing
 
-- Unit + integration: `cargo test --workspace` (180 tests; scripted
+- Unit + integration: `cargo test --workspace` (189 tests; scripted
   providers, mock HTTP servers, real temp-workspace tool execution).
 - E2E: `tests/e2e.sh` drives `prricode serve` over stdio against local Ollama
   (`qwen2.5-coder:3b`) — session, turn, tool execution, `-32601`.
 - Live-provider verification (manual, network; key in the environment only):
-  `docs/TESTING.md` — catalog, one-off chat, a tool-calling turn over stdio,
+  `docs/how-to/run-the-tests.md` — catalog, one-off chat, a tool-calling turn over stdio,
   `session/setModel`, the credential store round-trip, and the TUI. Last run
   against OpenRouter's free catalog and Kilo's `:free` tier.
 - Computer-use tests run against the live X11 display; the gate runner tests
@@ -116,17 +121,32 @@ identifiers. The protocol surface is our own design.
 - Never commit a test that fakes a real side effect; degrade with a reason or
   skip on the host.
 
-## Current state (2026-10-14)
+## Documentation
+
+Docs live under `docs/` in four Diátaxis quadrants — `tutorials/`,
+`how-to/`, `reference/`, `explanation/` — with `docs/index.md` as the entry
+point and `mkdocs.yml` building them into the published site. When you add a
+doc, put it in the quadrant that matches its job and add it to the nav.
+Every command, setting, and configuration must be documented from the TUI
+first, with the file/env equivalent second.
+
+## Current state (2026-10-15)
 
 Protocol surface, TUI, agent loop, product-builder pipeline through operate,
 verification moat, multi-provider layer, and the project's own-naming posture
-are
-complete and CI-green. Live-provider verification is done (see Testing);
-two multi-provider bugs it surfaced are fixed and tested: the `auth token`
-clap arg-id collision, and a gateway error object answered with HTTP 200.
+are complete and CI-green. Live-provider verification is done (see Testing);
+three bugs it or the audit surfaced are fixed and tested: the `auth token`
+clap arg-id collision, a gateway error object answered with HTTP 200, and the
+build stage stalling on approvals.
 
-Every agent-facing surface is reachable from the TUI (`docs/TUI-GUIDE.md`);
-the config file and env vars are the optional equivalents
-(`docs/CONFIGURATION.md`). Roadmap items remaining (macOS computer-use
-backend, Wayland compositor end-to-end, Houston/Snazzy palette verification,
-approval timeout transport surface) are documented in `docs/ROADMAP.md`.
+Every agent-facing surface is reachable from the TUI
+(`docs/how-to/tui-guide.md`); the config file and env vars are the optional
+equivalents (`docs/how-to/connect-a-provider.md`).
+
+The first release is tagged `v0.1.0`. A launch-readiness preflight
+(`docs/explanation/launch-status.md`) records what is verified, which
+measurement surfaces are registered (owner-side GitHub analytics only — the
+product itself ships no telemetry), and the preregistered D0/W1/M1 targets.
+Roadmap items remaining (macOS computer-use backend, Wayland compositor
+end-to-end, Houston/Snazzy palette verification, approval timeout transport
+surface, a press/facts kit) are documented in `docs/explanation/roadmap.md`.

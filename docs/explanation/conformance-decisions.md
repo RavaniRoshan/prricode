@@ -2,11 +2,11 @@
 
 The decision log for the protocol-conformance pass: each item names what was
 decided, why, and where it landed. Read
-[`docs/PROTOCOL-CONFORMANCE.md`](PROTOCOL-CONFORMANCE.md) for what the surface
+[`docs/reference/protocol-conformance.md`](../reference/protocol-conformance.md) for what the surface
 *is*; this file records how the ambiguous parts were resolved.
 
 All items are closed. Where a decision deferred work, the deferral is recorded
-in [`docs/ROADMAP.md`](ROADMAP.md).
+in [`docs/explanation/roadmap.md`](roadmap.md).
 
 ## Decision — the compatibility target is the specification
 
@@ -28,7 +28,7 @@ No embedded JS runtime: it would add ~100MB for a runtime the skill format does
 not require.
 
 **Flag:** `skills.runtime = "subprocess"`, documented in
-`docs/ARCHITECTURE.md`. An embedded-runtime option stays a roadmap item.
+`docs/explanation/architecture.md`. An embedded-runtime option stays a roadmap item.
 
 **Where:** `crates/prricode-skills` (script runtime),
 `skills/wordcount/` (reference example), plus an e2e test that ships a python3
@@ -45,7 +45,7 @@ three risk-class footer variants that relabel the approve key.
 Colors, panel structure, and copy are prricode's own design language; the
 *behavioral* contract is what had to match.
 
-**Where:** `docs/VISUAL-SPEC.md` (spec + implementation checklist),
+**Where:** `docs/reference/visual-spec.md` (spec + implementation checklist),
 `crates/prricode-tui` (implementation, 51 tests).
 
 ## Decision — internal engine types are dispositioned, not mirrored
@@ -58,7 +58,7 @@ conformance) or **Flagged** (a `// future work:` entry naming what is not
 built). The unaccounted-internals check is empty.
 
 **Where:** `crates/prricode-core/src/internals.rs`,
-`docs/INTERNALS-DISPOSITION.md`.
+`docs/explanation/internals-disposition.md`.
 
 ## Decision — prricode's own credential store, external OAuth flagged off
 
@@ -71,7 +71,7 @@ handlers with `// future work:` comments, returning a documented "not enabled"
 result — never silently succeeding.
 
 **Where:** `crates/prricode-provider/src/credentials.rs`,
-`crates/prricode-cli` (`auth`, `login`, `logout`), `docs/CONFIGURATION.md`.
+`crates/prricode-cli` (`auth`, `login`, `logout`), `docs/how-to/connect-a-provider.md`.
 
 ## Deferred — macOS computer-use backend
 
@@ -80,7 +80,7 @@ XTEST) with a Wayland capture probe behind `grim`. A macOS accessibility
 backend (AXUIElement for the UI tree, CGEvent for input) is the next platform
 target, behind the existing `ComputerUse` trait.
 
-**Where:** `docs/ROADMAP.md`, `crates/prricode-computer-use`.
+**Where:** `docs/explanation/roadmap.md`, `crates/prricode-computer-use`.
 
 ## Documented — CLI subcommand count
 
@@ -88,7 +88,7 @@ The 18-subcommand surface is a superset of the smallest earlier command set in
 the family; the delta is documented in the conformance report rather than
 "fixed" by dropping commands.
 
-**Where:** `docs/PROTOCOL-CONFORMANCE.md` (CLI section).
+**Where:** `docs/reference/protocol-conformance.md` (CLI section).
 
 ---
 

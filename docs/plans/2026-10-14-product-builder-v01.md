@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust workspace (13 existing crates + 2 new), ratatui TUI, reqwest, serde_json, SQLite via rusqlite, tokio. Tests: `#[cfg(test)]` unit tests per crate, scripted `ModelProvider` integration tests (pattern from `crates/prricode-agent/tests/mcp_integration.rs`), plus the existing CI gates.
 
-**Spec:** `docs/PRD.md` (sections 5, 6, 7, 10, 12, 15, 16), `docs/PRD-onepager.md`
+**Spec:** `docs/explanation/prd.md` (sections 5, 6, 7, 10, 12, 15, 16), `docs/explanation/prd-onepager.md`
 
 ## Global Constraints
 
@@ -43,8 +43,8 @@
 | `crates/prricode-workflow/src/lib.rs` | Add `Prompt` step result recording so build gates can read per-task outcomes; no change to the state machine itself. |
 | `crates/prricode-server/src/lib.rs` | Three additive methods: `pipeline/conceptSet`, `pipeline/specRead`, `pipeline/planRead`. |
 | `crates/prricode-tui/src/lib.rs`, `app.rs`, `ui.rs` | `/concept`, `/spec`, `/plan`, `/build` slash commands; pipeline rail in the status line; confirmation prompts for concept/spec gates. |
-| `docs/PROTOCOL.md` | Document the three new methods. |
-| `docs/ARCHITECTURE.md` | Document the pipeline crates and stage flow. |
+| `docs/reference/protocol.md` | Document the three new methods. |
+| `docs/explanation/architecture.md` | Document the pipeline crates and stage flow. |
 
 ---
 
@@ -1260,7 +1260,7 @@ git commit -m "feat(build): gated build stage over the workflow engine"
 **Files:**
 - Modify: `crates/prricode-server/src/lib.rs`
 - Modify: `crates/prricode-server/Cargo.toml`
-- Modify: `docs/PROTOCOL.md`
+- Modify: `docs/reference/protocol.md`
 
 **Interfaces:**
 - Consumes: `prricode-pipeline` (Tasks 6–10).
@@ -1306,7 +1306,7 @@ Expected: FAIL — method not found (-32601).
 - `pipeline/specRead` returns the persisted spec JSON (or an empty draft) and the persisted stage label.
 - `pipeline/planRead` returns the persisted waves JSON.
 
-In `docs/PROTOCOL.md`, add a "Pipeline" method group documenting the three methods, their params, results, and the `pipeline:<stage>` notifications.
+In `docs/reference/protocol.md`, add a "Pipeline" method group documenting the three methods, their params, results, and the `pipeline:<stage>` notifications.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1316,7 +1316,7 @@ Expected: PASS (1 test).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/prricode-server docs/PROTOCOL.md
+git add crates/prricode-server docs/reference/protocol.md
 git commit -m "feat(server): pipeline conceptSet/specRead/planRead methods"
 ```
 
@@ -1412,8 +1412,8 @@ git commit -m "feat(tui): pipeline slash commands, rail, and confirmation gates"
 **Files:**
 - Modify: `crates/prricode-pipeline/src/lib.rs`
 - Modify: `crates/prricode-server/src/lib.rs`
-- Modify: `docs/ARCHITECTURE.md`
-- Modify: `docs/CONFIGURATION.md`
+- Modify: `docs/explanation/architecture.md`
+- Modify: `docs/how-to/connect-a-provider.md`
 - Modify: `README.md`
 
 **Interfaces:**
@@ -1485,8 +1485,8 @@ impl Pipeline {
 (Requires adding `pub fn data_dir(&self) -> &Path` to `prricode-persistence`'s `Persistence` — one line, returns the stored path.)
 
 Then:
-- `docs/ARCHITECTURE.md`: add a "Product Builder pipeline" section (stage flow, the two crates, gates, worktree-per-run, the protocol methods).
-- `docs/CONFIGURATION.md`: document the stack preset list and where run worktrees live.
+- `docs/explanation/architecture.md`: add a "Product Builder pipeline" section (stage flow, the two crates, gates, worktree-per-run, the protocol methods).
+- `docs/how-to/connect-a-provider.md`: document the stack preset list and where run worktrees live.
 - `README.md`: one line in the Product Builder section noting v0.1 covers Concept → Clarify → Specify → Plan → Build-with-gates.
 
 - [ ] **Step 4: Run test to verify it passes**

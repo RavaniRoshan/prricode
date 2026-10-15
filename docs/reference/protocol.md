@@ -275,7 +275,7 @@ Standard JSON-RPC codes plus these prricode-specific codes:
 
 The server emits JSON-RPC notifications (no `id`) for streaming state. The
 runtime notification set (turn lifecycle, item deltas, approval requests,
-session list changes) is documented in `docs/ARCHITECTURE.md` as the runtime
+session list changes) is documented in `docs/explanation/architecture.md` as the runtime
 matures; clients must ignore unknown notifications.
 
 ## CLI surface
