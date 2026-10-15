@@ -305,6 +305,26 @@ pub struct ComputerUse {
 }
 
 impl ComputerUse {
+    /// Why computer use is unavailable on this host, in the user's terms.
+    /// A platform with no backend at all says so rather than blaming a
+    /// missing X display, which on macOS would be a lie.
+    pub fn unavailable_reason(&self) -> String {
+        if cfg!(target_os = "macos") {
+            return "computer use unavailable: the macOS backend (Accessibility + Screen \
+                    Recording) is not implemented yet — X11 via XQuartz is the interim                     path; set DISPLAY to use it"
+                .into();
+        }
+        if cfg!(target_os = "windows") {
+            return "computer use unavailable: no Windows backend is implemented yet — \
+                    X11 (VcXsrv/X410) is the interim path; set DISPLAY to use it"
+                .into();
+        }
+        match input_method() {
+            Ok(_) => "computer use unavailable: no display (set DISPLAY)".into(),
+            Err(e) => format!("computer use unavailable: {e}"),
+        }
+    }
+
     pub fn probe() -> Self {
         let display = std::env::var("DISPLAY").ok().filter(|d| !d.is_empty());
         let has_display = display.is_some();
@@ -653,6 +673,25 @@ mod tests {
                     "the error names what to install: {text}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_unavailable_reason_names_the_platform_not_just_a_missing_display() {
+        // On a Linux host the answer is about displays; on macOS it must not
+        // claim "no X11 display" as if that were the whole truth.
+        let reason = ComputerUse::probe().unavailable_reason();
+        if cfg!(target_os = "macos") {
+            assert!(reason.contains("macOS backend"), "{reason}");
+            assert!(reason.contains("Accessibility"), "{reason}");
+            assert!(!reason.contains("no X11 display"), "{reason}");
+        } else if cfg!(target_os = "windows") {
+            assert!(reason.contains("Windows"), "{reason}");
+        } else {
+            assert!(
+                reason.contains("display") || reason.contains("xdotool"),
+                "{reason}"
+            );
         }
     }
 }
