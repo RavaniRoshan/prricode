@@ -8,6 +8,40 @@
 > there is no TUI. The TUI reads them at startup, so either surface works.
 > Full command and key reference: [`docs/how-to/tui-guide.md`](tui-guide.md).
 
+## Install a prebuilt binary
+
+Releases publish stripped binaries for five targets, with `SHA256SUMS`:
+
+| Platform | Asset |
+|---|---|
+| Linux x86_64 | `prricode-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `prricode-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 (Intel) | `prricode-x86_64-apple-darwin.tar.gz` |
+| macOS aarch64 (Apple silicon) | `prricode-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `prricode-x86_64-pc-windows-msvc.zip` |
+
+```bash
+# linux or macOS — pick the asset for your platform
+VERSION=v0.1.0
+curl -fsSLO "https://github.com/RavaniRoshan/prricode/releases/download/$VERSION/prricode-x86_64-unknown-linux-gnu.tar.gz"
+sha256sum -c SHA256SUMS --ignore-missing        # verify before you run it
+tar xzf prricode-x86_64-unknown-linux-gnu.tar.gz
+./prricode exec "say hi" --provider echo
+```
+
+Then put `prricode` somewhere on your `PATH`. Building from source works too
+(`cargo build --release`); see the README.
+
+
+
+> **The terminal is the interface.** Everything on this page can be set from
+> the TUI instead of a file: `/model` and `/provider` switch the brain live,
+> `/approval` and `/yolo` set the approval policy, `/theme` picks the palette,
+> `/goal` sets the objective. The config file and environment variables below
+> are the *optional* equivalents — for those who prefer files, or for CI where
+> there is no TUI. The TUI reads them at startup, so either surface works.
+> Full command and key reference: [`docs/how-to/tui-guide.md`](tui-guide.md).
+
 prricode resolves settings in this order, first match wins:
 
 1. CLI flags (`--provider`, `--model`, `--base-url`, `--api-key`, `--api-key-env`)
