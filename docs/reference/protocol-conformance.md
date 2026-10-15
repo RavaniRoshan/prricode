@@ -113,6 +113,27 @@ matches the specified 18-subcommand surface; the approval modes are
 `sha256:6de32db08bbbe0deb478d2bfcaba001e9fb490986bc80db3aceb4d996abf7df9`
 unchanged, so the handshake identifies as protocol-compatible.
 
+## Property tests
+
+The verifier's oracle is stronger than "the build is green". Each EARS
+requirement generates a property test the workspace can actually run, written
+into `tests/generated/` and executed as a `property` gate alongside
+typecheck/build/test.
+
+Only what a criterion states **literally and checkably** becomes an assertion:
+
+- a count ("the suite shall have at least three tests") counts the workspace's
+  own test functions across py/rs/js/ts
+- a file claim ("`app.py` shall exist") checks the file
+
+Anything that would require guessing how to run the product — output contents,
+exit codes, timing — generates a test that **skips loudly**, so the run reports
+that requirement as unverified rather than passing vacuously. A generated test
+that passed because it asserted nothing would be worse than no test at all.
+
+The generated count mirrors `prricode_verify::properties::count_workspace_tests`
+in Rust, so the two sides cannot drift.
+
 ## Delivery economics
 
 Every verification pass records what the run cost and what it delivered for
