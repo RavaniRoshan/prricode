@@ -55,6 +55,7 @@ nav:
       - Product requirements: explanation/prd.md
       - The one-pager: explanation/prd-onepager.md
       - Architecture: explanation/architecture.md
+      - Facts (press kit): explanation/facts.md
       - Conformance decisions: explanation/conformance-decisions.md
       - Internals disposition: explanation/internals-disposition.md
       - Roadmap: explanation/roadmap.md
