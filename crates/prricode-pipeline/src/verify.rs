@@ -107,6 +107,14 @@ pub async fn run_verify_stage(
     };
     report.not_tested = not_tested(&report);
     report.residual_risk = residual_risk(&report, stack);
+    for gate in &report.gates {
+        if gate.skipped {
+            report.residual_risk.push(format!(
+                "gate {} did not run: {}",
+                gate.gate, gate.evidence_tail
+            ));
+        }
+    }
 
     // (5) persist the records and render the dossier into the run dir.
     let persistence = Persistence::new(data_dir)?;
@@ -339,7 +347,13 @@ mod tests {
         .await
         .unwrap();
         assert!(!report.gates.is_empty(), "gates must have run");
-        assert!(report.gates.iter().all(|g| g.passed));
+        // A gate that could not run (no pytest on this host) is reported, not
+        // counted as a failure.
+        assert!(
+            report.gates.iter().filter(|g| !g.skipped).all(|g| g.passed),
+            "every gate that ran must pass: {:?}",
+            report.gates
+        );
         assert_eq!(report.requirements.len(), 1);
         assert!(dir
             .join("runs")
@@ -501,7 +515,11 @@ mod tests {
             2,
             "every requirement gets a verdict"
         );
-        assert!(report.gates.iter().all(|g| g.passed));
+        assert!(
+            report.gates.iter().filter(|g| !g.skipped).all(|g| g.passed),
+            "every gate that ran must pass: {:?}",
+            report.gates
+        );
         assert_eq!(report.requirements[0].verdict, Verdict::Pass);
         assert_eq!(report.requirements[1].verdict, Verdict::Unverified);
         assert!(

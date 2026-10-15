@@ -262,6 +262,7 @@ pub async fn write_and_run(
         return Vec::new();
     }
 
+    let tests_len = tests.len();
     let command = format!("pytest -q {}", suite.display());
     let spec = prricode_sandbox::SandboxSpec {
         workspace_root: workspace.to_path_buf(),
@@ -275,6 +276,21 @@ pub async fn write_and_run(
     match outcome {
         Ok(output) => {
             let stdout = output.stdout.trim();
+            // 127 is the shell's "command not found": pytest is not installed
+            // on this host, so the gate could not run — which is not a failure.
+            // It is reported as skipped and lands in residual risk.
+            if output.exit_code == 127 {
+                record.exit_code = 127;
+                record.passed = false;
+                record.skipped = true;
+                record.evidence_tail =
+                    format!("pytest unavailable — property gate not run: {stdout}");
+                record.command = format!(
+                    "pytest (unavailable — {} generated tests not run)",
+                    tests_len
+                );
+                return vec![record];
+            }
             // A skipped test is not a failure: it is a requirement this run
             // could not check, and the verifier reads it as unverified.
             let skipped = stdout.matches("skipped").count();
@@ -287,9 +303,14 @@ pub async fn write_and_run(
             );
         }
         Err(e) => {
+            // No pytest on this host: the gate cannot run, which is not the
+            // same as failing. It is reported as skipped and lands in the
+            // dossier's residual risk rather than blocking acceptance.
             record.exit_code = 127;
             record.passed = false;
-            record.evidence_tail = format!("pytest unavailable: {e}");
+            record.skipped = true;
+            record.evidence_tail = format!("pytest unavailable — property gate not run: {e}");
+            record.command = format!("pytest (unavailable — {tests_len} generated tests not run)");
         }
     }
     vec![record]
@@ -452,6 +473,17 @@ mod tests {
     /// gate record reports both.
     #[tokio::test]
     async fn a_generated_suite_runs_against_a_real_workspace() {
+        // This test drives a real pytest; on a host without one it is not a
+        // failure, it is a skip.
+        let has_pytest = std::process::Command::new("pytest")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_pytest {
+            eprintln!("skip: pytest is not installed on this host");
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("proprun-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();

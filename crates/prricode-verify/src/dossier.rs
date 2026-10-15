@@ -123,7 +123,13 @@ pub fn render_markdown(
         md.push_str("(no gates ran)\n\n");
     }
     for gate in &report.gates {
-        let outcome = if gate.passed { "passed" } else { "FAILED" };
+        let outcome = if gate.skipped {
+            "NOT RUN"
+        } else if gate.passed {
+            "passed"
+        } else {
+            "FAILED"
+        };
         md.push_str(&format!(
             "- {} — `{}` → exit {}, {outcome} ({}ms)\n",
             gate.gate, gate.command, gate.exit_code, gate.duration_ms

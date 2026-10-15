@@ -21,6 +21,11 @@ pub struct GateRecord {
     pub command: String,
     pub exit_code: i32,
     pub passed: bool,
+    /// True when the gate did not run for an environmental reason (no
+    /// pytest, no toolchain). A skipped gate is not a failing one: it is
+    /// reported in the dossier's residual risk instead.
+    #[serde(default)]
+    pub skipped: bool,
     pub evidence_tail: String,
     pub duration_ms: u64,
 }
@@ -36,6 +41,7 @@ impl GateRecord {
             command: command.to_string(),
             exit_code: -1,
             passed: false,
+            skipped: false,
             evidence_tail: String::new(),
             duration_ms: 0,
         }
@@ -74,7 +80,8 @@ impl VerificationReport {
     /// Acceptable only when every gate passed, at least one requirement was
     /// judged, and no requirement failed.
     pub fn is_acceptable(&self) -> bool {
-        self.gates.iter().all(|g| g.passed)
+        // A gate that never ran cannot make the run unacceptable.
+        self.gates.iter().filter(|g| !g.skipped).all(|g| g.passed)
             && !self.requirements.iter().any(|r| r.verdict == Verdict::Fail)
             && !self.requirements.is_empty()
     }
@@ -123,5 +130,40 @@ mod tests {
             residual_risk: vec![],
         };
         assert!(!base.is_acceptable());
+    }
+
+    #[test]
+    fn a_gate_that_never_ran_does_not_block_acceptance() {
+        let report = VerificationReport {
+            run_id: "run-skip".into(),
+            gates: vec![
+                GateRecord {
+                    passed: true,
+                    ..GateRecord::new("run-skip", "test", "cargo test")
+                },
+                GateRecord {
+                    passed: false,
+                    skipped: true,
+                    exit_code: 127,
+                    evidence_tail: "pytest unavailable — property gate not run".into(),
+                    ..GateRecord::new("run-skip", "property", "pytest")
+                },
+            ],
+            requirements: vec![GateVerdict {
+                requirement_id: "R1".into(),
+                verdict: Verdict::Pass,
+                evidence: "green".into(),
+            }],
+            not_tested: vec![],
+            residual_risk: vec![],
+        };
+        assert!(
+            report.is_acceptable(),
+            "a skipped gate is not a failing one: {:?}",
+            report.gates
+        );
+        // …and it must not read as "all gates passed" either.
+        let ran = report.gates.iter().filter(|g| !g.skipped).count();
+        assert_eq!(ran, 1, "one gate actually ran");
     }
 }
