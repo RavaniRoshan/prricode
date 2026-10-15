@@ -321,6 +321,11 @@ pub async fn run_skill_script(
         workspace_root: workspace_root.to_path_buf(),
         allow_network: false,
         timeout: std::time::Duration::from_secs(120),
+        // The script lives beside the skill, which is not the workspace the
+        // agent is working in. Without this bind the sandbox (rightly) hides
+        // it and the helper cannot be opened — visible when the skill ships
+        // under a path the sandbox covers with a tmpfs.
+        extra_ro_paths: vec![skill.location.implementation()],
     };
     let full = command.join(" ");
     let output = prricode_sandbox::run_command(&full, &spec).await?;

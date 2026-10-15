@@ -390,6 +390,7 @@ impl ShipFlow {
             workspace_root: self.workspace.implementation(),
             allow_network: false,
             timeout: std::time::Duration::from_secs(120),
+            extra_ro_paths: Vec::new(),
         };
         let (ok, detail) = match prricode_sandbox::run_command(&command, &spec).await {
             Ok(output) if output.timed_out => {
