@@ -106,7 +106,7 @@ the model sees it. Attachments never enter the composer history.
 Dracula, Nord, Tokyo Night, Gruvbox, Ayu, Everforest, Kanagawa, Monokai,
 Poimandres, Rosé Pine, Synthwave '84, GitHub, One, Houston, Snazzy) plus your
 own files in `~/.config/prricode/themes/*.json` — the JSON schema is
-documented in `docs/ARCHITECTURE.md`.
+documented in `docs/explanation/architecture.md`.
 
 ## File equivalents (optional)
 
@@ -119,4 +119,4 @@ Everything the TUI does has a file/env equivalent, for those who want it:
 | `/theme` | `~/.config/prricode/themes/*.json` |
 | credentials | `prricode auth token <provider>` (0600 store) or env vars |
 
-See `docs/CONFIGURATION.md` for the full file-based reference.
+See `docs/how-to/connect-a-provider.md` for the full file-based reference.

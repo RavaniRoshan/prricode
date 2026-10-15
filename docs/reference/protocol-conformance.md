@@ -89,7 +89,7 @@ remaining internal engine types are dispositioned explicitly and queryably:
 **Implemented** (the concept exists in prricode under our own naming — these
 types had no protocol-wire presence, so mirroring their names would add
 compatibility debt, not conformance) or **Flagged** (a `// future work:` entry
-naming what is not built). See `docs/INTERNALS-DISPOSITION.md`.
+naming what is not built). See `docs/explanation/internals-disposition.md`.
 
 ### CLI — 18 subcommands, real bodies
 
@@ -122,7 +122,7 @@ unchanged, so the handshake identifies as protocol-compatible.
   scripted providers, real temp-workspace tool execution, gate runs)
 - Live provider runs — catalog, tool-calling turn, `session/setModel`, the
   credential store, and the build → verify → dossier chain (see
-  `docs/TESTING.md`)
+  `docs/how-to/run-the-tests.md`)
 - Manual stdio smoke: initialize / settings write+read / task stopAll / unknown
   method all return correct shapes and error codes
 

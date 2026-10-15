@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (tokio, serde_json), `gh` CLI + `git` for releases, `reqwest` for health checks, existing `prricode-sandbox`/approval engine/agent loop. Secrets pass through the environment of a child process only — never written to the repo, spec, dossier, or DB.
 
-**Spec:** `docs/PRD.md` §8 (last mile), §10 (oracle map — ship gates), §16 (v0.3 milestone). Founder ruling (2026-10-14): ship stops at GitHub release + install steps; deploy is optional and agent-arranged per product; the agent asks the operator for credentials/secrets as the target requires.
+**Spec:** `docs/explanation/prd.md` §8 (last mile), §10 (oracle map — ship gates), §16 (v0.3 milestone). Founder ruling (2026-10-14): ship stops at GitHub release + install steps; deploy is optional and agent-arranged per product; the agent asks the operator for credentials/secrets as the target requires.
 
 ## Global Constraints
 
@@ -118,7 +118,7 @@
 
 ## Task 6: Surfaces — TUI `/ship` `/deploy` `/operate` + secret collection + protocol
 
-**Files:** `crates/prricode-tui/src/{lib.rs,app.rs,ui.rs}`, `crates/prricode-server/src/lib.rs`, `docs/PROTOCOL.md`.
+**Files:** `crates/prricode-tui/src/{lib.rs,app.rs,ui.rs}`, `crates/prricode-server/src/lib.rs`, `docs/reference/protocol.md`.
 
 **Interfaces:**
 - Produces (TUI): `/ship` runs the ship stage and shows install steps + release URL (approval gate first); `/deploy` proposes the plan, renders the target + reason + the **exact credentials it will ask for**, and on `y` opens a secret-collection mode where each typed line is a credential value (masked in the composer via a `secret_input: bool` flag on the input box) and is forwarded to the agent task as a `DeploySecret { name, value }` command that **never** persists it; `/operate` runs a health pass and shows results; ship rail segment (`ship: v… · deploy: cloudflare · health: 2/2`).
@@ -134,7 +134,7 @@
 
 ## Task 7: Docs + branch verification
 
-**Files:** `docs/ARCHITECTURE.md`, `docs/CONFIGURATION.md`, `docs/TESTING.md`, `docs/PROTOCOL.md`, `README.md`.
+**Files:** `docs/explanation/architecture.md`, `docs/how-to/connect-a-provider.md`, `docs/how-to/run-the-tests.md`, `docs/reference/protocol.md`, `README.md`.
 
 - [ ] **Step 1: Docs** — ARCHITECTURE: ship/deploy/operate sections (the always-works ship path, the agent-arranged deploy with the secrets hygiene rule, operate artifacts); CONFIGURATION: the credentials model (env-only, per-target var names, never persisted) and the supported target marker table; TESTING: which parts need `gh`/network (ship tests are local-git only; deploy execution is tested with local commands); PROTOCOL: the two methods; README: one line in the Product Builder section.
 - [ ] **Step 2: Gates** — `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` (expect 100+).

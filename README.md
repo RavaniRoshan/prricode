@@ -85,7 +85,7 @@ those who prefer files or CI; the TUI reads them at startup.
   | Info | `/help`, `/?` |
 
 The full keymap, the approval flow, theming, and the file/env equivalents are
-in [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md).
+in [`docs/how-to/tui-guide.md`](docs/how-to/tui-guide.md).
 
 ## Pick your brain
 
@@ -104,7 +104,7 @@ in [`docs/TUI-GUIDE.md`](docs/TUI-GUIDE.md).
 ```bash
 git implementation https://github.com/RavaniRoshan/prricode.git
 cd prricode
-cargo build --release
+cargo build --release          # or: git checkout v0.1.0
 
 # the TUI — the default way in: provider/model are picked or typed in-app
 ./target/release/prricode
@@ -173,22 +173,25 @@ prricode/
 
 ## Documentation
 
-- `docs/FIRST-PRODUCT.md` — **start here**: a twenty-minute lesson from a rough
-  idea to a verified product, with the dossier at the end
-- `docs/TUI-GUIDE.md` — **the terminal is the interface**: every command, key,
-  and setting, all reachable from the TUI
-- `docs/PRD.md` / `docs/PRD-onepager.md` — the product requirements and the
-  positioning card
-- `docs/PROTOCOL.md` — the JSON-RPC surface: methods, types, error codes
-- `docs/PROTOCOL-CONFORMANCE.md` — what the protocol surface is and how it was
-  verified; `docs/CONFORMANCE-DECISIONS.md` — how the ambiguous parts were
-  resolved
-- `docs/CONFIGURATION.md` — providers, keys, config file (the TUI equivalents
-  are listed alongside)
-- `docs/COMPUTER_USE.md` — permissions, actions, Xvfb testing
-- `docs/TESTING.md` — test matrix, live-provider verification, e2e
-- `docs/SKILLS.md` / `docs/VOICE.md` — skill format, speech setup
-- `docs/ARCHITECTURE.md` — request path, storage, notifications
+The [documentation site](https://ravaniroshan.github.io/prricode/) is
+organised the Diátaxis way, so you can tell at a glance whether something will
+teach you, solve a problem, describe the machinery, or explain a decision.
+
+| | |
+|---|---|
+| **[Tutorial](https://ravaniroshan.github.io/prricode/tutorials/first-product/)** | **Start here** — a twenty-minute lesson from a rough idea to a verified product, with the dossier at the end |
+| **[How-to guides](https://ravaniroshan.github.io/prricode/how-to/tui-guide/)** | The TUI is the interface (every command, key, and setting), connecting a provider, running the tests, skills, computer use, voice |
+| **[Reference](https://ravaniroshan.github.io/prricode/reference/protocol/)** | The JSON-RPC surface, the protocol conformance report, the visual/UX spec |
+| **[Explanation](https://ravaniroshan.github.io/prricode/explanation/prd/)** | The product requirements, architecture, roadmap, conformance decisions, and [launch status](https://ravaniroshan.github.io/prricode/explanation/launch-status/) — what is verified, what is measured, and the preregistered targets |
+
+Everything is also readable as Markdown in
+[docs/](https://github.com/RavaniRoshan/prricode/tree/main/docs).
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the gates, the house rules, and how
+to pick up work. Security reports go through
+[SECURITY.md](SECURITY.md) — never a public issue.
 
 ## Development
 

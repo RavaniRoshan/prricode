@@ -21,3 +21,6 @@ node_modules/
 .DS_Store
 *.swp
 .superpowers/
+
+# Generated docs site (mkdocs build output)
+/site/

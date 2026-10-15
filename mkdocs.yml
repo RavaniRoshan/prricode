@@ -1,0 +1,86 @@
+site_name: prricode
+site_description: >-
+  An autonomous AI coding agent for the terminal — TUI, any model, and a
+  Product Builder pipeline that carries a concept to a verified product.
+site_url: https://ravaniroshan.github.io/prricode/
+repo_url: https://github.com/RavaniRoshan/prricode
+repo_name: RavaniRoshan/prricode
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    # prricode's own TUI theme: terminal black, cyan accent.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - Build your first product: tutorials/first-product.md
+  - How-to guides:
+      - The TUI is the interface: how-to/tui-guide.md
+      - Connect a provider: how-to/connect-a-provider.md
+      - Run the tests: how-to/run-the-tests.md
+      - Author and import skills: how-to/skills.md
+      - Set up computer use: how-to/computer-use.md
+      - Set up voice: how-to/voice.md
+  - Reference:
+      - JSON-RPC protocol: reference/protocol.md
+      - Protocol conformance: reference/protocol-conformance.md
+      - Visual / UX spec: reference/visual-spec.md
+  - Explanation:
+      - Launch status: explanation/launch-status.md
+      - Product requirements: explanation/prd.md
+      - The one-pager: explanation/prd-onepager.md
+      - Architecture: explanation/architecture.md
+      - Conformance decisions: explanation/conformance-decisions.md
+      - Internals disposition: explanation/internals-disposition.md
+      - Roadmap: explanation/roadmap.md
+  - Archive:
+      - Implementation plans: plans/2026-10-14-product-builder-v01.md
+      - Ship + operate plan: plans/2026-10-14-ship-operate-v03.md
+      - Verification plan: plans/2026-10-14-verification-v02.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - attr_list
+  - def_list
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.details
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/RavaniRoshan/prricode

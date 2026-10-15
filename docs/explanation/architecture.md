@@ -91,10 +91,10 @@ Each run gets its own workspace: `Pipeline::prepare_worktree` creates
 `<data-dir>/runs/<session-id>/` as a git worktree off the current workspace
 when the process runs inside a git repository (`git worktree add --detach`),
 and a plain directory otherwise; the Build stage's turns run with that path as
-their workspace root. See `docs/CONFIGURATION.md` for the preset list and
+their workspace root. See `docs/how-to/connect-a-provider.md` for the preset list and
 storage locations.
 
-Server surface (additive, see `docs/PROTOCOL.md`): `pipeline/conceptSet`
+Server surface (additive, see `docs/reference/protocol.md`): `pipeline/conceptSet`
 starts a run and emits the first interview question as a `turn/item`
 notification; `pipeline/specRead` returns the latest spec and stage;
 `pipeline/planRead` returns the wave plan. Pipeline state persists per session
@@ -167,7 +167,7 @@ context boundary after `session/compact`.
 
 The agent emits `AgentEvent` values; `notification_for` maps them to JSON-RPC
 notifications on stdout. 39 method names are mapped (see
-`docs/PROTOCOL.md`); live emissions cover turn lifecycle, item deltas,
+`docs/reference/protocol.md`); live emissions cover turn lifecycle, item deltas,
 approvals, goals, sessions, tasks, usage, and settings. Computer-use, workflow,
 MCP, and hook notifications are mapped and arrive with their subsystems.
 

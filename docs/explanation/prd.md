@@ -340,4 +340,4 @@ has an owner and a due milestone.
 
 ---
 
-*End of PRD. See `docs/PRD-onepager.md` for the positioning card.*
+*End of PRD. See `docs/explanation/prd-onepager.md` for the positioning card.*

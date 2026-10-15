@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (tokio, serde_json, rusqlite), existing `prricode-agent` runner + `prricode-sandbox` execution, existing `prricode-provider` (scripted providers for tests), ratatui.
 
-**Spec:** `docs/PRD.md` §7 (verification & acceptance), §10 (oracle map), §16 (v0.2 milestone)
+**Spec:** `docs/explanation/prd.md` §7 (verification & acceptance), §10 (oracle map), §16 (v0.2 milestone)
 
 ## Global Constraints
 
@@ -35,7 +35,7 @@
 | `crates/prricode-pipeline/src/lib.rs` | Verify stage: cheap gates per task, verifier at end; `run_dir` reuse |
 | `crates/prricode-tui/src/lib.rs`, `app.rs`, `ui.rs` | Verify rail segment, gate results, `/dossier` |
 | `crates/prricode-server/src/lib.rs` | `pipeline/verifyRead` method |
-| `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, `docs/TESTING.md` | Docs |
+| `docs/reference/protocol.md`, `docs/explanation/architecture.md`, `docs/how-to/run-the-tests.md` | Docs |
 
 ---
 
@@ -253,7 +253,7 @@ async fn verify_stage_produces_a_report_with_gate_and_verdict_evidence() {
 
 ## Task 6: Surfaces — TUI verify rail + `/dossier` + `pipeline/verifyRead`
 
-**Files:** `crates/prricode-tui/src/{lib.rs,app.rs,ui.rs}`, `crates/prricode-server/src/lib.rs`, `docs/PROTOCOL.md`.
+**Files:** `crates/prricode-tui/src/{lib.rs,app.rs,ui.rs}`, `crates/prricode-server/src/lib.rs`, `docs/reference/protocol.md`.
 
 **Interfaces:**
 - Produces (TUI): rail segment `verify: gates 3/3 · verdicts 1P/0F/1U`; after build completes the TUI auto-runs the verify stage and shows gate/verdict events; `/dossier` opens the rendered markdown path (log + open via `$PAGER`/`less` if available, else print the path); a `VerifyDone { report_path, gates_passed: usize, gates_total: usize, pass: usize, fail: usize, unverified: usize }` UiEvent.
@@ -269,7 +269,7 @@ async fn verify_stage_produces_a_report_with_gate_and_verdict_evidence() {
 
 ## Task 7: Docs + full-branch verification
 
-**Files:** `docs/ARCHITECTURE.md`, `docs/TESTING.md`, `docs/PROTOCOL.md`, `README.md`.
+**Files:** `docs/explanation/architecture.md`, `docs/how-to/run-the-tests.md`, `docs/reference/protocol.md`, `README.md`.
 
 **Interfaces:** none (docs only).
 
