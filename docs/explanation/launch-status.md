@@ -5,8 +5,8 @@ targets are. This page is the record an auditor or a curious reader can check
 claims against; it is not a marketing page.
 
 **Current state at a glance:** public repository, MIT license, CI green on
-both jobs (build/clippy/fmt/tests and the Ollama e2e), 189 workspace tests
-passing, first release `v0.1.0` tagged.
+both jobs (build/clippy/fmt/tests and the Ollama e2e), 226 workspace tests
+passing, latest release `v0.2.2` tagged (five platform binaries + `SHA256SUMS`).
 
 ## What has been verified
 
@@ -32,7 +32,7 @@ dispositions:
 | `RAMP-A1` claim/disclosure integrity | The docs narrated where the protocol surface came from | **Fixed** — rewritten; no product, company, or discovery history remains in the working tree, any commit message, or any blob in history |
 | `RAMP-R1` stage truth | Public repo, MIT, CI green — no contradiction with what is claimed | Pass |
 | `RAMP-M1` platform/embargo | No embargo, no announcement under embargo | Pass |
-| `RAMP-A9` technical go-live | Both CI jobs green; release path implemented | Pass — release cut at `v0.1.0` |
+| `RAMP-A9` technical go-live | Both CI jobs green; release path implemented | Pass — releases cut at `v0.1.0`–`v0.2.2`, each with platform binaries and checksums |
 | `RAMP-A7` sales/support enablement | No `SECURITY.md`, no contribution path | **Fixed** — both added |
 | `RAMP-R8` risk/rollback register | Gaps named in the roadmap, no register | Partial — [the roadmap](../explanation/roadmap.md) is the register |
 | `RAMP-P1` instrumentation | No declared measurement | **Registered** — see below |
@@ -68,7 +68,7 @@ There is no paid campaign, but if a link is shared it should carry
 attribution so the referrer data means something:
 
 ```text
-?utm_source=<channel>&utm_medium=<where>&utm_campaign=prricode-v0.1.0
+?utm_source=<channel>&utm_medium=<where>&utm_campaign=prricode-v0.2.2
 ```
 
 Channels worth distinguishing: `hn`, `reddit`, `x`, `linkedin`, `devto`,
@@ -76,7 +76,7 @@ Channels worth distinguishing: `hn`, `reddit`, `x`, `linkedin`, `devto`,
 
 ## Preregistered targets
 
-Registered for `RAMP-R10` at release (`v0.1.0`, 2026-10-15). These are read
+Registered for `RAMP-R10` at release (`v0.2.2`, 2026-10-15). These are read
 against the surfaces above — nothing else counts. If a target is missed, the
 miss is recorded here rather than the target quietly moved.
 
