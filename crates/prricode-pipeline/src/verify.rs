@@ -18,7 +18,7 @@ use prricode_persistence::Persistence;
 use prricode_spec::Requirements;
 use prricode_verify::{
     dossier::{self, DeliveryEconomics},
-    gates, verifier, GateRecord, Verdict, VerificationReport,
+    gates, properties, verifier, GateRecord, Verdict, VerificationReport,
 };
 use prricode_workflow::WorkflowEngine;
 
@@ -78,16 +78,23 @@ pub async fn run_verify_stage(
     let requirements: Requirements = serde_json::from_str(requirements_json)?;
     requirements.validate()?;
 
-    // (1) detect the stack and run the cheap deterministic gates.
+    // (1) the property tests this run's requirements generate: written into
+    //     the workspace and run as their own gate, so a requirement is judged
+    //     against something that exercised it rather than only against a green
+    //     build.
+    let property_gate = properties::write_and_run(run_id, workspace, &requirements.items).await;
+
+    // (2) detect the stack and run the cheap deterministic gates.
     let stack = gates::StackKind::detect(workspace);
     let plan = gates::GatePlan::for_stack(stack);
-    let gate_records = gates::run_gates(run_id, workspace, &plan).await;
+    let mut gate_records = gates::run_gates(run_id, workspace, &plan).await;
+    gate_records.extend(property_gate);
 
-    // (2) the evidence bundle: gate records plus the workspace diff.
+    // (3) the evidence bundle: gate records plus the workspace diff.
     let diff_summary = git_diff_stat(workspace).await;
     let evidence = evidence_bundle(&gate_records, &diff_summary);
 
-    // (3) the adversarial verifier pass — isolated context, evidence-only
+    // (4) the adversarial verifier pass — isolated context, evidence-only
     // tools, one turn, every requirement covered or it is an error.
     let verdicts = verifier::verify(runner, &requirements, &evidence, workspace).await?;
 
@@ -101,7 +108,7 @@ pub async fn run_verify_stage(
     report.not_tested = not_tested(&report);
     report.residual_risk = residual_risk(&report, stack);
 
-    // (4) persist the records and render the dossier into the run dir.
+    // (5) persist the records and render the dossier into the run dir.
     let persistence = Persistence::new(data_dir)?;
     dossier::persist_report(&persistence, &report)?;
     let run_dir = data_dir.join("runs").join(run_id);

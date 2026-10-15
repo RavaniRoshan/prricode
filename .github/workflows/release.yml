@@ -26,12 +26,6 @@ jobs:
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
             cross: true
-          - os: macos-13
-            target: x86_64-apple-darwin
-            archive: tar.gz
-          - os: macos-14
-            target: aarch64-apple-darwin
-            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
@@ -92,9 +86,54 @@ jobs:
             prricode-${{ matrix.target }}.sha256
           if-no-files-found: error
 
+  # Both macOS targets come out of one job on one arm64 runner: the pool is
+  # the bottleneck and two queued jobs double both the wait and the macOS
+  # minutes burned. Cross-compiling x86_64 from arm64 is free (same SDK).
+  macos:
+    name: macos (x86_64 + aarch64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          rustup target add x86_64-apple-darwin
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build both targets
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --target "$target"
+          done
+      - name: Package
+        shell: bash
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            (cd "target/$target/release" && strip prricode || true)
+            tar czf "prricode-$target.tar.gz" -C "target/$target/release" prricode
+          done
+          ls -1 prricode-*.tar.gz
+      - name: Checksums
+        shell: bash
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            shasum -a 256 "prricode-$target.tar.gz" | tee "prricode-$target.sha256"
+          done
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            prricode-aarch64-apple-darwin.tar.gz
+            prricode-x86_64-apple-darwin.tar.gz
+            prricode-aarch64-apple-darwin.sha256
+            prricode-x86_64-apple-darwin.sha256
+          if-no-files-found: error
+
+
   release:
     name: publish release
-    needs: build
+    needs: [build, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
