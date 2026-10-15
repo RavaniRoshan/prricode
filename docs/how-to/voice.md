@@ -42,10 +42,28 @@ prricode voice --file note.wav --text "…" # (synthesize) writes speech.mp3
 Without `stt_model`/`tts_model` configured, the commands say so plainly and
 point here — no silent failure.
 
+## Local speech engines
+
+Voice does not have to go over HTTP. Set a command and prricode runs whatever
+is installed on your machine instead — the same subprocess shape the skill
+runtime uses, so nothing is bundled here and you bring your own binaries:
+
+```toml
+[voice]
+stt_command = "whisper-cli -m ~/models/ggml-base.en.bin -f {input}"
+tts_command = "piper -m ~/voices/en_US-amy.onnx -f {output}"
+```
+
+`{input}` is a temp file holding the audio; the transcript is read from stdout.
+`{output}` is a temp file the command writes; the text arrives on stdin. Any
+binary works — `whisper.cpp`, `piper`, a script of your own — and the HTTP
+backend is used only when no command is set. A command that fails reports its
+exit code and stderr rather than an empty transcript.
+
 ## What this is not
 
-- No local whisper/piper build: nothing runs speech on your machine by default.
-  A local `whisper.cpp` backend is a candidate for a feature flag later.
+- No bundled models: local speech needs a `whisper.cpp`/`piper` build of your
+  own, downloaded by your tooling rather than by prricode.
 - No wake word or streaming ASR; input is file-based.
 - The media pipeline (`media/upload` chunked uploads) feeds audio into
   sessions; transcriptions attach as user items.
