@@ -157,7 +157,7 @@ or read `acceptance-dossier.md` in the run directory.
 - `cargo build` — clean, zero warnings
 - `cargo clippy --workspace --all-targets` — clean at `-D warnings`
 - `cargo fmt --check` — clean
-- `cargo test --workspace` — 189 tests green (mock-server HTTP integration,
+- `cargo test --workspace` — 226 tests green (mock-server HTTP integration,
   scripted providers, real temp-workspace tool execution, gate runs)
 - Live provider runs — catalog, tool-calling turn, `session/setModel`, the
   credential store, and the build → verify → dossier chain (see

@@ -1,14 +1,21 @@
 # prricode
 
-**An autonomous AI coding agent that lives in your terminal.**
+<p align="center">
+  <a href="https://github.com/RavaniRoshan/prricode/actions/workflows/ci.yml"><img src="https://github.com/RavaniRoshan/prricode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/RavaniRoshan/prricode/releases/latest"><img src="https://img.shields.io/github/v/release/RavaniRoshan/prricode" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+</p>
 
-prricode takes the whole job, not a slice of it. Bring a rough idea and it
-carries it end to end — conversation → specification → plan → build →
-verification → delivery → operation — with a human approval at the
-irreversible moments (deploy, spend, publish) rather than at every edit.
+**Concept in. Running product out.**
+
+prricode is an autonomous AI coding agent that lives in your terminal. Bring a
+rough idea and it carries the whole job end to end — conversation →
+specification → plan → build → verification → delivery → operation — with a
+human approval at the irreversible moments (deploy, spend, publish) rather
+than at every edit.
 
 <p align="center">
-  <img src="assets/prricode-demo.gif" alt="prricode — from a rough concept to an acceptance dossier, in the terminal" width="776">
+  <img src="assets/prricode-demo.gif" alt="prricode's TUI carrying a concept through the Product Builder pipeline — the clarify stage interviewing the operator about a word-count CLI, driven by a live model" width="776">
 </p>
 <p align="center">
   <a href="assets/prricode-demo.mp4">mp4</a> · <a href="assets/prricode-demo.webm">webm</a>
@@ -36,70 +43,7 @@ The autonomy rule: full autonomy where an oracle exists, human judgement where
 it doesn't. The build runs open inside a disposable worktree — you already
 consented at the plan gate — and the gates are what judge the result.
 
-## What it does
-
-- **A real agent loop with tools** — `shell` (sandboxed), `read_file`,
-  `write_file`, `edit_file`, `glob`, `grep`, `web_fetch`, `task` (subagents),
-  and `computer` (screen + input). Built for small models: fenced-JSON
-  recovery, argument repair, dedupe, and retry, so a 3B model on your laptop
-  still lands its tool calls.
-- **Any model** — one OpenAI-compatible client with first-class presets for
-  Ollama (local and cloud), OpenRouter, the Kilo AI Gateway, OpenAI, and any
-  custom endpoint. Switch provider and model live from the TUI (`/provider`,
-  `/model`) — no restart. Offline echo provider for tests.
-- **Remembers** — every message, tool call, and result is persisted in SQLite.
-  Resume, fork, and compact sessions across runs.
-- **Verification, not vibes** — deterministic gates after every build task, an
-  adversarial verifier with structural context isolation, and the dossier.
-- **Approvals that fit your risk appetite** — allow once, for the session, or
-  always in this workspace (persisted as a policy amendment), with a timeout
-  that denies rather than hangs.
-- **Credentials stored safely** — `prricode auth token <provider>` keeps keys
-  in a 0600 store; `prricode logout <provider>` drops one, or all of them.
-  Keys never land in the repo or in logs.
-- **Extensible** — `SKILL.md` capability bundles, a stdio MCP client, 25
-  bundled themes, `Ctrl+V` image paste, and STT/TTS plumbing for models with
-  ears.
-
-## The terminal is the interface
-
-Every setting, command, and configuration is reachable from the composer. The
-config file and environment variables exist as *optional equivalents* for
-those who prefer files or CI; the TUI reads them at startup.
-
-- **Composer**: `Return` sends, `Ctrl+J` newline, `Ctrl+R`/`Ctrl+P`/`Ctrl+N`
-  history, `Ctrl+G` edit in `$EDITOR`, `Alt+B`/`Alt+F` word moves, `Ctrl+K`/
-  `Ctrl+Y` kill/yank, `Ctrl+L` clear
-- **`@`** insert a file path, **`!cmd`** run a shell command in the workspace,
-  **`Ctrl+V`** paste an image from the clipboard
-- **`Ctrl+C`/`Esc`** interrupt a running turn without losing the session
-- **Approvals inline**: sensitive tool calls pause with `y` allow-once / `s`
-  allow-for-session / `a` always-in-this-workspace / `n` deny
-- **Slash commands** — settings and pipeline, all in-app:
-
-  | Group | Commands |
-  |---|---|
-  | Session | `/new`, `/resume`, `/sessions`, `/clear`, `/compact`, `/quit` |
-  | Settings | `/model`, `/provider`, `/approval`, `/yolo`, `/theme`, `/goal` |
-  | Product Builder | `/concept`, `/spec`, `/plan`, `/build`, `/ship`, `/deploy`, `/operate`, `/dossier` |
-  | Info | `/help`, `/?` |
-
-The full keymap, the approval flow, theming, and the file/env equivalents are
-in [`docs/how-to/tui-guide.md`](docs/how-to/tui-guide.md).
-
-## Pick your brain
-
-| Provider | `--provider` | Key env | Notes |
-|---|---|---|---|
-| Echo (offline) | `echo` | — | No network; replies `echo: <text>`. Tests and protocol debugging. |
-| Ollama (local) | `ollama` | — | `/api` native surface with tools. |
-| Ollama Cloud | `ollama-cloud` | `OLLAMA_API_KEY` | Hosted models, same account. |
-| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | Hundreds of models, one key. |
-| Kilo AI Gateway | `kilo` | `KILO_API_KEY` | `:free` models work anonymously. |
-| OpenAI | `openai` | `OPENAI_API_KEY` | |
-| Anything else | `custom` | yours | Any OpenAI-compatible endpoint via `--base-url`. |
-
-## Quickstart
+## Try it
 
 Install, either way:
 
@@ -111,7 +55,7 @@ tar xzf prricode-x86_64-unknown-linux-gnu.tar.gz && ./prricode exec "say hi" --p
 # or from source
 git clone https://github.com/RavaniRoshan/prricode.git
 cd prricode
-cargo build --release          # or: git checkout v0.1.0
+cargo build --release          # or: git checkout v0.2.2
 ```
 
 Then:
@@ -141,6 +85,79 @@ Or carry a concept all the way through the pipeline:
 ./target/release/prricode                       # then: /concept <your idea>
 ```
 
+## Pick your brain
+
+One OpenAI-compatible client, first-class presets. Switch provider and model
+live from the TUI (`/provider`, `/model`) — no restart.
+
+| Provider | `--provider` | Key env | Notes |
+|---|---|---|---|
+| Echo (offline) | `echo` | — | No network; replies `echo: <text>`. Tests and protocol debugging. |
+| Ollama (local) | `ollama` | — | `/api` native surface with tools. |
+| Ollama Cloud | `ollama-cloud` | `OLLAMA_API_KEY` | Hosted models, same account. |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | Hundreds of models, one key. |
+| Kilo AI Gateway | `kilo` | `KILO_API_KEY` | `:free` models work anonymously. |
+| OpenAI | `openai` | `OPENAI_API_KEY` | |
+| Anything else | `custom` | yours | Any OpenAI-compatible endpoint via `--base-url`. |
+
+Keys live in a 0600 credential store (`prricode auth token <provider>`) or
+environment variables — never in the repo, never in logs.
+
+## What it does
+
+- **A real agent loop with tools** — `shell` (sandboxed), `read_file`,
+  `write_file`, `edit_file`, `glob`, `grep`, `web_fetch`, `task` (subagents),
+  and `computer` (screen + input). Built for small models: fenced-JSON
+  recovery, argument repair, dedupe, and retry, so a 3B model on your laptop
+  still lands its tool calls.
+- **Verification, not vibes** — deterministic gates after every build task, an
+  adversarial verifier with structural context isolation, property tests
+  generated from the EARS requirements, and the acceptance dossier with
+  delivery economics (tokens and gate time per verified requirement).
+- **Brownfield-aware** — the pipeline surveys an existing workspace first
+  (stack, layout, tests), plans tasks against the files that are already
+  there, and rejects plans that would scaffold a second project.
+- **Remembers** — every message, tool call, and result is persisted in SQLite.
+  Resume, fork, and compact sessions across runs.
+- **Approvals that fit your risk appetite** — allow once, for the session, or
+  always in this workspace (persisted as a policy amendment), with a timeout
+  that denies rather than hangs.
+- **Ship and operate** — a GitHub release path, agent-arranged deploys with
+  environment-only secrets and redaction, health checks, and autonomous
+  rollback on regression (armed at your say-so).
+- **A business layer** — market research, pricing, and landing-page plans,
+  every claim either sourced or marked unsourced.
+- **Extensible** — `SKILL.md` capability bundles, a stdio MCP client, 25
+  bundled themes, `Ctrl+V` image paste, and STT/TTS plumbing for models with
+  ears.
+
+## The terminal is the interface
+
+Every setting, command, and configuration is reachable from the composer. The
+config file and environment variables exist as *optional equivalents* for
+those who prefer files or CI; the TUI reads them at startup.
+
+- **Composer**: `Return` sends, `Ctrl+J` newline, `Ctrl+R`/`Ctrl+P`/`Ctrl+N`
+  history, `Ctrl+G` edit in `$EDITOR`, `Alt+B`/`Alt+F` word moves, `Ctrl+K`/
+  `Ctrl+Y` kill/yank, `Ctrl+L` clear
+- **`@`** insert a file path, **`!cmd`** run a shell command in the workspace,
+  **`Ctrl+V`** paste an image from the clipboard
+- **`Ctrl+C`/`Esc`** interrupt a running turn without losing the session
+- **Approvals inline**: sensitive tool calls pause with `y` allow-once / `s`
+  allow-for-session / `a` always-in-this-workspace / `n` deny
+- **Slash commands** — settings and pipeline, all in-app:
+
+  | Group | Commands |
+  |---|---|
+  | Session | `/new`, `/resume`, `/sessions`, `/clear`, `/compact`, `/quit` |
+  | Settings | `/model`, `/provider`, `/approval`, `/yolo`, `/theme`, `/goal` |
+  | Product Builder | `/concept`, `/spec`, `/plan`, `/build`, `/ship`, `/deploy`, `/operate`, `/dossier` |
+  | Business layer | `/research`, `/pricing`, `/landing` |
+  | Info | `/help`, `/?` |
+
+The full keymap, the approval flow, theming, and the file/env equivalents are
+in [`docs/how-to/tui-guide.md`](docs/how-to/tui-guide.md).
+
 ## The protocol
 
 A stable JSON-RPC 2.0 surface over stdio, so any editor, TUI, or script can
@@ -168,19 +185,23 @@ prricode/
     prricode-provider/    echo + ollama + OpenAI-compatible presets, credential store
     prricode-persistence/ SQLite: sessions, items, goals, usage, settings
     prricode-sandbox/     bubblewrap execution
-    prricode-computer-use/ X11 screenshots + input, Wayland probe
+    prricode-computer-use/ X11 screenshots + input, Wayland capture/input selection
     prricode-workflow/    workflow runs with child control
     prricode-skills/      SKILL.md loading and import
     prricode-mcp/         MCP stdio client
-    prricode-voice/       speech-to-text / text-to-speech plumbing
+    prricode-voice/       speech-to-text / text-to-speech: HTTP or local commands
     prricode-tui/         the terminal UI: 25 themes, image paste, /commands
     prricode-spec/        EARS requirements, layered specs, task graph + waves
-    prricode-verify/      gate runner, adversarial verifier, acceptance dossier
+    prricode-verify/      gate runner, property tests, adversarial verifier, dossier
     prricode-ship/        release path, deploy, operate (rollback)
-    prricode-pipeline/    stage orchestration for the Product Builder
+    prricode-pipeline/    stage orchestration, workspace survey, business layer
   docs/                   protocol, configuration, TUI, and operator docs
   tests/                  e2e scenario driving the real binary
 ```
+
+226 tests, `cargo fmt --check` clean, clippy clean at `-D warnings`, and a
+real Ollama e2e in CI. Every capability degrades honestly — when something
+cannot run it says so with a reason, never a fake success.
 
 ## Documentation
 

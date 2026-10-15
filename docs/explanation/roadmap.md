@@ -76,14 +76,10 @@ today so the gap is explicit.
   (default off); a failed health check runs the recorded rollback command
   through the sandbox and records the outcome in the operate log.
 - **Approval timeout: COMPLETE** — configurable via
-  `PRRICODE_APPROVAL_TIMEOUT_SECS` (default 600s), resolving as `timed_out`.')
+  `PRRICODE_APPROVAL_TIMEOUT_SECS` (default 600s), resolving as `timed_out`.
 - ~~**Cost per delivered outcome**~~ — DONE in v0.1.0. Tokens + gate wall
   time per verified requirement, persisted per run and rendered in the dossier
   and the TUI rail. See `docs/reference/protocol-conformance.md`.
-- ~~**Property-based test generation**~~ — DONE in v0.1.1. Count and
-  file-existence criteria become real assertions run as a `property`
-  gate; anything the generator cannot check skips loudly and lands as
-  UNVERIFIED. See `docs/reference/protocol-conformance.md`.
 - ~~**Property-based test generation**~~ — DONE in v0.1.1. Count and
   file-existence criteria become real assertions run as a `property`
   gate; anything the generator cannot check skips loudly and lands as

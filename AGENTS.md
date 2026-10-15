@@ -59,11 +59,11 @@ identifiers. The protocol surface is our own design.
 | `prricode-provider` | Echo + Ollama native + one OpenAI-compatible client (openrouter/kilo/openai/ollama-cloud/custom presets), TOML config, credential store |
 | `prricode-persistence` | SQLite: sessions, items, goals, usage, settings, gate records |
 | `prricode-sandbox` | bubblewrap execution, network toggle, path scoping |
-| `prricode-computer-use` | X11 screenshots (XGetImage/scrot/import) + input (XTEST), Wayland probe (grim) |
+| `prricode-computer-use` | X11 screenshots (XGetImage/scrot/import) + input (XTEST), Wayland capture/input selection (grim/wlrctl/ydotool/portal probe) |
 | `prricode-workflow` | Workflow definitions + run state machine (pause/resume/cancel/child control) |
 | `prricode-skills` | SKILL.md loading/import + script runtime (shebang interpreters via the sandbox) |
 | `prricode-mcp` | MCP stdio client (initialize/tools_list/tools_call) |
-| `prricode-voice` | STT/TTS traits + OpenAI-compatible `/audio/*` backend |
+| `prricode-voice` | STT/TTS traits + OpenAI-compatible `/audio/*` backend + local command engines |
 | `prricode-tui` | Interactive terminal UI: composer, streaming, approvals (y/s/a/n durability), 25 themes, image paste, `/command` bar, pipeline rail, `/ship` `/deploy` `/operate` |
 | `prricode-spec` | Concept, EARS requirements, Core-4 layered specs, 5 stack presets, task graph + waves |
 | `prricode-verify` | Gate runner (typecheck/build/test), adversarial verifier, acceptance dossier |
@@ -108,7 +108,7 @@ identifiers. The protocol surface is our own design.
 
 ## Testing
 
-- Unit + integration: `cargo test --workspace` (189 tests; scripted
+- Unit + integration: `cargo test --workspace` (226 tests; scripted
   providers, mock HTTP servers, real temp-workspace tool execution).
 - E2E: `tests/e2e.sh` drives `prricode serve` over stdio against local Ollama
   (`qwen2.5-coder:3b`) — session, turn, tool execution, `-32601`.
@@ -135,18 +135,24 @@ first, with the file/env equivalent second.
 Protocol surface, TUI, agent loop, product-builder pipeline through operate,
 verification moat, multi-provider layer, and the project's own-naming posture
 are complete and CI-green. Live-provider verification is done (see Testing);
-three bugs it or the audit surfaced are fixed and tested: the `auth token`
-clap arg-id collision, a gateway error object answered with HTTP 200, and the
-build stage stalling on approvals.
+three bugs it surfaced are fixed and tested: the `auth token` clap arg-id
+collision, a gateway error object answered with HTTP 200, and the build stage
+stalling on approvals.
+
+Releases `v0.1.0`–`v0.2.2` are tagged; `v0.2.2` publishes stripped binaries
+for five targets (Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64)
+plus `SHA256SUMS` via `.github/workflows/release.yml`. Both CI jobs
+(build/clippy/fmt/tests and the Ollama e2e) are green.
 
 Every agent-facing surface is reachable from the TUI
 (`docs/how-to/tui-guide.md`); the config file and env vars are the optional
 equivalents (`docs/how-to/connect-a-provider.md`).
 
-The first release is tagged `v0.1.0`. A launch-readiness preflight
-(`docs/explanation/launch-status.md`) records what is verified, which
-measurement surfaces are registered (owner-side GitHub analytics only — the
-product itself ships no telemetry), and the preregistered D0/W1/M1 targets.
-Roadmap items remaining (macOS computer-use backend, Wayland compositor
-end-to-end, Houston/Snazzy palette verification, approval timeout transport
-surface, a press/facts kit) are documented in `docs/explanation/roadmap.md`.
+A launch-readiness preflight (`docs/explanation/launch-status.md`) records what
+is verified, which measurement surfaces are registered (owner-side GitHub
+analytics only — the product itself ships no telemetry), and the preregistered
+D0/W1/M1 targets. Roadmap items remaining (the macOS computer-use backend
+implementation, Wayland input execution against a live compositor, a bundled
+speech model manager, streaming ASR + wake word, vLLM/llama.cpp/LM Studio
+presets, Houston/Snazzy palette verification, the `?` empty-composer binding,
+and a session picker list) are documented in `docs/explanation/roadmap.md`.

@@ -8,44 +8,51 @@ What is tested, how, and how to run it.
 cargo build                 # zero warnings
 cargo clippy --workspace    # zero warnings
 cargo fmt --check
-cargo test --workspace      # 180 tests at time of writing
+cargo test --workspace      # 226 tests at time of writing
 ```
 
 ## What the unit/integration suite covers
 
-- **prricode-cli** (6 tests): every subcommand's argument graph parses —
+- **prricode-cli** (7 tests): every subcommand's argument graph parses —
   including the `auth token <provider>` positional, which must not collide
   with the global `--provider` flag — plus the global flags next to
   subcommands.
-- **prricode-provider** (20 tests): SSE parsing across chunk boundaries,
+- **prricode-provider** (22 tests): SSE parsing across chunk boundaries,
   streamed tool-call assembly, lenient JSON repair (fences, truncation,
   chatter), tool-call response parsing, usage/cost extraction, config
   precedence (CLI > env > file > preset), Kilo org header injection, a
   gateway error object answered with HTTP 200 (the provider's own message
   must survive), and a mock HTTP server exercising list/chat/stream/error
   paths plus the native Ollama NDJSON path.
-- **prricode-tui** (50 tests): composer keymap and editing, slash-command
+- **prricode-tui** (51 tests): composer keymap and editing, slash-command
   routing, approval durability tiers and risk classes, theme loading and
-  switching, image-paste state, pipeline rail state.
-- **prricode-agent** (13 tests): tool-call recovery — fenced JSON,
+  switching, image-paste state, pipeline rail state, delivery-economics
+  rendering.
+- **prricode-agent** (12 tests): tool-call recovery — fenced JSON,
   concatenated objects, bare JSON, unknown-tool rejection, dedupe; approval
   timeout resolution and policy-amendment matching.
-- **prricode-sandbox** (3 tests): path scoping (escapes rejected), real
+- **prricode-sandbox** (4 tests): path scoping (escapes rejected), real
   command execution, availability reporting.
 - **prricode-skills** (5 tests): frontmatter parsing, plain-markdown fallback,
   import + load + prompt rendering round-trip, rejection of directories
   without `SKILL.md`, script execution through the sandbox.
 - **prricode-workflow** (5 tests): run lifecycle (start/pause/resume/advance/
   complete), cancel + child control, token budget, unknown-run errors.
-- **prricode-computer-use** (5 tests): display probe behavior, no-display
-  errors, action deserialization from the wire shape.
-- **prricode-mcp** (1 test): full stdio handshake against a bash MCP server —
+- **prricode-computer-use** (12 tests): display probe behavior (X11 and
+  Wayland), no-display errors, input-method selection across
+  XTEST/wlrctl/ydotool/portal, action deserialization from the wire shape.
+- **prricode-mcp** (2 tests): full stdio handshake against a bash MCP server —
   initialize, tools/list, tools/call.
-- **prricode-voice** (1 test): unconfigured STT/TTS error clarity.
-- **prricode-spec / verify / ship / pipeline** (61 tests): EARS validation,
-  the layered spec, wave scheduling, gate verdicts, the acceptance dossier,
-  ship-record extraction, rollback conditions, operate-log redaction, and
-  the stage state machine.
+- **prricode-core / server** (10 tests): schema fingerprint stability, the
+  internals disposition inventory, and stdio dispatch smoke.
+- **prricode-voice** (3 tests): unconfigured STT/TTS error clarity, the local
+  command-engine templates.
+- **prricode-spec / verify / ship / pipeline** (93 tests): EARS validation,
+  the layered spec, wave scheduling, the property-test generator, gate
+  verdicts (including a skipped gate is not a failure), the acceptance
+  dossier, delivery economics, the brownfield survey and reuse gate, the
+  business-layer validators, ship-record extraction, rollback conditions,
+  operate-log redaction, and the stage state machine.
 
 ## End-to-end scenario
 
