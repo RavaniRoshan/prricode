@@ -66,10 +66,32 @@ xvfb-run -a -s "-screen 0 1280x800x24" bash -c '
 
 The agent runtime test suite exercises the tool against `DISPLAY` when present.
 
+## Wayland
+
+Screenshots under Wayland use `grim` (screencopy) and need no special
+permission. Input is different — Wayland has no portable injection API and each
+compositor exposes its own — so the input method is picked from what is
+genuinely installed, in portability order:
+
+| Method | Needs |
+|---|---|
+| X11 XTEST (`xdotool`) | `DISPLAY` + `xdotool` — the tested path, also covers XWayland |
+| `wlrctl` | `WAYLAND_DISPLAY` + a wlroots compositor (sway, Hyprland, river) |
+| `ydotool` | `WAYLAND_DISPLAY` + `ydotoold` (uinput, compositor-agnostic) |
+| portal RemoteDesktop | `WAYLAND_DISPLAY` + `xdg-desktop-portal` (consent handshake not implemented) |
+
+`computerUseSetup/check` reports which method is in play (`inputMethod`) and,
+when none is, the exact reason (`inputUnavailableReason`) — so a client reads
+the truth instead of assuming X11.
+
 ## Limitations
 
-- X11 only. On a Wayland-only session without XWayland, no display is found and
-  the tool returns a clear error.
+- X11 is the tested path. On a Wayland-only session without XWayland the input
+  method falls through to the selection above, and returns a clear error naming
+  what to install when nothing matches.
+- The wlrctl/ydotool execution paths have not been exercised against a live
+  compositor, and the portal consent handshake is not implemented; both degrade
+  to a named reason.
 - AT-SPI tree reads are declared `unknown`, not implemented; the X11 backend
   works from pixels and XTEST.
 - Multi-monitor capture covers the root window (all monitors).
