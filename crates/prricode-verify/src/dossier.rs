@@ -13,7 +13,97 @@ use std::path::Path;
 use crate::GateRecord;
 
 /// Render the five-section dossier markdown for a verification report.
-pub fn render_markdown(report: &VerificationReport, run_dir: &Path, diff_summary: &str) -> String {
+/// What a run cost and what it delivered — the only two numbers that decide
+/// whether verification paid for itself. Tokens and gate seconds are kept
+/// apart on purpose: they are different currencies and blending them would
+/// hide which one is expensive.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DeliveryEconomics {
+    pub run_id: String,
+    /// Model tokens the build turns spent (input + output).
+    pub build_tokens: u64,
+    /// Wall time the per-task gates consumed.
+    pub gate_wall_ms: u64,
+    /// Tasks the run attempted.
+    pub tasks_attempted: u32,
+    pub requirements_total: u32,
+    pub requirements_verified: u32,
+    pub requirements_failed: u32,
+    pub requirements_unverified: u32,
+}
+
+impl DeliveryEconomics {
+    pub fn of(report: &VerificationReport, build_tokens: u64, tasks_attempted: u32) -> Self {
+        let gate_wall_ms = report.gates.iter().map(|g| g.duration_ms).sum();
+        let mut verified = 0;
+        let mut failed = 0;
+        let mut unverified = 0;
+        for verdict in &report.requirements {
+            match verdict.verdict {
+                crate::Verdict::Pass => verified += 1,
+                crate::Verdict::Fail => failed += 1,
+                crate::Verdict::Unverified => unverified += 1,
+            }
+        }
+        Self {
+            run_id: report.run_id.clone(),
+            build_tokens,
+            gate_wall_ms,
+            tasks_attempted,
+            requirements_total: report.requirements.len() as u32,
+            requirements_verified: verified,
+            requirements_failed: failed,
+            requirements_unverified: unverified,
+        }
+    }
+
+    /// Tokens spent per verified requirement. `None` when nothing verified —
+    /// dividing by zero is not a rate.
+    pub fn tokens_per_verified(&self) -> Option<f64> {
+        (self.requirements_verified > 0)
+            .then(|| self.build_tokens as f64 / self.requirements_verified as f64)
+    }
+
+    /// Gate wall time per verified requirement, in milliseconds.
+    pub fn gate_ms_per_verified(&self) -> Option<u64> {
+        (self.requirements_verified > 0)
+            .then(|| self.gate_wall_ms / self.requirements_verified as u64)
+    }
+
+    fn markdown(&self) -> String {
+        let per_tokens = match self.tokens_per_verified() {
+            Some(rate) => format!("{rate:.0} tokens per verified requirement"),
+            None => "not computable — no requirement was verified".to_string(),
+        };
+        let per_gate = match self.gate_ms_per_verified() {
+            Some(ms) => format!("{ms} ms per verified requirement"),
+            None => "not computable — no requirement was verified".to_string(),
+        };
+        format!(
+            "## Delivery economics\n\n\
+             - Build tokens: {} ({} tasks attempted)\n\
+             - Gate wall time: {} ms\n\
+             - Requirements: {} total · {} verified · {} failed · {} unverified\n\
+             - {per_tokens}\n\
+             - {per_gate}\n\n",
+            self.build_tokens,
+            self.tasks_attempted,
+            self.gate_wall_ms,
+            self.requirements_total,
+            self.requirements_verified,
+            self.requirements_failed,
+            self.requirements_unverified,
+        )
+    }
+}
+
+/// Render a dossier with its delivery economics appended.
+pub fn render_markdown(
+    report: &VerificationReport,
+    run_dir: &Path,
+    diff_summary: &str,
+    economics: Option<&DeliveryEconomics>,
+) -> String {
     let mut md = String::new();
     md.push_str(&format!("# Verification dossier: {}\n\n", report.run_id));
 
@@ -55,6 +145,7 @@ pub fn render_markdown(report: &VerificationReport, run_dir: &Path, diff_summary
             md.push_str("```\n\n");
         }
     }
+    md.push_str("## Requirements\n\n");
     if report.requirements.is_empty() {
         md.push_str("(no requirement verdicts)\n\n");
     }
@@ -84,11 +175,35 @@ pub fn render_markdown(report: &VerificationReport, run_dir: &Path, diff_summary
     }
     md.push('\n');
 
+    // What the run cost, and what it delivered for it. Appended last so the
+    // verdict sections stay where a reviewer reads first.
+    if let Some(e) = economics {
+        md.push_str(&e.markdown());
+    }
+
     md
 }
 
 /// Persist one report: a settings row per gate record plus one JSON row
 /// holding the whole report under `dossier:<run_id>`.
+/// Persist a run's delivery economics under its own row, so a caller can read
+/// the cost of a run without parsing the whole dossier.
+pub fn persist_economics(persistence: &Persistence, e: &DeliveryEconomics) -> anyhow::Result<()> {
+    persistence.set_setting(
+        &format!("economics:{}", e.run_id),
+        &serde_json::to_string(e)?,
+    )?;
+    Ok(())
+}
+
+/// Load a run's economics, or `None` when the run never recorded any.
+pub fn load_economics(persistence: &Persistence, run_id: &str) -> Option<DeliveryEconomics> {
+    let json = persistence
+        .get_setting(&format!("economics:{run_id}"))
+        .ok()??;
+    serde_json::from_str(&json).ok()
+}
+
 pub fn persist_report(
     persistence: &Persistence,
     report: &VerificationReport,
@@ -154,8 +269,12 @@ mod tests {
             not_tested: vec!["R2 (no endpoint built)".into()],
             residual_risk: vec!["performance unmeasured".into()],
         };
-        let markdown =
-            render_markdown(&report, Path::new("/tmp/run-9"), "5 files changed, +120/-3");
+        let markdown = render_markdown(
+            &report,
+            Path::new("/tmp/run-9"),
+            "5 files changed, +120/-3",
+            None,
+        );
         for section in [
             "What changed",
             "What was verified and how",
@@ -204,6 +323,113 @@ mod tests {
             .list_gate_records("other-run")
             .unwrap()
             .is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn record(run: &str, gate: &str, passed: bool, ms: u64) -> GateRecord {
+        GateRecord {
+            passed,
+            duration_ms: ms,
+            command: "cargo test".into(),
+            exit_code: if passed { 0 } else { 1 },
+            evidence_tail: String::new(),
+            ..GateRecord::new(run, gate, "cargo test")
+        }
+    }
+
+    fn report(run: &str) -> VerificationReport {
+        VerificationReport {
+            run_id: run.into(),
+            gates: vec![
+                record(run, "build", true, 1200),
+                record(run, "test", true, 3400),
+            ],
+            requirements: vec![
+                crate::GateVerdict {
+                    requirement_id: "R1".into(),
+                    verdict: Verdict::Pass,
+                    evidence: "green".into(),
+                },
+                crate::GateVerdict {
+                    requirement_id: "R2".into(),
+                    verdict: Verdict::Fail,
+                    evidence: "red".into(),
+                },
+                crate::GateVerdict {
+                    requirement_id: "R3".into(),
+                    verdict: Verdict::Unverified,
+                    evidence: String::new(),
+                },
+            ],
+            not_tested: vec!["R3".into()],
+            residual_risk: vec![],
+        }
+    }
+
+    #[test]
+    fn economics_counts_what_a_run_cost_and_what_it_delivered() {
+        let r = report("run-1");
+        let e = DeliveryEconomics::of(&r, 9000, 4);
+        assert_eq!(e.build_tokens, 9000);
+        assert_eq!(e.tasks_attempted, 4);
+        assert_eq!(e.requirements_total, 3);
+        assert_eq!(e.requirements_verified, 1);
+        assert_eq!(e.requirements_failed, 1);
+        assert_eq!(e.requirements_unverified, 1);
+        assert_eq!(e.gate_wall_ms, 4600);
+        // Per delivered unit, not per activity.
+        assert_eq!(e.tokens_per_verified(), Some(9000.0));
+        assert_eq!(e.gate_ms_per_verified(), Some(4600));
+    }
+
+    #[test]
+    fn economics_with_nothing_verified_reports_no_rate() {
+        let mut r = report("run-2");
+        r.requirements[0].verdict = Verdict::Unverified;
+        let e = DeliveryEconomics::of(&r, 100, 1);
+        assert_eq!(e.requirements_verified, 0);
+        assert_eq!(
+            e.tokens_per_verified(),
+            None,
+            "dividing by zero is not a rate"
+        );
+        assert_eq!(e.gate_ms_per_verified(), None);
+    }
+
+    #[test]
+    fn the_dossier_carries_the_economics_section() {
+        let r = report("run-3");
+        let md = render_markdown(
+            &r,
+            Path::new("/tmp/run-3"),
+            "3 files changed, +40/-2",
+            Some(&DeliveryEconomics::of(&r, 9000, 4)),
+        );
+        assert!(
+            md.contains("## Delivery economics"),
+            "the dossier must show what the run cost: {md}"
+        );
+        assert!(
+            md.contains("Build tokens: 9000") || md.contains("tokens"),
+            "tokens appear"
+        );
+        assert!(md.contains("Gate wall time"), "gate time appears");
+        assert!(
+            md.contains("Requirements: 3 total"),
+            "the delivered unit count appears"
+        );
+    }
+
+    #[test]
+    fn economics_round_trip_through_the_settings_table() {
+        let dir = std::env::temp_dir().join(format!("econ-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let persistence = Persistence::new(&dir).unwrap();
+        let e = DeliveryEconomics::of(&report("run-8"), 12000, 5);
+        persist_economics(&persistence, &e).unwrap();
+        let loaded = load_economics(&persistence, "run-8").expect("the economics persist");
+        assert_eq!(loaded, e);
+        assert_eq!(load_economics(&persistence, "run-missing"), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

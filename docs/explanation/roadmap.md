@@ -51,6 +51,9 @@ today so the gap is explicit.
   through the sandbox and records the outcome in the operate log.
 - **Approval timeout: COMPLETE** — configurable via
   `PRRICODE_APPROVAL_TIMEOUT_SECS` (default 600s), resolving as `timed_out`.')
+- ~~**Cost per delivered outcome**~~ — DONE in v0.1.0. Tokens + gate wall
+  time per verified requirement, persisted per run and rendered in the dossier
+  and the TUI rail. See `docs/reference/protocol-conformance.md`.
 - **Property-based test generation** — the verifier judges from concrete
   evidence today; generating property tests from EARS requirements text
   (fast-check/hypothesis) is the stronger oracle.

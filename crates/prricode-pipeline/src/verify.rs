@@ -16,7 +16,10 @@ use std::path::Path;
 use prricode_agent::AgentRunner;
 use prricode_persistence::Persistence;
 use prricode_spec::Requirements;
-use prricode_verify::{dossier, gates, verifier, GateRecord, Verdict, VerificationReport};
+use prricode_verify::{
+    dossier::{self, DeliveryEconomics},
+    gates, verifier, GateRecord, Verdict, VerificationReport,
+};
 use prricode_workflow::WorkflowEngine;
 
 /// Events the verify stage produces for the TUI rail: one per gate, one per
@@ -103,7 +106,18 @@ pub async fn run_verify_stage(
     dossier::persist_report(&persistence, &report)?;
     let run_dir = data_dir.join("runs").join(run_id);
     std::fs::create_dir_all(&run_dir)?;
-    let markdown = dossier::render_markdown(&report, &run_dir, &diff_summary);
+
+    // What this run cost and what it delivered: the build's own token spend
+    // from the workflow run, the gate wall time from the records, and the
+    // delivered unit count from the verdicts. Kept as one row so the TUI and
+    // pipeline/verifyRead can read it without parsing the dossier.
+    let economics = {
+        let run = engine.get(run_id)?;
+        let e = DeliveryEconomics::of(&report, run.tokens_used, run.definition.steps.len() as u32);
+        dossier::persist_economics(&persistence, &e)?;
+        Some(e)
+    };
+    let markdown = dossier::render_markdown(&report, &run_dir, &diff_summary, economics.as_ref());
     std::fs::write(run_dir.join("acceptance-dossier.md"), markdown)?;
 
     Ok(report)
@@ -372,7 +386,10 @@ mod tests {
             };
             Ok(ChatResponse {
                 message,
-                usage: Usage::default(),
+                usage: Usage {
+                    input_tokens: 120,
+                    output_tokens: 30,
+                },
                 finish_reason: finish.into(),
                 cost_usd: None,
             })
@@ -498,7 +515,40 @@ mod tests {
             .expect("the verify pass persists its report");
         assert_eq!(stored.requirements.len(), 2);
         assert_eq!(stored.run_id, run_id);
+
+        // What the run cost, and what it delivered for it — the dossier's last
+        // section plus its own persisted row.
+        let md = std::fs::read_to_string(dossier_path(&dir, &run_id)).unwrap();
+        assert!(
+            md.contains("## Delivery economics"),
+            "the dossier reports the run's economics: {md}"
+        );
+        let economics =
+            prricode_verify::dossier::load_economics(&Persistence::new(&dir).unwrap(), &run_id)
+                .expect("the economics persist as their own row");
+        assert_eq!(economics.tasks_attempted, 1, "the run attempted one task");
+        assert!(
+            economics.build_tokens > 0,
+            "the build turn spent tokens: {economics:?}"
+        );
+        assert!(economics.gate_wall_ms > 0, "the gates took real time");
+        assert_eq!(economics.requirements_verified, 1);
+        assert_eq!(economics.requirements_unverified, 1);
+        assert!(
+            economics.tokens_per_verified().is_some(),
+            "one verified requirement gives a computable rate: {economics:?}"
+        );
+        assert_eq!(
+            economics.tokens_per_verified().unwrap() as u64,
+            economics.build_tokens,
+            "one verified unit means the rate is the total"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn dossier_path(dir: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+        dir.join("runs").join(run_id).join("acceptance-dossier.md")
     }
 
     #[test]
