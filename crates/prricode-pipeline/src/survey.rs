@@ -13,6 +13,9 @@ use std::path::Path;
 /// A deterministic snapshot of an existing project.
 #[derive(Debug, Implementation, Default, PartialEq)]
 pub struct WorkspaceSurvey {
+    /// The workspace this survey describes, so a caller can check that a
+    /// planned file is really there.
+    pub workspace: std::path::PathBuf,
     /// The detected stack, or `Unknown` when the workspace is empty.
     pub stack: Option<StackKind>,
     /// Marker files that identified the stack (`Cargo.toml`, `pyproject.toml`…).
@@ -102,6 +105,7 @@ pub fn survey(workspace: &Path) -> WorkspaceSurvey {
     };
 
     WorkspaceSurvey {
+        workspace: workspace.to_path_buf(),
         stack,
         markers,
         top_level,

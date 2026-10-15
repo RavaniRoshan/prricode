@@ -36,9 +36,12 @@ pub fn plan_prompt_for(
     };
     let prompt = format!(
         "Turn these requirements into a task graph.\n{}\n\n\
-         Output a fenced JSON array of tasks. Each task: {{\"id\":\"scaffold\",\"label\":\"Scaffold\",\"prompt\":\"...\",\"depends_on\":[],\"requirement_id\":\"R1\"}}.\n\
+         Output a fenced JSON array of tasks. Each task: {{\"id\":\"scaffold\",\"label\":\"Scaffold\",\"prompt\":\"...\",\"depends_on\":[],\"requirement_id\":\"R1\",\"files\":[\"…\"]}}.
+\
          Rules: at least one task per requirement (requirement_id traces it); ids are short slugs; \
-         depends_on references earlier task ids only; {first_task_rule}.\n\
+         depends_on references earlier task ids only; {first_task_rule}; \
+         every task names the files it edits in \"files\" — workspace-relative, and they must already exist.
+\
          Output ONLY the fenced JSON block.",
         list.join("\n"),
     );
@@ -54,6 +57,33 @@ pub fn plan_prompt_for(
             tool_calls: vec![],
         },
     ]
+}
+
+/// In an existing project, every task must edit a file that is really there.
+/// A task that names nothing builds its own world beside the real one, which
+/// is the classic brownfield failure. Greenfield is unconstrained.
+pub fn validate_reuse(
+    graph: &TaskGraph,
+    survey: &crate::survey::WorkspaceSurvey,
+) -> Result<(), SpecError> {
+    if !survey.is_brownfield() {
+        return Ok(());
+    }
+    for node in &graph.nodes {
+        if node.files.is_empty() {
+            return Err(SpecError::Uncovered {
+                id: format!("{} (names no files)", node.id),
+            });
+        }
+        for file in &node.files {
+            if !survey.workspace.join(file).exists() {
+                return Err(SpecError::Uncovered {
+                    id: format!("{} ({file} does not exist)", node.id),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The retry ask when the traceability gate rejects a graph: the gap is the
@@ -219,6 +249,15 @@ pub fn parse_task_graph(model_text: &str) -> Result<TaskGraph, SpecError> {
                     .get("requirement_id")
                     .and_then(|v| v.as_str())
                     .map(String::from),
+                files: item
+                    .get("files")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|f| f.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect();
@@ -339,6 +378,72 @@ mod tests {
         );
         assert!(brown.contains("Existing tests: 1"), "{brown}");
         assert_ne!(green, brown, "the prompts must differ");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// In an existing project a task that creates its own file is the classic
+    /// brownfield failure: a second skeleton next to the first. Every task
+    /// must name the files it edits, and those files must exist.
+    #[test]
+    fn a_brownfield_task_must_name_files_that_exist() {
+        let dir = std::env::temp_dir().join(format!("reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "[project]\n").unwrap();
+        std::fs::write(dir.join("src/app.py"), "def main():\n    pass\n").unwrap();
+        let survey = crate::survey::survey(&dir);
+
+        let mut graph = parse_task_graph(
+            "```json\n[{\"id\":\"a\",\"label\":\"A\",\"prompt\":\"x\",\"depends_on\":[],\"requirement_id\":\"R1\",\"files\":[\"src/app.py\"]}]\n```",
+        )
+        .unwrap();
+        assert!(
+            validate_reuse(&graph, &survey).is_ok(),
+            "an existing file is fine"
+        );
+
+        // A file that is not there is a planning error, not a runtime surprise.
+        graph.nodes[0].files = vec!["src/does_not_exist.py".into()];
+        let err = validate_reuse(&graph, &survey).unwrap_err();
+        assert!(
+            err.to_string().contains("src/does_not_exist.py"),
+            "the missing file is named: {err}"
+        );
+
+        // A task that names nothing creates its own world.
+        graph.nodes[0].files = Vec::new();
+        let err = validate_reuse(&graph, &survey).unwrap_err();
+        assert!(
+            err.to_string().contains("names no files"),
+            "the task is told to edit what is there: {err}"
+        );
+
+        // Greenfield has no such constraint.
+        let green = crate::survey::WorkspaceSurvey::default();
+        graph.nodes[0].files = Vec::new();
+        assert!(validate_reuse(&graph, &green).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_brownfield_prompt_names_the_files_the_task_should_edit() {
+        let reqs = reqs();
+        let mut survey = crate::survey::WorkspaceSurvey::default();
+        assert!(!survey.is_brownfield());
+        let dir = std::env::temp_dir().join(format!("reuse2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        survey = crate::survey::survey(&dir);
+        let text = message_text(&plan_prompt_for(&reqs, &survey));
+        assert!(
+            text.contains("Cargo.toml"),
+            "the plan sees the project's real files: {text}"
+        );
+        assert!(
+            text.contains("files") && text.contains("edit"),
+            "each task is asked to name the files it edits: {text}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -178,6 +178,11 @@ pub struct TaskNode {
     pub prompt: String,
     pub depends_on: Vec<String>,
     pub requirement_id: Option<String>,
+    /// Existing files this task edits. In a brownfield workspace every task
+    /// names at least one, and the plan gate checks they exist — a task that
+    /// names nothing builds its own world beside the real one.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Implementation, Default, Serialize, Deserialize)]
@@ -358,6 +363,7 @@ mod tests {
             prompt: format!("do {id}"),
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
             requirement_id: req.map(String::from),
+            files: Vec::new(),
         }
     }
 
