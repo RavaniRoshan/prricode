@@ -60,7 +60,7 @@ skill unless the destination is removed first.
 ## Skill scripts (runtime contract)
 
 A skill may ship executable helpers under `scripts/`. The runtime contract,
-mirroring the prricode's skill-script invocation:
+with this invocation contract:
 
 ```
 <interpreter> <skill-dir>/scripts/<helper> <args...>
@@ -72,7 +72,7 @@ mirroring the prricode's skill-script invocation:
 - Scripts execute through **`prricode-sandbox`** with no network and a 120s
   timeout; the caller's workspace root is where data files resolve.
 - Loaded skills expose `scripts` and `script_command()`; the bundled
-  `wordcount` skill (`skills/wordcount/`) is the reference example and is
+  `wordcount` skill (`skills/wordcount/`) is the worked example and is
   executed end-to-end in its tests.
 
 ## Authoring tips

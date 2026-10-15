@@ -1,6 +1,6 @@
 # Internals Disposition
 
-Every internal struct family found in the engine surface (364 Debug-visible
+Every internal struct family in the engine surface (364 Debug-visible
 names, 251 families) is dispositioned in
 `crates/prricode-core/src/internals.rs` — a queryable inventory:
 

@@ -38,7 +38,7 @@ pub fn restore_terminal() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Poll for the next keyboard event using the reference composer keymap:
+/// Poll for the next keyboard event using the documented composer keymap:
 /// Ctrl+<c> and Alt+<c> arrive as their own actions.
 pub fn next_event(timeout: std::time::Duration) -> anyhow::Result<Option<KeyAction>> {
     if !event::poll(timeout)? {

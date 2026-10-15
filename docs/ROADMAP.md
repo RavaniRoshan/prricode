@@ -7,7 +7,7 @@ today so the gap is explicit.
 
 - **macOS computer-use backend.** prricode's computer-use is X11-first
   (screenshots via `XGetImage`, input via XTEST) and runs on macOS only under
-  XQuartz. The prricode's computer use is macOS accessibility-based.
+  XQuartz, so it is X11-only there today.
   Next step: a macOS backend behind the existing `ComputerUse` trait using the
   Accessibility APIs (AXUIElement) for reading the UI tree and CGEvent for
   input injection; `computerUseSetup/check` reports the real permission state

@@ -13,7 +13,8 @@ plan → build → verify → ship → operate, turning an idea into a verified,
 shippable product.
 
 License: MIT. All code here is our own. **Never reference, name, or cite any
-other product or company anywhere** — source, comments, docs, commit messages,
+third-party product or company anywhere** — source, comments, docs, commit
+messages,
 identifiers. The protocol surface is our own design.
 
 ## Stack
@@ -31,7 +32,8 @@ identifiers. The protocol surface is our own design.
    shapes in `prricode-core` never change. New capabilities are additive
    (new methods, new fields with `#[serde(default)]`, new tools, new
    notifications).
-2. **Public repo hygiene**: no proprietary product names in code or docs; no
+2. **Public repo hygiene**: no third-party product or company names in code
+   or docs; no
    secrets in the repo — credentials live in the 0600 credential store or env
    vars; user secrets in deploy flows are environment-only for child processes
    and redacted from every captured artifact.
@@ -92,7 +94,7 @@ identifiers. The protocol surface is our own design.
 | Protocol reference | `docs/PROTOCOL.md` |
 | Conformance report | `docs/PROTOCOL-CONFORMANCE.md` |
 | Visual/UX spec + implementation checklist | `docs/VISUAL-SPEC.md` |
-| Gap register (closed gaps + rulings) | `docs/CONFORMANCE-DECISIONS.md` |
+| Conformance decisions (closed rulings) | `docs/CONFORMANCE-DECISIONS.md` |
 | Product requirements | `docs/PRD.md`, `docs/PRD-onepager.md` |
 | Implementation plans | `docs/plans/` |
 | Roadmap (documented future work) | `docs/ROADMAP.md` |
@@ -117,7 +119,8 @@ identifiers. The protocol surface is our own design.
 ## Current state (2026-10-14)
 
 Protocol surface, TUI, agent loop, product-builder pipeline through operate,
-verification moat, multi-provider layer, and the full clean-room posture are
+verification moat, multi-provider layer, and the project's own-naming posture
+are
 complete and CI-green. Live-provider verification is done (see Testing);
 two multi-provider bugs it surfaced are fixed and tested: the `auth token`
 clap arg-id collision, and a gateway error object answered with HTTP 200.

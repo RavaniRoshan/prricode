@@ -180,6 +180,9 @@ prricode/
 - `docs/PRD.md` / `docs/PRD-onepager.md` — the product requirements and the
   positioning card
 - `docs/PROTOCOL.md` — the JSON-RPC surface: methods, types, error codes
+- `docs/PROTOCOL-CONFORMANCE.md` — what the protocol surface is and how it was
+  verified; `docs/CONFORMANCE-DECISIONS.md` — how the ambiguous parts were
+  resolved
 - `docs/CONFIGURATION.md` — providers, keys, config file (the TUI equivalents
   are listed alongside)
 - `docs/COMPUTER_USE.md` — permissions, actions, Xvfb testing

@@ -12,7 +12,7 @@ Citation format: `S:"<string>"` = literal string in the binary (with file offset
 
 ### 1.1 Screen model (binary-verified vocabulary)
 
-The protocol surface's TUI is a **single scrollback pane plus modal drawers/pickers**, not a multi-pane IDE layout.
+The TUI is a **single scrollback pane plus modal drawers/pickers**, not a multi-pane IDE layout.
 
 - The scrollback is called the **transcript**: `S:"Show model reasoning in the transcript."`, `S:"Drawers, pickers, and transcript movement"` (a keymap group name), `S:"Replaying saved transcript."`
 - The input area is the **composer**: `S:"Move left in the composer draft."`, `S:"Edit the composer draft in $VISUAL or $EDITOR."`, `S:"...Open or close the compact shortcut overlay when the composer is empty."`

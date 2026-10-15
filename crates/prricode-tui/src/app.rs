@@ -286,7 +286,7 @@ pub enum UiEvent {
     Log(String),
 }
 
-/// Terminal key actions, mirroring the reference composer keymap.
+/// Terminal key actions, mirroring the documented composer keymap.
 #[derive(Debug, Implementation, PartialEq, Eq)]
 pub enum KeyAction {
     Char(char),

@@ -18,7 +18,7 @@
 - **Deploy is agent-arranged, never assumed:** the agent proposes the target from the detected stack and the product's own config, the operator confirms the target and supplies credentials, and only then does execution run. If anything is missing, the agent asks — it never invents credentials or proceeds on assumption.
 - Human approval gates unchanged in shape: deploy (irreversible + external side effects) requires explicit confirmation; ship (GitHub release, also irreversible) requires explicit confirmation.
 - Rollback records the previous release id + a one-command rollback for whatever target shipped (GitHub release revert, or the deploy target's rollback).
-- CI gates green at every task boundary; no proprietary product names.
+- CI gates green at every task boundary; no third-party product or company names.
 
 ---
 
