@@ -11,6 +11,13 @@ It is terminal-native: run `prricode` with no arguments and the whole agent is
 a TUI — sessions, providers, models, themes, approvals, and the Product Builder
 pipeline are all commands you type, not flags you memorise.
 
+<p align="center">
+  <img src="assets/prricode-demo.gif" alt="prricode — concept to acceptance dossier" width="776">
+</p>
+<p align="center">
+  <a href="assets/prricode-demo.mp4">mp4</a> · <a href="assets/prricode-demo.webm">webm</a>
+</p>
+
 ```
 $ prricode                                   # the TUI — the default way in
 $ prricode exec "add a --json flag to the export command and test it" --provider ollama
