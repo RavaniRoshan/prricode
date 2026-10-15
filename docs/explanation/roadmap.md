@@ -50,8 +50,10 @@ today so the gap is explicit.
   network) read of stack, layout, and existing tests, folded into the spec
   and plan prompts, with the plan's first task told to preserve what is there
   instead of scaffolding a second project.
-- **Task reuse.** Plan tasks that edit existing files rather than creating
-  new ones, with the plan carrying the survey's file list.
+- ~~**Task reuse**~~ — DONE in v0.2.2. Plan tasks carry a `files` list of
+  existing workspace-relative paths, enforced by a reuse gate: a task naming a
+  file that is not there, or naming nothing, is rejected rather than building
+  its own world.
 
 ## Verification
 

@@ -27,10 +27,15 @@ pub fn graph_to_definition(graph: &TaskGraph) -> WorkflowDefinition {
             steps.push(WorkflowStep::Prompt {
                 label: format!("[wave {}] {}", wave_index + 1, node.label),
                 prompt: format!(
-                    "Task {} — requirement {}: {}",
+                    "Task {} — requirement {}: {}{}",
                     node.label,
                     node.requirement_id.as_deref().unwrap_or("n/a"),
-                    node.prompt
+                    node.prompt,
+                    if node.files.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nEdit these existing files: {}", node.files.join(", "))
+                    }
                 ),
             });
         }
@@ -302,6 +307,7 @@ mod tests {
                     prompt: "pa".into(),
                     depends_on: vec![],
                     requirement_id: None,
+                    files: Vec::new(),
                 },
                 prricode_spec::TaskNode {
                     id: "b".into(),
@@ -309,6 +315,7 @@ mod tests {
                     prompt: "pb".into(),
                     depends_on: vec!["a".into()],
                     requirement_id: Some("R1".into()),
+                    files: Vec::new(),
                 },
             ],
         };

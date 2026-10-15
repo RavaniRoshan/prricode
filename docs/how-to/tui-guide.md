@@ -37,6 +37,15 @@ cd ~/code/my-existing-app
 prricode                                   # then: /concept <what you want added>
 ```
 
+### Tasks edit what is there
+
+A plan task carries a `files` list — workspace-relative, and it must already
+exist. That is a gate, not a convention: a plan whose task names a file that
+is not there is rejected by the reuse gate, and a task that names nothing at
+all is rejected too, because a task that creates its own world is exactly the
+failure this prevents. The build turn is then told which files to open, so the
+agent edits `src/app.py` instead of inventing a second skeleton next to it.
+
 ## The composer
 
 | Key | Action |

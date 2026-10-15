@@ -1334,6 +1334,14 @@ async fn run_plan_stage(ctx: StageCtx) {
             return;
         }
     };
+    // A brownfield plan must edit files that are really there.
+    if let Err(e) = plan::validate_reuse(&graph, &survey) {
+        ctx.flow.lock().unwrap().stage_in_flight = false;
+        let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+            "pipeline: plan rejected by the reuse gate — {e}"
+        )));
+        return;
+    }
     {
         let tasks = graph.nodes.len();
         let waves = graph.waves().map(|waves| waves.len()).unwrap_or(0);
