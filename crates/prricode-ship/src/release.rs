@@ -191,25 +191,29 @@ pub(crate) async fn detect_remote(workspace: &Path) -> Option<String> {
 /// Normalize a GitHub remote URL (https or scp-like ssh) to owner/name.
 /// Non-GitHub remotes return None: gh cannot release against them.
 fn normalize_github_remote(url: &str) -> Option<String> {
-    let path = if let Some(rest) = url.strip_prefix("git@") {
-        let (host, path) = rest.split_once(':')?;
-        if !is_github_host(host) {
-            return None;
-        }
-        path
-    } else if let Some(rest) = url
+    let path = ssh_remote_path(url).or_else(|| https_remote_path(url))?;
+    repo_name(path)
+}
+
+/// The repository path from an scp-like `git@host:owner/name` remote.
+fn ssh_remote_path(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("git@")?;
+    let (host, path) = rest.split_once(':')?;
+    is_github_host(host).then_some(path)
+}
+
+/// The repository path from an `https://`, `http://`, or `ssh://` remote.
+fn https_remote_path(url: &str) -> Option<&str> {
+    let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
-        .or_else(|| url.strip_prefix("ssh://"))
-    {
-        let (host, path) = rest.split_once('/')?;
-        if !is_github_host(host) {
-            return None;
-        }
-        path
-    } else {
-        return None;
-    };
+        .or_else(|| url.strip_prefix("ssh://"))?;
+    let (host, path) = rest.split_once('/')?;
+    is_github_host(host).then_some(path)
+}
+
+/// The `owner/name` tail of a remote path, without a `.git` suffix.
+fn repo_name(path: &str) -> Option<String> {
     let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
     let (owner, name) = path.split_once('/')?;
     if owner.is_empty() || name.is_empty() || name.contains('/') {
