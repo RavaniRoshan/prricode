@@ -5,14 +5,23 @@ today so the gap is explicit.
 
 ## Platform
 
-- **macOS computer-use backend.** prricode's computer-use is X11-first
-  (screenshots via `XGetImage`, input via XTEST) and runs on macOS only under
-  XQuartz, so it is X11-only there today.
-  Next step: a macOS backend behind the existing `ComputerUse` trait using the
-  Accessibility APIs (AXUIElement) for reading the UI tree and CGEvent for
-  input injection; `computerUseSetup/check` reports the real permission state
-  (Accessibility + Screen Recording in System Settings). The Linux backend and
-  its tests stay as they are; the trait seam already exists.
+- **macOS computer-use backend.** DONE in v0.2.2: `unavailable_reason()` now
+  names macOS and Windows as *platforms without a backend* instead of blaming
+  a missing X display, and points at the interim X11 path. Still to do —
+  implemented from a macOS host, where it can be compiled and exercised:
+  - capture: `ScreenCaptureKit` (per-display, works with the Screen Recording
+    permission) with `CGWindowListCreateImage` as the fallback; the existing
+    `CaptureMethod` enum gains a macOS variant
+  - input: `CGEvent` create/post for mouse and key events, behind the same
+    `InputMethod` selection the Linux probe uses
+  - the UI tree: `AXUIElement` reads replacing the AT-SPI-shaped `unknown`
+    the Linux path reports today
+  - permissions: `computerUseSetup/check` reporting the real state of
+    Accessibility and Screen Recording in System Settings, which on macOS are
+    per-app grants rather than a display-server extension
+  Why it is not written here: none of it can be compiled or exercised from a
+  Linux host, and committing untestable platform FFI would be worse than the
+  documented gap.
 - ~~**Wayland screen capture + input selection**~~ — DONE in v0.2.2. `grim`
   screencopy for screenshots; input selection across X11 XTEST, `wlrctl`,
   `ydotool`, and the portal, reported through `computerUseSetup/check` as
