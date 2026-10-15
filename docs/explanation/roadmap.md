@@ -23,9 +23,12 @@ today so the gap is explicit.
 
 ## Voice
 
-- **Local speech.** The STT/TTS traits are OpenAI-compatible HTTP today; a
-  bundled `whisper.cpp`/`piper` backend (feature-flagged, downloaded on first
-  use) would make voice work fully offline.
+- ~~**Local speech**~~ — DONE in v0.2.2. `voice.stt_command` /
+  `voice.ttt_command` run whatever is installed (`whisper.cpp`, `piper`, your
+  own script) instead of the HTTP backend; see
+  `docs/how-to/voice.md`. Nothing is bundled.
+- **A bundled model manager.** Local speech needs the user's own build; a
+  download-on-first-use manager is a future option.
 - **Streaming ASR + wake word.** Input is file/turn-based today.
 
 ## Providers

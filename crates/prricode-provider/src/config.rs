@@ -53,6 +53,14 @@ pub struct VoiceSettings {
     pub tts_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tts_voice: Option<String>,
+    /// A local stt command, run instead of the HTTP backend. `{input}` is the
+    /// audio file; the transcript is read from stdout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stt_command: Option<String>,
+    /// A local tts command, run instead of the HTTP backend. `{output}` is the
+    /// file to write; the text arrives on stdin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

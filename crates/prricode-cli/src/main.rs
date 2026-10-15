@@ -784,7 +784,9 @@ async fn main() -> Result<()> {
             println!("Wrote {}", path.display());
         }
         Command::Voice { toggle: _, file } => {
-            use prricode_voice::{OpenAiAudio, SpeechToText};
+            use prricode_voice::{CommandSpeech, OpenAiAudio, SpeechToText};
+            let voice = prricode_provider::load_config().voice;
+            let (stt_command, tts_command) = (voice.stt_command.clone(), voice.tts_command.clone());
             let config = prricode_provider::load_config();
             let Some(stt_model) = config.voice.stt_model.clone() else {
                 println!(
@@ -810,8 +812,15 @@ async fn main() -> Result<()> {
             }
             let env: HashMap<String, String> = std::env::vars().collect();
             let provider_config = resolve_settings(kind, settings.as_ref(), &overrides, &env);
-            let audio = OpenAiAudio::new(provider_config.base_url, provider_config.api_key)
-                .with_stt(stt_model.clone());
+            let local = CommandSpeech::new(stt_command.clone(), tts_command.clone());
+            let audio: Box<dyn SpeechToText> = if local.configured() {
+                Box::new(local)
+            } else {
+                Box::new(
+                    OpenAiAudio::new(provider_config.base_url, provider_config.api_key)
+                        .with_stt(stt_model.clone()),
+                )
+            };
             let bytes = std::fs::read(file)
                 .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))?;
             let media_type = match file.extension().and_then(|e| e.to_str()) {
