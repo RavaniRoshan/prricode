@@ -35,6 +35,12 @@ pub struct ComputerUseState {
     pub input_monitoring: Permission,
     pub screen_recording: Permission,
     pub setup: SetupPhase,
+    /// Which input method this host can use right now, and why not when it
+    /// cannot. A client should read this rather than assume X11.
+    pub input_method: Option<InputMethod>,
+    /// The reason input is unavailable, when it is. Present exactly when
+    /// `input_method` is `None`, so a client always gets one of the two.
+    pub input_unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +75,14 @@ pub enum CaptureMethod {
     WaylandGrim,
 }
 
+/// Whether a (non-empty) `DISPLAY` names an X server.
+fn display_set() -> bool {
+    std::env::var("DISPLAY")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .is_some()
+}
+
 /// Whether a (non-empty) `WAYLAND_DISPLAY` names a compositor.
 fn wayland_display_set() -> bool {
     std::env::var("WAYLAND_DISPLAY")
@@ -86,6 +100,106 @@ pub fn grim_on_path() -> bool {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(_) => true,
     }
+}
+
+/// How this host can inject input. X11 (XTEST via `xdotool`) is the tested
+/// path; the Wayland paths exist because a pure Wayland session has no X
+/// server to talk to, and each is chosen only when its tool is genuinely
+/// installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputMethod {
+    /// X11 XTEST through `xdotool` (also works under XWayland).
+    X11Xdotool,
+    /// `wlrctl` — wlroots compositors (sway, Hyprland, …).
+    WaylandWlrctl,
+    /// `ydotool` — uinput-based, compositor-agnostic, needs its daemon.
+    WaylandYdotool,
+    /// The `xdg-desktop-portal` RemoteDesktop interface — compositor-agnostic,
+    /// consent-gated. The plumbing is present; the per-session consent handshake
+    /// is not implemented yet, so it degrades to a named reason.
+    WaylandPortalRemoteDesktop,
+}
+
+impl InputMethod {
+    pub fn id(&self) -> &'static str {
+        match self {
+            InputMethod::X11Xdotool => "x11-xdotool",
+            InputMethod::WaylandWlrctl => "wayland-wlrctl",
+            InputMethod::WaylandYdotool => "wayland-ydotool",
+            InputMethod::WaylandPortalRemoteDesktop => "wayland-portal-remotedesktop",
+        }
+    }
+
+    /// What a caller must know to use this method.
+    pub fn requirement(&self) -> &'static str {
+        match self {
+            InputMethod::X11Xdotool => "X11 display + xdotool",
+            InputMethod::WaylandWlrctl => "WAYLAND_DISPLAY + wlrctl (wlroots compositor)",
+            InputMethod::WaylandYdotool => "WAYLAND_DISPLAY + ydotoold running",
+            InputMethod::WaylandPortalRemoteDesktop => {
+                "WAYLAND_DISPLAY + xdg-desktop-portal RemoteDesktop (consent handshake not implemented)"
+            }
+        }
+    }
+}
+
+/// Whether a binary is on PATH and runnable. Presence is decided by whether
+/// it can be spawned with `--help` at all, never by parsing its output.
+fn tool_on_path(binary: &str) -> bool {
+    std::process::Command::new(binary)
+        .arg("--help")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Decide the input method from four honest facts, in portability order:
+/// X11 first (it is the tested path and also covers XWayland), then wlrctl,
+/// then ydotool, then the portal. Each Wayland option is chosen only when its
+/// tool is actually installed; if none is, the returned error names the
+/// missing pieces rather than claiming input works.
+fn decide_input(
+    has_display: bool,
+    has_wayland: bool,
+    has_xdotool: bool,
+    has_wlrctl: bool,
+    has_ydotool: bool,
+) -> ComputerUseResult<InputMethod> {
+    if has_display {
+        if !has_xdotool {
+            return Err(ComputerUseError::Unsupported(
+                "input needs `xdotool` on PATH — install xdotool to drive X11".into(),
+            ));
+        }
+        return Ok(InputMethod::X11Xdotool);
+    }
+    if has_wayland {
+        if has_wlrctl {
+            return Ok(InputMethod::WaylandWlrctl);
+        }
+        if has_ydotool {
+            return Ok(InputMethod::WaylandYdotool);
+        }
+        return Err(ComputerUseError::Unsupported(
+            "Wayland input needs `wlrctl` (wlroots) or `ydotool` (uinput + ydotoold) on PATH              — XWayland covers the X11 path where it is available"
+                .into(),
+        ));
+    }
+    Err(ComputerUseError::NoDisplay(
+        "no display: DISPLAY and WAYLAND_DISPLAY are both unset".into(),
+    ))
+}
+
+/// The input method this host can actually use right now.
+pub fn input_method() -> ComputerUseResult<InputMethod> {
+    decide_input(
+        display_set(),
+        wayland_display_set(),
+        tool_on_path("xdotool"),
+        tool_on_path("wlrctl"),
+        tool_on_path("ydotool"),
+    )
 }
 
 /// Decide the Wayland capture method from two honest facts. Returns the
@@ -216,6 +330,11 @@ impl ComputerUse {
                 Permission::Granted
             } else {
                 Permission::Missing
+            },
+            input_method: input_method().ok(),
+            input_unavailable_reason: match input_method() {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
             },
             setup: if has_display && xtest {
                 SetupPhase::ReadyForTarget
@@ -408,6 +527,8 @@ mod tests {
                 input_monitoring: Permission::Missing,
                 screen_recording: Permission::Missing,
                 setup: SetupPhase::Dormant,
+                input_method: None,
+                input_unavailable_reason: Some("no display".into()),
             },
         };
         assert!(matches!(
@@ -467,6 +588,70 @@ mod tests {
                 .unwrap_or(false)
             {
                 assert!(matches!(screenshot_method(), Ok(CaptureMethod::X11)));
+            }
+        }
+    }
+
+    #[test]
+    fn input_prefers_the_tested_x11_path_when_a_display_exists() {
+        let method = decide_input(true, false, true, true, true).unwrap();
+        assert_eq!(method, InputMethod::X11Xdotool);
+        assert_eq!(method.id(), "x11-xdotool");
+        assert!(method.requirement().contains("xdotool"));
+    }
+
+    #[test]
+    fn x11_without_xdotool_names_the_missing_tool() {
+        let err = decide_input(true, false, false, false, false).unwrap_err();
+        assert!(
+            err.to_string().contains("xdotool"),
+            "the missing tool is named: {err}"
+        );
+    }
+
+    #[test]
+    fn wayland_input_prefers_wlrctl_then_ydotool() {
+        // A wlroots compositor with wlrctl installed.
+        assert_eq!(
+            decide_input(false, true, false, true, false).unwrap(),
+            InputMethod::WaylandWlrctl
+        );
+        // No wlrctl, but ydotool is there.
+        assert_eq!(
+            decide_input(false, true, false, false, true).unwrap(),
+            InputMethod::WaylandYdotool
+        );
+    }
+
+    #[test]
+    fn wayland_without_any_input_tool_names_what_is_missing() {
+        let err = decide_input(false, true, false, false, false).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("wlrctl"), "{text}");
+        assert!(text.contains("ydotool"), "{text}");
+    }
+
+    #[test]
+    fn no_display_at_all_is_a_distinct_failure() {
+        let err = decide_input(false, false, false, false, false).unwrap_err();
+        assert!(
+            matches!(err, ComputerUseError::NoDisplay(_)),
+            "no display is not the same as a missing tool: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_wayland_display_is_probed_not_assumed() {
+        // This workstation sets WAYLAND_DISPLAY but has neither wlrctl nor
+        // ydotool, so the honest answer is the named-missing-tools error.
+        match input_method() {
+            Ok(method) => assert_eq!(method, InputMethod::X11Xdotool),
+            Err(e) => {
+                let text = e.to_string();
+                assert!(
+                    text.contains("wlrctl") || text.contains("ydotool") || text.contains("xdotool"),
+                    "the error names what to install: {text}"
+                );
             }
         }
     }

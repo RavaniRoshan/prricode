@@ -13,10 +13,13 @@ today so the gap is explicit.
   input injection; `computerUseSetup/check` reports the real permission state
   (Accessibility + Screen Recording in System Settings). The Linux backend and
   its tests stay as they are; the trait seam already exists.
-- **Wayland screen capture.** The `grim` path is probed and wired; a pure
-  Wayland session without XWayland now captures via `grim` (screencopy), and
-  input via `wlrctl`/portal (xdg-desktop-portal RemoteDesktop) is the
-  remaining piece.
+- ~~**Wayland screen capture + input selection**~~ — DONE in v0.2.2. `grim`
+  screencopy for screenshots; input selection across X11 XTEST, `wlrctl`,
+  `ydotool`, and the portal, reported through `computerUseSetup/check` as
+  `inputMethod` plus `inputUnavailableReason`.
+- **Wayland input execution against a live compositor.** The selection is
+  unit-tested; the wlrctl/ydotool paths have not run against a real
+  compositor, and the portal consent handshake is not implemented.
 
 ## Voice
 
