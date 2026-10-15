@@ -37,7 +37,7 @@ dispositions:
 | `RAMP-R8` risk/rollback register | Gaps named in the roadmap, no register | Partial — [the roadmap](../explanation/roadmap.md) is the register |
 | `RAMP-P1` instrumentation | No declared measurement | **Registered** — see below |
 | `RAMP-R10` preregistered targets | None | **Registered** — see below |
-| `RAMP-A4` press/facts manifest | None | Open — a facts sheet is a future asset |
+| `RAMP-A4` press/facts manifest | None | **Fixed** — `docs/explanation/facts.md` (identity, verified capabilities, honest non-claims, boilerplate) |
 | `RAMP-A6` pricing/offer terms | Open source, no paid tier | Not applicable |
 
 To re-score, re-run the preflight with the root scorer present and feed it the
