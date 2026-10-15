@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 pub mod dossier;
 pub mod gates;
+pub mod properties;
 pub mod verifier;
 
 /// One executed verification gate: a command run against the workspace.
