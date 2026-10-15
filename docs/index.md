@@ -24,7 +24,7 @@ explain a decision.
 | **[Tutorials](tutorials/first-product.md)** | Lessons. Follow one start to finish and you end up with a working product and an understanding of the stages. |
 | **[How-to guides](how-to/tui-guide.md)** | Recipes for a specific job: connect a model, run the tests, author a skill, set up computer use, contribute. |
 | **[Reference](reference/protocol.md)** | The machinery, described exactly: the JSON-RPC surface, the TUI spec, the conformance report. |
-| **[Explanation](explanation/prd.md)** | Why it is built this way: the product requirements, the architecture, the roadmap, and the decisions the conformance pass made. |
+| **[Explanation](explanation/prd.md)** | Why it is built this way: the product requirements, the architecture, the roadmap, the decisions the conformance pass made, and [launch status](explanation/launch-status.md) — what is verified, what is measured, and the preregistered targets. Press? [The facts sheet](explanation/facts.md). |
 
 ## Quick answers
 
