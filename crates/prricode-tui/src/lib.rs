@@ -1138,39 +1138,6 @@ async fn set_stage(ctx: &StageCtx, label: &str) {
     });
 }
 
-/// One silent model turn for a pipeline stage prompt.
-fn stage_turn_input(ctx: &StageCtx, messages: Vec<ChatMessage>) -> TurnInput {
-    let prompt = messages
-        .iter()
-        .map(message_text)
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    TurnInput {
-        session_id: ctx.session_id.clone(),
-        model: ctx.model.clone(),
-        approval_mode: ctx.approval_mode,
-        workspace_root: ctx.workspace_root.clone(),
-        data_dir: ctx.data_dir.clone(),
-        history: Vec::new(),
-        user_content: vec![ContentPart::text(prompt)],
-        goal: None,
-        skills_prompt: None,
-        max_iterations: 15,
-        turn_id: uuid::Uuid::now_v7().to_string(),
-    }
-}
-
-fn message_text(message: &ChatMessage) -> String {
-    message
-        .content
-        .iter()
-        .map(|part| match part {
-            ContentPart::Text(text) => text.clone(),
-            ContentPart::Image { .. } => String::new(),
-        })
-        .collect()
-}
-
 /// The Specify stage: a confirmed concept becomes a validated Core-4 spec.
 async fn run_specify_stage(ctx: StageCtx) {
     let concept = {
@@ -1193,9 +1160,23 @@ async fn run_specify_stage(ctx: StageCtx) {
     };
     let preset = concept.stack.as_ref().and_then(|stack| stack.preset);
     set_stage(&ctx, PipelineStage::Specify.label()).await;
-    let input = stage_turn_input(&ctx, specify::spec_prompt(&concept, preset));
-    let outcome = match ctx.pipeline.runner.run_subagent(input).await {
-        Ok(outcome) => outcome,
+    // The repair loop lives in the pipeline crate (bounded, gate error fed
+    // back to the model); the TUI only surfaces its notices.
+    let requirements = match specify::produce_requirements(
+        &ctx.pipeline.runner,
+        &concept,
+        preset,
+        &ctx.model,
+        ctx.approval_mode,
+        |notice| {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: EARS gate sent it back — {notice}"
+            )));
+        },
+    )
+    .await
+    {
+        Ok(requirements) => requirements,
         Err(e) => {
             ctx.flow.lock().unwrap().stage_in_flight = false;
             let _ = ctx
@@ -1204,29 +1185,19 @@ async fn run_specify_stage(ctx: StageCtx) {
             return;
         }
     };
-    match specify::parse_requirements(&outcome.content) {
-        Ok(requirements) => {
-            let count = requirements.items.len();
-            {
-                let mut flow = ctx.flow.lock().unwrap();
-                let spec = flow.spec.get_or_insert_with(|| Spec::draft(concept));
-                spec.regenerate(requirements);
-                flow.stage_in_flight = false;
-                persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
-            }
-            let _ = ctx.ui_tx.send(UiEvent::PipelineGate {
-                gate: "spec-confirmation".to_string(),
-            });
-            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
-                "pipeline: spec ready — {count} requirements; y to confirm, n to reject"
-            )));
-        }
-        Err(e) => {
-            ctx.flow.lock().unwrap().stage_in_flight = false;
-            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
-                "pipeline: spec rejected by the EARS gate — {e}"
-            )));
-        }
+    {
+        let count = requirements.items.len();
+        let mut flow = ctx.flow.lock().unwrap();
+        let spec = flow.spec.get_or_insert_with(|| Spec::draft(concept));
+        spec.regenerate(requirements);
+        flow.stage_in_flight = false;
+        persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
+        let _ = ctx.ui_tx.send(UiEvent::PipelineGate {
+            gate: "spec-confirmation".to_string(),
+        });
+        let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+            "pipeline: spec ready — {count} requirements; y to confirm, n to reject"
+        )));
     }
 }
 
@@ -1251,9 +1222,21 @@ async fn run_plan_stage(ctx: StageCtx) {
         requirements
     };
     set_stage(&ctx, PipelineStage::Plan.label()).await;
-    let input = stage_turn_input(&ctx, plan::plan_prompt(&requirements));
-    let outcome = match ctx.pipeline.runner.run_subagent(input).await {
-        Ok(outcome) => outcome,
+    // The repair loop lives in the pipeline crate; the TUI surfaces notices.
+    let graph = match plan::produce_task_graph(
+        &ctx.pipeline.runner,
+        &requirements,
+        &ctx.model,
+        ctx.approval_mode,
+        |notice| {
+            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+                "pipeline: traceability gate sent it back — {notice}"
+            )));
+        },
+    )
+    .await
+    {
+        Ok(graph) => graph,
         Err(e) => {
             ctx.flow.lock().unwrap().stage_in_flight = false;
             let _ = ctx
@@ -1262,33 +1245,16 @@ async fn run_plan_stage(ctx: StageCtx) {
             return;
         }
     };
-    match plan::parse_task_graph(&outcome.content) {
-        Ok(graph) => {
-            if let Err(e) = plan::validate_traceability(&graph, &requirements) {
-                ctx.flow.lock().unwrap().stage_in_flight = false;
-                let _ = ctx.ui_tx.send(UiEvent::Log(format!(
-                    "pipeline: plan rejected by the traceability gate — {e}"
-                )));
-                return;
-            }
-            let tasks = graph.nodes.len();
-            let waves = graph.waves().map(|waves| waves.len()).unwrap_or(0);
-            {
-                let mut flow = ctx.flow.lock().unwrap();
-                flow.graph = Some(graph);
-                flow.stage_in_flight = false;
-                persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
-            }
-            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
-                "pipeline: plan ready — {tasks} tasks in {waves} waves; /build to run the build"
-            )));
-        }
-        Err(e) => {
-            ctx.flow.lock().unwrap().stage_in_flight = false;
-            let _ = ctx.ui_tx.send(UiEvent::Log(format!(
-                "pipeline: plan failed to parse — {e}"
-            )));
-        }
+    {
+        let tasks = graph.nodes.len();
+        let waves = graph.waves().map(|waves| waves.len()).unwrap_or(0);
+        let mut flow = ctx.flow.lock().unwrap();
+        flow.graph = Some(graph);
+        flow.stage_in_flight = false;
+        persist_pipeline(&ctx.pipeline, &ctx.session_id, &flow);
+        let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+            "pipeline: plan ready — {tasks} tasks in {waves} waves; /build to run the build"
+        )));
     }
 }
 
