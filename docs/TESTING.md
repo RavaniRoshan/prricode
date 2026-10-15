@@ -130,11 +130,24 @@ the workspace → the per-task gates actually running (pytest's cache appears)
 `<data_dir>/runs/<run_id>/`. The verifier turn is the model's, so an
 occasional malformed reply fails the run; re-run it.
 
+A second live test drives `specify::produce_requirements` — the function the
+specify stage calls, including its repair loop:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... MODEL='nvidia/nemotron-3-super-120b-a12b:free' \
+  cargo test -p prricode-pipeline live_specify_repairs_a_rejected_list -- --ignored --nocapture
+```
+
+The repair loop itself (a rejected list gets the gate error back as a bounded
+repair ask, and gives up after three attempts) is covered deterministically by
+scripted-provider tests, so it does not depend on a model misbehaving on cue.
+
 Known limits of the free tiers, not of prricode: OpenRouter's shared free
 pool returns HTTP 429 when the upstream provider is exhausted (Google,
-Poolside), and one gateway answered HTTP 200 with a top-level `error`
-object and no `choices` — prricode now surfaces that error verbatim instead
-of "response has no choices".
+Poolside), occasionally drops a stream mid-body (surfaced as
+`error decoding response body`), and one gateway answered HTTP 200 with a
+top-level `error` object and no `choices` — prricode now surfaces that error
+verbatim instead of "response has no choices".
 
 The gate-runner tests execute real toolchains in temp workspaces — the Rust
 path (cargo) is deterministic everywhere; the Node gate test needs node on
