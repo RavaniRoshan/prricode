@@ -2164,7 +2164,27 @@ impl PrricodeServer {
             .as_deref()
             .and_then(|run_id| prricode_verify::dossier::load_report(&self.persistence, run_id))
             .or_else(|| Self::latest_dossier_report(&self.persistence));
-        Ok(json!({ "report": report }))
+        // What the run cost and what it delivered, resolved exactly like the
+        // report: this run's row, else the latest.
+        let economics = state
+            .run_id
+            .as_deref()
+            .and_then(|run_id| prricode_verify::dossier::load_economics(&self.persistence, run_id))
+            .or_else(|| Self::latest_economics(&self.persistence));
+        Ok(json!({ "report": report, "economics": economics }))
+    }
+
+    /// The most recent persisted delivery-economics row.
+    fn latest_economics(
+        persistence: &Persistence,
+    ) -> Option<prricode_verify::dossier::DeliveryEconomics> {
+        let run_id = persistence
+            .list_settings()
+            .ok()?
+            .into_iter()
+            .filter_map(|(key, _)| key.strip_prefix("economics:").map(String::from))
+            .max()?;
+        prricode_verify::dossier::load_economics(persistence, &run_id)
     }
 
     /// The most recent persisted verification report: dossier rows are keyed

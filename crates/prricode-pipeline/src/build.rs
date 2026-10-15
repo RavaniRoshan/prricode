@@ -480,6 +480,31 @@ mod live {
         assert!(dossier.exists(), "the dossier renders into the run dir");
         eprintln!("dossier: {}", dossier.display());
 
+        // What the run cost and what it delivered for it.
+        let md = std::fs::read_to_string(&dossier).unwrap();
+        assert!(
+            md.contains("## Delivery economics"),
+            "the dossier must report the run's economics"
+        );
+        let economics = prricode_verify::dossier::load_economics(&persistence, &run_id)
+            .expect("the economics persist as their own row");
+        eprintln!(
+            "economics: {} tokens over {} tasks · {} ms of gates · {} verified of {} requirements",
+            economics.build_tokens,
+            economics.tasks_attempted,
+            economics.gate_wall_ms,
+            economics.requirements_verified,
+            economics.requirements_total
+        );
+        assert!(
+            economics.build_tokens > 0,
+            "a live build spends tokens: {economics:?}"
+        );
+        assert!(
+            economics.tokens_per_verified().is_some(),
+            "the verified requirement gives a computable rate: {economics:?}"
+        );
+
         std::fs::remove_dir_all(&workspace).ok();
         std::fs::remove_dir_all(&data_dir).ok();
     }

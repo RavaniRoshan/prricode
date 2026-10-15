@@ -1425,6 +1425,10 @@ async fn run_verify_after_build(
             .filter(|v| v.verdict == verdict)
             .count()
     };
+    let economics = match Persistence::new(&ctx.data_dir) {
+        Ok(persistence) => prricode_verify::dossier::load_economics(&persistence, run_id),
+        Err(_) => None,
+    };
     let _ = ctx.ui_tx.send(UiEvent::VerifyDone {
         report_path: dossier_path.display().to_string(),
         gates_passed,
@@ -1432,7 +1436,22 @@ async fn run_verify_after_build(
         pass: tally(Verdict::Pass),
         fail: tally(Verdict::Fail),
         unverified: tally(Verdict::Unverified),
+        build_tokens: economics.as_ref().map(|e| e.build_tokens).unwrap_or(0),
+        tasks_attempted: economics.as_ref().map(|e| e.tasks_attempted).unwrap_or(0),
     });
+    if let Some(e) = economics {
+        let per = e.tokens_per_verified();
+        let _ = ctx.ui_tx.send(UiEvent::Log(format!(
+            "cost: {} tokens over {} tasks · {} ms of gates · {} verified of {} requirements{}",
+            e.build_tokens,
+            e.tasks_attempted,
+            e.gate_wall_ms,
+            e.requirements_verified,
+            e.requirements_total,
+            per.map(|r| format!(" · {r:.0} tokens per verified requirement"))
+                .unwrap_or_default()
+        )));
+    }
 }
 
 /// Bounded filesystem glob for the '@' picker (no VCS/build dirs).

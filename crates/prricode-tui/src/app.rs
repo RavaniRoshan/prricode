@@ -137,9 +137,26 @@ pub struct PipelineView {
 pub struct VerifyCounts {
     pub gates_passed: usize,
     pub gates_total: usize,
+    /// What the run cost, for the rail's per-unit rate. `0` when the build
+    /// reported no usage (a scripted provider, say).
+    pub build_tokens: u64,
+    /// Tasks the run attempted.
+    pub tasks_attempted: u32,
     pub pass: usize,
     pub fail: usize,
     pub unverified: usize,
+}
+
+impl VerifyCounts {
+    /// The rail's cost-per-delivered-unit suffix: tokens per verified
+    /// requirement, or nothing when nothing was verified.
+    pub fn economics_suffix(&self) -> String {
+        if self.pass == 0 || self.build_tokens == 0 {
+            return String::new();
+        }
+        let rate = self.build_tokens as f64 / self.pass as f64;
+        format!(" · {:.1}k tok/req", rate / 1000.0)
+    }
 }
 
 /// Ship, deploy, and health tallies the rail renders as its ship segment.
@@ -158,12 +175,13 @@ impl PipelineView {
     pub fn verify_segment(&self) -> Option<String> {
         self.verify.as_ref().map(|verify| {
             format!(
-                "verify: gates {}/{} · verdicts {}P/{}F/{}U",
+                "verify: gates {}/{} · verdicts {}P/{}F/{}U{}",
                 verify.gates_passed,
                 verify.gates_total,
                 verify.pass,
                 verify.fail,
-                verify.unverified
+                verify.unverified,
+                verify.economics_suffix()
             )
         })
     }
@@ -238,6 +256,9 @@ pub enum UiEvent {
         pass: usize,
         fail: usize,
         unverified: usize,
+        /// What the run cost, for the rail's per-unit rate.
+        build_tokens: u64,
+        tasks_attempted: u32,
     },
     /// The ship stage released the workspace: its tag, the release URL, and
     /// the install steps to show.
@@ -1343,6 +1364,8 @@ impl App {
                 pass,
                 fail,
                 unverified,
+                build_tokens,
+                tasks_attempted,
             } => {
                 self.dossier_path = Some(report_path);
                 let stage = self
@@ -1359,6 +1382,8 @@ impl App {
                         pass,
                         fail,
                         unverified,
+                        build_tokens,
+                        tasks_attempted,
                     }),
                     ship: None,
                 });
@@ -2201,12 +2226,19 @@ mod tests {
                 pass: 1,
                 fail: 0,
                 unverified: 1,
+                build_tokens: 9000,
+                tasks_attempted: 7,
             },
             &tx,
         );
         assert!(app
             .status_line()
             .contains("verify: gates 3/3 · verdicts 1P/0F/1U"));
+        assert!(
+            app.status_line().contains("9.0k tok/req"),
+            "the rail reports the cost per verified requirement: {}",
+            app.status_line()
+        );
         assert_eq!(
             app.dossier_path.as_deref(),
             Some("/tmp/runs/run-1/acceptance-dossier.md")

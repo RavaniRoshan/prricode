@@ -113,6 +113,24 @@ matches the specified 18-subcommand surface; the approval modes are
 `sha256:6de32db08bbbe0deb478d2bfcaba001e9fb490986bc80db3aceb4d996abf7df9`
 unchanged, so the handshake identifies as protocol-compatible.
 
+## Delivery economics
+
+Every verification pass records what the run cost and what it delivered for
+it, as its own persisted row and the last section of the dossier:
+
+- **Build tokens** — the model tokens the build turns spent
+- **Gate wall time** — the milliseconds the per-task gates consumed
+- **Delivered units** — requirements total / verified / failed / unverified
+- **Per verified requirement** — tokens and gate seconds per verified unit
+
+The two currencies stay separate on purpose: blending tokens with seconds
+would hide which one is expensive. When nothing was verified the rate is
+reported as *not computable* rather than divided by zero.
+
+Read it back with `pipeline/verifyRead` (`economics` alongside `report`), see
+it in the TUI rail (`verify: gates 3/3 · verdicts 1P/0F/1U · 9.0k tok/req`),
+or read `acceptance-dossier.md` in the run directory.
+
 ## Verification runs
 
 - `cargo build` — clean, zero warnings
