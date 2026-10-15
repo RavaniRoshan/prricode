@@ -225,7 +225,9 @@ mod tests {
         assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
         assert_eq!(output.stdout.trim(), "print('outside')");
 
-        // Without the extra path the sandbox is honest about hiding it.
+        // Without the extra path the sandbox is honest about hiding it — but
+        // only when there is a sandbox: with no bubblewrap the level degrades
+        // to None and nothing is hidden by design.
         let bare = SandboxSpec {
             extra_ro_paths: Vec::new(),
             ..spec.clone()
@@ -236,11 +238,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_ne!(
-            hidden.exit_code, 0,
-            "a path the caller did not name must stay hidden: {}",
-            hidden.stderr
-        );
+        if hidden.sandbox_level == SandboxLevel::Bubblewrap {
+            assert_ne!(
+                hidden.exit_code, 0,
+                "a path the caller did not name must stay hidden: {}",
+                hidden.stderr
+            );
+        }
         std::fs::remove_dir_all(&workspace).ok();
         std::fs::remove_dir_all(&outside).ok();
     }
