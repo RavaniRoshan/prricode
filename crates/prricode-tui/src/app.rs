@@ -1146,6 +1146,32 @@ impl App {
                     let _ = commands.send(UiCommand::OperateRun);
                     self.push_system("operate: running a health pass".to_string());
                 }
+                // Business layer — drafts a human confirms, never decisions.
+                // Prices come from the operator, never from the model.
+                "research" => {
+                    self.push_system(
+                        "research: draft a brief against a named competitor set — every claim \
+                         must carry its source or be marked [needs source]"
+                            .to_string(),
+                    );
+                    let _ = commands.send(UiCommand::BusinessResearch);
+                }
+                "pricing" => {
+                    self.push_system(
+                        "pricing: name the tiers and type the prices — the harness will \
+                         refuse a tier with no price or no limit"
+                            .to_string(),
+                    );
+                    let _ = commands.send(UiCommand::BusinessPricing);
+                }
+                "landing" => {
+                    self.push_system(
+                        "landing: draft the page — headline, sections, and exactly one \
+                         primary call to action"
+                            .to_string(),
+                    );
+                    let _ = commands.send(UiCommand::BusinessLanding);
+                }
                 "dossier" => self.open_dossier(),
                 "theme" => {
                     if arg.is_empty() {

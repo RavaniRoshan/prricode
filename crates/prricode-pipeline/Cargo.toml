@@ -15,6 +15,7 @@ prricode-sandbox = { path = "../prricode-sandbox" }
 prricode-verify = { path = "../prricode-verify" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 futures-util = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
