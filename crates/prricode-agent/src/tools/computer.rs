@@ -99,9 +99,7 @@ impl Tool for ComputerTool {
 
         let computer = ComputerUse::probe();
         if !computer.available() {
-            return Ok(ToolOutput::error(
-                "computer use unavailable: no X11 display (set DISPLAY)".to_string(),
-            ));
+            return Ok(ToolOutput::error(computer.unavailable_reason()));
         }
         if matches!(action, ComputerAction::Screenshot) {
             let bytes = computer
