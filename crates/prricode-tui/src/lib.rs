@@ -93,6 +93,13 @@ pub enum UiCommand {
     },
     /// Run a standalone operate health pass.
     OperateRun,
+    /// Draft the market/competitive research brief. The output is a draft a
+    /// human confirms; unsourced claims are reported, not hidden.
+    BusinessResearch,
+    /// Draft the pricing model. Tiers and prices come from the operator.
+    BusinessPricing,
+    /// Draft the landing page plan.
+    BusinessLanding,
     /// Switch the persisted TUI theme (settings key `theme`).
     SetTheme {
         slug: String,
@@ -580,6 +587,18 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                     };
                     operate_pass(&ui_tx, &agent_persistence, &session_id, &workspace).await;
                 }
+                // The business layer drafts. Each is written to the run
+                // directory and opened for review; nothing here deploys,
+                // publishes, or prices on its own.
+                UiCommand::BusinessResearch => {
+                    business_draft(&ui_tx, &agent_data_dir, &session_id, DraftKind::Research);
+                }
+                UiCommand::BusinessPricing => {
+                    business_draft(&ui_tx, &agent_data_dir, &session_id, DraftKind::Pricing);
+                }
+                UiCommand::BusinessLanding => {
+                    business_draft(&ui_tx, &agent_data_dir, &session_id, DraftKind::Landing);
+                }
                 UiCommand::SetTheme { slug } => {
                     if let Err(e) = agent_persistence.set_setting("theme", &slug) {
                         tracing::warn!("theme save failed: {e}");
@@ -928,6 +947,70 @@ struct ShipCtx {
 /// deploy flow step by step — each step's events become UI events, and each
 /// pending input waits for the operator's answer. The flow ends when it is
 /// done, the deploy is declined, or the answer channel closes.
+/// The kind of business-layer draft a slash command asked for.
+#[derive(Debug, Implementation, Copy)]
+enum DraftKind {
+    Research,
+    Pricing,
+    Landing,
+}
+
+/// Write one business-layer draft into the session's run directory.
+///
+/// The drafts are deliberately *unfilled*: the model is never allowed to
+/// invent a price or an unsourced claim, and the harness's job is to hand the
+/// operator a form with the invariants stated. The dossier-style file is what
+/// lands in the run directory, and the operator fills the rest.
+fn business_draft(
+    ui_tx: &tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    data_dir: &std::path::Path,
+    session_id: &str,
+    kind: DraftKind,
+) {
+    let dir = data_dir.join("runs").join(session_id).join("business");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        let _ = ui_tx.send(UiEvent::Log(format!(
+            "business: cannot create {dir:?}: {e}"
+        )));
+        return;
+    }
+    let (name, body) = match kind {
+        DraftKind::Research => (
+            "research.md",
+            prricode_pipeline::business::render_research(
+                &prricode_pipeline::business::ResearchBrief::default(),
+            ),
+        ),
+        DraftKind::Pricing => (
+            "pricing.md",
+            prricode_pipeline::business::render_pricing(
+                &prricode_pipeline::business::PricingModel::default(),
+            ),
+        ),
+        DraftKind::Landing => (
+            "landing.md",
+            prricode_pipeline::business::render_landing(
+                &prricode_pipeline::business::LandingPlan::default(),
+            ),
+        ),
+    };
+    let path = dir.join(name);
+    match std::fs::write(&path, body) {
+        Ok(()) => {
+            let _ = ui_tx.send(UiEvent::Log(format!(
+                "{}: draft written to {} — edit it; the harness refuses unsourced claims, unpriced tiers, and a page with no call to action",
+                name.trim_end_matches(".md"),
+                path.display()
+            )));
+        }
+        Err(e) => {
+            let _ = ui_tx.send(UiEvent::Log(format!(
+                "business: cannot write {path:?}: {e}"
+            )));
+        }
+    }
+}
+
 async fn run_ship_flow(mut ctx: ShipCtx) {
     let record = match run_ship_stage(
         &ctx.pipeline.runner,
