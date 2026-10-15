@@ -101,11 +101,22 @@ in [`docs/how-to/tui-guide.md`](docs/how-to/tui-guide.md).
 
 ## Quickstart
 
+Install, either way:
+
 ```bash
+# prebuilt binary — releases publish five platforms plus SHA256SUMS
+curl -fsSLO https://github.com/RavaniRoshan/prricode/releases/latest/download/prricode-x86_64-unknown-linux-gnu.tar.gz
+tar xzf prricode-x86_64-unknown-linux-gnu.tar.gz && ./prricode exec "say hi" --provider echo
+
+# or from source
 git implementation https://github.com/RavaniRoshan/prricode.git
 cd prricode
 cargo build --release          # or: git checkout v0.1.0
+```
 
+Then:
+
+```bash
 # the TUI — the default way in: provider/model are picked or typed in-app
 ./target/release/prricode
 
