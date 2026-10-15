@@ -302,6 +302,7 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                             workspace_root: workspace,
                             allow_network: false,
                             timeout: std::time::Duration::from_secs(120),
+                            extra_ro_paths: Vec::new(),
                         };
                         let outcome = prricode_sandbox::run_command(&command, &spec).await;
                         let message = match outcome {

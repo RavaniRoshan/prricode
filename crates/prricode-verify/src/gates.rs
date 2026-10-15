@@ -83,6 +83,7 @@ pub async fn run_gates(run_id: &str, workspace: &Path, plan: &GatePlan) -> Vec<G
             workspace_root: workspace.to_path_buf(),
             allow_network: false,
             timeout: Duration::from_secs(300),
+            extra_ro_paths: Vec::new(),
         };
         let started = Instant::now();
         let outcome = prricode_sandbox::run_command(command, &spec).await;

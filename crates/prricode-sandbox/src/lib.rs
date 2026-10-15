@@ -16,12 +16,17 @@ pub enum SandboxLevel {
     Bubblewrap,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct SandboxSpec {
     pub workspace_root: PathBuf,
     /// Allow loopback + outbound network (web_fetch needs it; default off).
     pub allow_network: bool,
     pub timeout: Duration,
+    /// Read-only paths outside the workspace root the caller explicitly
+    /// names, bind-mounted into the sandbox. A skill's own directory is the
+    /// motivating case: the agent must be able to run a helper that lives
+    /// beside the skill, not inside the workspace it is working on.
+    pub extra_ro_paths: Vec<PathBuf>,
 }
 
 pub struct SandboxOutput {
@@ -75,6 +80,11 @@ pub async fn run_command(command: &str, spec: &SandboxSpec) -> SandboxResult<San
             c.arg("--dev").arg("/dev");
             c.arg("--proc").arg("/proc");
             c.arg("--tmpfs").arg("/tmp");
+            for path in &spec.extra_ro_paths {
+                if path.exists() {
+                    c.arg("--ro-bind").arg(path).arg(path);
+                }
+            }
             c.arg("--bind")
                 .arg(&spec.workspace_root)
                 .arg(&spec.workspace_root);
@@ -180,9 +190,58 @@ mod tests {
             workspace_root: std::env::temp_dir(),
             allow_network: false,
             timeout: Duration::from_secs(10),
+            extra_ro_paths: Vec::new(),
         };
         let output = run_command("echo sandbox-ok", &spec).await.unwrap();
         assert_eq!(output.exit_code, 0);
         assert!(output.stdout.contains("sandbox-ok"));
+    }
+
+    #[tokio::test]
+    async fn an_extra_ro_path_is_visible_inside_the_sandbox() {
+        // A path outside the workspace root the caller explicitly named must
+        // be readable: skills execute helpers that live in the skill's own
+        // directory, and that directory is not the workspace.
+        let workspace = std::env::temp_dir().join(format!("sbx-ws-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("sbx-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("helper.py"), "print('outside')\n").unwrap();
+
+        let spec = SandboxSpec {
+            workspace_root: workspace.clone(),
+            allow_network: false,
+            timeout: Duration::from_secs(30),
+            extra_ro_paths: vec![outside.clone()],
+        };
+        let output = run_command(
+            &format!("cat {}", outside.join("helper.py").display()),
+            &spec,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert_eq!(output.stdout.trim(), "print('outside')");
+
+        // Without the extra path the sandbox is honest about hiding it.
+        let bare = SandboxSpec {
+            extra_ro_paths: Vec::new(),
+            ..spec.clone()
+        };
+        let hidden = run_command(
+            &format!("cat {}", outside.join("helper.py").display()),
+            &bare,
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            hidden.exit_code, 0,
+            "a path the caller did not name must stay hidden: {}",
+            hidden.stderr
+        );
+        std::fs::remove_dir_all(&workspace).ok();
+        std::fs::remove_dir_all(&outside).ok();
     }
 }

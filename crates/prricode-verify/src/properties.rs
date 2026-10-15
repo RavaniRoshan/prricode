@@ -268,6 +268,7 @@ pub async fn write_and_run(
         workspace_root: workspace.to_path_buf(),
         allow_network: false,
         timeout: std::time::Duration::from_secs(300),
+        extra_ro_paths: Vec::new(),
     };
     let mut record = GateRecord::new(run_id, "property", &command);
     let started = std::time::Instant::now();
