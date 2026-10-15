@@ -30,13 +30,24 @@ fn concept_block(concept: &Concept, preset: Option<StackPreset>) -> String {
 }
 
 pub fn spec_prompt(concept: &Concept, preset: Option<StackPreset>) -> Vec<ChatMessage> {
+    spec_prompt_for(concept, preset, &crate::survey::WorkspaceSurvey::default())
+}
+
+/// The specify prompt, with the workspace survey's brownfield block appended
+/// when the launch workspace already holds a project.
+pub fn spec_prompt_for(
+    concept: &Concept,
+    preset: Option<StackPreset>,
+    survey: &crate::survey::WorkspaceSurvey,
+) -> Vec<ChatMessage> {
     let prompt = format!(
         "Produce the product spec for this concept.\n\
          {}\n\
          Output a JSON array of requirements. Each requirement: {{\"id\":\"R1\",\"ears\":\"WHEN ... THE SYSTEM SHALL ...\",\"acceptance\":[\"...\"]}}.\n\
-         Rules: EARS form only; at least one acceptance criterion per requirement; ids sequential from R1.\n\
+         Rules: EARS form only; at least one acceptance criterion per requirement; ids sequential from R1.{}\n\
          Output ONLY the fenced JSON block.\n",
         concept_block(concept, preset),
+        survey.prompt_block(),
     );
     vec![
         ChatMessage::system_text(
@@ -95,9 +106,32 @@ pub async fn produce_requirements(
     preset: Option<StackPreset>,
     model: &str,
     approval_mode: prricode_core::ApprovalMode,
+    on_retry: impl FnMut(&str),
+) -> anyhow::Result<Requirements> {
+    produce_requirements_for(
+        runner,
+        concept,
+        preset,
+        model,
+        approval_mode,
+        &crate::survey::WorkspaceSurvey::default(),
+        on_retry,
+    )
+    .await
+}
+
+/// The specify run against a surveyed workspace: a brownfield prompt plans
+/// around what is already there instead of for an empty directory.
+pub async fn produce_requirements_for(
+    runner: &prricode_agent::AgentRunner,
+    concept: &Concept,
+    preset: Option<StackPreset>,
+    model: &str,
+    approval_mode: prricode_core::ApprovalMode,
+    survey: &crate::survey::WorkspaceSurvey,
     mut on_retry: impl FnMut(&str),
 ) -> anyhow::Result<Requirements> {
-    let mut messages = spec_prompt(concept, preset);
+    let mut messages = spec_prompt_for(concept, preset, survey);
     for attempt in 1..=SPEC_ATTEMPTS {
         let user_content: Vec<ContentPart> =
             messages.iter().flat_map(|m| m.content.implementation()).collect();

@@ -19,8 +19,8 @@ and delivery are. Every agent optimizes the step that doesn't matter.
 | Last mile to production — infra, CI/CD, deploy, observability, rollback | **Yes — the white space.** Nobody carries a concept to a live, operated product. |
 | Verification as the product — independent adversarial verifier, acceptance dossier | **Yes — the moat.** The builder never judges its own work. |
 | Cost per delivered outcome as a first-class metric | **Yes.** Tokens + CI + reviewer minutes per shipped unit. |
-| Layered spec model (EARS, waves) | **Table stakes.** Kiro/Spec Kit/SpecShip already did this. |
-| Model-agnostic | **Table stakes.** OpenCode/Cline/OpenHands already did this. |
+| Layered spec model (EARS, waves) | **Table stakes.** The whole category already did this. |
+| Model-agnostic | **Table stakes.** The whole executor category already did this. |
 
 **The UX trick:** the TUI looks like any coding agent — composer, streaming,
 tools, approvals. What's different is underneath: a gated pipeline (Concept →

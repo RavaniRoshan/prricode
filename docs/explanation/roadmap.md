@@ -44,6 +44,15 @@ today so the gap is explicit.
 - **Session picker list** — `/sessions` shows state today; a navigable picker
   of stored sessions is the follow-up.
 
+## Brownfield
+
+- ~~**Workspace survey**~~ — DONE in v0.1.1. A deterministic (no model, no
+  network) read of stack, layout, and existing tests, folded into the spec
+  and plan prompts, with the plan's first task told to preserve what is there
+  instead of scaffolding a second project.
+- **Task reuse.** Plan tasks that edit existing files rather than creating
+  new ones, with the plan carrying the survey's file list.
+
 ## Verification
 
 - **Autonomous rollback execution: COMPLETE** — armed at deploy-confirmation
