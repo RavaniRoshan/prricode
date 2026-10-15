@@ -324,8 +324,13 @@ pub async fn run_skill_script(
         // The script lives beside the skill, which is not the workspace the
         // agent is working in. Without this bind the sandbox (rightly) hides
         // it and the helper cannot be opened — visible when the skill ships
-        // under a path the sandbox covers with a tmpfs.
-        extra_ro_paths: vec![skill.location.clone()],
+        // under a path the sandbox covers with a tmpfs. `location` is the
+        // SKILL.md file, so the directory is its parent.
+        extra_ro_paths: skill
+            .location
+            .parent()
+            .map(|dir| vec![dir.to_path_buf()])
+            .unwrap_or_default(),
     };
     let full = command.join(" ");
     let output = prricode_sandbox::run_command(&full, &spec).await?;
