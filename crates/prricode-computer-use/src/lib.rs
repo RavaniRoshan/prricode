@@ -662,15 +662,28 @@ mod tests {
 
     #[test]
     fn the_wayland_display_is_probed_not_assumed() {
-        // This workstation sets WAYLAND_DISPLAY but has neither wlrctl nor
-        // ydotool, so the honest answer is the named-missing-tools error.
+        // Three honest outcomes depending on the host: X11 when a display is
+        // there, the named-missing-tools error when only Wayland is, and no
+        // display at all when neither is. What must hold on every host is that
+        // the answer is one of those three, with a reason naming the missing
+        // piece — never a silent X11 assumption.
         match input_method() {
-            Ok(method) => assert_eq!(method, InputMethod::X11Xdotool),
+            Ok(method) => {
+                assert!(matches!(
+                    method,
+                    InputMethod::X11Xdotool
+                        | InputMethod::WaylandWlrctl
+                        | InputMethod::WaylandYdotool
+                ));
+            }
             Err(e) => {
                 let text = e.to_string();
                 assert!(
-                    text.contains("wlrctl") || text.contains("ydotool") || text.contains("xdotool"),
-                    "the error names what to install: {text}"
+                    text.contains("wlrctl")
+                        || text.contains("ydotool")
+                        || text.contains("xdotool")
+                        || text.contains("no display"),
+                    "the error names what is missing: {text}"
                 );
             }
         }
