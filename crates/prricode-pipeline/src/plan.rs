@@ -177,6 +177,7 @@ pub async fn produce_task_graph_for(
                 user_content,
                 goal: None,
                 skills_prompt: None,
+                allowed_tools: Vec::new(),
                 max_iterations: 1,
                 turn_id: uuid::Uuid::now_v7().to_string(),
             })

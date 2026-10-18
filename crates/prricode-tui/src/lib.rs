@@ -270,6 +270,7 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         user_content: submit_user_content(text, image),
                         goal,
                         skills_prompt: None,
+                        allowed_tools: Vec::new(),
                         max_iterations: 25,
                         turn_id: uuid::Uuid::now_v7().to_string(),
                     };

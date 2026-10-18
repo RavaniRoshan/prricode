@@ -84,3 +84,21 @@ mod tests {
         }));
     }
 }
+
+#[cfg(test)]
+mod registry_tests {
+    use crate::tools::{LspTool, ReplTool, ToolRegistryBuilder};
+
+    #[test]
+    fn allowed_tools_narrow_the_registry_and_tolerate_stale_names() {
+        let mut registry = ToolRegistryBuilder::new()
+            .with_tool(LspTool)
+            .with_tool(ReplTool)
+            .build();
+        registry.retain(&["lsp".into(), "ghost".into()]);
+        assert_eq!(registry.names(), vec!["lsp".to_string()]);
+        // An empty list is a no-op, never an empty registry.
+        registry.retain(&[]);
+        assert_eq!(registry.names(), vec!["lsp".to_string()]);
+    }
+}

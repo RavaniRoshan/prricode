@@ -371,6 +371,29 @@ pub async fn run_skill_script(
     })
 }
 
+/// Union of allowed-tool restrictions across active skills. `None` when none
+/// of the active skills restricts anything; `Some(intersection)` when one or
+/// more does — a skill that declares nothing imposes nothing.
+pub fn active_allowed_tools(skills: &[Skill], active: &[String]) -> Option<Vec<String>> {
+    let mut restricted: Option<Vec<String>> = None;
+    for skill in skills {
+        if !active.iter().any(|a| a == &skill.name) {
+            continue;
+        }
+        if skill.allowed_tools.is_empty() {
+            continue;
+        }
+        restricted = Some(match restricted.take() {
+            None => skill.allowed_tools.implementation(),
+            Some(current) => current
+                .into_iter()
+                .filter(|t| skill.allowed_tools.contains(t))
+                .collect(),
+        });
+    }
+    restricted
+}
+
 /// Render active skills into a system-prompt fragment.
 pub fn render_skills_prompt(skills: &[Skill], active: &[String]) -> String {
     let mut out = String::new();
@@ -408,6 +431,39 @@ mod tests {
         assert_eq!(skill.allowed_tools, vec!["read_file", "grep", "shell"]);
         assert_eq!(skill.context.as_deref(), Some("fork"));
         assert!(skill.instructions.contains("# Deep dive"));
+    }
+
+    #[test]
+    fn allowed_tools_intersect_across_active_skills() {
+        let make = |name: &str, tools: &str| {
+            parse_skill_md(
+                &format!(
+                    "---\nname: {name}\ndescription: d\nallowed-tools: {tools}\n---\n\nbody\n"
+                ),
+                &std::path::PathBuf::from(format!("/x/{name}/SKILL.md")),
+                SkillSource::Project,
+            )
+        };
+        let skills = vec![make("a", "read_file, grep"), make("b", "grep, shell")];
+        assert_eq!(
+            active_allowed_tools(&skills, &["a".into(), "b".into()]),
+            Some(vec!["grep".to_string()])
+        );
+        // A skill with no restriction imposes nothing.
+        let loose = vec![make("a", "read_file"), {
+            parse_skill_md(
+                "---\nname: c\ndescription: d\n---\n\nbody\n",
+                Path::new("/x/c/SKILL.md"),
+                SkillSource::Project,
+            )
+        }];
+        assert_eq!(
+            active_allowed_tools(&loose, &["a".into(), "c".into()]),
+            Some(vec!["read_file".to_string()])
+        );
+        // Inactive restricted skills do not constrain.
+        let others = vec![make("zzz", "shell")];
+        assert_eq!(active_allowed_tools(&others, &["a".into()]), None);
     }
 
     #[test]

@@ -782,6 +782,18 @@ impl PrricodeServer {
         let turns = Arc::implementation(&self.turns);
         let goals = Arc::implementation(&self.goals);
         let server = Arc::implementation(self);
+        // Skill activation: discovered skills + the persisted activation
+        // payload produce this turn's prompt fragment and tool allow-list.
+        let cwd = Self::workspace_of(session);
+        let skills = prricode_skills::load_skills(&dirs_home(), &cwd);
+        let mut skills_prompt: Option<String> = None;
+        let mut allowed_tools: Vec<String> = Vec::new();
+        if !skills.is_empty() {
+            if let Some((prompt, allowed)) = self.skills_for_session(&session_id, &skills) {
+                skills_prompt = Some(prompt);
+                allowed_tools = allowed;
+            }
+        }
         let input = TurnInput {
             session_id: session_id.implementation(),
             model: self.model_of(session),
@@ -791,7 +803,8 @@ impl PrricodeServer {
             history,
             user_content,
             goal,
-            skills_prompt: None,
+            skills_prompt,
+            allowed_tools,
             max_iterations: 25,
             turn_id: turn_id.implementation(),
         };
@@ -1970,6 +1983,20 @@ impl PrricodeServer {
         }))
     }
 
+    /// Compute the skills fragment and tool allow-list for a session's next
+    /// turn. `None` when nothing is active. The persisted activation payload
+    /// is `{activation, selector}` JSON; legacy non-JSON values are treated
+    /// as a comma-separated selector list.
+    fn skills_for_session(
+        &self,
+        session_id: &str,
+        skills: &[prricode_skills::Skill],
+    ) -> Option<(String, Vec<String>)> {
+        self.persistence
+            .get_setting(&format!("skillActivation:{session_id}"))
+            .ok()?
+            .and_then(|raw| compute_skills_fragment(&raw, skills))
+    }
     async fn handle_subagent_target(&self, params: Option<Value>) -> Result<Value> {
         let params: SubagentTargetParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         Ok(json!({
@@ -2903,6 +2930,64 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Compute the skills prompt fragment and tool allow-list from an activation
+/// payload. `None` when the payload says inactive or selects nothing. Only
+/// discovered skills activate; unknown selectors are skipped with an honest
+/// notice baked into the prompt. Legacy non-JSON payloads are treated as a
+/// comma-separated selector list ("activate" is implicit).
+fn compute_skills_fragment(
+    raw: &str,
+    skills: &[prricode_skills::Skill],
+) -> Option<(String, Vec<String>)> {
+    let active: Vec<String> = match serde_json::from_str::<Value>(raw).ok() {
+        Some(v) => {
+            let activate = v.get("activation").and_then(|a| a.as_str()) == Some("activate");
+            if !activate {
+                return None;
+            }
+            v.get("selector")
+                .and_then(|s| s.as_str())
+                .map(|s| {
+                    s.split([',', ' '])
+                        .filter(|t| !t.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        None => raw
+            .split([',', ' '])
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+            .collect(),
+    };
+    if active.is_empty() {
+        return None;
+    }
+    let found: Vec<String> = skills
+        .iter()
+        .filter(|s| active.iter().any(|a| a == &s.name))
+        .map(|s| s.name.implementation())
+        .collect();
+    let missing: Vec<String> = active
+        .iter()
+        .filter(|a| !found.contains(a))
+        .reimplemented()
+        .collect();
+    if found.is_empty() && missing.is_empty() {
+        return None;
+    }
+    let allowed = prricode_skills::active_allowed_tools(skills, &found).unwrap_or_default();
+    let mut prompt = prricode_skills::render_skills_prompt(skills, &found);
+    if !missing.is_empty() {
+        prompt.push_str(&format!(
+            "(not found and skipped: {})\n",
+            missing.join(", ")
+        ));
+    }
+    Some((prompt, allowed))
+}
+
 /// MCP server configuration (stdio + http transports from `~/.config/prricode/mcp.toml`).
 pub mod http_bridge;
 mod mcp {
@@ -3355,6 +3440,68 @@ mod tests {
             .expect("legacy dir listed");
         assert_eq!(plain["enabled"], true);
         std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn skill_activation_fragment_computes_honestly() {
+        use prricode_skills::SkillSource;
+
+        let make = |name: &str, tools: &[&str]| {
+            let tools_frontmatter = if tools.is_empty() {
+                String::new()
+            } else {
+                format!("allowed-tools: {}\n", tools.join(", "))
+            };
+            prricode_skills::parse_skill_md(
+                &format!(
+                    "---\nname: {name}\ndescription: d\n{tools_frontmatter}---\n\nbody {name}\n"
+                ),
+                std::path::Path::new("/x/SKILL.md"),
+                SkillSource::Project,
+            )
+        };
+        let skills = vec![make("alpha", &["read_file", "grep"]), make("beta", &[])];
+        // Nothing → None.
+        assert!(compute_skills_fragment(
+            "{\"activation\":\"activate\",\"selector\":\"\"}",
+            &skills
+        )
+        .is_none());
+        // Deactivated → None.
+        assert!(compute_skills_fragment(
+            "{\"activation\":\"deactivate\",\"selector\":\"alpha\"}",
+            &skills
+        )
+        .is_none());
+        // Active alpha: prompt restricted to alpha, and its allowed tools.
+        let (prompt, allowed) = compute_skills_fragment(
+            "{\"activation\":\"activate\",\"selector\":\"alpha\"}",
+            &skills,
+        )
+        .expect("active");
+        assert!(prompt.contains("## alpha"));
+        assert!(!prompt.contains("## beta"));
+        assert_eq!(allowed, vec!["read_file".to_string(), "grep".to_string()]);
+        // Legacy comma-list still activates.
+        let (prompt, allowed) = compute_skills_fragment("alpha", &skills).expect("legacy active");
+        assert!(prompt.contains("## alpha"));
+        assert_eq!(allowed, vec!["read_file".to_string(), "grep".to_string()]);
+        // Unknown selectors skipped with an honest notice.
+        let (prompt, _) = compute_skills_fragment(
+            "{\"activation\":\"activate\",\"selector\":\"ghost, alpha\"}",
+            &skills,
+        )
+        .expect("active");
+        assert!(prompt.contains("(not found and skipped: ghost)"));
+        // Selection that matches nothing produces the notice and empty prompt
+        // body but is not silently treated as inactive.
+        let (prompt, allowed) = compute_skills_fragment(
+            "{\"activation\":\"activate\",\"selector\":\"ghost\"}",
+            &skills,
+        )
+        .expect("missing-only still reported");
+        assert!(prompt.contains("(not found and skipped: ghost)"));
+        assert!(allowed.is_empty());
     }
 
     #[tokio::test]

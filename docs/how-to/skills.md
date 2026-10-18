@@ -56,6 +56,10 @@ skill unless the destination is removed first.
 - `skill/list` — every discovered skill: name, source, description, location.
 - `skill/import` — `{source, dryRun, force}`; returns `imported`, `name`, `dest`.
 - `skill/setActivation` — `{activation, scope, selector}`; persisted per session.
+  On the next turn an activated skill ships its instructions into the system
+  prompt (unknown selectors are skipped with an honest notice) and, when the
+  skill declares `allowed-tools`, the turn's tool registry is narrowed to
+  exactly those tools. Deactivate with `{"activation": "deactivate", ...}`.
 
 ## Skill scripts (runtime contract)
 

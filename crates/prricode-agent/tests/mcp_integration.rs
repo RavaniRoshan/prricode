@@ -112,6 +112,7 @@ async fn agent_calls_mcp_tool_through_registry() {
             user_content: vec![ContentPart::text("ping the mcp tool")],
             goal: None,
             skills_prompt: None,
+            allowed_tools: Vec::new(),
             max_iterations: 5,
             turn_id: "turn-1".into(),
         })

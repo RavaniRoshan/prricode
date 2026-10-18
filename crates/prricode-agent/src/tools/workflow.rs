@@ -213,6 +213,7 @@ pub mod workflow_exec {
                     user_content: vec![ContentPart::text(prompt)],
                     goal: None,
                     skills_prompt: None,
+                    allowed_tools: Vec::new(),
                     max_iterations: 15,
                     turn_id: Uuid::now_v7().to_string(),
                 })

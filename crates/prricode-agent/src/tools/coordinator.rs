@@ -82,6 +82,7 @@ impl Tool for CoordinatorTool {
                         user_content: vec![prricode_provider::ContentPart::text(prompt.implementation())],
                         goal: None,
                         skills_prompt: None,
+                        allowed_tools: Vec::new(),
                         max_iterations: 15,
                         turn_id: uuid::Uuid::now_v7().to_string(),
                     })

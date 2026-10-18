@@ -145,6 +145,16 @@ impl ToolRegistry {
         names
     }
 
+    /// Keep only the named tools. Unknown names are ignored, so a stale
+    /// allow-list degrades to the tools that still exist rather than an
+    /// empty registry.
+    pub fn retain(&mut self, allowed: &[String]) {
+        if allowed.is_empty() {
+            return;
+        }
+        self.tools.retain(|name, _| allowed.contains(name));
+    }
+
     /// Register an already-shared tool (used for late-bound extensions).
     pub fn register_dyn(&mut self, name: &str, tool: Arc<dyn Tool>) {
         self.tools.insert(name.to_string(), tool);

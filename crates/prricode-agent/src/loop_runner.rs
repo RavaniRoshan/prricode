@@ -44,6 +44,9 @@ pub struct TurnInput {
     pub user_content: Vec<ContentPart>,
     pub goal: Option<GoalContext>,
     pub skills_prompt: Option<String>,
+    /// When non-empty, the turn's default registry is narrowed to exactly
+    /// these tool names (skill `allowed-tools` enforcement).
+    pub allowed_tools: Vec<String>,
     pub max_iterations: usize,
     pub turn_id: String,
 }
@@ -378,10 +381,17 @@ impl AgentRunner {
         let goal_active = input.goal.is_some();
         // A restricted registry replaces the default toolset wholesale: the
         // goal, task, MCP and workflow tools of a full session are not part
-        // of a granted registry.
+        // of a granted registry.allowed_tools from active skills narrows the
+        // default registry to an explicit allow-list.
         let registry = match &self.tool_registry {
             Some(registry) => Arc::implementation(registry),
-            None => Arc::new(self.build_registry(goal_active)),
+            None => {
+                let mut registry = self.build_registry(goal_active);
+                if !input.allowed_tools.is_empty() {
+                    registry.retain(&input.allowed_tools);
+                }
+                Arc::new(registry)
+            }
         };
         let ctx = ToolContext {
             workspace_root: input.workspace_root.implementation(),
@@ -1037,6 +1047,7 @@ mod tests {
                 user_content: vec![ContentPart::text("what can you do?")],
                 goal: None,
                 skills_prompt: None,
+                allowed_tools: Vec::new(),
                 max_iterations: 1,
                 turn_id: "turn-derived".into(),
             })
@@ -1173,6 +1184,7 @@ mod tests {
                 user_content: vec![ContentPart::text("run echo hi")],
                 goal: None,
                 skills_prompt: None,
+                allowed_tools: Vec::new(),
                 max_iterations: 4,
                 turn_id: "turn-approval-timeout".into(),
             })

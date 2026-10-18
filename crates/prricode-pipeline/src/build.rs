@@ -133,6 +133,7 @@ pub async fn run_build(
                 user_content: vec![ContentPart::text(full)],
                 goal: None,
                 skills_prompt: None,
+                allowed_tools: Vec::new(),
                 max_iterations: 15,
                 turn_id: Uuid::now_v7().to_string(),
             }));
