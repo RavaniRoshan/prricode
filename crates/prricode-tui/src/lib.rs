@@ -5,7 +5,7 @@ mod app;
 mod theme;
 mod ui;
 
-pub use app::{App, PendingApproval, PipelineView, Role, TurnMessage, UiEvent};
+pub use app::{App, PendingApproval, PipelineView, Role, SessionSummary, TurnMessage, UiEvent};
 pub use theme::{Theme, ThemeStore};
 
 use anyhow::Result;
@@ -53,6 +53,8 @@ pub enum UiCommand {
     SwitchSession {
         session_id: String,
     },
+    /// `/sessions` picker: request every stored session summary.
+    SessionsList,
     /// Persist an "always allow in this workspace" policy amendment.
     RecordAmendment {
         amendment: crate::app::PolicyAmendment,
@@ -340,6 +342,20 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         session_id: new_id,
                         messages,
                     });
+                }
+                UiCommand::SessionsList => {
+                    let mut sessions: Vec<SessionSummary> = agent_persistence
+                        .list_sessions()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|record| SessionSummary {
+                            id: record.id.implementation(),
+                            model: record.model_id.unwrap_or_default(),
+                            workspace: record.workspace_root.unwrap_or_default(),
+                        })
+                        .collect();
+                    sessions.sort_by(|a, b| a.id.cmp(&b.id));
+                    let _ = ui_tx.send(UiEvent::SessionsListed { sessions });
                 }
                 UiCommand::ShellRun { command } => {
                     // '!' shell mode: run in the workspace through the sandbox,

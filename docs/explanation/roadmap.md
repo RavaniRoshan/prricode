@@ -54,10 +54,11 @@ today so the gap is explicit.
 - **Image paste (ctrl+v): COMPLETE** — wl-paste/xclip clipboard capture,
   attach/detach in the composer, image parts ride the turn; attachments never
   enter composer history.
-- **`?` shortcut overlay on an empty composer** — `/help` toggles the panel
-  today; the literal key-when-empty binding is a follow-up.
-- **Session picker list** — `/sessions` shows state today; a navigable picker
-  of stored sessions is the follow-up.
+- **`?` shortcut overlay on an empty composer: DONE** — the literal key opens
+  the help panel when the composer is empty (typed `?` mid-text stays a
+  character); Esc closes it.
+- **Session picker list: DONE** — `/sessions` opens a navigable modal over
+  every stored session with resume-on-Enter.
 
 ## Brownfield
 

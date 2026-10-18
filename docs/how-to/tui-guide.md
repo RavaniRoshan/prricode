@@ -76,8 +76,8 @@ Type `/` and the command, then `Return`.
 | Command | What it does |
 |---|---|
 | `/new` | Fresh session |
-| `/resume` | Resume an earlier session (stored ones listed in the server's session list) |
-| `/sessions` | Show the current session state |
+| `/resume <id>` | Resume an earlier session directly by id |
+| `/sessions` | Open the navigable session picker (a row per stored session; ↑/↓ or j/k move, Enter resumes, Esc closes) |
 | `/clear` | Wipe or keep the scrollback |
 | `/compact` | Compact context (server-side `session/compact`) |
 | `/quit` (alias `/exit`) | Quit |
@@ -108,6 +108,7 @@ Type `/` and the command, then `Return`.
 | Command | What it does |
 |---|---|
 | `/help` (alias `/?`) | Show the command + key reference |
+| `?` (empty composer) | Open the same help panel from the keyboard; Esc closes it |
 | `/message` `/ts` `/ps` | Server-side surfaces (honest stubs, documented as future work) |
 
 ## Approvals — three durability tiers

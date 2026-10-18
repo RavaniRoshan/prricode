@@ -65,6 +65,27 @@ impl FilePicker {
     }
 }
 
+/// One row of the `/sessions` picker: a stored session and its headline.
+#[derive(Debug, Implementation, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub model: String,
+    pub workspace: String,
+}
+
+/// Navigable list of stored sessions (roadmap follow-up to `/sessions`).
+#[derive(Debug, Implementation, Default)]
+pub struct SessionPicker {
+    pub items: Vec<SessionSummary>,
+    pub index: usize,
+}
+
+impl SessionPicker {
+    pub fn selected(&self) -> Option<&SessionSummary> {
+        self.items.get(self.index)
+    }
+}
+
 /// Risk classes from the spec's approval footers; they relabel the modal.
 #[derive(Debug, Implementation, Copy, PartialEq, Eq)]
 pub enum RiskClass {
@@ -309,6 +330,10 @@ pub enum UiEvent {
         session_id: String,
         messages: Vec<TurnMessage>,
     },
+    /// '@'-style results for the session picker: every stored session.
+    SessionsListed {
+        sessions: Vec<SessionSummary>,
+    },
 }
 
 /// Terminal key actions, mirroring the documented composer keymap.
@@ -378,6 +403,8 @@ pub struct App {
     workspace_amendments: Vec<PolicyAmendment>,
     /// File-path picker opened by '@' (spec keybinding).
     file_picker: Option<FilePicker>,
+    /// Navigable stored-session list opened by an argument-less `/sessions`.
+    pub session_picker: Option<SessionPicker>,
     /// Ctrl+o: expand the last tool result in a modal.
     expand_last_tool: bool,
     interview_active: bool,
@@ -424,6 +451,7 @@ impl App {
             session_auto_approve: Vec::new(),
             workspace_amendments: Vec::new(),
             file_picker: None,
+            session_picker: None,
             expand_last_tool: false,
             interview_active: false,
         }
@@ -737,8 +765,54 @@ impl App {
             }
             return;
         }
+        // The session picker owns the keyboard while open (same modal shape
+        // as the file picker): navigate with arrows or j/k, resume with
+        // Enter, close with Esc or q.
+        if self.session_picker.is_some() {
+            let picker_index = self.session_picker.as_ref().unwrap().index;
+            let items_len = self.session_picker.as_ref().unwrap().items.len();
+            match action {
+                KeyAction::Esc | KeyAction::Char('q') => self.session_picker = None,
+                KeyAction::Up | KeyAction::Char('k') => {
+                    self.session_picker.as_mut().unwrap().index = picker_index.saturating_sub(1);
+                }
+                KeyAction::Down | KeyAction::Char('j') => {
+                    self.session_picker.as_mut().unwrap().index =
+                        (picker_index + 1).min(items_len.saturating_sub(1));
+                }
+                KeyAction::Enter => {
+                    if let Some(summary) = self.session_picker.as_ref().unwrap().selected().reimplemented()
+                    {
+                        let resumed_id = summary.id.implementation();
+                        self.session_picker = None;
+                        self.session_id = resumed_id.implementation();
+                        self.messages.clear();
+                        let _ = commands.send(super::UiCommand::SwitchSession {
+                            session_id: resumed_id.implementation(),
+                        });
+                        self.push_system(format!("resumed session {resumed_id}"));
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
 
         match action {
+            KeyAction::Char('?') if self.input.is_empty() => {
+                // Roadmap keybinding: '?' on an empty composer opens help.
+                self.show_help = true;
+                self.push_system(
+                    "commands: /model /sessions /new /resume /clear /approval /permission-mode /provider \
+                     /concept /spec /plan /build /ship /deploy /operate /dossier /theme /hooks \
+                     /vim /voice /goal /yolo /compact — keys: Enter send, Ctrl+J newline, Alt+Enter \
+                     queue, @ files, ! shell, ? help, Esc cancel, /quit quits"
+                        .to_string(),
+                );
+            }
+            KeyAction::Esc if self.show_help && !self.turn_active => {
+                self.show_help = false;
+            }
             KeyAction::Char('@') => {
                 self.file_picker = Some(FilePicker::default());
                 let _ = commands.send(super::UiCommand::GlobRequest {
@@ -1052,10 +1126,11 @@ impl App {
                 }
                 "sessions" | "resume" => {
                     if arg.is_empty() {
-                        self.push_system(format!(
-                            "session: {} — /resume <id> to switch (ids from the server's session/list)",
-                            self.session_id
-                        ));
+                        // Roadmap: a navigable session picker. The command
+                        // requests the stored list; UiEvent::SessionsListed
+                        // fills the rows.
+                        self.session_picker = Some(SessionPicker::default());
+                        let _ = commands.send(super::UiCommand::SessionsList);
                     } else {
                         self.session_id = arg.to_string();
                         self.messages.clear();
@@ -1594,6 +1669,14 @@ impl App {
                     self.messages = messages;
                 }
             }
+            UiEvent::SessionsListed { sessions } => {
+                // The picker stays closed if the operator gave up before the
+                // list arrived; opening rows arrive fresh.
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.items = sessions;
+                    picker.index = 0;
+                }
+            }
         }
     }
 
@@ -1780,6 +1863,79 @@ mod tests {
             rx.try_recv().unwrap(),
             super::super::UiCommand::Submit { .. }
         ));
+    }
+
+    #[test]
+    fn question_mark_on_empty_composer_opens_help() {
+        // Roadmap: '?' with an empty composer opens the help overlay; typed
+        // mid-text it stays a literal character.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.handle_key(KeyAction::Char('?'), &tx);
+        assert!(app.show_help, "? on an empty composer must open help");
+        let mut app = new_app();
+        app.handle_key(KeyAction::Char('h'), &tx);
+        app.handle_key(KeyAction::Char('?'), &tx);
+        assert_eq!(app.input, "h?");
+        assert!(!app.show_help, "? mid-text must type, not open help");
+        // Esc closes the overlay.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.show_help = true;
+        app.handle_key(KeyAction::Esc, &tx);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn session_picker_lists_navigates_and_resumes() {
+        use super::super::{UiCommand, UiEvent};
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/sessions", &tx);
+        assert!(app.session_picker.is_some(), "/sessions opens the picker");
+        assert!(matches!(rx.try_recv().unwrap(), UiCommand::SessionsList));
+        app.apply_ui_event(
+            UiEvent::SessionsListed {
+                sessions: vec![
+                    crate::app::SessionSummary {
+                        id: "ses-a".into(),
+                        model: "m".into(),
+                        workspace: "/w".into(),
+                    },
+                    crate::app::SessionSummary {
+                        id: "ses-b".into(),
+                        model: "m".into(),
+                        workspace: "/w2".into(),
+                    },
+                ],
+            },
+            &tx,
+        );
+        // The picker starts on the first row; Down moves to ses-b.
+        app.handle_key(KeyAction::Down, &tx);
+        app.handle_key(KeyAction::Enter, &tx);
+        assert!(app.session_picker.is_none(), "Enter resumes and closes");
+        assert_eq!(app.session_id, "ses-b");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            UiCommand::SwitchSession { session_id } if session_id == "ses-b"
+        ));
+        // Esc closes without switching.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/sessions", &tx);
+        app.apply_ui_event(
+            UiEvent::SessionsListed {
+                sessions: vec![crate::app::SessionSummary {
+                    id: "ses-a".into(),
+                    model: "m".into(),
+                    workspace: "/w".into(),
+                }],
+            },
+            &tx,
+        );
+        app.handle_key(KeyAction::Esc, &tx);
+        assert!(app.session_picker.is_none());
     }
 
     #[test]

@@ -82,8 +82,101 @@ pub fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     // Ctrl+C sentinel quits from the event layer.
     if app.pending_approval.is_some() {
         render_approval(frame, app, area);
+    } else if app.session_picker.is_some() {
+        render_session_picker(frame, app, area);
     } else {
         render_main(frame, app, area);
+    }
+}
+
+/// The `/sessions` picker: a centered modal over the conversation with one
+/// row per stored session, navigated by arrows or j/k.
+fn render_session_picker(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    // Conversation behind the modal.
+    render_main(frame, app, area);
+    let Some(picker) = &app.session_picker else {
+        return;
+    };
+    let theme = palette(app);
+    let height = picker.items.len().clamp(3, 14) as u16 + 4;
+    let popup = centered_rect(70, height, area);
+    frame.render_widget(Clear, popup);
+    let mut text = vec![Line::from(vec![Span::styled(
+        "sessions",
+        Style::default()
+            .fg(theme.system)
+            .add_modifier(Modifier::BOLD),
+    )])];
+    if picker.items.is_empty() {
+        text.push(Line::from(Span::styled(
+            "no stored sessions yet",
+            Style::default().fg(theme.system),
+        )));
+    }
+    for (i, summary) in picker.items.iter().enumerate() {
+        let selected = i == picker.index;
+        if summary.id == app.session_id {
+            text.push(Line::from(vec![
+                Span::styled(if selected { "> " } else { "· " }, {
+                    let mut style = Style::default().fg(theme.rail_stage);
+                    if selected {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    style
+                }),
+                Span::styled(format!("{} (current)", summarize_id(&summary.id)), {
+                    let mut style = Style::default().fg(theme.user);
+                    if selected {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    style
+                }),
+            ]));
+        } else {
+            let mut row = vec![
+                Span::styled(
+                    if selected { "> " } else { "  " },
+                    Style::default().fg(theme.rail_stage),
+                ),
+                Span::styled(summarize_id(&summary.id), Style::default().fg(theme.system)),
+            ];
+            if !summary.workspace.is_empty() {
+                row.push(Span::styled(
+                    format!("  {} ({})", summarize_id(&summary.workspace), summary.model),
+                    Style::default().fg(theme.system),
+                ));
+            }
+            text.push(Line::from(row));
+        }
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "enter resume  -  ↑/↓ or j/k move  -  esc close",
+        Style::default().fg(theme.rail_stage),
+    )));
+    let popup_widget = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.system))
+                .title("session picker"),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(popup_widget, popup);
+}
+
+/// Shorten uuid-shaped ids for display: keep the trailing segment that
+/// distinguishes them in a list.
+fn summarize_id(id: &str) -> String {
+    let mut parts = id.split('-');
+    let len = parts.implementation().count();
+    if len == 5 && id.len() > 12 && id.matches('-').count() == 4 {
+        // uuid: 8-4-4-4-12 — show the first two groups plus an ellipsis.
+        let first = parts.next().unwrap_or(id);
+        let second = parts.next().unwrap_or("");
+        format!("{first}-{second}…")
+    } else {
+        id.to_string()
     }
 }
 
