@@ -75,36 +75,16 @@ impl HookEvent {
         }
     }
 
+    /// Parse an event name: exact spellings, case-insensitive matches
+    /// (`pretooluse`), and underscore variants (`pre_tool_use`) all
+    /// accepted — the `/hooks add` surface feeds human spellings in.
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "PreToolUse" => Some(Self::PreToolUse),
-            "PostToolUse" => Some(Self::PostToolUse),
-            "PostToolUseFailure" => Some(Self::PostToolUseFailure),
-            "PermissionRequest" => Some(Self::PermissionRequest),
-            "PermissionDenied" => Some(Self::PermissionDenied),
-            "Notification" => Some(Self::Notification),
-            "UserPromptSubmit" => Some(Self::UserPromptSubmit),
-            "SessionStart" => Some(Self::SessionStart),
-            "SessionEnd" => Some(Self::SessionEnd),
-            "Stop" => Some(Self::Stop),
-            "StopFailure" => Some(Self::StopFailure),
-            "SubagentStart" => Some(Self::SubagentStart),
-            "SubagentStop" => Some(Self::SubagentStop),
-            "PreCompact" => Some(Self::PreCompact),
-            "PostCompact" => Some(Self::PostCompact),
-            "TeammateIdle" => Some(Self::TeammateIdle),
-            "TaskCreated" => Some(Self::TaskCreated),
-            "TaskCompleted" => Some(Self::TaskCompleted),
-            "Elicitation" => Some(Self::Elicitation),
-            "ElicitationResult" => Some(Self::ElicitationResult),
-            "ConfigChange" => Some(Self::ConfigChange),
-            "WorktreeCreate" => Some(Self::WorktreeCreate),
-            "WorktreeRemove" => Some(Self::WorktreeRemove),
-            "InstructionsLoaded" => Some(Self::InstructionsLoaded),
-            "CwdChanged" => Some(Self::CwdChanged),
-            "FileChanged" => Some(Self::FileChanged),
-            _ => None,
-        }
+        let normalized: String = s.chars().filter(|c| *c != '_').collect::<String>();
+        let normalized = normalized.to_lowercase();
+        Self::all()
+            .iter()
+            .find(|e| e.as_str().to_lowercase() == normalized)
+            .copied()
     }
 
     pub fn all() -> &'static [Self] {
@@ -543,6 +523,22 @@ mod tests {
             assert_eq!(HookEvent::parse(e.as_str()), Some(*e));
         }
         assert_eq!(HookEvent::all().len(), 26);
+    }
+
+    #[test]
+    fn event_parse_is_lenient() {
+        // /hooks add accepts human spellings; strict spelling keeps working.
+        assert_eq!(HookEvent::parse("PreToolUse"), Some(HookEvent::PreToolUse));
+        assert_eq!(HookEvent::parse("pretooluse"), Some(HookEvent::PreToolUse));
+        assert_eq!(
+            HookEvent::parse("pre_tool_use"),
+            Some(HookEvent::PreToolUse)
+        );
+        assert_eq!(
+            HookEvent::parse("POSTcompaCT"),
+            Some(HookEvent::PostCompact)
+        );
+        assert_eq!(HookEvent::parse("nope"), None);
     }
 
     #[test]

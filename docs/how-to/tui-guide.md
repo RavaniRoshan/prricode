@@ -111,6 +111,8 @@ Type `/` and the command, then `Return`.
 | `?` (empty composer) | Open the same help panel from the keyboard; Esc closes it |
 | `/message <session> <text>` | Queue a cross-session message into the workspace's `.prricode/messages` queue (same files the `send_message` tool uses) |
 | `/ts` `/ps` | Local task/process view of the active turn and pipeline state |
+| `/hooks` | List the hooks registered in this runner (id, event, type) |
+| `/hooks add <event>[@tool] <command> [args…]` | Register a command hook for this session. The event name is case-insensitive (`pretooluse` works). `@tool` optionally filters by tool-name pattern (`*` matches everything). Unknown events are answered with the full event list; hooks live for the lifetime of the TUI process |
 
 ## Approvals — three durability tiers
 

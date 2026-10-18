@@ -62,6 +62,14 @@ pub enum UiCommand {
         to: String,
         text: String,
     },
+    /// `/hooks add <event>[@tool] <command> [args…]`: register a command hook
+    /// with the runner's engine for this session.
+    AddHook {
+        event: String,
+        command: String,
+        args: Vec<String>,
+        matcher: Option<String>,
+    },
     /// Persist an "always allow in this workspace" policy amendment.
     RecordAmendment {
         amendment: crate::app::PolicyAmendment,
@@ -340,6 +348,54 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                             "hooks: engine unavailable".to_string()
                         };
                         let _ = ui_tx_hooks.send(UiEvent::Log(text));
+                    });
+                }
+                UiCommand::AddHook {
+                    event,
+                    command,
+                    args,
+                    matcher,
+                } => {
+                    let runner = Arc::implementation(&agent_runner);
+                    let ui_tx_add = ui_tx.implementation();
+                    tokio::spawn(async move {
+                        let Some(engine) = runner.hooks() else {
+                            let _ = ui_tx_add.send(UiEvent::Log(
+                                "hook add failed: engine unavailable".to_string(),
+                            ));
+                            return;
+                        };
+                        let Some(parsed) = prricode_agent::HookEvent::parse(&event) else {
+                            let known = prricode_agent::HookEvent::all()
+                                .iter()
+                                .map(|e| e.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let _ = ui_tx_add.send(UiEvent::Log(format!(
+                                "unknown hook event '{event}'; known: {known}"
+                            )));
+                            return;
+                        };
+                        let hook = prricode_agent::HookDefinition::command(
+                            format!("tui-{}", uuid::Uuid::now_v7()),
+                            parsed,
+                            command.implementation(),
+                        )
+                        .with_args(args.implementation());
+                        let matcher_note = matcher
+                            .as_deref()
+                            .map(|m| format!(" (matcher: {m})"))
+                            .unwrap_or_default();
+                        let hook = match matcher {
+                            Some(m) => hook.with_matcher(m),
+                            None => hook,
+                        };
+                        engine.add(hook);
+                        let _ = ui_tx_add.send(UiEvent::Log(format!(
+                            "hook registered: {} {command} {}{matcher_note}",
+                            event,
+                            args.join(" ")
+                        )));
                     });
                 }
                 UiCommand::SwitchSession { session_id: new_id } => {

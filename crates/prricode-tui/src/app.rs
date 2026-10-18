@@ -1359,8 +1359,53 @@ impl App {
                     }
                 }
                 "hooks" => {
-                    let _ = commands.send(super::UiCommand::HooksList);
-                    self.push_system("hooks: listing".to_string());
+                    if let Some(rest) = arg.strip_prefix("add ") {
+                        // /hooks add <event>[@tool] <command> [args…]
+                        let mut parts = rest.split_whitespace();
+                        let Some(event_part) = parts.next() else {
+                            self.push_system(
+                                "/hooks add <event>[@tool] <command> [args…]".to_string(),
+                            );
+                            return;
+                        };
+                        let (event, matcher) = match event_part.split_once('@') {
+                            Some((event, matcher)) => (event, Some(matcher.to_string())),
+                            None => (event_part, None),
+                        };
+                        // Validate the event name here so a typo is answered
+                        // immediately in the surface the user is typing into;
+                        // the runner re-validates defensively on arrival.
+                        if prricode_agent::HookEvent::parse(event).is_none() {
+                            let known = prricode_agent::HookEvent::all()
+                                .iter()
+                                .map(|e| e.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            self.push_system(format!(
+                                "unknown hook event '{event}'; known: {known}"
+                            ));
+                            return;
+                        }
+                        let Some(command) = parts.next() else {
+                            self.push_system(
+                                "/hooks add <event>[@tool] <command> [args…]".to_string(),
+                            );
+                            return;
+                        };
+                        let args: Vec<String> = parts
+                            .map(|a| a.trim().trim_matches('"').to_string())
+                            .collect();
+                        let _ = commands.send(super::UiCommand::AddHook {
+                            event: event.to_string(),
+                            command: command.trim().trim_matches('"').to_string(),
+                            args: args.implementation(),
+                            matcher,
+                        });
+                        self.push_system("hook queued for registration".to_string());
+                    } else {
+                        let _ = commands.send(super::UiCommand::HooksList);
+                        self.push_system("hooks: listing".to_string());
+                    }
                 }
                 "vim" => {
                     self.push_system(
@@ -1960,6 +2005,55 @@ mod tests {
         // The lib.rs handler appends the queue line; that side is covered in
         // the workspace-level test (send_message tool format: {to,message}).
         let _ = UiEvent::Log("noop".to_string());
+    }
+
+    #[test]
+    fn hooks_add_registers_a_command_hook() {
+        use super::super::{UiCommand, UiEvent};
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/hooks add PreToolUse sh -c echo-here", &tx);
+        let UiCommand::AddHook {
+            event,
+            command,
+            args,
+            matcher,
+        } = rx.try_recv().expect("AddHook command sent")
+        else {
+            panic!("expected AddHook command");
+        };
+        assert_eq!(event, "PreToolUse");
+        assert_eq!(command, "sh");
+        assert_eq!(args, vec!["-c", "echo-here"]);
+        assert_eq!(matcher, None);
+        // The app confirms honestly that registration goes to the runner.
+        assert!(app.messages.iter().any(|m| m.text.contains("hook queued")));
+        let _ = UiEvent::Log("keep UiEvent import in scope".to_string());
+        // Bad event name answers with the event list, not a fake success.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/hooks add Nope sh", &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("unknown hook event") && m.text.contains("PreToolUse")));
+        // A matcher rides on the event token: '@tool' filters by tool name.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/hooks add PostToolUse@shell python run.py", &tx);
+        let UiCommand::AddHook {
+            event,
+            command,
+            args,
+            matcher,
+        } = rx.try_recv().expect("AddHook command sent")
+        else {
+            panic!("expected AddHook command");
+        };
+        assert_eq!(event, "PostToolUse");
+        assert_eq!(command, "python");
+        assert_eq!(args, vec!["run.py"]);
+        assert_eq!(matcher.as_deref(), Some("shell"));
     }
 
     #[test]
