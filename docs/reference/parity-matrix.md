@@ -15,6 +15,7 @@ Generated from the reference inventory. Status values: `implemented`, `partial`,
 - new
 - resume
 - approval
+- permission-mode
 - provider
 - concept
 - spec
@@ -25,6 +26,9 @@ Generated from the reference inventory. Status values: `implemented`, `partial`,
 - operate
 - dossier
 - theme
+- vim
+- voice
+- hooks
 - yolo
 - goal
 - compact
@@ -38,6 +42,7 @@ Generated from the reference inventory. Status values: `implemented`, `partial`,
 
 ## Current implemented tools (agent registry)
 
+Real (behavior implemented, tested):
 - ShellTool
 - ReadFileTool
 - WriteFileTool
@@ -46,12 +51,38 @@ Generated from the reference inventory. Status values: `implemented`, `partial`,
 - GlobTool
 - GrepTool
 - WebFetchTool
+- WebSearchTool
 - ComputerTool
 - GoalCompleteTool
-- TaskTool
-- McpTool
+- TaskTool / AgentTool / CoordinatorTool (subagent orchestration)
+- McpTool, ListMcpResourcesTool, ReadMcpResourceTool (stdio + http transports)
 - WorkflowTool
-- (subagent turns reuse same registry)
+- TodoTool
+- BriefTool
+- SleepTool
+- ConfigTool
+- NotebookEditTool
+- EnterPlanModeTool / ExitPlanModeTool
+- EnterWorktreeTool / ExitWorktreeTool
+- TeamCreateTool / TeamDeleteTool
+- SendMessageTool
+- ScheduleCronTool
+- RemoteTriggerTool
+- AskUserQuestionTool
+- ToolSearchTool
+
+Honest stubs (report `unsupported`): tool-search fallbacks, mcp_auth, lsp,
+repl — see `crates/prricode-agent/src/tools/stubs.rs`.
+
+## Server surface deltas since the audit
+
+- hook/list returns real registered hooks; hook dispatch runs concurrently
+- session/compact plus a turn-start auto-compaction trigger
+  (token-estimate threshold)
+- plugin/list reads `plugin.toml` manifests (name/version/description/enabled)
+- mcp.toml accepts `type = "http"` servers; resource list/read over stdio
+- http bridge: `POST /jsonrpc` via `prricode serve --http <addr>`
+- skill/setActivation persists; skills parse model/allowed-tools/context
 
 ## Reference Inventory
 
