@@ -7,6 +7,7 @@ pub struct SystemPromptContext<'a> {
     pub approval_mode: ApprovalMode,
     pub goal: Option<&'a str>,
     pub skills_prompt: Option<&'a str>,
+    pub project_instructions: Option<&'a str>,
 }
 
 pub fn build_system_prompt(ctx: SystemPromptContext<'_>) -> String {
@@ -59,6 +60,11 @@ pub fn build_system_prompt(ctx: SystemPromptContext<'_>) -> String {
     if let Some(skills) = ctx.skills_prompt {
         prompt.push_str("\n# Active skills\n");
         prompt.push_str(skills);
+        prompt.push('\n');
+    }
+    if let Some(pi) = ctx.project_instructions {
+        prompt.push_str("\n# Project instructions\n");
+        prompt.push_str(pi);
         prompt.push('\n');
     }
     prompt

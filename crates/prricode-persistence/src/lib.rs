@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tracing::info;
 
+mod jsonl;
+pub use jsonl::*;
+
 const GOALS_DB_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -117,6 +120,10 @@ CREATE TABLE IF NOT EXISTS gate_records (
     duration_ms INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_items_session_created ON items (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records (session_id);
+CREATE INDEX IF NOT EXISTS idx_gate_records_run ON gate_records (run_id);
 "#;
 
 #[derive(Debug)]
@@ -136,14 +143,16 @@ impl Persistence {
     }
 
     fn init(&self) -> Result<()> {
-        let conn = rusqlite::Connection::open(&self.db_path)?;
+        let conn = self.conn()?;
         conn.execute_batch(GOALS_DB_SCHEMA)?;
         info!("Persistence initialized at {}", self.db_path);
         Ok(())
     }
 
     pub fn conn(&self) -> Result<rusqlite::Connection> {
-        Ok(rusqlite::Connection::open(&self.db_path)?)
+        let conn = rusqlite::Connection::open(&self.db_path)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        Ok(conn)
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -431,4 +440,71 @@ pub struct GateRecordRow {
     pub duration_ms: u64,
     #[serde(default)]
     pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_persistence_lifecycle_and_indices() {
+        let temp_path =
+            std::env::temp_dir().join(format!("prricode-test-{}", uuid::Uuid::now_v7()));
+        let p = Persistence::new(&temp_path).unwrap();
+
+        // Verify tables and indices exist in sqlite_master
+        let conn = p.conn().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index'")
+            .unwrap();
+        let indices: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(indices.contains(&"idx_items_session_created".to_string()));
+        assert!(indices.contains(&"idx_usage_session".to_string()));
+        assert!(indices.contains(&"idx_gate_records_run".to_string()));
+
+        // Test settings
+        p.set_setting("theme", "dracula").unwrap();
+        p.set_setting("approvalAmendment:/tmp/ws:shell:cargo", "{}")
+            .unwrap();
+        let settings = p.list_settings().unwrap();
+        assert_eq!(settings.len(), 2);
+        assert_eq!(p.get_setting("theme").unwrap().as_deref(), Some("dracula"));
+
+        // Test items
+        let item = ItemRecord {
+            id: "i1".into(),
+            session_id: "s1".into(),
+            kind: "user".into(),
+            role: Some("user".into()),
+            content: r#"{"content":[{"type":"text","text":"hello"}]}"#.into(),
+            created_at: String::new(),
+        };
+        p.save_item(&item).unwrap();
+        let items = p.list_items("s1", None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "i1");
+
+        // Test gate records
+        let gate = GateRecordRow {
+            id: "g1".into(),
+            run_id: "r1".into(),
+            gate: "test".into(),
+            command: "cargo test".into(),
+            exit_code: 0,
+            passed: true,
+            evidence_tail: "ok".into(),
+            duration_ms: 100,
+            created_at: String::new(),
+        };
+        p.save_gate_record(&gate).unwrap();
+        let gates = p.list_gate_records("r1").unwrap();
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].id, "g1");
+
+        let _ = std::fs::remove_dir_all(&temp_path);
+    }
 }

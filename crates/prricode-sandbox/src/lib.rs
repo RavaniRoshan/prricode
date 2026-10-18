@@ -105,6 +105,18 @@ pub async fn run_command(command: &str, spec: &SandboxSpec) -> SandboxResult<San
             c
         }
     };
+    // Mask credentials: drop sensitive environment variables from the child.
+    for (k, _) in std::env::vars() {
+        let ku = k.to_uppercase();
+        if ku.contains("KEY")
+            || ku.contains("TOKEN")
+            || ku.contains("SECRET")
+            || ku.contains("PASSWORD")
+            || ku.contains("CREDENTIAL")
+        {
+            cmd.env_remove(&k);
+        }
+    }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let child = tokio::process::Command::from(cmd)

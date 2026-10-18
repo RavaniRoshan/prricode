@@ -4,7 +4,7 @@ use super::{Risk, Tool, ToolContext, ToolOutput, ToolResult};
 use async_trait::async_trait;
 use prricode_mcp::{McpRegistry, McpTool as McpServerTool};
 use prricode_provider::ToolDef;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub struct McpTool {
@@ -80,4 +80,92 @@ pub fn mcp_result_text(result: &Value) -> String {
         out = serde_json::to_string_pretty(result).unwrap_or_default();
     }
     out.trim_end().to_string()
+}
+
+pub struct ListMcpResourcesTool {
+    registry: Arc<McpRegistry>,
+}
+
+impl ListMcpResourcesTool {
+    pub fn new(registry: Arc<McpRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl Tool for ListMcpResourcesTool {
+    fn def(&self) -> ToolDef {
+        ToolDef {
+            name: "list_mcp_resources".to_string(),
+            description: "List resources from connected MCP servers.".to_string(),
+            parameters: json!({"type":"object","properties":{"server":{"type":"string"}}}),
+        }
+    }
+    fn risk(&self) -> Risk {
+        Risk::Safe
+    }
+    async fn execute(&self, _ctx: &ToolContext, input: &Value) -> ToolResult<ToolOutput> {
+        let server_filter = input.get("server").and_then(|v| v.as_str());
+        let servers = if let Some(s) = server_filter {
+            vec![s.to_string()]
+        } else {
+            self.registry.names()
+        };
+        let mut out = Vec::new();
+        for s in servers {
+            if let Some(client) = self.registry.get(&s) {
+                match client.resources_list().await {
+                    Ok(res) => out.push(json!({"server": s, "resources": res})),
+                    Err(e) => out.push(json!({"server": s, "error": e.to_string()})),
+                }
+            }
+        }
+        Ok(ToolOutput::text(
+            serde_json::to_string_pretty(&out).unwrap_or_default(),
+        ))
+    }
+}
+
+pub struct ReadMcpResourceTool {
+    registry: Arc<McpRegistry>,
+}
+
+impl ReadMcpResourceTool {
+    pub fn new(registry: Arc<McpRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl Tool for ReadMcpResourceTool {
+    fn def(&self) -> ToolDef {
+        ToolDef {
+            name: "read_mcp_resource".to_string(),
+            description: "Read a resource from an MCP server.".to_string(),
+            parameters: json!({"type":"object","properties":{"server":{"type":"string"},"uri":{"type":"string"}},"required":["server","uri"]}),
+        }
+    }
+    fn risk(&self) -> Risk {
+        Risk::Safe
+    }
+    async fn execute(&self, _ctx: &ToolContext, input: &Value) -> ToolResult<ToolOutput> {
+        let server = input
+            .get("server")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| super::ToolError::InvalidInput("missing server".into()))?;
+        let uri = input
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| super::ToolError::InvalidInput("missing uri".into()))?;
+        let client = self.registry.get(server).ok_or_else(|| {
+            super::ToolError::Execution(format!("MCP server '{server}' disconnected"))
+        })?;
+        let result = client
+            .resources_read(uri)
+            .await
+            .map_err(|e| super::ToolError::Execution(e.to_string()))?;
+        Ok(ToolOutput::text(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        ))
+    }
 }

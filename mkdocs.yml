@@ -58,11 +58,13 @@ nav:
       - Facts (press kit): explanation/facts.md
       - Conformance decisions: explanation/conformance-decisions.md
       - Internals disposition: explanation/internals-disposition.md
+      - Gap analysis: explanation/gap-analysis.md
       - Roadmap: explanation/roadmap.md
   - Archive:
       - Implementation plans: plans/2026-10-14-product-builder-v01.md
       - Ship + operate plan: plans/2026-10-14-ship-operate-v03.md
       - Verification plan: plans/2026-10-14-verification-v02.md
+      - Build loop plan: plans/BUILD-LOOP.md
 
 markdown_extensions:
   - admonition

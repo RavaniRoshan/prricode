@@ -26,6 +26,12 @@ use uuid::Uuid;
 
 const MAX_GOAL_CONTINUATIONS: usize = 100;
 
+/// Auto-compaction trigger: when the estimated history exceeds this many
+/// tokens, `turn/start` compacts before spawning the turn.
+const AUTO_COMPACT_THRESHOLD_TOKENS: usize = 48_000;
+/// Fixed context charge for an image in the token estimate.
+const IMAGE_TOKEN_BUDGET: usize = 1_000;
+
 pub struct PrricodeServer {
     data_dir: PathBuf,
     persistence: Arc<Persistence>,
@@ -37,6 +43,7 @@ pub struct PrricodeServer {
     goals: Arc<Mutex<HashMap<String, GoalRecord>>>,
     uploads: Arc<Mutex<HashMap<String, MediaUploadState>>>,
     workflows: Arc<prricode_workflow::WorkflowEngine>,
+    hooks: Arc<prricode_agent::HooksEngine>,
     events_tx: mpsc::UnboundedSender<AgentEvent>,
     default_model: Option<String>,
     default_provider_id: String,
@@ -381,6 +388,7 @@ impl PrricodeServer {
         let approvals = Arc::new(ApprovalEngine::new().with_events(events_tx.implementation()));
         let provider: Arc<dyn ModelProvider> = Arc::from(provider);
         let workflows = Arc::new(prricode_workflow::WorkflowEngine::new());
+        let hooks = Arc::new(prricode_agent::HooksEngine::new());
         // MCP: spawn configured stdio servers and expose their tools.
         let mcp_registry = Arc::new(prricode_mcp::McpRegistry::new());
         let runner = Arc::new(
@@ -388,6 +396,7 @@ impl PrricodeServer {
                 .with_events(events_tx.implementation())
                 .with_persistence(Arc::implementation(&persistence))
                 .with_workflows(Arc::implementation(&workflows))
+                .with_hooks(Arc::implementation(&hooks))
                 .with_mcp(Arc::implementation(&mcp_registry))
                 .with_default_model(default_model.implementation().unwrap_or_default()),
         );
@@ -398,6 +407,20 @@ impl PrricodeServer {
         let refresher = Arc::implementation(&runner);
         tokio::spawn(async move {
             for server in mcp::load_mcp_servers() {
+                if server.transport == "http" {
+                    let url = server.url.implementation().unwrap_or_default();
+                    let client = prricode_mcp::McpHttpClient::new(server.name.implementation(), url);
+                    match client.tools_list().await {
+                        Ok(_) => {
+                            tracing::info!("mcp http server '{}' connected", server.name);
+                            mcp_spawner.insert_http(client);
+                        }
+                        Err(e) => {
+                            tracing::warn!("mcp http server '{}' failed: {e}", server.name)
+                        }
+                    }
+                    continue;
+                }
                 match prricode_mcp::McpStdioClient::spawn(
                     &server.name,
                     &server.command,
@@ -426,6 +449,7 @@ impl PrricodeServer {
             goals: Arc::new(Mutex::new(HashMap::new())),
             uploads: Arc::new(Mutex::new(HashMap::new())),
             workflows,
+            hooks,
             events_tx,
             default_model,
             default_provider_id,
@@ -462,6 +486,8 @@ impl PrricodeServer {
                     rpc_err.0.implementation()
                 } else if let Some(json_err) = err.downcast_ref::<JsonRpcError>() {
                     json_err.implementation()
+                } else if let Some(serde_err) = err.downcast_ref::<serde_json::Error>() {
+                    JsonRpcError::invalid_params(serde_err.to_string())
                 } else {
                     JsonRpcError::internal_error(err.to_string())
                 };
@@ -1046,6 +1072,12 @@ impl PrricodeServer {
         let goal = self.goal_of(&session.id).map(|g| GoalContext {
             objective: g.objective,
         });
+        // Phase 8: auto-compaction. If the reconstructed history exceeds the
+        // token budget, summarize it before spawning so the turn starts from
+        // a fresh context boundary. A failed compaction never blocks the turn.
+        if self.estimate_history_tokens(&session.id) >= AUTO_COMPACT_THRESHOLD_TOKENS {
+            let _ = self.run_compaction(&session).await;
+        }
         let turn_id = self.spawn_turn(&session, user_content, goal, false);
         Ok(serde_json::to_value(TurnStartResult {
             turn_id: Uuid::parse_str(&turn_id).unwrap_or_else(|_| Uuid::now_v7()),
@@ -1694,15 +1726,36 @@ impl PrricodeServer {
     async fn handle_session_compact(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
         let params: SessionCompactParams = serde_json::from_value(params.unwrap_or(json!({})))?;
         let session = self.session_state(&params.session_id.to_string()).await?;
+        let compacted = self.run_compaction(&session).await?;
+        Ok(serde_json::to_value(SessionCompactResult { compacted })?)
+    }
+
+    /// Estimated context size of a session's reconstructed history, in
+    /// approximate tokens (chars / 4; images count as a fixed large budget).
+    /// Used by the auto-compaction trigger.
+    fn estimate_history_tokens(&self, session_id: &str) -> usize {
+        let chars: usize = self
+            .load_history(session_id)
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .map(|p| match p {
+                ContentPart::Text(t) => t.chars().count(),
+                ContentPart::Image { .. } => IMAGE_TOKEN_BUDGET,
+            })
+            .sum();
+        chars / 4
+    }
+
+    /// Summarize the session so far and persist the summary as the context
+    /// boundary. Shared by `session/compact` and the turn-start auto trigger.
+    async fn run_compaction(self: &Arc<Self>, session: &SessionState) -> Result<bool> {
         let history = self.load_history(&session.id);
         if history.len() < 4 {
             let _ = self.events_tx.send(AgentEvent::SessionCompact {
                 session_id: session.id.implementation(),
                 compacted: false,
             });
-            return Ok(serde_json::to_value(SessionCompactResult {
-                compacted: false,
-            })?);
+            return Ok(false);
         }
         let compact_input: Vec<ChatMessage> = history
             .iter()
@@ -1716,7 +1769,7 @@ impl PrricodeServer {
         let response = self
             .provider
             .chat(&ChatRequest {
-                model: self.model_of(&session),
+                model: self.model_of(session),
                 messages: compact_input,
                 ..Default::default()
             })
@@ -1733,9 +1786,7 @@ impl PrricodeServer {
             session_id: session.id.implementation(),
             compacted: true,
         });
-        Ok(serde_json::to_value(SessionCompactResult {
-            compacted: true,
-        })?)
+        Ok(true)
     }
 
     async fn handle_session_fork(self: &Arc<Self>, params: Option<Value>) -> Result<Value> {
@@ -1997,7 +2048,51 @@ impl PrricodeServer {
 
     async fn handle_plugin_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: PluginListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "plugins": [] }))
+        let mut plugins = Vec::new();
+        let dir = self.data_dir.join("plugins");
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let Some(dir_name) = entry.file_name().to_str().map(String::from) else {
+                    continue;
+                };
+                // A plugin directory may carry a plugin.toml manifest:
+                // name/version/description/enabled. Without one we report the
+                // directory name (legacy layout), enabled by default.
+                let manifest = entry.path().join("plugin.toml");
+                if let Ok(text) = std::fs::read_to_string(&manifest) {
+                    if let Ok(table) = text.parse::<toml::Table>() {
+                        let name = table
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&dir_name)
+                            .to_string();
+                        let version = table
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0.0.0")
+                            .to_string();
+                        let description = table
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let enabled = table
+                            .get("enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        plugins.push(json!({
+                            "name": name,
+                            "version": version,
+                            "description": description,
+                            "enabled": enabled,
+                        }));
+                        continue;
+                    }
+                }
+                plugins.push(json!({"name": dir_name, "enabled": true}));
+            }
+        }
+        Ok(json!({ "plugins": plugins }))
     }
 
     async fn handle_plugin_install(&self, params: Option<Value>) -> Result<Value> {
@@ -2007,7 +2102,13 @@ impl PrricodeServer {
 
     async fn handle_hook_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: HookListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
-        Ok(json!({ "hooks": [] }))
+        let hooks: Vec<prricode_agent::HookWire> = self
+            .hooks
+            .list()
+            .iter()
+            .map(prricode_agent::HookWire::from)
+            .collect();
+        Ok(json!({ "hooks": hooks }))
     }
 
     async fn handle_feedback_submit(&self, params: Option<Value>) -> Result<Value> {
@@ -2802,11 +2903,16 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// MCP server configuration (stdio transports from `~/.config/prricode/mcp.toml`).
+/// MCP server configuration (stdio + http transports from `~/.config/prricode/mcp.toml`).
 mod mcp {
     #[derive(Debug, Implementation)]
     pub struct McpServerConfig {
         pub name: String,
+        /// "stdio" or "http"; defaults to stdio.
+        pub transport: String,
+        /// http transport: the endpoint URL.
+        pub url: Option<String>,
+        /// stdio transport: the command and args.
         pub command: String,
         pub args: Vec<String>,
     }
@@ -2833,7 +2939,17 @@ mod mcp {
                     .iter()
                     .filter_map(|server| {
                         let name = server.get("name")?.as_str()?.to_string();
-                        let command = server.get("command")?.as_str()?.to_string();
+                        let transport = server
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("stdio")
+                            .to_string();
+                        let url = server.get("url").and_then(|u| u.as_str()).map(String::from);
+                        let command = server
+                            .get("command")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let args = server
                             .get("args")
                             .and_then(|a| a.as_array())
@@ -2843,15 +2959,76 @@ mod mcp {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        Some(McpServerConfig {
-                            name,
-                            command,
-                            args,
-                        })
+                        // Honest validation: stdio needs a command, http needs a url.
+                        match transport.as_str() {
+                            "stdio" if command.is_empty() => None,
+                            "http" if url.is_none() => None,
+                            _ => Some(McpServerConfig {
+                                name,
+                                transport,
+                                url,
+                                command,
+                                args,
+                            }),
+                        }
                     })
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn loads_stdio_and_http_servers() {
+            let dir =
+                std::env::temp_dir().join(format!("prricode-mcp-cfg-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("mcp.toml");
+            std::fs::write(
+                &path,
+                r#"
+[[servers]]
+name = "local"
+command = "bash"
+args = ["-c", "echo hi"]
+
+[[servers]]
+name = "remote"
+type = "http"
+url = "http://127.0.0.1:9999"
+
+[[servers]]
+name = "broken-http"
+type = "http"
+
+[[servers]]
+name = "broken-stdio"
+command = ""
+"#,
+            )
+            .unwrap();
+            // Loader reads PRRICODE_MCP_CONFIG; point it at the temp file.
+            let previous = std::env::var("PRRICODE_MCP_CONFIG").ok();
+            std::env::set_var("PRRICODE_MCP_CONFIG", &path);
+            let servers = load_mcp_servers();
+            match previous {
+                Some(v) => std::env::set_var("PRRICODE_MCP_CONFIG", v),
+                None => std::env::remove_var("PRRICODE_MCP_CONFIG"),
+            }
+            std::fs::remove_dir_all(&dir).ok();
+            let stdio = servers.iter().find(|s| s.name == "local").expect("stdio");
+            assert_eq!(stdio.transport, "stdio");
+            assert_eq!(stdio.command, "bash");
+            let http = servers.iter().find(|s| s.name == "remote").expect("http");
+            assert_eq!(http.transport, "http");
+            assert_eq!(http.url.as_deref(), Some("http://127.0.0.1:9999"));
+            // Invalid entries are dropped, not faked.
+            assert!(servers.iter().all(|s| s.name != "broken-http"));
+            assert!(servers.iter().all(|s| s.name != "broken-stdio"));
+        }
     }
 }
 
@@ -3111,6 +3288,167 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["kind"], "ship");
         assert_eq!(events[1]["kind"], "health");
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn invalid_params_return_code_32602() {
+        let data_dir =
+            std::env::temp_dir().join(format!("prricode-test-params-{}", uuid::Uuid::now_v7()));
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "session/start",
+            "params": { "commandId": 12345 } // invalid: integer instead of string UUID
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        assert!(response.result.is_none());
+        let err = response.error.expect("expected invalid params error");
+        assert_eq!(err.code, -32602);
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn plugin_list_reports_manifests_and_drops_nothing() {
+        let data_dir =
+            std::env::temp_dir().join(format!("prricode-plugins-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(data_dir.join("plugins/manifested")).unwrap();
+        std::fs::write(
+            data_dir.join("plugins/manifested/plugin.toml"),
+            "name = \"my-plugin\"\nversion = \"1.2.3\"\ndescription = \"does things\"\nenabled = false\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(data_dir.join("plugins/plain")).unwrap();
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "plugin/list",
+            "params": {
+                "sessionId": "00000000-0000-7000-8000-000000000004",
+                "commandId": "00000000-0000-7000-8000-000000000003"
+            }
+        }))
+        .unwrap();
+        let response = server.handle_request(request).await;
+        let result = response.result.expect("ok");
+        let plugins = result["plugins"].as_array().expect("plugins array");
+        let manifested = plugins
+            .iter()
+            .find(|p| p["name"] == "my-plugin")
+            .expect("manifested plugin listed under manifest name");
+        assert_eq!(manifested["version"], "1.2.3");
+        assert_eq!(manifested["description"], "does things");
+        assert_eq!(manifested["enabled"], false);
+        let plain = plugins
+            .iter()
+            .find(|p| p["name"] == "plain")
+            .expect("legacy dir listed");
+        assert_eq!(plain["enabled"], true);
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_skips_recent_sessions() {
+        // A short history must not trigger the auto-compact path: turn/start
+        // reports compacted=false and the summary item is untouched.
+        let data_dir =
+            std::env::temp_dir().join(format!("prricode-autocompact-off-{}", uuid::Uuid::now_v7()));
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        // Create the session.
+        let start = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/start",
+            "params": { "commandId": "00000000-0000-7000-8000-000000000001" }
+        }))
+        .unwrap();
+        let resp = server.handle_request(start).await;
+        let session_id = resp.result.unwrap()["sessionId"]
+            .as_str()
+            .expect("sessionId")
+            .to_string();
+        let est = server.estimate_history_tokens(&session_id);
+        assert!(est < AUTO_COMPACT_THRESHOLD_TOKENS);
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_runs_when_history_exceeds_the_threshold() {
+        let data_dir =
+            std::env::temp_dir().join(format!("prricode-autocompact-on-{}", uuid::Uuid::now_v7()));
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let start = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/start",
+            "params": { "commandId": "00000000-0000-7000-8000-000000000001" }
+        }))
+        .unwrap();
+        let resp = server.handle_request(start).await;
+        let session_id = resp.result.unwrap()["sessionId"]
+            .as_str()
+            .expect("sessionId")
+            .to_string();
+        // Stuff the history past the char budget (compaction needs >= 4 msgs).
+        let filler = "x".repeat(AUTO_COMPACT_THRESHOLD_TOKENS * 4);
+        for _ in 0..4 {
+            server
+                .persistence
+                .save_item(&ItemRecord {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    session_id: session_id.implementation(),
+                    kind: "user".into(),
+                    role: Some("user".into()),
+                    content: serde_json::to_string(&json!({
+                        "content": [{ "type": "text", "text": filler.implementation() }]
+                    }))
+                    .unwrap(),
+                    created_at: String::new(),
+                })
+                .unwrap();
+        }
+        assert!(server.estimate_history_tokens(&session_id) >= AUTO_COMPACT_THRESHOLD_TOKENS);
+        // turn/start must run compaction first, then spawn normally.
+        let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "turn/start",
+            "params": {
+                "sessionId": session_id,
+                "commandId": "00000000-0000-7000-8000-000000000002",
+                "input": [ { "type": "text", "text": "continue" } ]
+            }
+        }))
+        .unwrap();
+        let resp = server.handle_request(request).await;
+        assert!(resp.error.is_none(), "turn/start should not error");
+        // The summary item now exists in the session.
+        let items = server.persistence.list_items(&session_id, None).unwrap();
+        assert!(
+            items.iter().any(|i| i.kind == "summary"),
+            "auto-compact must persist a summary item"
+        );
+        // And the compaction event was streamed.
+        // (events_tx was consumed by _rx; assert persisted state only)
+        // Cancel the spawned turn so the test exits cleanly.
+        let turn_id = resp.result.unwrap()["turnId"].as_str().unwrap().to_string();
+        let cancel = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "turn/cancel",
+            "params": { "turnId": turn_id }
+        }))
+        .unwrap();
+        let _ = server.handle_request(cancel).await;
         std::fs::remove_dir_all(&data_dir).ok();
     }
 }

@@ -169,6 +169,16 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Run on a remote host over SSH (unsupported in this build)
+    Ssh { host: String },
+    /// Connect to a server URL (unsupported in this build)
+    Open { url: String },
+    /// Check installation health
+    Doctor,
+    /// List configured agents
+    Agents,
+    /// Check for updates
+    Update,
 }
 
 #[derive(Subcommand)]

@@ -5,7 +5,7 @@ mod app;
 mod theme;
 mod ui;
 
-pub use app::{App, PendingApproval, PipelineView, TurnMessage, UiEvent};
+pub use app::{App, PendingApproval, PipelineView, Role, TurnMessage, UiEvent};
 pub use theme::{Theme, ThemeStore};
 
 use anyhow::Result;
@@ -49,6 +49,10 @@ pub enum UiCommand {
         model: String,
     },
     SetApprovalMode(ApprovalMode),
+    HooksList,
+    SwitchSession {
+        session_id: String,
+    },
     /// Persist an "always allow in this workspace" policy amendment.
     RecordAmendment {
         amendment: crate::app::PolicyAmendment,
@@ -172,7 +176,7 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
     };
     let cmd_tx_agent = cmd_tx_agent;
     tokio::spawn(async move {
-        let session_id = agent_launch
+        let mut session_id = agent_launch
             .resume_session
             .implementation()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
@@ -292,6 +296,50 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                 }
                 UiCommand::SetModel { model: new_model } => model = new_model,
                 UiCommand::SetApprovalMode(mode) => approval_mode = mode,
+                UiCommand::HooksList => {
+                    let runner = Arc::implementation(&agent_runner);
+                    let ui_tx_hooks = ui_tx.implementation();
+                    tokio::spawn(async move {
+                        let text = if let Some(engine) = runner.hooks() {
+                            let hooks = engine.list();
+                            if hooks.is_empty() {
+                                "hooks: none registered".to_string()
+                            } else {
+                                let lines: Vec<String> = hooks
+                                    .iter()
+                                    .map(|h| {
+                                        format!(
+                                            "{} [{}] {} (supported: {})",
+                                            h.id,
+                                            h.event.as_str(),
+                                            h.hook_type.as_str(),
+                                            h.hook_type.supported()
+                                        )
+                                    })
+                                    .collect();
+                                format!(
+                                    "hooks:
+{}",
+                                    lines.join(
+                                        "
+"
+                                    )
+                                )
+                            }
+                        } else {
+                            "hooks: engine unavailable".to_string()
+                        };
+                        let _ = ui_tx_hooks.send(UiEvent::Log(text));
+                    });
+                }
+                UiCommand::SwitchSession { session_id: new_id } => {
+                    session_id = new_id.implementation();
+                    let messages = load_display_messages(&agent_persistence, &session_id);
+                    let _ = ui_tx.send(UiEvent::SessionSwitched {
+                        session_id: new_id,
+                        messages,
+                    });
+                }
                 UiCommand::ShellRun { command } => {
                     // '!' shell mode: run in the workspace through the sandbox,
                     // stream the result as a system message (never as a turn).
@@ -333,10 +381,15 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                 }
                 UiCommand::RecordAmendment { amendment } => {
                     // Durable "always allow in this workspace" rule.
-                    if let Err(e) = agent_persistence.set_setting(
-                        &format!("approvalAmendment:{}", session_id),
-                        &serde_json::to_string(&amendment).unwrap_or_default(),
-                    ) {
+                    let key = format!(
+                        "approvalAmendment:{}:{}:{}",
+                        stage_workspace.display(),
+                        amendment.tool,
+                        amendment.matcher
+                    );
+                    if let Err(e) = agent_persistence
+                        .set_setting(&key, &serde_json::to_string(&amendment).unwrap_or_default())
+                    {
                         tracing::warn!("amendment persist failed: {e}");
                     }
                 }
@@ -618,6 +671,34 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
             default_model
         },
     );
+    let initial_session_id = launch
+        .resume_session
+        .implementation()
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    app.session_id = initial_session_id.implementation();
+    if launch.resume_session.is_some() {
+        let history = load_display_messages(&persistence, &initial_session_id);
+        if !history.is_empty() {
+            app.messages = history;
+        }
+        app.push_system(format!("resumed session {initial_session_id}"));
+    }
+
+    let stage_workspace = launch
+        .workspace_root
+        .implementation()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let workspace_prefix = format!("approvalAmendment:{}:", stage_workspace.display());
+    if let Ok(settings) = persistence.list_settings() {
+        for (k, v) in settings {
+            if k.starts_with(&workspace_prefix) {
+                if let Ok(amendment) = serde_json::from_str::<app::PolicyAmendment>(&v) {
+                    app.add_workspace_amendment(amendment);
+                }
+            }
+        }
+    }
+
     // Theme selection: the config file names a starting theme, and the last
     // `/theme` choice (persisted under the settings key `theme`) wins over
     // it. An unknown name falls back to the default with a log line.
@@ -799,6 +880,90 @@ fn load_history(persistence: &Arc<Persistence>, session_id: &str) -> Vec<ChatMes
         }
     }
     history
+}
+
+fn load_display_messages(persistence: &Arc<Persistence>, session_id: &str) -> Vec<TurnMessage> {
+    let items = persistence.list_items(session_id, None).unwrap_or_default();
+    let mut messages = Vec::new();
+    for item in items {
+        let Ok(content) = serde_json::from_str::<serde_json::Value>(&item.content) else {
+            continue;
+        };
+        match item.kind.as_str() {
+            "user" => {
+                if let Some(text) = content
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                {
+                    messages.push(TurnMessage {
+                        role: Role::User,
+                        text,
+                    });
+                }
+            }
+            "assistant" => {
+                let text = content
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|p| {
+                                if p.get("type")?.as_str()? == "text" {
+                                    p.get("text")?.as_str()
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    messages.push(TurnMessage {
+                        role: Role::Assistant,
+                        text,
+                    });
+                }
+            }
+            "tool_use" => {
+                let name = content.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let summary = summarize_tool(&content);
+                messages.push(TurnMessage {
+                    role: Role::Tool,
+                    text: format!("{name}: {summary}"),
+                });
+            }
+            "tool_result" => {
+                let is_error = content
+                    .get("isError")
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(false);
+                let mark = if is_error { "✗" } else { "✓" };
+                messages.push(TurnMessage {
+                    role: Role::Tool,
+                    text: format!("{mark} result"),
+                });
+            }
+            "summary" => {
+                if let Some(text) = content.as_str() {
+                    messages.push(TurnMessage {
+                        role: Role::System,
+                        text: text.to_string(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    messages
 }
 
 /// Render an approval summary payload as one display line.

@@ -54,7 +54,10 @@ pub fn next_event(timeout: std::time::Duration) -> anyhow::Result<Option<KeyActi
         KeyCode::Char(c) if modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Ctrl(c),
         KeyCode::Char(c) if modifiers.contains(KeyModifiers::ALT) => KeyAction::Alt(c),
         KeyCode::Char(c) => KeyAction::Char(c),
+        KeyCode::Enter if modifiers.contains(KeyModifiers::ALT) => KeyAction::Alt('\n'),
+        KeyCode::Enter if modifiers.contains(KeyModifiers::SHIFT) => KeyAction::Ctrl('j'),
         KeyCode::Enter => KeyAction::Enter,
+        KeyCode::Tab => KeyAction::Tab,
         KeyCode::Backspace => KeyAction::Backspace,
         KeyCode::Delete => KeyAction::Delete,
         KeyCode::Esc => KeyAction::Esc,
@@ -213,19 +216,78 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         chunks[2].y + 1 + row.min(chunks[2].height.saturating_sub(2)),
     ));
 
-    // Footer.
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled("Esc", Style::default().fg(theme.footer_key)),
-        Span::raw(" cancel  "),
-        Span::styled("PgUp/PgDn", Style::default().fg(theme.footer_key)),
-        Span::raw(" scroll  "),
-        Span::styled("/model", Style::default().fg(theme.footer_command)),
-        Span::raw(" switch model  "),
-        Span::styled("/approval", Style::default().fg(theme.footer_command)),
-        Span::raw(" approval mode  "),
-        Span::styled("/quit", Style::default().fg(theme.footer_command)),
-        Span::raw(" quit"),
-    ]));
+    // Footer / command bar.
+    let footer_spans = if app.input.starts_with('/') {
+        let typed = app.input.trim_start_matches('/');
+        let (typed_cmd, _) = typed.split_once(char::is_whitespace).unwrap_or((typed, ""));
+        let all_commands = [
+            ("help", "command reference"),
+            ("model", "switch/show model"),
+            ("theme", "switch/list color theme"),
+            ("sessions", "show session state"),
+            ("new", "fresh session"),
+            ("resume", "resume session"),
+            ("concept", "start idea pipeline"),
+            ("spec", "specify stage"),
+            ("plan", "plan stage"),
+            ("build", "build stage"),
+            ("verify", "verify stage"),
+            ("ship", "ship release"),
+            ("deploy", "confirm deploy"),
+            ("operate", "run health checks"),
+            ("dossier", "open acceptance dossier"),
+            ("clear", "clear transcript"),
+            ("approval", "switch approval mode"),
+            ("yolo", "toggle auto-approval"),
+            ("goal", "view/set goal"),
+            ("quit", "exit prricode"),
+        ];
+        let matches: Vec<_> = all_commands
+            .into_iter()
+            .filter(|(cmd, _)| cmd.starts_with(typed_cmd))
+            .take(6)
+            .collect();
+
+        if matches.is_empty() {
+            vec![
+                Span::styled(
+                    format!("no matching command: /{typed_cmd}"),
+                    Style::default().fg(theme.system),
+                ),
+                Span::raw("  · type /help for command list"),
+            ]
+        } else {
+            let mut spans = vec![Span::styled(
+                "commands: ",
+                Style::default().fg(theme.system),
+            )];
+            for (i, (cmd, desc)) in matches.into_iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(Span::styled(
+                    format!("/{cmd}"),
+                    Style::default().fg(theme.footer_command),
+                ));
+                spans.push(Span::raw(format!(" {desc}")));
+            }
+            spans
+        }
+    } else {
+        vec![
+            Span::styled("Esc", Style::default().fg(theme.footer_key)),
+            Span::raw(" cancel  "),
+            Span::styled("PgUp/PgDn", Style::default().fg(theme.footer_key)),
+            Span::raw(" scroll  "),
+            Span::styled("/model", Style::default().fg(theme.footer_command)),
+            Span::raw(" switch model  "),
+            Span::styled("/approval", Style::default().fg(theme.footer_command)),
+            Span::raw(" approval mode  "),
+            Span::styled("/quit", Style::default().fg(theme.footer_command)),
+            Span::raw(" quit"),
+        ]
+    };
+    let footer = Paragraph::new(Line::from(footer_spans));
     frame.render_widget(footer, chunks[3]);
 }
 

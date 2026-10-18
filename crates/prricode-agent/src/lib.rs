@@ -4,14 +4,22 @@
 //! answer, persisting every item and recording usage along the way.
 
 mod approval;
+mod hooks;
 mod loop_runner;
+mod memory;
+mod project_instructions;
 mod prompts;
 mod tools;
 
 pub use approval::{ApprovalDecision, ApprovalEngine, ApprovalOutcome};
+pub use hooks::{
+    HookContext, HookDefinition, HookEvent, HookResult, HookType, HookWire, HooksEngine,
+};
 pub use loop_runner::{
     AgentRunner, GoalContext, TurnHandle, TurnInput, TurnOutcome, TurnTicket, GOAL_COMPLETE_TOOL,
 };
+pub use memory::*;
+pub use project_instructions::{load_project_instructions, ProjectInstructionsMode};
 pub use prompts::build_system_prompt;
 pub use prricode_mcp::McpRegistry;
 pub use tools::{

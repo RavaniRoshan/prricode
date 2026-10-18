@@ -783,6 +783,32 @@ async fn main() -> Result<()> {
             std::fs::write(&path, STARTER_CONFIG)?;
             println!("Wrote {}", path.display());
         }
+        Command::Ssh { host } => {
+            println!("ssh: unsupported in this build (target: {host})");
+        }
+        Command::Open { url } => {
+            println!("open: unsupported in this build (target: {url})");
+        }
+        Command::Doctor => {
+            println!("prricode doctor");
+            println!("data_dir: {}", data_dir.display());
+            println!("config: {}", prricode_provider::config_path().display());
+            println!("provider: {:?}", cli.provider);
+            println!(
+                "model: {}",
+                default_model(&cli).unwrap_or_else(|| "(default)".into())
+            );
+            println!(
+                "workspace: {}",
+                std::env::current_dir().unwrap_or_default().display()
+            );
+        }
+        Command::Agents => {
+            println!("agents: no configured agents in this build");
+        }
+        Command::Update => {
+            println!("update: not available in this build (unsupported: no updater)");
+        }
         Command::Voice { toggle: _, file } => {
             use prricode_voice::{CommandSpeech, OpenAiAudio, SpeechToText};
             let voice = prricode_provider::load_config().voice;
@@ -1120,22 +1146,6 @@ async fn main() -> Result<()> {
             if uuid::Uuid::parse_str(session_id).is_err() {
                 println!("(note: session ids are UUIDs; run 'prricode resume' to list them)");
             }
-        }
-        Command::Resume { session_id: None } => {
-            // Interactive resume goes through the TUI picker.
-            let launch = prricode_tui::LaunchConfig {
-                provider: provider_kind(cli.provider),
-                model: default_model(&cli),
-                base_url: cli.base_url.implementation(),
-                approval_mode: cli
-                    .approval_mode
-                    .map(|m| m.to_mode())
-                    .unwrap_or(prricode_core::ApprovalMode::Closed),
-                workspace_root: None,
-                data_dir: Some(data_dir),
-                resume_session: None,
-            };
-            return prricode_tui::run(launch);
         }
         Command::Resume { session_id } => {
             let persistence = Persistence::new(&data_dir)?;

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 prricode-core = { path = "../prricode-core" }
+dirs = { workspace = true }
 prricode-provider = { path = "../prricode-provider" }
 prricode-persistence = { path = "../prricode-persistence" }
 prricode-sandbox = { path = "../prricode-sandbox" }

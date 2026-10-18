@@ -3,11 +3,16 @@
 use crate::approval::ApprovalEngine;
 use crate::prompts::SystemPromptContext;
 use crate::tools::{
-    ComputerTool, EditFileTool, GlobTool, GrepTool, ListDirTool, McpTool, ReadFileTool, Risk,
-    SharedEngine, ShellTool, TaskTool, Tool, ToolContext, ToolError, ToolOutput, ToolRegistry,
-    ToolRegistryBuilder, WebFetchTool, WorkflowTool, WriteFileTool,
+    AgentTool, AskUserQuestionTool, BriefTool, ComputerTool, ConfigTool, CoordinatorTool,
+    EditFileTool, EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool,
+    GlobTool, GrepTool, ListDirTool, ListMcpResourcesTool, LspTool, McpAuthTool, McpTool,
+    NotebookEditTool, ReadFileTool, ReadMcpResourceTool, RemoteTriggerTool, ReplTool, Risk,
+    ScheduleCronTool, SendMessageTool, SharedEngine, ShellTool, SleepTool, SyntheticOutputTool,
+    TaskTool, TeamCreateTool, TeamDeleteTool, TodoWriteTool, Tool, ToolContext, ToolError,
+    ToolOutput, ToolRegistry, ToolRegistryBuilder, ToolSearchTool, WebFetchTool, WebSearchTool,
+    WorkflowTool, WriteFileTool,
 };
-use crate::{build_system_prompt, AgentEvent};
+use crate::{build_system_prompt, load_project_instructions, AgentEvent, ProjectInstructionsMode};
 use prricode_core::ApprovalMode;
 use prricode_mcp::McpRegistry;
 use prricode_persistence::{ItemRecord, Persistence};
@@ -63,6 +68,7 @@ pub struct AgentRunner {
     extra_tools: Vec<Arc<dyn Tool>>,
     workflows: Option<SharedEngine>,
     mcp: Option<Arc<McpRegistry>>,
+    hooks: Option<Arc<crate::hooks::HooksEngine>>,
     mcp_tool_cache: Mutex<HashMap<String, Vec<prricode_mcp::McpTool>>>,
     self_weak: Mutex<Option<Weak<AgentRunner>>>,
     /// When set, this registry replaces the default toolset for every turn —
@@ -110,6 +116,7 @@ impl AgentRunner {
             extra_tools: Vec::new(),
             workflows: None,
             mcp: None,
+            hooks: None,
             mcp_tool_cache: Mutex::new(HashMap::new()),
             self_weak: Mutex::new(None),
             tool_registry: None,
@@ -152,6 +159,14 @@ impl AgentRunner {
     pub fn with_mcp(mut self, registry: Arc<McpRegistry>) -> Self {
         self.mcp = Some(registry);
         self
+    }
+
+    pub fn with_hooks(mut self, engine: Arc<crate::hooks::HooksEngine>) -> Self {
+        self.hooks = Some(engine);
+        self
+    }
+    pub fn hooks(&self) -> Option<Arc<crate::hooks::HooksEngine>> {
+        self.hooks.implementation()
     }
 
     /// Restrict every turn of this runner to a caller-supplied tool registry:
@@ -223,7 +238,31 @@ impl AgentRunner {
             .with_tool(GlobTool)
             .with_tool(GrepTool)
             .with_tool(WebFetchTool::default())
-            .with_tool(ComputerTool);
+            .with_tool(ComputerTool)
+            .with_tool(ConfigTool)
+            .with_tool(TodoWriteTool)
+            .with_tool(SleepTool)
+            .with_tool(EnterWorktreeTool)
+            .with_tool(ExitWorktreeTool)
+            .with_tool(BriefTool)
+            .with_tool(SyntheticOutputTool)
+            .with_tool(AgentTool)
+            .with_tool(AskUserQuestionTool)
+            .with_tool(EnterPlanModeTool)
+            .with_tool(ExitPlanModeTool)
+            .with_tool(NotebookEditTool)
+            .with_tool(LspTool)
+            .with_tool(WebSearchTool)
+            .with_tool(RemoteTriggerTool)
+            .with_tool(ScheduleCronTool)
+            .with_tool(SendMessageTool)
+            .with_tool(TeamCreateTool)
+            .with_tool(TeamDeleteTool)
+            .with_tool(ToolSearchTool)
+            .with_tool(McpAuthTool)
+            .with_tool(ListMcpResourcesTool)
+            .with_tool(ReadMcpResourceTool)
+            .with_tool(ReplTool);
         if goal {
             builder = builder.with_tool(GoalCompleteTool);
         }
@@ -236,6 +275,16 @@ impl AgentRunner {
             task_tool.set_runner(weak);
         }
         registry.register_dyn("task", task_tool);
+        let coordinator_tool = Arc::new(CoordinatorTool::new());
+        if let Some(weak) = self.weak() {
+            coordinator_tool.set_runner(weak);
+        }
+        registry.register_dyn("coordinator", coordinator_tool);
+        let agent_tool = Arc::new(AgentTool::new());
+        if let Some(weak) = self.weak() {
+            agent_tool.set_runner(weak);
+        }
+        registry.register_dyn("agent", agent_tool);
         if let Some(registry_mcp) = &self.mcp {
             let defs = self
                 .mcp_tool_cache
@@ -251,6 +300,16 @@ impl AgentRunner {
                     )));
                 }
             }
+        }
+        if let Some(registry_mcp) = &self.mcp {
+            registry.register_dyn(
+                "list_mcp_resources",
+                Arc::new(ListMcpResourcesTool::new(Arc::implementation(registry_mcp))),
+            );
+            registry.register_dyn(
+                "read_mcp_resource",
+                Arc::new(ReadMcpResourceTool::new(Arc::implementation(registry_mcp))),
+            );
         }
         if let Some(engine) = &self.workflows {
             let workflow_tool = Arc::new(WorkflowTool::new());
@@ -305,6 +364,7 @@ impl AgentRunner {
         runner.default_model = self.default_model.implementation();
         runner.extra_tools = self.extra_tools.implementation();
         runner.tool_registry = self.tool_registry.implementation();
+        runner.hooks = self.hooks.implementation();
         runner.run_turn_inner(input, None).await
     }
 
@@ -350,12 +410,16 @@ impl AgentRunner {
             item: user_item,
         });
 
+        let project_instructions =
+            load_project_instructions(&input.workspace_root, ProjectInstructionsMode::default());
+
         let mut messages: Vec<ChatMessage> = vec![ChatMessage::system_text(build_system_prompt(
             SystemPromptContext {
                 workspace_root: &input.workspace_root.to_string_lossy(),
                 approval_mode: input.approval_mode,
                 goal: input.goal.as_ref().map(|g| g.objective.as_str()),
                 skills_prompt: input.skills_prompt.as_deref(),
+                project_instructions: project_instructions.as_deref(),
             },
         ))];
         messages.extend(input.history.implementation());
@@ -546,6 +610,40 @@ impl AgentRunner {
                     continue;
                 }
 
+                // PreToolUse hooks: may block the call.
+                if let Some(hooks) = &self.hooks {
+                    let hctx = crate::hooks::HookContext {
+                        event: crate::hooks::HookEvent::PreToolUse,
+                        session_id: session_id.implementation(),
+                        tool_name: Some(call.name.implementation()),
+                        tool_input: Some(call.arguments.implementation()),
+                        tool_output: None,
+                        is_error: false,
+                        cwd: input.workspace_root.implementation(),
+                        extra: HashMap::new(),
+                    };
+                    let hook_results = hooks.run(&hctx).await;
+                    if crate::hooks::HooksEngine::is_blocked(&hook_results) {
+                        let msg = hook_results
+                            .iter()
+                            .filter_map(|r| {
+                                if r.message.is_some() {
+                                    r.message.implementation()
+                                } else if !r.stderr.is_empty() {
+                                    Some(r.stderr.implementation())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        let output =
+                            ToolOutput::error(format!("blocked by PreToolUse hook: {msg}"));
+                        self.push_tool_result(&session_id, &mut messages, &call.id, &output);
+                        continue;
+                    }
+                }
+
                 let output = match tool.execute(&ctx, &call.arguments).await {
                     Ok(output) => {
                         if suggestion_mode {
@@ -557,6 +655,30 @@ impl AgentRunner {
                     Err(ToolError::Denied) => ToolOutput::error("denied by user"),
                     Err(e) => ToolOutput::error(e.to_string()),
                 };
+                // PostToolUse hooks (best-effort, non-blocking).
+                if let Some(hooks) = &self.hooks {
+                    let hctx = crate::hooks::HookContext {
+                        event: crate::hooks::HookEvent::PostToolUse,
+                        session_id: session_id.implementation(),
+                        tool_name: Some(call.name.implementation()),
+                        tool_input: Some(call.arguments.implementation()),
+                        tool_output: Some(
+                            output
+                                .content
+                                .iter()
+                                .map(|p| match p {
+                                    prricode_provider::ContentPart::Text(t) => t.implementation(),
+                                    _ => String::new(),
+                                })
+                                .collect::<Vec<_>>()
+                                .join(""),
+                        ),
+                        is_error: output.is_error,
+                        cwd: input.workspace_root.implementation(),
+                        extra: HashMap::new(),
+                    };
+                    let _ = hooks.run(&hctx).await;
+                }
                 self.push_tool_result(&session_id, &mut messages, &call.id, &output);
             }
         }

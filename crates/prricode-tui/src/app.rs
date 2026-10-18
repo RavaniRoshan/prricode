@@ -305,6 +305,10 @@ pub enum UiEvent {
         output: u64,
     },
     Log(String),
+    SessionSwitched {
+        session_id: String,
+        messages: Vec<TurnMessage>,
+    },
 }
 
 /// Terminal key actions, mirroring the documented composer keymap.
@@ -825,6 +829,21 @@ impl App {
                 self.input.insert_str(idx, &killed);
                 self.cursor += killed.chars().count();
             }
+            KeyAction::Ctrl('t') => {
+                if self.cursor > 0 && self.char_len() >= 2 {
+                    let mut chars: Vec<char> = self.input.chars().collect();
+                    let swap_idx = if self.cursor >= chars.len() {
+                        chars.len() - 1
+                    } else {
+                        self.cursor
+                    };
+                    chars.swap(swap_idx - 1, swap_idx);
+                    self.input = chars.into_iter().collect();
+                    if self.cursor < self.char_len() {
+                        self.cursor += 1;
+                    }
+                }
+            }
             KeyAction::Alt('b') => {
                 self.cursor = self.cursor.saturating_sub(self.word_left_len());
             }
@@ -1012,7 +1031,10 @@ impl App {
                     self.show_help = !self.show_help;
                     if self.show_help {
                         self.push_system(
-                            "commands: /model /sessions /new /resume /clear /approval /provider                              /concept /spec /plan /build /ship /deploy /operate /dossier /theme                              /goal /yolo /compact — keys: Enter send, Ctrl+J newline, Alt+Enter                              queue, @ files, ! shell, Esc cancel, /quit quits"
+                            "commands: /model /sessions /new /resume /clear /approval /provider \
+                             /concept /spec /plan /build /ship /deploy /operate /dossier /theme /hooks \
+                             /goal /yolo /compact — keys: Enter send, Ctrl+J newline, Alt+Enter \
+                             queue, @ files, ! shell, Esc cancel, /quit quits"
                                 .to_string(),
                         );
                     }
@@ -1037,6 +1059,9 @@ impl App {
                     } else {
                         self.session_id = arg.to_string();
                         self.messages.clear();
+                        let _ = commands.send(super::UiCommand::SwitchSession {
+                            session_id: arg.to_string(),
+                        });
                         self.push_system(format!("resumed session {arg}"));
                     }
                 }
@@ -1044,11 +1069,27 @@ impl App {
                     self.session_id = uuid::Uuid::now_v7().to_string();
                     self.messages.clear();
                     self.streaming.clear();
+                    let _ = commands.send(super::UiCommand::SwitchSession {
+                        session_id: self.session_id.implementation(),
+                    });
                     self.push_system(format!("new session {}", self.session_id));
                 }
                 "clear" => {
                     self.messages.clear();
                     self.streaming.clear();
+                }
+                "permission-mode" | "permission_mode" => {
+                    let mode = match arg {
+                        "default" => ApprovalMode::Closed,
+                        "plan" => ApprovalMode::Suggestive,
+                        "auto" => ApprovalMode::Auto,
+                        "bypass" | "bypasspermissions" => ApprovalMode::Open,
+                        "dontask" => ApprovalMode::Open,
+                        _ => ApprovalMode::Closed,
+                    };
+                    self.approval_mode = mode;
+                    let _ = commands.send(UiCommand::SetApprovalMode(mode));
+                    self.push_system(format!("permission mode: {arg}"));
                 }
                 "approval" => {
                     let mode = match arg {
@@ -1241,6 +1282,20 @@ impl App {
                             "goal requested: {arg} — persistent goals are set via the protocol (goal/set)"
                         ));
                     }
+                }
+                "hooks" => {
+                    let _ = commands.send(super::UiCommand::HooksList);
+                    self.push_system("hooks: listing".to_string());
+                }
+                "vim" => {
+                    self.push_system(
+                        "vim mode: not implemented in this build (unsupported)".to_string(),
+                    );
+                }
+                "voice" => {
+                    self.push_system(
+                        "voice: not implemented in this build (unsupported)".to_string(),
+                    );
                 }
                 "compact" => {
                     // Context compaction is a server-side operation.
@@ -1530,6 +1585,15 @@ impl App {
                 self.output_tokens += output;
             }
             UiEvent::Log(message) => self.push_system(message),
+            UiEvent::SessionSwitched {
+                session_id,
+                messages,
+            } => {
+                self.session_id = session_id;
+                if !messages.is_empty() {
+                    self.messages = messages;
+                }
+            }
         }
     }
 
@@ -1631,11 +1695,17 @@ impl App {
         }
     }
 
-    fn push_system(&mut self, text: String) {
+    pub fn push_system(&mut self, text: String) {
         self.messages.push(TurnMessage {
             role: Role::System,
             text,
         });
+    }
+
+    pub fn add_workspace_amendment(&mut self, amendment: PolicyAmendment) {
+        if !self.workspace_amendments.contains(&amendment) {
+            self.workspace_amendments.push(amendment);
+        }
     }
 
     /// Flatten the conversation for rendering, including in-flight streaming.
@@ -2766,5 +2836,112 @@ mod tests {
             &tx,
         );
         assert!(app.status_line().contains("health: 1/1"));
+    }
+
+    #[test]
+    fn ctrl_t_transposes_characters() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+
+        // 1. "hello" with cursor at 2: transposes 'e' (index 1) and 'l' (index 2) -> "hlelo", cursor at 3
+        for c in "hello".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.cursor = 2;
+        app.handle_key(KeyAction::Ctrl('t'), &tx);
+        assert_eq!(app.input, "hlelo");
+        assert_eq!(app.cursor, 3);
+
+        // 2. Cursor at end of line (cursor == char_len): transposes last two characters
+        app.input = "ab".into();
+        app.cursor = 2;
+        app.handle_key(KeyAction::Ctrl('t'), &tx);
+        assert_eq!(app.input, "ba");
+        assert_eq!(app.cursor, 2);
+
+        // 3. Cursor at 0: does nothing
+        app.cursor = 0;
+        app.handle_key(KeyAction::Ctrl('t'), &tx);
+        assert_eq!(app.input, "ba");
+        assert_eq!(app.cursor, 0);
+
+        // 4. Short input: does nothing
+        app.input = "x".into();
+        app.cursor = 1;
+        app.handle_key(KeyAction::Ctrl('t'), &tx);
+        assert_eq!(app.input, "x");
+    }
+
+    #[test]
+    fn resume_and_new_send_switch_session() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+
+        // /resume test-session-123
+        for c in "/resume test-session-123".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        assert_eq!(app.session_id, "test-session-123");
+        let cmd = rx.try_recv().unwrap();
+        match cmd {
+            super::super::UiCommand::SwitchSession { session_id } => {
+                assert_eq!(session_id, "test-session-123");
+            }
+            _ => panic!("expected SwitchSession"),
+        }
+
+        // /new
+        for c in "/new".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        app.handle_key(KeyAction::Enter, &tx);
+        let new_id = app.session_id.implementation();
+        assert_ne!(new_id, "test-session-123");
+        let cmd = rx.try_recv().unwrap();
+        match cmd {
+            super::super::UiCommand::SwitchSession { session_id } => {
+                assert_eq!(session_id, new_id);
+            }
+            _ => panic!("expected SwitchSession"),
+        }
+    }
+
+    #[test]
+    fn session_switched_event_restores_messages() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        let history = vec![
+            TurnMessage {
+                role: Role::User,
+                text: "hello world".into(),
+            },
+            TurnMessage {
+                role: Role::Assistant,
+                text: "hi there!".into(),
+            },
+        ];
+        app.apply_ui_event(
+            UiEvent::SessionSwitched {
+                session_id: "resumed-sess-456".into(),
+                messages: history,
+            },
+            &tx,
+        );
+        assert_eq!(app.session_id, "resumed-sess-456");
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[0].text, "hello world");
+        assert_eq!(app.messages[1].text, "hi there!");
+    }
+
+    #[test]
+    fn workspace_amendment_restoration() {
+        let mut app = new_app();
+        let amendment = PolicyAmendment::workspace("shell", "cargo test");
+        app.add_workspace_amendment(amendment.implementation());
+        assert_eq!(app.workspace_amendments.len(), 1);
+        // Adding duplicate does not create duplicate entries
+        app.add_workspace_amendment(amendment);
+        assert_eq!(app.workspace_amendments.len(), 1);
     }
 }

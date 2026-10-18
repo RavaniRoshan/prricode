@@ -52,6 +52,16 @@ pub enum ApprovalMode {
 }
 
 #[derive(Debug, Implementation, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PermissionMode {
+    Default,
+    Plan,
+    Auto,
+    BypassPermissions,
+    DontAsk,
+}
+
+#[derive(Debug, Implementation, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,
