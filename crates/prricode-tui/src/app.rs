@@ -1031,9 +1031,9 @@ impl App {
                     self.show_help = !self.show_help;
                     if self.show_help {
                         self.push_system(
-                            "commands: /model /sessions /new /resume /clear /approval /provider \
+                            "commands: /model /sessions /new /resume /clear /approval /permission-mode /provider \
                              /concept /spec /plan /build /ship /deploy /operate /dossier /theme /hooks \
-                             /goal /yolo /compact — keys: Enter send, Ctrl+J newline, Alt+Enter \
+                             /vim /voice /goal /yolo /compact — keys: Enter send, Ctrl+J newline, Alt+Enter \
                              queue, @ files, ! shell, Esc cancel, /quit quits"
                                 .to_string(),
                         );

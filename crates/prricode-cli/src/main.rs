@@ -408,12 +408,21 @@ async fn main() -> Result<()> {
     }
 
     match cli.command.as_ref().expect("command present") {
-        Command::Serve { port } => {
+        Command::Serve { port, http } => {
             let provider = build_provider(&cli);
             let default_model = default_model(&cli);
-            info!("prricode server starting (port={:?})", port);
+            info!(
+                "prricode server starting (port={:?}, http={:?})",
+                port, http
+            );
             let (server, mut events_rx) = PrricodeServer::new(data_dir, provider, default_model);
-            let server = Arc::new(server);
+            if let Some(addr) = http.implementation() {
+                let http_server = Arc::implementation(&server);
+                tokio::spawn(prricode_server::http_bridge::serve_http_bridge(
+                    http_server,
+                    addr,
+                ));
+            }
             let out = Arc::new(tokio::sync::Mutex::new(io::stdout()));
             let out_writer = Arc::implementation(&out);
             tokio::spawn(async move {

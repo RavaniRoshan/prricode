@@ -14,6 +14,15 @@ pub struct Skill {
     pub source: SkillSource,
     /// Runnable helpers under the skill's `scripts/` directory.
     pub scripts: Vec<PathBuf>,
+    /// Optional frontmatter: model preference for skills used as subagents.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional frontmatter: narrow the tool registry to these names.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Optional frontmatter: context style (e.g. "fork").
+    #[serde(default)]
+    pub context: Option<String>,
 }
 
 impl Skill {
@@ -100,6 +109,9 @@ pub fn parse_skill_md(text: &str, location: &Path, source: SkillSource) -> Skill
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unnamed".to_string());
     let mut description = String::new();
+    let mut model = None;
+    let mut allowed_tools = Vec::new();
+    let mut context = None;
     let mut lines = text.lines().peekable();
     if lines.peek().is_some_and(|l| l.trim() == "---") {
         lines.next();
@@ -119,6 +131,17 @@ pub fn parse_skill_md(text: &str, location: &Path, source: SkillSource) -> Skill
                 name = unquote(rest);
             } else if let Some(rest) = trimmed.strip_prefix("description:") {
                 description = unquote(rest);
+            } else if let Some(rest) = trimmed.strip_prefix("model:") {
+                model = Some(unquote(rest));
+            } else if let Some(rest) = trimmed.strip_prefix("allowed-tools:") {
+                allowed_tools = unquote(rest)
+                    .split(',')
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty())
+                    .map(String::from)
+                    .collect();
+            } else if let Some(rest) = trimmed.strip_prefix("context:") {
+                context = Some(unquote(rest));
             }
         }
         let instructions = body.join("\n");
@@ -129,6 +152,9 @@ pub fn parse_skill_md(text: &str, location: &Path, source: SkillSource) -> Skill
             location: location.to_path_buf(),
             source,
             scripts: Vec::new(),
+            model,
+            allowed_tools,
+            context,
         };
     }
     let instructions = text.to_string();
@@ -145,6 +171,9 @@ pub fn parse_skill_md(text: &str, location: &Path, source: SkillSource) -> Skill
         location: location.to_path_buf(),
         source,
         scripts: Vec::new(),
+        model: None,
+        allowed_tools: Vec::new(),
+        context: None,
     }
 }
 
@@ -365,6 +394,20 @@ mod tests {
         assert_eq!(skill.name, "git");
         assert_eq!(skill.description, "Git helpers");
         assert!(skill.instructions.contains("Use git commands."));
+        assert!(skill.model.is_none(), "unset frontmatter stays absent");
+        assert!(skill.allowed_tools.is_empty());
+        assert!(skill.context.is_none());
+    }
+
+    #[test]
+    fn parses_optional_frontmatter_fields() {
+        let text = "---\nname: dense\nversion: 2\ndescription: Deep dive\nmodel: big-model\nallowed-tools: read_file, grep, shell\ncontext: fork\n---\n\n# Deep dive\n";
+        let skill = parse_skill_md(text, Path::new("/x/dense/SKILL.md"), SkillSource::Project);
+        assert_eq!(skill.name, "dense");
+        assert_eq!(skill.model.as_deref(), Some("big-model"));
+        assert_eq!(skill.allowed_tools, vec!["read_file", "grep", "shell"]);
+        assert_eq!(skill.context.as_deref(), Some("fork"));
+        assert!(skill.instructions.contains("# Deep dive"));
     }
 
     #[test]

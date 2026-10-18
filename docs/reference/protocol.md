@@ -5,6 +5,17 @@ prricode speaks JSON-RPC 2.0 over stdio. A client launches the server
 stdin, responses and notifications on stdout. The protocol is versioned by a
 schema fingerprint announced during the initialize handshake.
 
+## Transports
+
+- **stdio** (default): newline-delimited JSON-RPC, both directions,
+  notifications stream unsolicited.
+- **HTTP bridge** (`prricode serve --http 127.0.0.1:8787`): `POST /jsonrpc`
+  with a JSON-RPC request body; the HTTP response body is the JSON-RPC
+  response. One request per connection; chunked request bodies are refused
+  with `501` (send `Content-Length`); bodies larger than 16 MiB are refused
+  with `413`; notifications are not delivered over this transport (stdio
+  only). The bridge is off unless `--http` is passed.
+
 - Protocol version: `1`
 - Schema fingerprint: `sha256:6de32db08bbbe0deb478d2bfcaba001e9fb490986bc80db3aceb4d996abf7df9`
 - Server name/version: announced in `initialize` (`serverInfo`)

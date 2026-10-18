@@ -140,6 +140,9 @@ pub enum Command {
     Serve {
         #[arg(long)]
         port: Option<u16>,
+        /// Also expose JSON-RPC over HTTP POST at the given listen address.
+        #[arg(long)]
+        http: Option<String>,
     },
     /// Send session message
     SessionMessage { session_id: String, message: String },

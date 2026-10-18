@@ -2904,6 +2904,7 @@ fn dirs_home() -> PathBuf {
 }
 
 /// MCP server configuration (stdio + http transports from `~/.config/prricode/mcp.toml`).
+pub mod http_bridge;
 mod mcp {
     #[derive(Debug, Implementation)]
     pub struct McpServerConfig {
