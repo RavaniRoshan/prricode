@@ -1378,13 +1378,48 @@ impl App {
                     self.push_system("compaction runs on the server (session/compact)".to_string());
                 }
                 "message" | "ts" | "ps" => {
-                    // Cross-session messaging and task/process listings are
-                    // server-side surfaces.
-                    // future work: wire to the protocol methods when the TUI
-                    // owns a session id on the server side.
-                    self.push_system(format!(
-                        "/{command} is a server-side surface — not available in this build"
-                    ));
+                    if command == "message" {
+                        // Cross-session messaging: queue into the workspace's
+                        // message store (the send_message tool reads/writes
+                        // the same files). Sessions pick messages up when
+                        // their agent runs.
+                        if arg.is_empty() {
+                            self.push_system("/message <session> <text>".to_string());
+                        } else if let Some((to, text)) = arg.split_once(char::is_whitespace) {
+                            let (to, text) = (to.trim(), text.trim());
+                            if to.is_empty() || text.is_empty() {
+                                self.push_system("/message <session> <text>".to_string());
+                            } else {
+                                let _ = commands.send(UiCommand::SendMessage {
+                                    to: to.to_string(),
+                                    text: text.to_string(),
+                                });
+                                self.push_system(format!("message queued to {to}"));
+                            }
+                        } else {
+                            self.push_system("/message <session> <text>".to_string());
+                        }
+                    } else {
+                        // /ts and /ps report the real local state instead of
+                        // pretending to reach a server: one turn at a time,
+                        // plus the pipeline stage when one is running.
+                        let task_line = if self.turn_active {
+                            format!("tasks: 1 active (turn {})", self.session_id)
+                        } else {
+                            "tasks: none active".to_string()
+                        };
+                        let state = if command == "ps" {
+                            format!(
+                                "turn: {} · status: {}",
+                                if self.turn_active { "running" } else { "idle" },
+                                self.status
+                            )
+                        } else {
+                            task_line.implementation()
+                        };
+                        self.push_system(task_line);
+                        self.push_system(state);
+                    }
                 }
                 other => self.push_system(format!("unknown command: /{other} (try /help)")),
             }
@@ -1887,6 +1922,47 @@ mod tests {
     }
 
     #[test]
+    fn message_ts_and_ps_are_real_local_or_queue_surfaces() {
+        use super::super::{UiCommand, UiEvent};
+        // /message parses and queues through the command channel.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/message ses-b hello there", &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            UiCommand::SendMessage { to, text } if to == "ses-b" && text == "hello there"
+        ));
+        // Missing target or text explains the usage instead of failing.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/message", &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("/message <session>")));
+        let mut app = new_app();
+        app.submit("/message ses-b", &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("/message <session>")));
+        // /ts and /ps report the real local state: no background tasks, one
+        // turn view, nothing faked as "server-side".
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/ts", &tx);
+        assert!(app.messages.iter().any(|m| m.text.contains("tasks:")));
+        let mut app = new_app();
+        app.turn_active = true;
+        app.submit("/ps", &tx);
+        let reported = app.messages.iter().any(|m| m.text.contains("turn:"));
+        assert!(reported, "/ps must report the real turn state");
+        // The lib.rs handler appends the queue line; that side is covered in
+        // the workspace-level test (send_message tool format: {to,message}).
+        let _ = UiEvent::Log("noop".to_string());
+    }
+
+    #[test]
     fn session_picker_lists_navigates_and_resumes() {
         use super::super::{UiCommand, UiEvent};
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -2308,27 +2384,29 @@ mod tests {
     }
 
     #[test]
-    fn server_side_commands_are_honest_stubs() {
+    fn server_side_and_local_status_commands_stay_honest() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut app = new_app();
-        for command in ["/compact", "/message x", "/ts", "/ps"] {
+        for command in ["/compact", "/message x hi", "/ts", "/ps"] {
             for c in command.chars() {
                 app.handle_key(KeyAction::Char(c), &tx);
             }
             app.handle_key(KeyAction::Enter, &tx);
         }
-        // Each explains where the surface lives; none fakes success.
+        // Compaction is server-side and says so.
         assert!(app
             .messages
             .iter()
             .any(|m| m.text.contains("session/compact")));
-        // All three server-side stubs say the same honest thing.
-        let stubs = app
+        // /message accepted the queue request (the lib.rs handler writes it).
+        // /ts and /ps report the real local state.
+        assert!(app.messages.iter().any(|m| m.text.contains("tasks:")));
+        assert!(app.messages.iter().any(|m| m.text.contains("turn:")));
+        // No surface claims to be unavailable in this build.
+        assert!(!app
             .messages
             .iter()
-            .filter(|m| m.text.contains("not available in this build"))
-            .count();
-        assert_eq!(stubs, 3);
+            .any(|m| m.text.contains("not available in this build")));
     }
 
     #[test]

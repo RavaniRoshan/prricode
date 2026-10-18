@@ -55,6 +55,13 @@ pub enum UiCommand {
     },
     /// `/sessions` picker: request every stored session summary.
     SessionsList,
+    /// `/message <session> <text>`: queue a cross-session message into the
+    /// workspace's `.prricode/messages` JSONL queue (same file contract as
+    /// the send_message tool).
+    SendMessage {
+        to: String,
+        text: String,
+    },
     /// Persist an "always allow in this workspace" policy amendment.
     RecordAmendment {
         amendment: crate::app::PolicyAmendment,
@@ -356,6 +363,46 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         .collect();
                     sessions.sort_by(|a, b| a.id.cmp(&b.id));
                     let _ = ui_tx.send(UiEvent::SessionsListed { sessions });
+                }
+                UiCommand::SendMessage { to, text } => {
+                    // Same queue contract as the send_message tool:
+                    // <workspace>/.prricode/messages/<to>.jsonl, one JSON
+                    // object per line. The composer reports acceptance; a
+                    // failure surfaces honestly.
+                    let queue = stage_workspace
+                        .implementation()
+                        .join(".prricode")
+                        .join("messages")
+                        .join(format!("{to}.jsonl"));
+                    let ui_tx_msg = ui_tx.implementation();
+                    tokio::spawn(async move {
+                        let line = serde_json::json!({ "to": to, "message": text });
+                        let outcome = (|| -> std::io::Result<()> {
+                            std::fs::create_dir_all(
+                                queue
+                                    .parent()
+                                    .ok_or_else(|| std::io::Error::other("no parent"))?,
+                            )?;
+                            let mut f = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&queue)?;
+                            use std::io::Write;
+                            writeln!(f, "{line}")
+                        })();
+                        match outcome {
+                            Ok(()) => {
+                                let _ = ui_tx_msg.send(UiEvent::Log(format!(
+                                    "message queued to {}",
+                                    queue.display()
+                                )));
+                            }
+                            Err(e) => {
+                                let _ =
+                                    ui_tx_msg.send(UiEvent::Log(format!("message failed: {e}")));
+                            }
+                        }
+                    });
                 }
                 UiCommand::ShellRun { command } => {
                     // '!' shell mode: run in the workspace through the sandbox,

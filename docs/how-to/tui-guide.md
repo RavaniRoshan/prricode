@@ -109,7 +109,8 @@ Type `/` and the command, then `Return`.
 |---|---|
 | `/help` (alias `/?`) | Show the command + key reference |
 | `?` (empty composer) | Open the same help panel from the keyboard; Esc closes it |
-| `/message` `/ts` `/ps` | Server-side surfaces (honest stubs, documented as future work) |
+| `/message <session> <text>` | Queue a cross-session message into the workspace's `.prricode/messages` queue (same files the `send_message` tool uses) |
+| `/ts` `/ps` | Local task/process view of the active turn and pipeline state |
 
 ## Approvals — three durability tiers
 
