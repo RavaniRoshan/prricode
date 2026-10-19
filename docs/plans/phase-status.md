@@ -36,7 +36,7 @@ full workspace tests green, one commit per phase item.
 | 8 | Mid-turn micro-compaction | pending | … |
 | 9 | Agent/task/coordinator/worktrees/team | done | tools registered + tests |
 | 10 | MCP stdio + HTTP transports | done | round-trip test over raw HTTP listener; `mcp.toml` `type = "http"` |
-| 10 | MCP env expansion `${VAR}` in config | pending | … |
+| 10 | MCP env expansion `${VAR}` in config | done | `expand_env` + `load_mcp_servers_with` (command/args/url/env values); `[servers.env]` table plumbs into `McpStdioClient::spawn_with_env`; 4 new tests |
 | 10 | OAuth/XAA | degraded | `mcp_auth` stub reports unsupported |
 | 11 | Plugin manifests in plugin/list | done | `plugin.toml` name/version/description/enabled |
 | 11 | Marketplace install | degraded | proxied sources not planned; `plugin/install` honest |

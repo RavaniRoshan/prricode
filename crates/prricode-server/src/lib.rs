@@ -421,10 +421,11 @@ impl PrricodeServer {
                     }
                     continue;
                 }
-                match prricode_mcp::McpStdioClient::spawn(
+                match prricode_mcp::McpStdioClient::spawn_with_env(
                     &server.name,
                     &server.command,
                     &server.args,
+                    &server.env,
                 )
                 .await
                 {
@@ -2991,6 +2992,7 @@ fn compute_skills_fragment(
 /// MCP server configuration (stdio + http transports from `~/.config/prricode/mcp.toml`).
 pub mod http_bridge;
 mod mcp {
+    use std::collections::HashMap;
     #[derive(Debug, Implementation)]
     pub struct McpServerConfig {
         pub name: String,
@@ -3001,16 +3003,66 @@ mod mcp {
         /// stdio transport: the command and args.
         pub command: String,
         pub args: Vec<String>,
+        /// stdio transport: extra child-process env vars (after
+        /// `${VAR}` expansion).
+        pub env: HashMap<String, String>,
+    }
+
+    /// Populate placeholders in a config string with an injected lookup, so
+    /// the loader stays deterministic in tests and shell-free in production.
+    fn expand_env<T: Fn(&str) -> Option<String>>(input: &str, var: &T) -> String {
+        let mut out = String::with_capacity(input.len());
+        let bytes: Vec<char> = input.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == '$' && i + 1 < bytes.len() && bytes[i + 1] == '{' {
+                if let Some(close_rel) = bytes[i + 2..].iter().position(|&c| c == '}') {
+                    let name: String = bytes[i + 2..i + 2 + close_rel].iter().collect();
+                    if !name.is_empty() {
+                        // Well-formed placeholder always expands; unset
+                        // variables expand to empty (documented behavior).
+                        if let Some(value) = var(&name) {
+                            out.push_str(&value);
+                        }
+                        i += 2 + close_rel + 1;
+                        continue;
+                    }
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Production lookup: the process environment. `${UNSET}` expands to
+    /// "" — an unset placeholder is never an error; configs that require a
+    /// value should name required tools explicitly.
+    fn process_lookup(k: &str) -> Option<String> {
+        std::env::var(k).ok()
     }
 
     /// Load `[[servers]]` tables from the MCP config file.
     pub fn load_mcp_servers() -> Vec<McpServerConfig> {
-        let path = std::env::var("PRRICODE_MCP_CONFIG")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                std::path::PathBuf::from(home).join(".config/prricode/mcp.toml")
-            });
+        load_mcp_servers_with(None, process_lookup)
+    }
+
+    /// Injectable variant: explicit config path + env-var lookup.
+    pub fn load_mcp_servers_with(
+        path: Option<&std::path::Path>,
+        var: impl Fn(&str) -> Option<String>,
+    ) -> Vec<McpServerConfig> {
+        let path = path.map_or_else(
+            || {
+                std::env::var("PRRICODE_MCP_CONFIG")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                        std::path::PathBuf::from(home).join(".config/prricode/mcp.toml")
+                    })
+            },
+            |p| p.to_path_buf(),
+        );
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Vec::new();
         };
@@ -3030,19 +3082,33 @@ mod mcp {
                             .and_then(|t| t.as_str())
                             .unwrap_or("stdio")
                             .to_string();
-                        let url = server.get("url").and_then(|u| u.as_str()).map(String::from);
+                        let url = server
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .map(|u| expand_env(u, &var));
                         let command = server
                             .get("command")
                             .and_then(|c| c.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .map(|c| expand_env(c, &var))
+                            .unwrap_or_default();
                         let args = server
                             .get("args")
                             .and_then(|a| a.as_array())
                             .map(|a| {
                                 a.iter()
-                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .filter_map(|v| v.as_str().map(|s| expand_env(s, &var)))
                                     .collect()
+                            })
+                            .unwrap_or_default();
+                        let env = server
+                            .get("env")
+                            .and_then(|e| e.as_table())
+                            .map(|t| {
+                                t.iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|s| (k.implementation(), expand_env(s, &var)))
+                                    })
+                                    .collect::<HashMap<String, String>>()
                             })
                             .unwrap_or_default();
                         // Honest validation: stdio needs a command, http needs a url.
@@ -3055,6 +3121,7 @@ mod mcp {
                                 url,
                                 command,
                                 args,
+                                env,
                             }),
                         }
                     })
@@ -3066,6 +3133,63 @@ mod mcp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn expands_env_placeholders() {
+            let lookup = |k: &str| match k {
+                "PORT" => Some("9001".to_string()),
+                _ => None,
+            };
+            assert_eq!(expand_env("${PORT}", &lookup), "9001");
+            assert_eq!(
+                expand_env("http://127.0.0.1:${PORT}/mcp", &lookup),
+                "http://127.0.0.1:9001/mcp"
+            );
+            // Unset variables expand to empty (documented); no panic.
+            assert_eq!(expand_env("x=${MISSING}y", &lookup), "x=y");
+            // Without braces or without a closing brace, text is literal.
+            assert_eq!(expand_env("$NOBRACES", &lookup), "$NOBRACES");
+            assert_eq!(expand_env("${open", &lookup), "${open");
+        }
+
+        #[test]
+        fn parses_env_table_and_expands_config_values() {
+            let dir =
+                std::env::temp_dir().join(format!("prricode-mcp-env-{}", uuid::Uuid::now_v7()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("mcp.toml");
+            std::fs::write(
+                &path,
+                r#"
+[[servers]]
+name = "local"
+command = "${DIR}/run.sh"
+args = ["--token", "${TOKEN}"]
+
+[servers.env]
+TOKEN = "${TOKEN}"
+
+[[servers]]
+name = "remote"
+type = "http"
+url = "http://127.0.0.1:${PORT}/mcp"
+"#,
+            )
+            .unwrap();
+            let lookup = |k: &str| match k {
+                "DIR" => Some("/opt/tools".to_string()),
+                "TOKEN" => Some("abc123".to_string()),
+                "PORT" => Some("9001".to_string()),
+                _ => None,
+            };
+            let servers = load_mcp_servers_with(Some(&path), lookup);
+            let local = servers.iter().find(|s| s.name == "local").unwrap();
+            assert_eq!(local.command, "/opt/tools/run.sh");
+            assert!(local.args.contains(&"abc123".to_string()));
+            assert_eq!(local.env.get("TOKEN").map(String::as_str), Some("abc123"));
+            let remote = servers.iter().find(|s| s.name == "remote").unwrap();
+            assert_eq!(remote.url.as_deref(), Some("http://127.0.0.1:9001/mcp"));
+        }
 
         #[test]
         fn loads_stdio_and_http_servers() {

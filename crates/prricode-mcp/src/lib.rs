@@ -41,8 +41,20 @@ pub struct McpStdioClient {
 impl McpStdioClient {
     /// Spawn an MCP server process and complete the initialize handshake.
     pub async fn spawn(name: &str, command: &str, args: &[String]) -> McpResult<Self> {
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
+        Self::spawn_with_env(name, command, args, &Default::default()).await
+    }
+
+    /// Spawn with extra child-process env vars (from the `[env]` config
+    /// table, after `${VAR}` expansion).
+    pub async fn spawn_with_env(
+        name: &str,
+        command: &str,
+        args: &[String],
+        env: &std::collections::HashMap<String, String>,
+    ) -> McpResult<Self> {
+        let mut cmd = tokio::process::Command::new(command);
+        cmd.args(args).envs(env);
+        let mut child = cmd
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -370,6 +382,35 @@ done"#;
         assert_eq!(tools[0].name, "probe");
         let result = client.tools_call("probe", json!({"x": 1})).await.unwrap();
         assert!(result.is_object());
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_with_env_passes_env_to_child() {
+        // The child reads an env var passed through spawn_with_env and
+        // reflects it in its tools/list response name.
+        let script = r#"while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -z "$id" ] && continue
+  method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  case "$method" in
+    initialize) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"t","version":"1"}}}\n' "$id";;
+    tools/list) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"%s","description":"test tool","inputSchema":{"type":"object"}}]}}\n' "$id" "$PROBE_NAME";;
+    *) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id";;
+  esac
+done"#;
+        let mut env = std::collections::HashMap::new();
+        env.insert("PROBE_NAME".to_string(), "from-env".to_string());
+        let client = McpStdioClient::spawn_with_env(
+            "test",
+            "bash",
+            &["-c".to_string(), script.to_string()],
+            &env,
+        )
+        .await
+        .unwrap();
+        let tools = client.tools_list().await.unwrap();
+        assert_eq!(tools[0].name, "from-env");
         client.shutdown().await.unwrap();
     }
 

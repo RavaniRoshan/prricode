@@ -81,8 +81,11 @@ repl — see `crates/prricode-agent/src/tools/stubs.rs`.
   (token-estimate threshold)
 - plugin/list reads `plugin.toml` manifests (name/version/description/enabled)
 - mcp.toml accepts `type = "http"` servers; resource list/read over stdio
+- mcp.toml expands `${VAR}` in command/args/url values and supports an
+  `[servers.env]` table passed to stdio children
 - http bridge: `POST /jsonrpc` via `prricode serve --http <addr>`
 - skill/setActivation persists; skills parse model/allowed-tools/context
+- `skill` tool in the registry: load instructions by name, honest listing
 
 ## Reference Inventory
 
