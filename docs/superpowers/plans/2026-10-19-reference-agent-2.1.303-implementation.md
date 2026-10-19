@@ -370,17 +370,17 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Design note — what is observed.** The route set, the client construction per route, the credential resolution order per route, the first-party request shape, **and the Bedrock, Vertex, Mantle, and Foundry wire shapes are all REA-observed** in the pinned binary. The provider adapters were re-derived from the target's own bundled modules — `chunk-1njnz05e.js` (Bedrock and Mantle), `chunk-jdnh8sjs.js` (Vertex), `chunk-m5c0c57d.js` (Foundry) — and the audit's §2.2a records the exact literals, the exact body mutations, the exact path rewrites, and the exact thrown error messages. Implement what the audit says, not what the public SDKs do; where they differ, the audit wins. This implementation's route set is exactly the eight REA-observed routes; a ninth "Anthropic-native Bedrock" variant is an AWS API capability, not a the reference agent route, and is out of scope.
 
-- [ ] **Step 1: Write the failing anthropic driver test** — `buildUrl` yields `<baseUrl>/v1/messages` for the standard path and `<baseUrl>/v1/messages?beta=true` when `betaFlags` is non-empty; `buildHeaders` sets `anthropic-version: 2023-06-01`, `content-type: application/json`, `x-api-key` for an api-key credential and `authorization: Bearer <token>` for a bearer credential, and never both.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
-- [ ] **Step 3: Implement `src/provider/drivers/types.ts`** and `src/provider/drivers/anthropic.ts` to satisfy the test.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing retry test** — `classifyError` returns `retryable: true` for `408`, `409`, `429`, and any status `>= 500`; `retryable: false` for `400`, `401`, `403`, `404`; a `401` with a cached-token flag is retryable after invalidation.
-- [ ] **Step 6: Implement `classifyError`** in the anthropic driver and share the rule set via a helper the other drivers reuse.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing SSE test** — `parseStream` emits `message_start` once, then `text_delta` per `content_block_delta`, then `message_stop`; a `data:` frame carrying an `error` object emits `{ type: 'error' }` with `retryable` derived from the status.
-- [ ] **Step 9: Implement `parseStream`** with an explicit state object so a chunk boundary mid-frame does not lose data.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Write the failing per-route test** — for each of the eight routes, `driverFor(route).route === route`. The concrete wire shapes the drivers must produce:
+- [x] **Step 1: Write the failing anthropic driver test** — `buildUrl` yields `<baseUrl>/v1/messages` for the standard path and `<baseUrl>/v1/messages?beta=true` when `betaFlags` is non-empty; `buildHeaders` sets `anthropic-version: 2023-06-01`, `content-type: application/json`, `x-api-key` for an api-key credential and `authorization: Bearer <token>` for a bearer credential, and never both.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
+- [x] **Step 3: Implement `src/provider/drivers/types.ts`** and `src/provider/drivers/anthropic.ts` to satisfy the test.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing retry test** — `classifyError` returns `retryable: true` for `408`, `409`, `429`, and any status `>= 500`; `retryable: false` for `400`, `401`, `403`, `404`; a `401` with a cached-token flag is retryable after invalidation.
+- [x] **Step 6: Implement `classifyError`** in the anthropic driver and share the rule set via a helper the other drivers reuse.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing SSE test** — `parseStream` emits `message_start` once, then `text_delta` per `content_block_delta`, then `message_stop`; a `data:` frame carrying an `error` object emits `{ type: 'error' }` with `retryable` derived from the status.
+- [x] **Step 9: Implement `parseStream`** with an explicit state object so a chunk boundary mid-frame does not lose data.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Write the failing per-route test** — for each of the eight routes, `driverFor(route).route === route`. The concrete wire shapes the drivers must produce:
   - **firstParty** — `POST <baseUrl>/v1/messages`; headers `x-api-key` **or** `authorization: Bearer`, never both; `anthropic-version: 2023-06-01`; `model` in the body; `stream` in the body. The target's own source shows **both** a plain `/v1/messages` path and a `/v1/messages?beta=true` variant; implement both and record the discrepancy rather than hard-coding the `?beta=true` marker behind a conditional.
   - **bedrock** — `POST <baseUrl>/model/<modelId>/invoke` (or `.../invoke-with-response-stream`); `model` **not** in the body; body field `anthropic_version: "bedrock-2023-05-31"`, set by the adapter when absent; `stream` **removed** from the body; the `anthropic-beta` **header** is moved into the body's `anthropic_beta` array, split on `,` and **trimmed**, and only when the body does not already carry it; the `beta` **search parameter is deleted**; the rewritten paths are exactly `/v1/complete`, `/v1/messages`, and `/v1/messages?beta=true`; a non-JSON body throws `Expected request body to be a JSON object for post <path>`. Auth is SigV4 (service `bedrock`, region `awsRegion`, `host` header replaced, `connection` header deleted, multi-valued query parameters preserved) unless a Bedrock bearer token is present, which takes precedence and suppresses SigV4. Bedrock streaming is **not** SSE — it is a binary `application/vnd.amazon.eventstream` whose frames carry a `chunk` member holding a JSON blob of the Anthropic event.
   - **mantle** — `POST <baseUrl>/v1/messages` with the Anthropic-native body; the base URL is `https://bedrock-mantle.<region>.api.aws/anthropic`; auth is a bearer token or SigV4 with the service name **`bedrock-mantle`**; betas travel in the `anthropic-beta` **header** together with `anthropic-version: 2023-06-01`.
@@ -388,14 +388,14 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   - **foundry** — `POST https://<resource>.services.ai.azure.com/anthropic/v1/messages`; the body's `model` is the **deployment name**, not a model id; auth is `x-api-key` **or** an Azure AD bearer with the `https://ai.azure.com/.default` scope, never both. `ANTHROPIC_FOUNDRY_BASE_URL` and `ANTHROPIC_FOUNDRY_RESOURCE` are **mutually exclusive** — the target throws `baseURL and resource are mutually exclusive` when both are supplied, and `Must provide one of the 'baseURL' or 'resource' arguments, or the ANTHROPIC_FOUNDRY_RESOURCE environment variable` when neither is. With only a resource, the base URL is `https://<resource>.services.ai.azure.com/anthropic/` **with a trailing slash**. The API key may be an async function; `authHeaders` awaits it. The adapter exposes **no models API**.
   - **anthropicAws** and **anthropicGoogleCloud** — Anthropic-native bodies with a workspace id header and, respectively, an AWS credential chain and Google cloud-platform auth.
   - **gateway** — the first-party gateway shape: `POST /v1/messages` and `POST /v1/messages/count_tokens`, a `cc-gateway/<version>` user agent, `workspace_id` in the body rejected with `400 invalid_request_error`, Bedrock `count_tokens` computed locally or answered `501 not_supported` with `x-should-retry: false`, and the upstream stream re-framed as SSE with keep-alive comments and a rewritten `message_start.message.model`.
-- [ ] **Step 12: Implement the seven remaining drivers** and `src/provider/drivers/index.ts`.
-- [ ] **Step 13: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 13a: Write the failing beta-flag test** — a beta flag the upstream rejects must surface the upstream's `400` rather than being retried; a driver must translate a beta name whose spelling differs per platform instead of copying it verbatim, because Bedrock rejects the **whole** request for an unrecognized flag.
-- [ ] **Step 13b: Implement per-driver beta translation** in a `betaFlagsFor` table per driver, and add the failing test's assertion that a per-dialect beta list is trimmed before being placed in the body array.
-- [ ] **Step 13c: Write the failing timeout test** — `calculateNonstreamingTimeout` returns a value derived from `max_tokens` and the model's limit, and never exceeds the `600000` ms fallback; a request with an explicit timeout uses it unchanged.
-- [ ] **Step 13d: Implement `calculateNonstreamingTimeout`** on the driver, with the `600000` ms cap applied after the computation.
-- [ ] **Step 13e: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 14: Commit.**
+- [x] **Step 12: Implement the seven remaining drivers** and `src/provider/drivers/index.ts`.
+- [x] **Step 13: Run it to verify it passes** — expected: PASS.
+- [x] **Step 13a: Write the failing beta-flag test** — a beta flag the upstream rejects must surface the upstream's `400` rather than being retried; a driver must translate a beta name whose spelling differs per platform instead of copying it verbatim, because Bedrock rejects the **whole** request for an unrecognized flag.
+- [x] **Step 13b: Implement per-driver beta translation** in a `betaFlagsFor` table per driver, and add the failing test's assertion that a per-dialect beta list is trimmed before being placed in the body array.
+- [x] **Step 13c: Write the failing timeout test** — `calculateNonstreamingTimeout` returns a value derived from `max_tokens` and the model's limit, and never exceeds the `600000` ms fallback; a request with an explicit timeout uses it unchanged.
+- [x] **Step 13d: Implement `calculateNonstreamingTimeout`** on the driver, with the `600000` ms cap applied after the computation.
+- [x] **Step 13e: Run it to verify it passes** — expected: PASS.
+- [x] **Step 14: Commit.**
   ```bash
   git add src/provider/drivers tests/contracts/drivers.test.ts
   git commit -m "feat(provider): protocol drivers for all eight routes"
