@@ -182,16 +182,16 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   }
   ```
 
-- [ ] **Step 1: Write the failing test** — `TOP_LEVEL_KEY_ORDER` resolves `policySettings` over `flagSettings` over `userSettings`; `MERGED_KEY_ORDER` resolves `localSettings` over `projectSettings` over `userSettings`; a project tier whose path resolves to the user settings path is absent from `tiers`; `restricted: true` yields `null` for `projectSettings` and `localSettings`; a `policySettings` tier reports `readMode` `machine_admin`.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
-- [ ] **Step 3: Implement `src/config/tiers.ts`** with the three order constants and the two resolvers; the resolvers return the full `[{source, value}]` list (highest first) so the UI can report which tier won.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing loader test** — three cases, all REA-observed: (a) a project settings file that is a symlink to the user settings file is reported in `linkedAway` and contributes no tier; (b) a project settings file that resolves to the *same* file as the user settings file is **skipped entirely** and its source is reported with the read mode `as_read`, not `none`; (c) a local settings file merges over a legacy local settings file with the local file winning.
-- [ ] **Step 6: Implement `src/config/loader.ts`** — resolve the project settings path, compare real paths against the user settings path, skip a linked-away project tier, skip a same-file project tier while reporting it as `as_read`, read local settings over legacy local settings, and record per-tier read modes.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Implement `src/config/schema.ts`** as a `zod` schema for the settings document with `permissions.allow`, `permissions.deny`, `permissions.ask`, `permissions.defaultMode`, `sandbox.filesystem.{allowRead,allowWrite,denyRead,denyWrite,credentials}`, and `spellcheck`; unknown keys are preserved, not dropped, because the target preserves them.
-- [ ] **Step 9: Write `docs/compatibility/settings-precedence.md`** as the conformance table mapping each audit row to the test that pins it.
-- [ ] **Step 10: Commit.**
+- [x] **Step 1: Write the failing test** — `TOP_LEVEL_KEY_ORDER` resolves `policySettings` over `flagSettings` over `userSettings`; `MERGED_KEY_ORDER` resolves `localSettings` over `projectSettings` over `userSettings`; a project tier whose path resolves to the user settings path is absent from `tiers`; `restricted: true` yields `null` for `projectSettings` and `localSettings`; a `policySettings` tier reports `readMode` `machine_admin`.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
+- [x] **Step 3: Implement `src/config/tiers.ts`** with the three order constants and the two resolvers; the resolvers return the full `[{source, value}]` list (highest first) so the UI can report which tier won.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing loader test** — three cases, all REA-observed: (a) a project settings file that is a symlink to the user settings file is reported in `linkedAway` and contributes no tier; (b) a project settings file that resolves to the *same* file as the user settings file is **skipped entirely** and its source is reported with the read mode `as_read`, not `none`; (c) a local settings file merges over a legacy local settings file with the local file winning.
+- [x] **Step 6: Implement `src/config/loader.ts`** — resolve the project settings path, compare real paths against the user settings path, skip a linked-away project tier, skip a same-file project tier while reporting it as `as_read`, read local settings over legacy local settings, and record per-tier read modes.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Implement `src/config/schema.ts`** as a `zod` schema for the settings document with `permissions.allow`, `permissions.deny`, `permissions.ask`, `permissions.defaultMode`, `sandbox.filesystem.{allowRead,allowWrite,denyRead,denyWrite,credentials}`, and `spellcheck`; unknown keys are preserved, not dropped, because the target preserves them.
+- [x] **Step 9: Write `docs/compatibility/settings-precedence.md`** as the conformance table mapping each audit row to the test that pins it.
+- [x] **Step 10: Commit.**
   ```bash
   git add src/config tests/contracts/settings-precedence.test.ts docs/compatibility/settings-precedence.md
   git commit -m "feat(config): settings tier model and precedence"
