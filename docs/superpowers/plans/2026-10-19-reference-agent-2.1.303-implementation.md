@@ -280,14 +280,22 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   ```ts
   export interface CatalogModel {
     id: string;                 // logical model id, e.g. 'claude-haiku-4-5'
-    family: string;             // 'haiku' | 'sonnet' | 'opus'
+    family: string;             // 'haiku' | 'sonnet' | 'opus' | 'fable' | 'mythos'
     displayName: string;
     knowledgeCutoff?: string;
     providerIds: Partial<Record<ProviderRoute, string>>;  // absent key = not served
     eagerInputStreaming: Partial<Record<ProviderRoute, boolean>>;
+    vertexRegionEnvVar?: string;
     maxOutputTokens: { default: number; upper: number };
     pricing?: string;
     capabilities: string[];
+    // Additional fields the target's catalog carries; preserved rather than dropped.
+    advisorRank?: number;
+    context?: { window: number; native1m?: boolean; supports1mBeta?: boolean };
+    defaultEffort?: string;
+    effortCostIndex?: number;
+    fallback3p?: string;
+    imageLimits?: Record<string, unknown>;
   }
   export interface ModelCatalog {
     connectionId: string;
@@ -306,6 +314,8 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 - [ ] **Step 4: Run it to verify it passes** — expected: PASS.
 - [ ] **Step 5: Write the failing builtin test** — `src/provider/catalogs/builtin.json` parses, has `schemaVersion: 1`, and contains at least one model whose `providerIds` covers all eight routes plus at least one model that omits at least one route.
 - [ ] **Step 6: Create `src/provider/catalogs/builtin.json`** by transcribing the target's catalog literal from `chunk-w4f5s3e0.js`, preserving `provider_ids` key names and `null` as *absent*. Cite the source module and offset in a `_provenance` field in the file.
+
+  **The literal has already been extracted** to `/home/shiva/opt/reference-agent-rea/analysis/target-model-catalog.json` — the full object with `schema_version: 1`, eleven `pricing_tiers`, and **22 models**. Use it as the transcription source rather than re-deriving it by hand. Nine of the 22 models carry all eight route ids and thirteen omit at least one, so both cases in Step 5 are present. The catalog also carries fields beyond the plan's first draft — `advisor_rank`, `context`, `default_effort`, `effort_cost_index`, `fallback_3p`, `image_limits` — and families beyond haiku/sonnet/opus: **`fable`** and **`mythos`**. Preserve those rather than dropping them; the interface above has been widened accordingly.
 - [ ] **Step 7: Run it to verify it passes** — expected: PASS.
 - [ ] **Step 8: Write the failing normalize test** — a model with `eagerInputStreaming.vertex === true` yields a capability flag; `maxOutputTokens.upper` bounds the request `max_tokens`; a model with no `providerIds` for the active route is filtered out of the model's usable list.
 - [ ] **Step 9: Implement `src/provider/normalize.ts`** producing a driver-agnostic capability object.
