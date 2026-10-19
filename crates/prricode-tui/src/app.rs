@@ -1666,10 +1666,9 @@ impl App {
                     } else {
                         let config = prricode_provider::load_config();
                         if config.connections.contains_key(arg) {
-                            self.push_system(format!(
-                                "connection '{arg}' selected — restart prricode with \
-                                 --connection {arg} (or set defaults.connection) for full effect"
-                            ));
+                            let _ = commands.send(super::UiCommand::SwitchProvider {
+                                connection: arg.to_string(),
+                            });
                         } else {
                             self.push_system(
                                 "unknown provider or connection; known kinds: echo, ollama, \
