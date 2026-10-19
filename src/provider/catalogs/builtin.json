@@ -14,6 +14,8 @@
     "key_names": "The `provider_ids` keys are the TARGET's provider names (snake_case: first_party, bedrock, vertex, foundry, anthropic_aws, anthropic_google_cloud, mantle, gateway), NOT this implementation's ProviderRoute names. src/provider/catalog.ts maps them explicitly.",
     "null_semantics": "A `null` provider id means \"this provider does not serve this model\" — a fact, not an absence of knowledge. This implementation maps it to an ABSENT key in CatalogModel.providerIds; there is no representation for \"unknown\".",
     "ownership": "This catalog is the TARGET's, not a project extension: this implementation reproduces it. This implementation-owned extension is the connection registry (src/provider/registry.ts), not the catalog.",
+    "canonical_sha256": "77b3c0cadfe76ee1dccaadc617edf8ad9c7d488d50e05782087be987cf91a8f8",
+    "canonical_sha256_note": "SHA-256 of the canonical JSON of the literal in this file (object keys sorted, arrays in their own order, the `_provenance` block excluded). The same value is pinned as a literal in tests/contracts/provider-catalog.test.ts, so the transcription is checked against the TARGET's own extracted literal (/home/shiva/opt/reference-agent-rea/analysis/target-model-catalog.json) and not against itself.",
     "schema_version": 1
   },
   "//": "Hand-maintained baked-in model catalog — the source of truth for per-model provider IDs and metadata. On model launch add one entry to `models` below; `bun run generate:model-catalog` validates this file against the schema and formats it.",

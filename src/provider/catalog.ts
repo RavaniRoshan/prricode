@@ -32,6 +32,11 @@
  * the provider does not serve the model. A nullable field would conflate the
  * two, which is exactly the confusion the target's `null` avoids.
  *
+ * The absent key is a **superset** of the target's `null`: the target's own
+ * literal omits one provider key entirely, and this implementation cannot tell that
+ * apart from a `null`. See "Not served is a superset of the audited
+ * predicate" below.
+ *
  * ## The two provider naming schemes
  *
  * The target's catalog keys its providers in **snake_case**
@@ -42,15 +47,54 @@
  * translates the target's keys, and it **rejects** an unknown key rather than
  * dropping it.
  *
- * ## The mantle fallback
+ * ## The mantle fallback: one half of the target's rule
  *
  * `wd(model)` in the target layers a per-model override on top of the route
- * selector: if the catalog has no id for the selected route but has one for
- * `mantle`, the model resolves to `mantle`. `resolveModel` implements that
- * fallback, and `resolveModelRoute` reports the route it resolved to.
- * `providerIdFor` deliberately does **not** fall back: it is the strict
- * per-route lookup, and an absent key means "this route does not serve the
- * model" — which is what the usable-model list is built from.
+ * selector, and the rule has **two** halves (audit §2.1):
+ *
+ *   (a) *"with Bedrock and Mantle both enabled, an `anthropic.*` model
+ *       resolves to `mantle`"* — **target-observed, not implemented here**;
+ *   (b) *"otherwise, if the catalog has no id for the selected route but has
+ *       one for `mantle`, the model resolves to `mantle`"* — implemented.
+ *
+ * Half (b) is `resolveModel`; `resolveModelRoute` reports the route it
+ * resolved to. `providerIdFor` deliberately does **not** fall back: it is the
+ * strict per-route lookup, and an absent key means "this route does not serve
+ * the model" — which is what the usable-model list is built from.
+ *
+ * ### Half (a) is not implemented, and why
+ *
+ * The Bedrock+Mantle `anthropic.*` override needs the **enabled-flag set** —
+ * which of the provider flags the user turned on — and this module's API does
+ * **not** take one: a model is resolved against a *route*, and nothing else.
+ * The override therefore cannot be evaluated here without widening the API,
+ * so it is left out and labelled rather than silently approximated.
+ *
+ * **Where a later task must wire it in.** The override changes *which route a
+ * model resolves to*, so the wiring point is `resolveRouteForModel` in this
+ * file — the single function that `resolveModel`, `resolveModelRoute` and
+ * `normalizeModel` all go through for the route decision. A task that owns the
+ * enabled-flag set (the driver layer, CC-006) must pass it in there and apply
+ * the `anthropic.*` → `mantle` redirect **before** the half-(b) fallback.
+ *
+ * ## "Not served" is a superset of the audited predicate
+ *
+ * The audit states half (b) as `provider_ids[route] === null` while
+ * `provider_ids[mantle] !== null`. This implementation's "not served" test is an
+ * **absent key**, and that is a **superset** of the audited predicate:
+ *
+ *   - an explicit `null` in the target's literal — every "not served" entry
+ *     but one — is the audited case, and this implementation's test matches it;
+ *   - the target's literal **omits** the `gateway` key for exactly one row
+ *     (`claude-haiku-5-5`), and this implementation's test matches that too, while the
+ *     audited `=== null` predicate would not.
+ *
+ * This implementation therefore falls back to `mantle` for one row the audited
+ * predicate would not. The behaviour is deliberate: this implementation's model has no
+ * way to tell "the target wrote `null`" from "the target wrote nothing", and
+ * a row the target does not serve must not resolve to a route that does not
+ * serve it. The difference is pinned by a test, and it is exactly one row of
+ * the built-in catalog.
  */
 
 import { ROUTE_NAMES, isProviderRoute, type ProviderRoute } from './routes.js';
@@ -228,6 +272,64 @@ export interface ModelCatalog {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Copies                                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A deep copy of a JSON-shaped value.
+ *
+ * The catalog is a table of plain data — strings, numbers, booleans, arrays
+ * and plain objects — so a structural copy is enough to make a value
+ * unreachable from the copy it was taken from.
+ */
+function copyValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => copyValue(entry));
+  if (typeof value === 'object' && value !== null) {
+    const copy: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) copy[key] = copyValue(entry);
+    return copy;
+  }
+  return value;
+}
+
+/**
+ * A deep copy of one catalog row.
+ *
+ * The row's own maps (`providerIds`, `eagerInputStreaming`), its
+ * `max_output_tokens` table, its capability list and its `context` are copied
+ * as well, so a caller that edits one of them cannot reach the row it came
+ * from.
+ */
+function copyModel(model: CatalogModel): CatalogModel {
+  return copyValue(model) as CatalogModel;
+}
+
+/** A deep copy of a whole catalog. */
+function copyCatalog(catalog: ModelCatalog): ModelCatalog {
+  return copyValue(catalog) as ModelCatalog;
+}
+
+/**
+ * Freeze a value and everything it holds.
+ *
+ * The built-in catalog is a module-level singleton shared by every
+ * connection, so it is frozen: a caller cannot corrupt the shared table by
+ * editing the exported object. Callers that need to change a catalog take a
+ * copy (`builtinCatalogFor`, `listModels`).
+ */
+function deepFreeze(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) deepFreeze(entry);
+    Object.freeze(value);
+    return;
+  }
+  if (typeof value === 'object' && value !== null) {
+    for (const entry of Object.values(value)) deepFreeze(entry);
+    Object.freeze(value);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Lookups                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -258,10 +360,15 @@ export function findModel(catalog: ModelCatalog, modelId: string): CatalogModel 
 /**
  * The route a model resolves to for a selected route.
  *
- * This is the target's `wd(model)` override (audit §2.1): if the selected
- * route has no id for the model but `mantle` does, the model resolves to
- * `mantle`. `undefined` means the model is not served by the selected route
- * and has no `mantle` id either.
+ * This is **half (b)** of the target's `wd(model)` override (audit §2.1): if
+ * the selected route has no id for the model but `mantle` does, the model
+ * resolves to `mantle`. `undefined` means the model is not served by the
+ * selected route and has no `mantle` id either.
+ *
+ * **Half (a) is not implemented here.** The target's rule also sends an
+ * `anthropic.*` model to `mantle` when Bedrock **and** Mantle are both
+ * enabled; that needs the enabled-flag set, which this module does not take.
+ * This function is the wiring point for it — see the module header.
  */
 export function resolveRouteForModel(
   model: CatalogModel,
@@ -296,6 +403,10 @@ export function resolveModelRoute(
  * `mantle` id is returned. Use `resolveModelRoute` when the caller needs to
  * know *which* route the id belongs to, and `providerIdFor` when it needs the
  * strict per-route answer.
+ *
+ * The "no id for the route" test is an **absent key**, which is a superset of
+ * the audited `provider_ids[route] === null` predicate — see the module
+ * header.
  */
 export function resolveModel(
   catalog: ModelCatalog,
@@ -315,8 +426,8 @@ export function resolveModel(
  *
  * `family` matches the family exactly (case-insensitively); `query` is a
  * case-insensitive substring match against the model id and the display name.
- * The returned array is a copy, so a caller cannot mutate the catalog through
- * it.
+ * The returned array and its rows are **deep copies**, so a caller cannot
+ * mutate the catalog through them.
  */
 export function listModels(
   catalog: ModelCatalog,
@@ -340,7 +451,7 @@ export function listModels(
     }
   }
 
-  return models;
+  return models.map(copyModel);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -766,11 +877,29 @@ export function importCatalog(
 export const BUILTIN_CATALOG_RAW: unknown = BUILTIN_CATALOG_JSON;
 
 /** The target's catalog, imported into this implementation's shape. */
-export const builtinCatalog: ModelCatalog = importCatalog(BUILTIN_CATALOG_RAW);
+const importedBuiltinCatalog: ModelCatalog = importCatalog(BUILTIN_CATALOG_RAW);
 
-/** A copy of the built-in catalog, stamped with the connection it serves. */
+/**
+ * The target's catalog, in this implementation's shape.
+ *
+ * The table is **frozen**: it is a module-level singleton shared by every
+ * connection, so a caller must not be able to corrupt it. `builtinCatalogFor`
+ * and `listModels` hand out deep copies.
+ */
+export const builtinCatalog: ModelCatalog = importedBuiltinCatalog;
+
+deepFreeze(builtinCatalog);
+
+/**
+ * A copy of the built-in catalog, stamped with the connection it serves.
+ *
+ * The copy is **deep** — the rows are copies too — so the caller cannot reach
+ * the shared table through it.
+ */
 export function builtinCatalogFor(connectionId: string): ModelCatalog {
-  return { ...builtinCatalog, connectionId };
+  const copy = copyCatalog(builtinCatalog);
+  copy.connectionId = connectionId;
+  return copy;
 }
 
 /**

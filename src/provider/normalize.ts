@@ -11,6 +11,13 @@
  *
  * Nothing here talks to a provider, a credential or the network: the catalog
  * is a table of facts, and this module only reads it.
+ *
+ * **The mantle fallback this module applies is half of the target's rule.**
+ * The target's `wd(model)` also sends an `anthropic.*` model to `mantle` when
+ * Bedrock and Mantle are both enabled; that half needs the enabled-flag set,
+ * which this module does not take, so it is **not implemented** — see the
+ * header of `src/provider/catalog.ts` for the limit and for the place a later
+ * task must wire it in.
  */
 
 import {
