@@ -71,8 +71,11 @@ Real (behavior implemented, tested):
 - AskUserQuestionTool
 - ToolSearchTool
 
-Honest stubs (report `unsupported`): tool-search fallbacks, mcp_auth, lsp,
-repl — see `crates/prricode-agent/src/tools/stubs.rs`.
+Honest stubs (report `unsupported`): tool-search fallbacks, mcp_auth, repl —
+see `crates/prricode-agent/src/tools/stubs.rs`. lsp is real now:
+diagnostics/hover/definition via a framed JSON-RPC client over a discovered
+language server (extension map + PATH); honest `unsupported` when none is
+installed (`crates/prricode-agent/src/tools/lsp.rs`).
 
 ## Server surface deltas since the audit
 

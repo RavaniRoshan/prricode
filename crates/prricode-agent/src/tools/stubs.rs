@@ -24,12 +24,6 @@ macro_rules! stub_tool {
 }
 
 stub_tool!(
-    LspTool,
-    "lsp",
-    "LSP integration (unsupported in this build).",
-    Risk::Safe
-);
-stub_tool!(
     McpAuthTool,
     "mcp_auth",
     "MCP auth (unsupported in this build).",
@@ -76,7 +70,7 @@ mod tests {
             session_id: "s".into(),
             extensions: Default::default(),
         };
-        let out = LspTool.execute(&ctx, &json!({})).await.unwrap();
+        let out = McpAuthTool.execute(&ctx, &json!({})).await.unwrap();
         assert!(out.is_error);
         assert!(out.content.iter().any(|p| match p {
             prricode_provider::ContentPart::Text(t) => t.contains("unsupported"),
@@ -92,7 +86,7 @@ mod registry_tests {
     #[test]
     fn allowed_tools_narrow_the_registry_and_tolerate_stale_names() {
         let mut registry = ToolRegistryBuilder::new()
-            .with_tool(LspTool)
+            .with_tool(LspTool::default())
             .with_tool(ReplTool)
             .build();
         registry.retain(&["lsp".into(), "ghost".into()]);

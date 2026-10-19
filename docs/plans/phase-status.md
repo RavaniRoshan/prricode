@@ -54,7 +54,7 @@ full workspace tests green, one commit per phase item.
 | 15 | Computer use X11 | done | XGetImage/scrot + XTEST |
 | 15 | Wayland input | degraded | `unsupported: no live compositor on build host`; probe code present |
 | 15 | macOS/Windows backends | degraded | platform-N/A; documented in roadmap |
-| 16 | LSP integration | pending | … |
+| 16 | LSP integration | done | `crates/prricode-agent/src/tools/lsp.rs` — two-phase framed JSON-RPC client, server discovery by extension (rust-analyzer/clangd/gopls/pyright/typescript-language-server), diagnostics + hover + definition; honest `unsupported:` when no server binary; 15s timeout; 9 tests incl. fake-server round-trips |
 | 17 | ScheduleCron tool | done | delayed command via sandbox (process-local lifetime, documented) |
 | 17 | Cron persistence across restarts | pending | … |
 | 18 | HTTP bridge `POST /jsonrpc` | done | `serve --http`, 411/413/501 integrity, 2 tests |

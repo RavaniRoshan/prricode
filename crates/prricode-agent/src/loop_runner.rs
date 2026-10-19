@@ -255,7 +255,7 @@ impl AgentRunner {
             .with_tool(EnterPlanModeTool)
             .with_tool(ExitPlanModeTool)
             .with_tool(NotebookEditTool)
-            .with_tool(LspTool)
+            .with_tool(LspTool::default())
             .with_tool(WebSearchTool)
             .with_tool(RemoteTriggerTool)
             .with_tool(ScheduleCronTool)
