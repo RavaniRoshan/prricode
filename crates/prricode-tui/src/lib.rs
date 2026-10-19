@@ -49,6 +49,10 @@ pub enum UiCommand {
     SetModel {
         model: String,
     },
+    /// Rebuild the active provider from a named connection (Phase 23 TUI).
+    SwitchProvider {
+        connection: String,
+    },
     SetApprovalMode(ApprovalMode),
     HooksList,
     SwitchSession {
@@ -192,6 +196,11 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
     let agent_runner = Arc::implementation(&runner);
     let agent_approvals = Arc::implementation(&approvals);
     let agent_data_dir = data_dir.implementation();
+    // Mutable provider slot for runtime switches (Phase 23 TUI): the
+    // runner is shared, but each turn reads the current provider from
+    // this slot via TurnInput.provider_override.
+    let agent_provider: std::sync::Arc<std::sync::Mutex<Arc<dyn ModelProvider>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Arc::implementation(&provider)));
     let agent_launch = LaunchConfig {
         provider: kind,
         model: Some(default_model.implementation()),
@@ -300,7 +309,7 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         allowed_tools: Vec::new(),
                         max_iterations: 25,
                         turn_id: uuid::Uuid::now_v7().to_string(),
-                        provider_override: None,
+                        provider_override: Some(agent_provider.lock().unwrap().implementation()),
                     };
                     let runner = Arc::implementation(&agent_runner);
                     tokio::spawn(async move {
@@ -324,6 +333,42 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                     agent_approvals.decide(&approval_id, approved);
                 }
                 UiCommand::SetModel { model: new_model } => model = new_model,
+                UiCommand::SwitchProvider { connection } => {
+                    let config = prricode_provider::load_config();
+                    match prricode_provider::resolve_connection(&connection, &config) {
+                        Ok(resolved) => {
+                            let env: std::collections::HashMap<String, String> =
+                                std::env::vars().collect();
+                            let mut overrides = std::collections::HashMap::new();
+                            let store_key = format!("connection:{}", connection);
+                            if let Some(key) = prricode_provider::credential_get(&store_key) {
+                                overrides.insert("api_key".to_string(), key);
+                            }
+                            let pc = prricode_provider::resolve_settings(
+                                resolved.kind,
+                                Some(&resolved.settings),
+                                &overrides,
+                                &env,
+                            );
+                            let inner = prricode_provider::create_provider(pc);
+                            let gated = prricode_provider::CapabilityGatedProvider::new(
+                                inner,
+                                resolved.supports_tools,
+                                resolved.supports_streaming,
+                            );
+                            *agent_provider.lock().unwrap() =
+                                std::sync::Arc::from(gated);
+                            model = resolved.model.unwrap_or(model);
+                            let _ = ui_tx.send(UiEvent::Delta(format!(
+                                "switched to connection '{}' (model: {})\n",
+                                connection, model
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiEvent::Delta(format!("switch failed: {e}\n")));
+                        }
+                    }
+                }
                 UiCommand::SetApprovalMode(mode) => approval_mode = mode,
                 UiCommand::HooksList => {
                     let runner = Arc::implementation(&agent_runner);
