@@ -113,21 +113,25 @@ Full per-module index with every Evidence ID: `/home/shiva/opt/reference-agent-r
 
 | Task | Status | Handoff note |
 |---|---|---|
-| `CC-001` REA native baseline and target manifest | In progress | Ghidra Evidence covers startup, entry dispatch, helper handlers and seccomp; Bun source recovery now enables REA JavaScript analysis. Capture the full application Evidence, continue targeted features and worker callees, then perform the coverage audit; do not begin implementation beforehand. |
-| `CC-002` durable ledger and feature matrix | Not started | This ledger exists; expand after user reviews the plan and CC-001 evidence path is defined. |
-| `CC-003` CLI/config/session contracts | Not started | Keep documentation, REA, runtime observations, and unknowns distinct. |
-| `CC-004` multi-provider registry/catalog/manager | Not started | Core project extension, not claimed as the reference agent target behavior. |
-| `CC-005` provider protocol drivers | Not started | See plan protocol matrix. |
-| `CC-006` agent runtime and routing | Not started | Depends on normalized provider events. |
-| `CC-007` permissions, sandbox, and tools | Not started | Permission boundary precedes execution. |
-| `CC-008` config/context/memory/commands | Not started | Preserve provenance and scope. |
-| `CC-009` session persistence/resumption | Not started | Versioned events and restart recovery. |
-| `CC-010` CLI/headless/automation | Not started | Stable stream/output contract. |
-| `CC-011` interactive terminal/accessibility | Not started | Shared runtime event source. |
-| `CC-012` extensions | Not started | MCP, hooks, skills, subagents, plugins, code intelligence. |
-| `CC-013` integrations/background/lifecycle | Not started | Separate local contract from remote service dependencies. |
-| `CC-014` packaging/platform documentation | Not started | Claim only platforms with a clean install gate. |
-| `CC-015` compatibility/release evaluation | Not started | Report match/partial/mismatch/not-tested/unknown with evidence. |
+| `CC-001` REA native baseline and target manifest | In progress | JavaScript semantic coverage is now untruncated for the modules that matter (per-module analysis with a raised per-file ceiling). The five largest modules exceed the REA transfer byte budget; a ceiling ladder recovers ~40,000 nodes each. Remaining: agent-loop and session-resume traces, the Messages `parseResponse` callee, and the seccomp per-syscall policy. |
+| `CC-002` durable ledger and feature matrix | In progress | Ledger exists. `docs/compatibility/feature-matrix.md` created with 36 rows (24 observed, 8 partial, 1 unknown, 3 project requirements). `docs/compatibility/settings-precedence.md` written. |
+| `CC-003` Settings tiers and precedence | In progress | Implemented (commits `5a42cea`, `0c4b94d`) in `src/config/{tiers,scope,loader,schema}.ts` with `tests/contracts/settings-precedence.test.ts`. 47 tests green, `tsc --noEmit` clean. Two review rounds completed; a second fix round is in flight. |
+| `CC-004` multi-provider registry/catalog/manager | Not started | Core project extension, not claimed as the reference agent target behavior. Depends on `CC-003`. |
+| `CC-005` provider-owned model catalog | Not started | Depends on `CC-004`. |
+| `CC-006` provider protocol drivers | Not started | Depends on `CC-004` and `CC-005`. |
+| `CC-007` permissions, rules, and approval | Not started | Depends on `CC-003`. |
+| `CC-008` tool registry and built-in tools | Not started | Permission boundary precedes execution. |
+| `CC-009` session events, storage, resume, compaction | Not started | Versioned events and restart recovery. |
+| `CC-010` agent runtime and turn orchestration | Not started | Depends on normalized provider events. |
+| `CC-011` MCP and the control surface | Not started | MCP client, control dispatcher, and the `can_use_tool` transport dispatcher. |
+| `CC-012` hooks | Not started | 33 hook events, matchers, and the exit-code contract. |
+| `CC-013` skills, subagents, plugins, marketplaces, IDE | Not started | Preserve provenance and scope. |
+| `CC-014` CLI, headless mode, and output contracts | Not started | Stable stream/output contract. |
+| `CC-015` interactive terminal UI | Not started | Shared runtime event source. |
+| `CC-016` provider manager surfaces (`/provider`, catalog) | Not started | Depends on `CC-004` and `CC-005`. |
+| `CC-017` platform sandbox and native parity | Not started | Five-layer sandbox; the seccomp supervisor is observability, not enforcement. |
+| `CC-018` packaging, installation, and update | Not started | Claim only platforms with a clean install gate. |
+| `CC-019` compatibility measurement and reporting | Not started | Report match/partial/mismatch/not-tested/unknown with evidence. |
 
 ## Handoff update template
 
