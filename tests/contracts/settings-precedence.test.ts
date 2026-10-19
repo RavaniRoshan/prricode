@@ -4,34 +4,57 @@
  * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.7 (Configuration).
  *
  * The test pins the two **distinct** orderings the target declares, the tier
- * degradation and suppression rules, the scope separation, and the read modes.
+ * degradation and suppression rules, the scope separation, the whole-block rule, and
+ * the read modes.
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
   MERGED_KEY_ORDER,
   PROJECT_SIDE_SOURCES,
   TOP_LEVEL_KEY_ORDER,
+  documentsOf,
+  effectiveOrdinarySource,
   effectiveSource,
+  mergeDocuments,
+  mergeMergedSettings,
+  resolveBlock,
   resolveMergedKey,
   resolveTopLevelKey,
   type SettingsSource,
+  type SettingsTier,
 } from '../../src/config/tiers.js';
-import { loadSettings, writeSandboxSettings } from '../../src/config/loader.js';
+import { loadSettings } from '../../src/config/loader.js';
 import {
   BOOLEAN_FLAG_SOURCES,
   POLICY_AND_USER_SOURCES,
+  SCOPE_BY_SOURCE,
+  SOURCE_ENUMERATION_ORDER,
   me,
   readBooleanFlag,
   readPerTier,
   readUserOnly,
   scopeFor,
 } from '../../src/config/scope.js';
-import { parseSettingsDocument } from '../../src/config/schema.js';
+import {
+  canonicalizePath,
+  parseSettingsDocument,
+  writeSandboxSettings,
+} from '../../src/config/schema.js';
 
 interface Workspace {
   root: string;
@@ -155,9 +178,128 @@ describe('settings tier resolution', () => {
 
     expect(resolved).toEqual([{ source: 'localSettings', value: true }]);
   });
+
+  it('merges the merged-settings document per key', () => {
+    // Implementation choice (not observed): the merge is per leaf, so two tiers that define
+    // different skills both survive and the higher tier wins the leaves it defines.
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { skills: { alpha: { enabled: false } }, model: 'user-model' }],
+      ['projectSettings', { skills: { alpha: { enabled: true } } }],
+      ['localSettings', { skills: { beta: { enabled: true } } }],
+    ]);
+
+    const merged = mergeMergedSettings(tiers);
+
+    // The project tier wins the `alpha` leaf over the user tier; the local tier
+    // contributes `beta`.
+    expect(merged['skills']).toEqual({
+      alpha: { enabled: true },
+      beta: { enabled: true },
+    });
+    expect(merged['model']).toBe('user-model');
+  });
+});
+
+describe('ordinary key resolution', () => {
+  it('resolves an ordinary key through the project and local tiers', () => {
+    // The target's per-key merge for ordinary keys is NOT derived from the target
+    // (audit §2.7, final line). The ordinary path is an explicitly underived implementation
+    // choice, so it is pinned here as such.
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { model: 'user-model' }],
+      ['projectSettings', { model: 'project-model' }],
+      ['localSettings', { model: 'local-model' }],
+    ]);
+
+    expect(effectiveOrdinarySource(tiers, 'model')).toBe('localSettings');
+    expect(effectiveOrdinarySource(tiers, 'missing')).toBeNull();
+  });
+
+  it('distinguishes the ordinary path from the top-level path', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { model: 'user-model' }],
+      ['localSettings', { model: 'local-model' }],
+    ]);
+
+    // The observed top-level order consults the policy, flag and user tiers only.
+    expect(effectiveSource(tiers, 'model')).toBe('userSettings');
+    // The ordinary path is a separate path and must not be silently identical.
+    expect(effectiveOrdinarySource(tiers, 'model')).toBe('localSettings');
+  });
+});
+
+describe('whole-block override', () => {
+  it('returns a higher tier block whole and never merges it key by key', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { permissions: { allow: ['Bash'], deny: ['Read'] } }],
+      ['projectSettings', { permissions: { deny: ['Write'] } }],
+    ]);
+
+    const block = resolveBlock(tiers, 'permissions');
+
+    expect(block?.source).toBe('projectSettings');
+    expect(block?.value).toEqual({ deny: ['Write'] });
+    // The lower tier's keys are not merged into the winning block.
+    expect((block?.value as Record<string, unknown>)['allow']).toBeUndefined();
+  });
+
+  it('does not consult a lower tier block when a higher tier defines the block', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { sandbox: { enabled: true } }],
+      ['localSettings', { sandbox: { enabled: false, allowUnsandboxedCommands: true } }],
+    ]);
+
+    const block = resolveBlock(tiers, 'sandbox');
+
+    expect(block?.source).toBe('localSettings');
+    expect(block?.value).toEqual({ enabled: false, allowUnsandboxedCommands: true });
+  });
+
+  it('resolves spellcheck from the user tier only', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { spellcheck: { enabled: true } }],
+      ['projectSettings', { spellcheck: { enabled: false } }],
+      ['localSettings', { spellcheck: { enabled: false } }],
+    ]);
+
+    const block = resolveBlock(tiers, 'spellcheck');
+
+    expect(block?.source).toBe('userSettings');
+    expect(block?.value).toEqual({ enabled: true });
+  });
+
+  it('never resolves a spellcheck block from a project or local tier', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['projectSettings', { spellcheck: { enabled: false } }],
+      ['localSettings', { spellcheck: { enabled: false } }],
+    ]);
+
+    expect(resolveBlock(tiers, 'spellcheck')).toBeUndefined();
+    expect(readPerTier(tiers, 'spellcheck')).toEqual([]);
+  });
 });
 
 describe('settings scope separation', () => {
+  it('maps every source to its observed scope', () => {
+    expect([...SOURCE_ENUMERATION_ORDER]).toEqual([
+      'userSettings',
+      'projectSettings',
+      'localSettings',
+    ]);
+    // The scope map carries exactly the sources of the enumeration order.
+    expect(Object.keys(SCOPE_BY_SOURCE)).toEqual([...SOURCE_ENUMERATION_ORDER]);
+    expect(SCOPE_BY_SOURCE).toEqual({
+      userSettings: 'user',
+      projectSettings: 'project',
+      localSettings: 'local',
+    });
+    expect(scopeFor('userSettings')).toBe('user');
+    expect(scopeFor('projectSettings')).toBe('project');
+    expect(scopeFor('localSettings')).toBe('local');
+    expect(scopeFor('policySettings')).toBeNull();
+    expect(scopeFor('flagSettings')).toBeNull();
+  });
+
   it('suppresses exactly the project-side sources when personal config is restricted', () => {
     expect(me('projectSettings', true)).toBeNull();
     expect(me('localSettings', true)).toBeNull();
@@ -165,8 +307,6 @@ describe('settings scope separation', () => {
 
     expect(me('projectSettings', false)).toBe('project');
     expect(me('localSettings', false)).toBe('local');
-    expect(scopeFor('policySettings')).toBeNull();
-    expect(scopeFor('flagSettings')).toBeNull();
   });
 
   it('reads spellcheck from user settings only', () => {
@@ -239,6 +379,47 @@ describe('settings scope separation', () => {
       value: true,
     });
   });
+
+  it('refuses to read a boolean flag that has no explicit union', () => {
+    const tiers = new Map<SettingsSource, unknown>([['localSettings', { someFlag: true }]]);
+
+    expect(() => readBooleanFlag(tiers, 'someFlag')).toThrow(/explicit source union/);
+    // A caller that knows the union can still read the flag.
+    expect(readBooleanFlag(tiers, 'someFlag', POLICY_AND_USER_SOURCES)).toBeUndefined();
+  });
+});
+
+describe('tier wrapper discrimination', () => {
+  it('treats a document with source and value keys as a document, not a wrapper', () => {
+    // The target preserves unknown keys, so this is a legal settings document.
+    const document = { source: 'userSettings', value: { nested: true } };
+    const tiers = new Map<SettingsSource, unknown>([['userSettings', document]]);
+
+    expect(resolveTopLevelKey(tiers, 'value')).toEqual([
+      { source: 'userSettings', value: { nested: true } },
+    ]);
+    expect(resolveTopLevelKey(tiers, 'source')).toEqual([
+      { source: 'userSettings', value: 'userSettings' },
+    ]);
+  });
+
+  it('converts plain tier entries into documents', () => {
+    const tiers = new Map<SettingsSource, SettingsTier>([
+      ['userSettings', { source: 'userSettings', value: { model: 'user-model' } }],
+    ]);
+
+    expect(effectiveSource(documentsOf(tiers), 'model')).toBe('userSettings');
+  });
+
+  it('merges documents without letting a settings file replace the prototype', () => {
+    const hostile = JSON.parse('{"__proto__": {"polluted": true}}') as Record<string, unknown>;
+
+    const merged = mergeDocuments({}, hostile);
+
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(merged, '__proto__')).toBe(false);
+  });
 });
 
 describe('settings loader', () => {
@@ -297,13 +478,39 @@ describe('settings loader', () => {
     expect(result.linkedAway).not.toContain('projectSettings');
   });
 
+  it('reads a distinct project settings file as its own tier', () => {
+    const workspace = makeWorkspace();
+    const projectDir = makeProjectDir(workspace);
+    writeJson(path.join(projectDir, 'settings.json'), { model: 'project-model' });
+
+    const result = loadSettings({
+      cwd: workspace.cwd,
+      configDir: workspace.configDir,
+      restricted: false,
+    });
+
+    expect(result.tiers.has('projectSettings')).toBe(true);
+    expect(result.tiers.get('projectSettings')?.value).toEqual({ model: 'project-model' });
+    expect(result.readMode.get('projectSettings')).toBe('as_read');
+    expect(result.linkedAway).not.toContain('projectSettings');
+    // The document is resolvable through the tier map.
+    expect(effectiveOrdinarySource(result.tiers, 'model')).toBe('projectSettings');
+  });
+
   it('merges local settings over the legacy local settings file with the local file winning', () => {
+    // Implementation choice (not observed): the legacy file is merged at *block* granularity,
+    // so the local file's `permissions` block replaces the legacy one wholesale
+    // instead of being merged key by key — the legacy `deny` rule is dropped with
+    // the rest of the block. The audit only states that local settings are "merged
+    // over a legacy local settings file, with the local file taking precedence",
+    // and the whole-block rule it states is about tiers, not files. A key-level
+    // merge would satisfy the audit's wording equally well.
     const workspace = makeWorkspace();
     const projectDir = makeProjectDir(workspace);
     writeJson(path.join(workspace.configDir, 'settings.local.json'), {
       model: 'legacy-model',
       legacyOnly: true,
-      permissions: { allow: ['Bash'] },
+      permissions: { allow: ['Bash'], deny: ['Read'] },
     });
     writeJson(path.join(projectDir, 'settings.local.json'), {
       model: 'local-model',
@@ -319,7 +526,6 @@ describe('settings loader', () => {
     const local = result.tiers.get('localSettings')?.value as Record<string, unknown>;
     expect(local['model']).toBe('local-model');
     expect(local['legacyOnly']).toBe(true);
-    // The local block applies as a whole over the legacy block.
     expect(local['permissions']).toEqual({ allow: ['Read'] });
   });
 
@@ -378,6 +584,60 @@ describe('settings loader', () => {
     expect(result.errors[0]?.source).toBe('userSettings');
     expect(result.errors[0]?.severity).toBe('error');
     expect(result.errors[0]?.path).toBe(userPath);
+  });
+
+  it('warns about a linked-away project tier', () => {
+    const workspace = makeWorkspace();
+    const projectDir = makeProjectDir(workspace);
+    const userPath = path.join(workspace.configDir, 'settings.json');
+    writeJson(userPath, { model: 'user-model' });
+    symlinkSync(userPath, path.join(projectDir, 'settings.json'));
+
+    const result = loadSettings({
+      cwd: workspace.cwd,
+      configDir: workspace.configDir,
+      restricted: false,
+    });
+
+    const warnings = result.errors.filter((error) => error.severity === 'warning');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.source).toBe('projectSettings');
+    expect(warnings[0]?.message).toContain('linked away');
+  });
+
+  it('warns about a project tier that resolves to the user settings file', () => {
+    const workspace = makeWorkspace();
+    symlinkSync(workspace.configDir, path.join(workspace.cwd, '.claude'));
+    writeJson(path.join(workspace.configDir, 'settings.json'), { model: 'user-model' });
+
+    const result = loadSettings({
+      cwd: workspace.cwd,
+      configDir: workspace.configDir,
+      restricted: false,
+    });
+
+    const warnings = result.errors.filter((error) => error.severity === 'warning');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.source).toBe('projectSettings');
+    expect(warnings[0]?.message).toContain('same file');
+  });
+
+  it('applies the flag settings overlay', () => {
+    const workspace = makeWorkspace();
+    writeJson(path.join(workspace.configDir, 'settings.json'), { model: 'user-model' });
+
+    const result = loadSettings({
+      cwd: workspace.cwd,
+      configDir: workspace.configDir,
+      restricted: false,
+      flagSettings: { model: 'flag-model' },
+    });
+
+    expect(result.tiers.has('flagSettings')).toBe(true);
+    expect(result.tiers.get('flagSettings')?.value).toEqual({ model: 'flag-model' });
+    expect(result.readMode.get('flagSettings')).toBe('as_read');
+    // The flag tier wins a top-level key over the user tier.
+    expect(effectiveSource(result.tiers, 'model')).toBe('flagSettings');
   });
 
   it('resolves a loaded tier through the top-level and merged rules', () => {
@@ -444,6 +704,47 @@ describe('sandbox configuration', () => {
     expect(written.model).toBe('user-model');
     expect(written.sandbox.enabled).toBe(false);
   });
+
+  it('refuses to overwrite a malformed settings file', () => {
+    const workspace = makeWorkspace();
+    const settingsPath = path.join(workspace.configDir, 'settings.json');
+    writeFileSync(settingsPath, '{ not json', 'utf8');
+
+    expect(() =>
+      writeSandboxSettings({ configDir: workspace.configDir, sandbox: { enabled: true } }),
+    ).toThrow(/refusing to overwrite/);
+    expect(readFileSync(settingsPath, 'utf8')).toBe('{ not json');
+  });
+
+  it('creates the configuration directory with restrictive permissions', () => {
+    const workspace = makeWorkspace();
+    const configDir = path.join(workspace.root, 'created-config');
+
+    writeSandboxSettings({ configDir, sandbox: { enabled: true } });
+
+    const stats = statSync(configDir);
+    expect(stats.mode & 0o777).toBe(0o700);
+  });
+
+  it('canonicalizes a path through its deepest existing ancestor', () => {
+    const workspace = makeWorkspace();
+    const real = path.join(workspace.root, 'real');
+    mkdirSync(real, { recursive: true });
+    const link = path.join(workspace.root, 'link');
+    symlinkSync(real, link);
+
+    // The symlinked ancestor is resolved; the missing tail is preserved.
+    expect(canonicalizePath(path.join(link, 'a', 'b', 'c'))).toBe(
+      path.join(realpathSync(real), 'a', 'b', 'c'),
+    );
+  });
+
+  it('expands a leading ~ in a path entry', () => {
+    const realHome = realpathSync(homedir());
+
+    expect(canonicalizePath('~')).toBe(realHome);
+    expect(canonicalizePath('~/x')).toBe(path.join(realHome, 'x'));
+  });
 });
 
 describe('settings document schema', () => {
@@ -459,7 +760,12 @@ describe('settings document schema', () => {
 
   it('validates the permission rule lists and the sandbox filesystem block', () => {
     const result = parseSettingsDocument({
-      permissions: { allow: ['Bash(ls:*)'], deny: ['Read(./secret)'], ask: [], defaultMode: 'plan' },
+      permissions: {
+        allow: ['Bash(ls:*)'],
+        deny: ['Read(./secret)'],
+        ask: [],
+        defaultMode: 'plan',
+      },
       sandbox: {
         filesystem: {
           allowRead: ['/tmp'],

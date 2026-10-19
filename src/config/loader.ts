@@ -30,29 +30,31 @@
  *   - The "legacy" local settings file defaults to `<configDir>/settings.local.json`,
  *     next to the user settings file, and is overridable through
  *     `legacyLocalSettingsPath`. The audit establishes the merge rule but not the
- *     path.
+ *     path — **the path is a implementation choice, not observed**.
  *   - The legacy merge is applied at **block** granularity (a key defined by the
- *     local file replaces the legacy value entirely), consistent with the target's
- *     "a higher tier's block applies as a whole" rule.
+ *     local file replaces the legacy value entirely). The audit says only that local
+ *     settings are "merged over a legacy local settings file, with the local file
+ *     taking precedence"; the whole-block rule it states is about **tiers**, not
+ *     about two files of the same tier. **The block granularity here is a reimplementation
+ *     choice, not observed** — a key-level merge would satisfy the audit's wording
+ *     equally well.
  *   - The project tier is not gated on project trust here; the target's `gateProject`
  *     decision is a trust question that belongs to the session layer.
- *   - The sandbox configuration writer canonicalizes its path entries (including
- *     symlink resolution) and writes `<configDir>/settings.json` with mode `0o600`.
- *     The audit states both rules but not the canonicalization algorithm, so the
- *     implementation resolves the deepest existing ancestor of a path and re-appends the
- *     remainder.
+ *
+ * The sandbox configuration *writer* lives in `schema.ts` (the settings-document
+ * module), not here: this file has one responsibility, reading the tiers.
  */
 
-import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { parseSettingsDocument } from './schema.js';
 import { isSuppressed } from './scope.js';
 import {
-  ALL_SOURCES,
+  SETTINGS_SOURCES,
   TIER_PRECEDENCE,
+  SettingsTierEntry,
   mergeBlockwise,
   type SettingsSource,
   type SettingsTier,
@@ -246,13 +248,13 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
   const errors: SettingsLoadError[] = [];
   const readMode = new Map<SettingsSource, SettingsReadMode>();
   const linkedAway: SettingsSource[] = [];
-  for (const source of ALL_SOURCES) readMode.set(source, 'none');
+  for (const source of SETTINGS_SOURCES) readMode.set(source, 'none');
 
   // --- policy tier: read as machine-administered policy. ---
   const policyPath = opts.policySettingsPath ?? path.join(configDir, 'managed-settings.json');
   const policy = readSettingsFile(policyPath, 'policySettings', errors);
   if (policy.status === 'ok') {
-    collected.set('policySettings', { source: 'policySettings', value: policy.document });
+    collected.set('policySettings', new SettingsTierEntry('policySettings', policy.document));
     readMode.set('policySettings', 'machine_admin');
   } else if (policy.status === 'invalid') {
     readMode.set('policySettings', 'machine_admin');
@@ -262,7 +264,7 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
   const userPath = path.join(configDir, 'settings.json');
   const user = readSettingsFile(userPath, 'userSettings', errors);
   if (user.status === 'ok') {
-    collected.set('userSettings', { source: 'userSettings', value: user.document });
+    collected.set('userSettings', new SettingsTierEntry('userSettings', user.document));
     readMode.set('userSettings', 'as_read');
   } else if (user.status === 'invalid') {
     readMode.set('userSettings', 'as_read');
@@ -293,7 +295,7 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
     } else {
       const project = readSettingsFile(projectPath, 'projectSettings', errors);
       if (project.status === 'ok') {
-        collected.set('projectSettings', { source: 'projectSettings', value: project.document });
+        collected.set('projectSettings', new SettingsTierEntry('projectSettings', project.document));
         readMode.set('projectSettings', 'as_read');
       } else if (project.status === 'invalid') {
         readMode.set('projectSettings', 'as_read');
@@ -311,11 +313,13 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
     if (legacy.status === 'ok' && legacy.document) documents.push(legacy.document);
     if (local.status === 'ok' && local.document) documents.push(local.document);
     if (documents.length > 0) {
+      // Implementation choice (not observed): the legacy file is merged at block granularity,
+      // so a key the local file defines replaces the legacy value entirely.
       const merged = documents.reduce<Record<string, unknown>>(
         (accumulated, document) => mergeBlockwise(accumulated, document),
         {},
       );
-      collected.set('localSettings', { source: 'localSettings', value: merged });
+      collected.set('localSettings', new SettingsTierEntry('localSettings', merged));
       readMode.set('localSettings', 'as_read');
     } else if (legacy.status === 'invalid' || local.status === 'invalid') {
       readMode.set('localSettings', 'as_read');
@@ -324,7 +328,7 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
 
   // --- flag tier: an overlay of settings keys supplied by the caller. ---
   if (opts.flagSettings && Object.keys(opts.flagSettings).length > 0) {
-    collected.set('flagSettings', { source: 'flagSettings', value: { ...opts.flagSettings } });
+    collected.set('flagSettings', new SettingsTierEntry('flagSettings', { ...opts.flagSettings }));
     readMode.set('flagSettings', 'as_read');
   }
 
@@ -336,127 +340,4 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
   }
 
   return { tiers, errors, readMode, linkedAway };
-}
-
-// --- sandbox configuration ---------------------------------------------------
-
-/** The path lists a sandbox filesystem block carries. */
-export interface SandboxFilesystemPaths {
-  allowRead?: string[];
-  allowWrite?: string[];
-  denyRead?: string[];
-  denyWrite?: string[];
-  credentials?: string[];
-}
-
-/** The sandbox block the target writes into the settings file. */
-export interface SandboxSettings {
-  enabled?: boolean;
-  failIfUnavailable?: boolean;
-  allowUnsandboxedCommands?: boolean;
-  enabledPlatforms?: string[];
-  excludedCommands?: string[];
-  filesystem?: SandboxFilesystemPaths;
-}
-
-const FILESYSTEM_PATH_KEYS: readonly (keyof SandboxFilesystemPaths)[] = [
-  'allowRead',
-  'allowWrite',
-  'denyRead',
-  'denyWrite',
-  'credentials',
-];
-
-function expandHome(input: string): string {
-  if (input === '~') return homedir();
-  if (input.startsWith('~/')) return path.join(homedir(), input.slice(2));
-  return input;
-}
-
-/**
- * Canonicalize a path entry: expand a leading `~`, make it absolute, and resolve
- * symlinks. A path that does not exist yet is canonicalized through its deepest
- * existing ancestor.
- */
-export function canonicalizePath(input: string): string {
-  const absolute = path.resolve(expandHome(input));
-  try {
-    return realpathSync(absolute);
-  } catch {
-    const parent = path.dirname(absolute);
-    try {
-      return path.join(realpathSync(parent), path.basename(absolute));
-    } catch {
-      return absolute;
-    }
-  }
-}
-
-/**
- * Canonicalize every path entry of a sandbox block. The path lists are the only
- * part of the block that carries filesystem paths.
- */
-export function canonicalizeSandboxPaths(sandbox: SandboxSettings): SandboxSettings {
-  const filesystem = sandbox.filesystem;
-  if (!filesystem) return { ...sandbox };
-  const canonical: SandboxFilesystemPaths = { ...filesystem };
-  for (const key of FILESYSTEM_PATH_KEYS) {
-    const entries = filesystem[key];
-    if (!entries) continue;
-    canonical[key] = entries.map((entry) => canonicalizePath(entry));
-  }
-  return { ...sandbox, filesystem: canonical };
-}
-
-export interface SandboxSettingsWriteResult {
-  /** The settings file the sandbox block was written to. */
-  path: string;
-  /** The whole settings document that was written. */
-  document: Record<string, unknown>;
-}
-
-/**
- * Write the sandbox configuration into `<configDir>/settings.json` with mode
- * `0o600`, after canonicalizing the block's path entries.
- *
- * The other keys of the settings file are preserved; only the `sandbox` block is
- * replaced. A settings file that cannot be parsed is never overwritten.
- */
-export function writeSandboxSettings(opts: {
-  configDir: string;
-  sandbox: SandboxSettings;
-}): SandboxSettingsWriteResult {
-  const configDir = path.resolve(opts.configDir);
-  const settingsPath = path.join(configDir, 'settings.json');
-
-  let existing: Record<string, unknown> = {};
-  try {
-    const raw = readFileSync(settingsPath, 'utf8');
-    if (raw.trim().length > 0) {
-      const parsed: unknown = JSON.parse(raw);
-      if (!isPlainObject(parsed)) {
-        throw new Error('the existing settings file does not contain a JSON object');
-      }
-      existing = parsed;
-    }
-  } catch (error) {
-    if (!isNotFound(error)) {
-      throw new Error(`refusing to overwrite ${settingsPath}: ${errorMessage(error)}`);
-    }
-  }
-
-  const document: Record<string, unknown> = {
-    ...existing,
-    sandbox: canonicalizeSandboxPaths(opts.sandbox),
-  };
-
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(settingsPath, `${JSON.stringify(document, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-  });
-  // `mode` only applies when the file is created, so the mode is set explicitly.
-  chmodSync(settingsPath, 0o600);
-
-  return { path: settingsPath, document };
 }

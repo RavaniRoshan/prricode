@@ -23,18 +23,36 @@
  * tier's block applies as a whole over any lower tier and is never merged key by key
  * ("the spellcheck block in `<source>` applies (as a whole, over any lower tier)").
  *
+ * The audit's §2.7 final line is explicit about what is *not* known: "the per-key
+ * merge for ordinary (non-merged, non-top-level) settings keys is not derived". The
+ * ordinary-key path is therefore an **open gap in the evidence**, and this module
+ * never claims otherwise.
+ *
  * Implementation choices (the audit does not pin them, so they are marked as such here):
  *
  *   - `TIER_PRECEDENCE` is the *composition* used for the whole-block rule. It is
  *     consistent with both observed orderings (policy > flag > user, and
  *     local > project > user) but the audit does not state a block ordering, so this
  *     ordering is a reimplementation decision and is not claimed as target-verified.
+ *   - `effectiveOrdinarySource` resolves an **ordinary** key (neither a top-level nor
+ *     a merged key). The target's per-key merge for ordinary keys is **not derived**
+ *     from the target — see the audit's §2.7 final line — so this function is an
+ *     **underived implementation choice**: this implementation applies the one precedence rule the audit
+ *     *does* state (the whole-block rule) to the tiers the two observed orderings do
+ *     not cover. It is not a claim about the target.
+ *   - `effectiveSource` resolves through the **observed** top-level order only. It
+ *     says nothing about ordinary keys; a caller that wants the ordinary path must
+ *     ask for it explicitly with `effectiveOrdinarySource`.
  *   - `resolveTopLevelKey` reads a *literal top-level* key; `resolveMergedKey`
  *     accepts a dotted path so that a merged setting can be resolved per leaf
  *     (`skills.my-skill`).
- *   - The resolvers accept a map whose entries are either a raw settings document or
- *     a `SettingsTier` wrapper (`{source, value}`), so that a `SettingsLoadResult`
- *     (`Map<SettingsSource, SettingsTier>`) can be passed straight in.
+ *   - `SETTINGS_SOURCES` is a **membership list, not an ordering**. It is a reimplementation
+ *     convenience for iterating the five sources; it is not a fifth observed
+ *     ordering.
+ *   - A tier wrapper is a `SettingsTierEntry` **instance**. The resolvers unwrap
+ *     instances only, so a legal settings document is never mistaken for a wrapper
+ *     (the target preserves unknown keys, so `{"source": ..., "value": ...}` is a
+ *     legal document).
  */
 
 /** The five settings sources the target names. */
@@ -45,8 +63,12 @@ export type SettingsSource =
   | 'projectSettings'
   | 'localSettings';
 
-/** Every source, in a stable enumeration order. */
-export const ALL_SOURCES: readonly SettingsSource[] = [
+/**
+ * The five sources as a **membership list**. The array order is *not* meaningful:
+ * the audit observes four orderings (`TOP_LEVEL_KEY_ORDER`, `MERGED_KEY_ORDER`,
+ * `D_` and `VD`) and this is not one of them. Implementation convenience, not observed.
+ */
+export const SETTINGS_SOURCES: readonly SettingsSource[] = [
   'policySettings',
   'flagSettings',
   'userSettings',
@@ -95,10 +117,39 @@ export const TIER_PRECEDENCE: readonly SettingsSource[] = [
   'userSettings',
 ];
 
+/**
+ * Per-key scope restrictions, as observed in the target.
+ *
+ * The target's own message states that "a spellcheck block in project or local
+ * settings is ignored, whatever else is configured; set it in your user settings
+ * instead", so `spellcheck` resolves from the user tier only. The block resolver and
+ * the scope readers both consult this table, so they cannot disagree.
+ */
+export const KEY_SCOPE_RESTRICTIONS: Readonly<Record<string, readonly SettingsSource[]>> = {
+  spellcheck: ['userSettings'],
+};
+
 /** A single tier's contribution for a key. */
 export interface SettingsTier {
   source: SettingsSource;
   value: unknown;
+}
+
+/**
+ * The concrete tier wrapper.
+ *
+ * The class is the *type* discriminator between a tier wrapper and a raw settings
+ * document: a settings document is always a plain object, so a legal document such
+ * as `{"source": "userSettings", "value": {...}}` is never mistaken for a wrapper.
+ */
+export class SettingsTierEntry implements SettingsTier {
+  readonly source: SettingsSource;
+  readonly value: unknown;
+
+  constructor(source: SettingsSource, value: unknown) {
+    this.source = source;
+    this.value = value;
+  }
 }
 
 /** A map of source -> settings document (or -> `SettingsTier` wrapper). */
@@ -109,21 +160,36 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * True when the map entry is a `SettingsTier` wrapper rather than a raw document.
- * The check is deliberately narrow: the object must have exactly the keys
- * `source` and `value`, and `source` must name the tier it is filed under.
+ * The settings document carried by a map entry.
+ *
+ * Only a `SettingsTierEntry` instance is unwrapped. A plain object is always a
+ * settings document, so a document that happens to carry `source` and `value` keys
+ * is never discarded.
  */
-function isTierWrapper(entry: unknown, source: SettingsSource): entry is SettingsTier {
-  if (!isPlainObject(entry)) return false;
-  const keys = Object.keys(entry);
-  if (keys.length > 2) return false;
-  if (!keys.includes('value') || !keys.includes('source')) return false;
-  return entry['source'] === source;
+export function documentOf(entry: unknown): unknown {
+  return entry instanceof SettingsTierEntry ? entry.value : entry;
 }
 
-/** The settings document carried by a map entry, unwrapping a tier if needed. */
-export function documentOf(entry: unknown, source: SettingsSource): unknown {
-  return isTierWrapper(entry, source) ? entry.value : entry;
+/**
+ * The documents of a tier map whose entries are tier wrappers.
+ *
+ * Use this when a caller built its tier entries as plain `{source, value}` objects
+ * rather than as `SettingsTierEntry` instances.
+ */
+export function documentsOf(tiers: ReadonlyMap<SettingsSource, SettingsTier>): Map<SettingsSource, unknown> {
+  const documents = new Map<SettingsSource, unknown>();
+  for (const [source, entry] of tiers) {
+    if (entry instanceof SettingsTierEntry) {
+      documents.set(source, entry.value);
+      continue;
+    }
+    if (isPlainObject(entry) && Object.prototype.hasOwnProperty.call(entry, 'value')) {
+      documents.set(source, entry['value']);
+      continue;
+    }
+    documents.set(source, entry);
+  }
+  return documents;
 }
 
 interface PathLookup {
@@ -156,7 +222,7 @@ function tiersDefining(
   const resolved: SettingsTier[] = [];
   for (const source of order) {
     if (!tiers.has(source)) continue;
-    const document = documentOf(tiers.get(source), source);
+    const document = documentOf(tiers.get(source));
     const lookup = lookupPath(document, path);
     if (lookup.found) resolved.push({ source, value: lookup.value });
   }
@@ -185,42 +251,68 @@ export function resolveMergedKey(tiers: SettingsTierMap, key: string): SettingsT
 }
 
 /**
- * The tier that supplies a top-level key, or `null` when no tier defines it.
+ * The tier that supplies a **top-level** key, or `null` when no tier defines it.
  *
- * Uses the top-level ordering, which is the target's default resolution path for a
- * plain settings key. Use `effectiveMergedSource` for merged settings.
+ * This resolves through the *observed* top-level order (`policySettings`,
+ * `flagSettings`, `userSettings`) and nothing else. It says **nothing** about
+ * ordinary keys: the target's per-key merge for ordinary keys is not derived
+ * (audit §2.7, final line), so this function must not be read as "the tier the
+ * target would use for any key".
+ *
+ * Use `effectiveOrdinarySource` for an ordinary key — that path is an explicitly
+ * underived implementation choice — and `resolveMergedKey` for a merged key.
  */
 export function effectiveSource(tiers: SettingsTierMap, key: string): SettingsSource | null {
   return resolveTopLevelKey(tiers, key)[0]?.source ?? null;
 }
 
-/** The tier that supplies a merged key, or `null` when no tier defines it. */
-export function effectiveMergedSource(tiers: SettingsTierMap, key: string): SettingsSource | null {
-  return resolveMergedKey(tiers, key)[0]?.source ?? null;
+/**
+ * The tier that supplies an **ordinary** key — one that is neither a top-level key
+ * nor a merged key.
+ *
+ * The target's per-key merge for ordinary keys is **not derived** from the target
+ * (audit §2.7, final line: "the per-key merge for ordinary (non-merged,
+ * non-top-level) settings keys is not derived"). This function is therefore an
+ * **underived implementation choice**, not an observed behaviour: this implementation resolves an
+ * ordinary key with the whole-block rule — the one precedence rule the audit *does*
+ * state — applied over the tiers the two observed orderings do not cover, and it
+ * honours the observed per-key scope restrictions (`spellcheck` is user-only).
+ */
+export function effectiveOrdinarySource(tiers: SettingsTierMap, key: string): SettingsSource | null {
+  return resolveBlock(tiers, key)?.source ?? null;
 }
 
 /**
  * Whole-block override: the highest tier that defines the block wins **as a whole**
  * and the block is never merged key by key with a lower tier.
+ *
+ * A key with an observed scope restriction (`spellcheck`) only resolves from a tier
+ * the restriction allows, so a spellcheck block in project or local settings is
+ * ignored exactly as the target's own message says.
  */
 export function resolveBlock(tiers: SettingsTierMap, key: string): SettingsTier | undefined {
+  const allowed = KEY_SCOPE_RESTRICTIONS[key];
   for (const source of TIER_PRECEDENCE) {
+    if (allowed && !allowed.includes(source)) continue;
     if (!tiers.has(source)) continue;
-    const document = documentOf(tiers.get(source), source);
+    const document = documentOf(tiers.get(source));
     const lookup = lookupPath(document, [key]);
     if (lookup.found) return { source, value: lookup.value };
   }
   return undefined;
 }
 
-function isPlainObjectRecord(value: unknown): value is Record<string, unknown> {
-  return isPlainObject(value);
-}
+/** Keys that must never be copied onto a merged object. */
+const UNSAFE_MERGE_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
  * Merge two documents key by key. A key defined by `high` replaces the value from
  * `low`; two plain objects are merged recursively so that e.g. two tiers that each
  * define a different skill both survive.
+ *
+ * `__proto__`, `constructor` and `prototype` are never copied: a settings file is
+ * attacker-influenced data and must not be able to replace the prototype of the
+ * object it is merged into.
  */
 export function mergeDocuments(
   low: Record<string, unknown>,
@@ -228,8 +320,9 @@ export function mergeDocuments(
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = { ...low };
   for (const [key, value] of Object.entries(high)) {
+    if (UNSAFE_MERGE_KEYS.has(key)) continue;
     const existing = merged[key];
-    if (isPlainObjectRecord(existing) && isPlainObjectRecord(value)) {
+    if (isPlainObject(existing) && isPlainObject(value)) {
       merged[key] = mergeDocuments(existing, value);
     } else {
       merged[key] = value;
@@ -247,19 +340,29 @@ export function mergeBlockwise(
   low: Record<string, unknown>,
   high: Record<string, unknown>,
 ): Record<string, unknown> {
-  return { ...low, ...high };
+  const merged: Record<string, unknown> = { ...low };
+  for (const [key, value] of Object.entries(high)) {
+    if (UNSAFE_MERGE_KEYS.has(key)) continue;
+    merged[key] = value;
+  }
+  return merged;
 }
 
 /**
  * The merged-settings document: every merged key takes the value of the first source
  * in `MERGED_KEY_ORDER` that defines it.
+ *
+ * Implementation choice (not observed): the audit says "the first source that defines a key
+ * wins" but does not define the granularity of a merged key. This implementation merges per
+ * **leaf**, so two tiers that define different skills both survive, and the higher
+ * tier wins the leaves it defines.
  */
 export function mergeMergedSettings(tiers: SettingsTierMap): Record<string, unknown> {
   let merged: Record<string, unknown> = {};
   // Fold from the lowest tier upwards so the highest tier wins per key.
   for (const source of [...MERGED_KEY_ORDER].reverse()) {
     if (!tiers.has(source)) continue;
-    const document = documentOf(tiers.get(source), source);
+    const document = documentOf(tiers.get(source));
     if (!isPlainObject(document)) continue;
     merged = mergeDocuments(merged, document);
   }

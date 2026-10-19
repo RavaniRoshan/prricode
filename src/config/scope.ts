@@ -7,7 +7,9 @@
  * explicit union of tiers:
  *
  *   - `spellcheck` is **user settings only**; a spellcheck block in project or local
- *     settings is ignored and the product tells the user to set it in user settings.
+ *     settings is ignored and the product tells the user to set it in user settings
+ *     ("a spellcheck block in project or local settings is ignored, whatever else is
+ *     configured; set it in your user settings instead").
  *   - `otelHeadersHelper`, `apiKeyHelper` and `autoMemoryDirectory` are read **per
  *     tier** and reported together with the tier that supplied them.
  *   - Boolean flags such as `skipDangerousModePermissionPrompt` and
@@ -18,19 +20,21 @@
  * The target's source enumeration order is `D_` =
  * ["userSettings", "projectSettings", "localSettings"], with the scope map
  * `{userSettings: "user", projectSettings: "project", localSettings: "local"}`.
+ * `SCOPE_BY_SOURCE` is the single source of truth for that map: `scopeFor` reads it
+ * rather than duplicating the mapping.
  *
  * Implementation choices (the audit does not pin them):
  *
  *   - The audit does not say which of the two boolean flags uses which union, so the
  *     mapping below is a reimplementation decision. The *shape* — an explicit union of sources,
  *     and one union that is policy+user only — is observed.
- *   - `me(source)` returns the personal scope a source contributes, or `null` when
- *     the source has no personal scope (policy and flag settings) or is suppressed by
- *     the "restrict personal config" restriction. `isSuppressed` answers the separate
- *     question "is this source suppressed right now?".
+ *   - A union is a *membership* set; the winner inside it is the highest precedence
+ *     member, not the first one listed. The audit lists the union in ascending
+ *     precedence, so this implementation reads it highest-first.
  */
 
 import {
+  KEY_SCOPE_RESTRICTIONS,
   PROJECT_SIDE_SOURCES,
   TIER_PRECEDENCE,
   documentOf,
@@ -43,7 +47,7 @@ import {
 export type SettingsScope = 'user' | 'project' | 'local';
 
 /**
- * `D_` — source enumeration order.
+ * `D_` — the source enumeration order, as observed in the target.
  */
 export const SOURCE_ENUMERATION_ORDER: readonly SettingsSource[] = [
   'userSettings',
@@ -51,36 +55,25 @@ export const SOURCE_ENUMERATION_ORDER: readonly SettingsSource[] = [
   'localSettings',
 ];
 
-/** The scope map the target pairs with `D_`. */
-export const SCOPE_BY_SOURCE: Readonly<Record<'userSettings' | 'projectSettings' | 'localSettings', SettingsScope>> =
-  {
-    userSettings: 'user',
-    projectSettings: 'project',
-    localSettings: 'local',
-  };
-
-/** The sources that carry a personal scope. */
-export const PERSONAL_SOURCES: readonly SettingsSource[] = [
-  'userSettings',
-  'projectSettings',
-  'localSettings',
-];
+/**
+ * The scope map the target pairs with `D_`. This is the single source of truth for
+ * the mapping: `scopeFor` reads it.
+ */
+export const SCOPE_BY_SOURCE: Readonly<
+  Record<'userSettings' | 'projectSettings' | 'localSettings', SettingsScope>
+> = {
+  userSettings: 'user',
+  projectSettings: 'project',
+  localSettings: 'local',
+};
 
 /**
  * The scope of a source, ignoring the restriction. Policy and flag settings have no
  * personal scope and therefore report `null`.
  */
 export function scopeFor(source: SettingsSource): SettingsScope | null {
-  switch (source) {
-    case 'userSettings':
-      return 'user';
-    case 'projectSettings':
-      return 'project';
-    case 'localSettings':
-      return 'local';
-    default:
-      return null;
-  }
+  if (source === 'policySettings' || source === 'flagSettings') return null;
+  return SCOPE_BY_SOURCE[source];
 }
 
 /**
@@ -101,7 +94,7 @@ export function isSuppressed(source: SettingsSource, restricted: boolean): boole
 
 function lookupKey(tiers: SettingsTierMap, source: SettingsSource, key: string): SettingsTier | undefined {
   if (!tiers.has(source)) return undefined;
-  const document = documentOf(tiers.get(source), source);
+  const document = documentOf(tiers.get(source));
   if (typeof document !== 'object' || document === null || Array.isArray(document)) return undefined;
   const record = document as Record<string, unknown>;
   if (!Object.prototype.hasOwnProperty.call(record, key)) return undefined;
@@ -122,10 +115,15 @@ export function readUserOnly(tiers: SettingsTierMap, key: string): SettingsTier 
  *
  * Used for `otelHeadersHelper`, `apiKeyHelper` and `autoMemoryDirectory`, which the
  * target reads per tier. The result is ordered highest precedence first.
+ *
+ * A key with an observed scope restriction (`spellcheck`) only reports the tiers the
+ * restriction allows, so this agrees with `resolveBlock`.
  */
 export function readPerTier(tiers: SettingsTierMap, key: string): SettingsTier[] {
+  const allowed = KEY_SCOPE_RESTRICTIONS[key];
   const found: SettingsTier[] = [];
   for (const source of TIER_PRECEDENCE) {
+    if (allowed && !allowed.includes(source)) continue;
     const tier = lookupKey(tiers, source, key);
     if (tier) found.push(tier);
   }
@@ -176,12 +174,22 @@ export const BOOLEAN_FLAG_SOURCE_SETS: Readonly<Record<string, readonly Settings
 /**
  * Read a boolean flag from its explicit source union and report the tier that
  * supplied the value.
+ *
+ * The union must be explicit: either the caller passes one, or the key is registered
+ * in `BOOLEAN_FLAG_SOURCE_SETS`. A key with no registered union is an error rather
+ * than a silent widening to the general union — a flag that the target reads from
+ * the policy and the user settings only must never pick up a local or flag value.
  */
 export function readBooleanFlag(
   tiers: SettingsTierMap,
   key: string,
   sources?: readonly SettingsSource[],
 ): SettingsTier | undefined {
-  const union = sources ?? BOOLEAN_FLAG_SOURCE_SETS[key] ?? BOOLEAN_FLAG_SOURCES;
+  const union = sources ?? BOOLEAN_FLAG_SOURCE_SETS[key];
+  if (!union) {
+    throw new Error(
+      `no explicit source union for the boolean flag "${key}"; pass one or register it in BOOLEAN_FLAG_SOURCE_SETS`,
+    );
+  }
   return readFromSources(tiers, key, union)[0];
 }
