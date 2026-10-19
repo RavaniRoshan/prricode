@@ -29,6 +29,25 @@ use uuid::Uuid;
 
 pub const GOAL_COMPLETE_TOOL: &str = "goal_complete";
 
+/// Fixed context charge for an image in the token estimate (matches the
+/// server-side turn-start estimate).
+const IMAGE_TOKEN_BUDGET: usize = 1_000;
+
+/// Rough context size of the in-flight messages, in estimated tokens:
+/// chars/4 for text, a fixed budget per image. Rough on purpose — the
+/// threshold is a safety valve, not a metering API.
+pub(crate) fn estimate_message_tokens(messages: &[ChatMessage]) -> usize {
+    let chars: usize = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .map(|p| match p {
+            ContentPart::Text(t) => t.chars().count(),
+            ContentPart::Image { .. } => IMAGE_TOKEN_BUDGET,
+        })
+        .sum();
+    chars / 4
+}
+
 pub struct GoalContext {
     pub objective: String,
 }
@@ -74,6 +93,9 @@ pub struct AgentRunner {
     hooks: Option<Arc<crate::hooks::HooksEngine>>,
     mcp_tool_cache: Mutex<HashMap<String, Vec<prricode_mcp::McpTool>>>,
     self_weak: Mutex<Option<Weak<AgentRunner>>>,
+    /// Mid-turn micro-compaction trigger (estimated tokens between loop
+    /// iterations). Zero disables it.
+    micro_compact_threshold: usize,
     /// When set, this registry replaces the default toolset for every turn —
     /// the isolation primitive for subagent turns (the adversarial verifier)
     /// that must run with fewer capabilities than the parent runner.
@@ -123,7 +145,14 @@ impl AgentRunner {
             mcp_tool_cache: Mutex::new(HashMap::new()),
             self_weak: Mutex::new(None),
             tool_registry: None,
+            micro_compact_threshold: 60_000,
         }
+    }
+
+    /// Override the mid-turn micro-compaction threshold (tests).
+    pub fn with_micro_compact_threshold(mut self, threshold: usize) -> Self {
+        self.micro_compact_threshold = threshold;
+        self
     }
 
     /// Register the Arc self-reference so the task tool can spawn subagents.
@@ -372,6 +401,48 @@ impl AgentRunner {
         runner.run_turn_inner(input, None).await
     }
 
+    /// Mid-turn micro-compaction: summarize the in-flight history and
+    /// continue the turn from system + summary. Bounded and honest — on any
+    /// provider failure the turn continues with full context.
+    async fn micro_compact(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        session_id: &str,
+    ) -> Option<Vec<ChatMessage>> {
+        let system = messages.first()?.implementation();
+        let mut request_messages = messages.to_vec();
+        request_messages.push(ChatMessage::user_text(
+            "Summarize the work in this turn so far in under 200 words. Keep the user's \
+             request, decisions, file paths, commands, notable tool results, and the \
+             immediate next step.",
+        ));
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages: request_messages,
+            ..Default::default()
+        };
+        let response = self.provider.chat(&request).await.ok()?;
+        let summary = response.message.text();
+        if summary.is_empty() {
+            return None;
+        }
+        let compacted = vec![
+            system,
+            ChatMessage::user_text(format!(
+                "Context compacted mid-turn. Summary of everything so far:\n{summary}\n\n\
+                 Continue the task from here."
+            )),
+        ];
+        if let Some(events) = &self.events {
+            let _ = events.send(AgentEvent::SessionCompact {
+                session_id: session_id.to_string(),
+                compacted: true,
+            });
+        }
+        Some(compacted)
+    }
+
     async fn run_turn_inner(
         &self,
         input: TurnInput,
@@ -457,6 +528,19 @@ impl AgentRunner {
                 if *cancel.borrow() {
                     completed = false;
                     break 'turn;
+                }
+            }
+            // Mid-turn micro-compaction: when the in-flight context between
+            // loop iterations crosses the threshold, summarize the history
+            // in place and continue from the summary. Stored history is
+            // untouched; this only bounds the model context of this turn.
+            if estimate_message_tokens(&messages) >= self.micro_compact_threshold
+                && messages.len() > 2
+            {
+                // Honest degrade: if the compaction call fails, the turn
+                // continues with the full context.
+                if let Some(compacted) = self.micro_compact(&model, &messages, &session_id).await {
+                    messages = compacted;
                 }
             }
             let request = ChatRequest {
@@ -1158,6 +1242,190 @@ mod tests {
             let _ = events.send(StreamEvent::Done);
             Ok(response)
         }
+    }
+
+    #[test]
+    fn estimate_message_tokens_counts_chars_and_images() {
+        let messages = vec![
+            ChatMessage::system_text("abcd"),   // 4 chars → 1 token
+            ChatMessage::user_text("efghijkl"), // 8 chars → 2 tokens
+        ];
+        assert_eq!(estimate_message_tokens(&messages), 3);
+        let with_image = vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentPart::Image {
+                media_type: "image/png".into(),
+                data_base64: "aGk=".into(),
+            }],
+            tool_call_id: None,
+            tool_calls: vec![],
+        }];
+        assert_eq!(estimate_message_tokens(&with_image), IMAGE_TOKEN_BUDGET / 4);
+    }
+
+    /// Records how many messages survived into each streamed call; the
+    /// first call asks for an echo of a large filler text so the tool
+    /// result inflates the mid-turn token estimate.
+    struct CompactionProbe {
+        stream_turn: std::sync::atomic::AtomicUsize,
+        compact_calls: std::sync::atomic::AtomicUsize,
+        stream_message_counts: Mutex<Vec<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for CompactionProbe {
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Echo
+        }
+
+        async fn list_models(&self) -> ProviderResult<Vec<prricode_provider::ModelInfo>> {
+            Ok(vec![])
+        }
+
+        async fn chat(&self, _request: &ChatRequest) -> ProviderResult<ChatResponse> {
+            // The compaction call itself.
+            self.compact_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ChatResponse {
+                message: AssistantMessage {
+                    content_parts: vec![ContentPart::text(
+                        "SUMMARY: user asked to echo filler; it printed; next: finish",
+                    )],
+                    tool_calls: vec![],
+                },
+                usage: Usage::default(),
+                finish_reason: "stop".into(),
+                cost_usd: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            request: &ChatRequest,
+            events: mpsc::UnboundedSender<StreamEvent>,
+        ) -> ProviderResult<ChatResponse> {
+            let turn = self
+                .stream_turn
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let message = if turn == 0 {
+                AssistantMessage {
+                    content_parts: vec![],
+                    tool_calls: vec![ToolCall {
+                        id: "call-1".into(),
+                        name: "shell".into(),
+                        arguments: json!({
+                            "command": "printf 'x%.0s' $(seq 1 2000)"
+                        }),
+                    }],
+                }
+            } else {
+                self.stream_message_counts
+                    .lock()
+                    .unwrap()
+                    .push(request.messages.len());
+                AssistantMessage {
+                    content_parts: vec![ContentPart::text("done")],
+                    tool_calls: vec![],
+                }
+            };
+            let response = ChatResponse {
+                message,
+                usage: Usage::default(),
+                finish_reason: "stop".into(),
+                cost_usd: None,
+            };
+            if !response.message.text().is_empty() {
+                let _ = events.send(StreamEvent::TextDelta(response.message.text()));
+            }
+            let _ = events.send(StreamEvent::Done);
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn micro_compaction_replaces_history_mid_turn() {
+        let (events, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let probe = Arc::new(CompactionProbe {
+            stream_turn: std::sync::atomic::AtomicUsize::new(0),
+            compact_calls: std::sync::atomic::AtomicUsize::new(0),
+            stream_message_counts: Mutex::new(Vec::new()),
+        });
+        let provider: Arc<dyn ModelProvider> = probe.implementation();
+        let runner = AgentRunner::new(provider.implementation(), Arc::new(ApprovalEngine::new()))
+            .with_events(events)
+            .with_micro_compact_threshold(400);
+        let outcome = runner
+            .run_turn(TurnInput {
+                session_id: "session-micro-compact".into(),
+                model: String::new(),
+                approval_mode: ApprovalMode::Open,
+                workspace_root: std::env::temp_dir(),
+                data_dir: std::env::temp_dir(),
+                history: vec![],
+                user_content: vec![ContentPart::text("echo the filler")],
+                goal: None,
+                skills_prompt: None,
+                allowed_tools: Vec::new(),
+                max_iterations: 4,
+                turn_id: "turn-micro-compact".into(),
+            })
+            .await
+            .expect("turn completes");
+        assert_eq!(outcome.content, "done");
+        let counts = probe.stream_message_counts.lock().unwrap().implementation();
+        assert!(!counts.is_empty(), "a second streamed call must occur");
+        // After compaction the follow-up call sees system + summary only.
+        assert_eq!(counts[0], 2, "compacted turn context: got {counts:?}");
+        assert_eq!(
+            probe
+                .compact_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one compaction call fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_micro_compaction_below_threshold() {
+        let (events, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let probe = Arc::new(CompactionProbe {
+            stream_turn: std::sync::atomic::AtomicUsize::new(0),
+            compact_calls: std::sync::atomic::AtomicUsize::new(0),
+            stream_message_counts: Mutex::new(Vec::new()),
+        });
+        let provider: Arc<dyn ModelProvider> = probe.implementation();
+        let runner = AgentRunner::new(provider.implementation(), Arc::new(ApprovalEngine::new()))
+            .with_events(events)
+            .with_micro_compact_threshold(usize::MAX);
+        let outcome = runner
+            .run_turn(TurnInput {
+                session_id: "session-no-compaction".into(),
+                model: String::new(),
+                approval_mode: ApprovalMode::Open,
+                workspace_root: std::env::temp_dir(),
+                data_dir: std::env::temp_dir(),
+                history: vec![],
+                user_content: vec![ContentPart::text("echo the filler")],
+                goal: None,
+                skills_prompt: None,
+                allowed_tools: Vec::new(),
+                max_iterations: 4,
+                turn_id: "turn-no-compaction".into(),
+            })
+            .await
+            .expect("turn completes");
+        assert_eq!(outcome.content, "done");
+        assert_eq!(
+            probe
+                .compact_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no compaction when the estimate stays under the threshold"
+        );
+        let counts = probe.stream_message_counts.lock().unwrap().implementation();
+        assert!(!counts.is_empty());
+        // Uncompacted turn: system + user + assistant(tool) + tool result.
+        assert_eq!(counts[0], 4, "got {counts:?}");
     }
 
     #[tokio::test]

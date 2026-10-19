@@ -33,7 +33,7 @@ full workspace tests green, one commit per phase item.
 | 7 | Parallel hook dispatch | done | timing test `hooks_run_in_parallel_not_sequentially` |
 | 7 | TUI hook registration (`/hooks add`) | done | app.rs parses `<event>[@tool] <command> [args…]`, lenient `HookEvent::parse` (13 hooks tests), lib.rs registers via `runner.hooks()`; test `hooks_add_registers_a_command_hook` |
 | 8 | Turn-start auto-compaction | done | threshold 48k est. tokens; 2 tests |
-| 8 | Mid-turn micro-compaction | pending | … |
+| 8 | Mid-turn micro-compaction | done | `estimate_message_tokens` (chars/4 + image budget) + `micro_compact_threshold` (default 60k, test-injectable) on `AgentRunner`; between loop iterations a crossing summarizes history in place ([system, summary]) via a provider `chat` call; provider failure degrades honestly (turn continues full-context); emits the existing `session/compact` event; stored history untouched; 3 tests |
 | 9 | Agent/task/coordinator/worktrees/team | done | tools registered + tests |
 | 10 | MCP stdio + HTTP transports | done | round-trip test over raw HTTP listener; `mcp.toml` `type = "http"` |
 | 10 | MCP env expansion `${VAR}` in config | done | `expand_env` + `load_mcp_servers_with` (command/args/url/env values); `[servers.env]` table plumbs into `McpStdioClient::spawn_with_env`; 4 new tests |
