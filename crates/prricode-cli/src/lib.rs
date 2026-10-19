@@ -27,6 +27,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub api_key_env: Option<String>,
 
+    /// Named connection from the config file ([connections.<name>]); falls
+    /// back to PRRICODE_CONNECTION, then defaults.connection.
+    #[arg(long, global = true)]
+    pub connection: Option<String>,
+
     #[arg(long, global = true)]
     pub reasoning_effort: Option<ReasoningEffortArg>,
 

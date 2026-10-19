@@ -14,7 +14,11 @@ mod openai_compat;
 #[cfg(test)]
 mod tests;
 
-pub use config::{config_path, load_config, ProviderConfig, ProviderSettings, PrricodeConfig};
+pub use config::{
+    config_path, connection_name, load_config, parse_kind_id, resolve_connection,
+    startup_connection, ConnectionSettings, ProviderConfig, ProviderSettings, PrricodeConfig,
+    ResolvedConnection,
+};
 pub use credentials::{
     get as credential_get, providers as credential_providers, remove as credential_remove,
     set as credential_set, CredentialStore,

@@ -66,6 +66,23 @@ full workspace tests green, one commit per phase item.
 | 20 | Release binaries (5 targets) | done | release.yml + SHA256SUMS |
 | 20 | E2E (Ollama stdio) | done | tests/e2e.sh |
 
+## Track 2 — Provider connections & selections (`provider-track.md`)
+
+| Phase | Item | Status | Evidence / honest reason |
+|---|---|---|---|
+| 21 | Named connections in config | done | `[connections.<name>]` table (`kind`/`base_url`/`model`/`api_key_env`/`api_key`/`headers`), `defaults.connection`, `resolve_connection` + `parse_kind_id` + `connection_name` precedence (flag > `PRRICODE_CONNECTION` > defaults) in `config.rs`; honest errors list known connections / accepted kind ids; 10 tests |
+| 21 | CLI `--connection` flag | done | global flag on `serve`/`exec`/`voice`; `build_provider` resolves the connection first and hard-errors (exit 2) with the resolver message instead of silently falling back to a different endpoint; `default_model` prefers the connection's model; verified end-to-end with a temp config through the echo connection |
+| 21 | Connection-keyed credential store entries | done | store keys are free strings; the `connection:<name>` convention round-trips via `save_at`/`load_at`/`remove_at` at an explicit path; test `connection_key_roundtrips_in_the_credential_store` |
+| 22 | `provider/list` method | pending | … |
+| 22 | `connection/test` verification | pending | … |
+| 22 | `connection/add` (settings-table persisted) | pending | … |
+| 23 | Runtime engine switch (`session/setEngine`) | pending | … |
+| 23 | TUI live `/provider <connection>` + `/connections` | pending | … |
+| 24 | Capability metadata (`supports_tools`/`supports_streaming`) | pending | … |
+| 24 | Loop degrade on capability-off engines | pending | … |
+| 25 | connect-a-provider.md connections-first | pending | … |
+| 25 | tui-guide.md + run-the-tests.md connection steps | pending | … |
+
 ## Working instructions for the tracker
 
 Grep for `| pending` to get the next batch. Do not stop until every row is

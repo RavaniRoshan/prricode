@@ -24,10 +24,18 @@ fn provider_kind(arg: ProviderArg) -> ProviderKind {
 }
 
 /// Build a provider from CLI overrides, environment, and the config file.
+/// The connection flag with its environment fallback; `startup_connection`
+/// then applies defaults.connection.
+fn connection_flag(cli: &Cli) -> Option<String> {
+    cli.connection
+        .implementation()
+        .or_else(|| std::env::var("PRRICODE_CONNECTION").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn build_provider(cli: &Cli) -> Box<dyn ModelProvider> {
-    let kind = provider_kind(cli.provider);
     let config = prricode_provider::load_config();
-    let settings = config.providers.get(kind.id());
     let mut overrides = HashMap::new();
     if let Some(base_url) = &cli.base_url {
         overrides.insert("base_url".to_string(), base_url.implementation());
@@ -41,6 +49,26 @@ fn build_provider(cli: &Cli) -> Box<dyn ModelProvider> {
         }
     }
     let env: HashMap<String, String> = std::env::vars().collect();
+    // An explicit connection (flag, env, or defaults.connection) wins over the
+    // kind flag; an unresolvable one is an honest hard error, never a silent
+    // fallback to a different endpoint.
+    if let Some(name) =
+        prricode_provider::startup_connection(&config, connection_flag(cli).as_deref())
+    {
+        match prricode_provider::resolve_connection(&name, &config) {
+            Ok(resolved) => {
+                let provider_config =
+                    resolve_settings(resolved.kind, Some(&resolved.settings), &overrides, &env);
+                return create_provider(provider_config);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let kind = provider_kind(cli.provider);
+    let settings = config.providers.get(kind.id());
     let provider_config = resolve_settings(kind, settings, &overrides, &env);
     create_provider(provider_config)
 }
@@ -50,6 +78,15 @@ fn default_model(cli: &Cli) -> Option<String> {
         return Some(model.implementation());
     }
     let config = prricode_provider::load_config();
+    if let Some(name) =
+        prricode_provider::startup_connection(&config, connection_flag(cli).as_deref())
+    {
+        if let Ok(resolved) = prricode_provider::resolve_connection(&name, &config) {
+            if let Some(model) = resolved.model {
+                return Some(model);
+            }
+        }
+    }
     if let Some(model) = config.defaults.model {
         return Some(model);
     }

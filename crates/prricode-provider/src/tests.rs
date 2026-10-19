@@ -4,6 +4,7 @@
 //! no network access.
 
 use super::config::{normalize_base_url, resolve};
+use super::credentials::{load_at, remove_at, save_at};
 use super::openai_compat::{
     build_chat_body, message_to_json, parse_chat_response, repair_json, sse_data_payload,
     ToolCallAssembler,
@@ -597,4 +598,181 @@ async fn create_provider_maps_kinds() {
         });
         assert_eq!(provider.kind(), kind);
     }
+}
+
+// ---------- connections (provider-track Phase 21) ----------
+
+#[test]
+fn connections_table_parses_with_all_fields() {
+    let text = r#"
+[connections.fast]
+kind = "custom"
+base_url = "https://relay.example.com/v1"
+model = "relay-mix"
+api_key_env = "RELAY_KEY"
+[connections.fast.headers]
+X-Flag = "on"
+"#;
+    let cfg: PrricodeConfig = toml::from_str(text).expect("parses");
+    let conn = cfg.connections.get("fast").expect("connection present");
+    assert_eq!(conn.kind.as_deref(), Some("custom"));
+    assert_eq!(
+        conn.base_url.as_deref(),
+        Some("https://relay.example.com/v1")
+    );
+    assert_eq!(conn.model.as_deref(), Some("relay-mix"));
+    assert_eq!(conn.api_key_env.as_deref(), Some("RELAY_KEY"));
+    assert_eq!(conn.headers.get("X-Flag").map(String::as_str), Some("on"));
+}
+
+#[test]
+fn connection_minimal_kind_only_parses() {
+    let text = r#"
+[connections.local]
+kind = "ollama"
+"#;
+    let cfg: PrricodeConfig = toml::from_str(text).expect("parses");
+    let conn = cfg.connections.get("local").expect("connection present");
+    assert_eq!(conn.kind.as_deref(), Some("ollama"));
+    assert!(conn.base_url.is_none());
+    assert!(conn.headers.is_empty());
+}
+
+#[test]
+fn defaults_connection_field_parses() {
+    let text = r#"
+[defaults]
+connection = "fast"
+
+[connections.fast]
+kind = "openrouter"
+"#;
+    let cfg: PrricodeConfig = toml::from_str(text).expect("parses");
+    assert_eq!(cfg.defaults.connection.as_deref(), Some("fast"));
+}
+
+#[test]
+fn kind_id_roundtrips_for_every_accepted_id() {
+    use super::ProviderKind::*;
+    for kind in [Echo, Ollama, OllamaCloud, OpenRouter, Kilo, OpenAI, Custom] {
+        assert_eq!(parse_kind_id(kind.id()), Some(kind), "{}", kind.id());
+    }
+    assert_eq!(parse_kind_id("not-a-kind"), None);
+}
+
+#[test]
+fn resolve_connection_unknown_name_reports_and_lists_known() {
+    let text = r#"
+[connections.fast]
+kind = "custom"
+base_url = "https://relay.example.com/v1"
+"#;
+    let cfg = toml::from_str::<PrricodeConfig>(text).expect("parses");
+    let err = resolve_connection("ghost", &cfg).expect_err("unknown name rejected");
+    assert!(err.contains("unknown connection 'ghost'"), "{err}");
+    assert!(err.contains("fast"), "{err}");
+}
+
+#[test]
+fn resolve_connection_unknown_kind_reports_accepted_ids() {
+    let text = r#"
+[connections.bad]
+kind = "nvidia-nim"
+base_url = "https://example.com"
+"#;
+    let cfg = toml::from_str::<PrricodeConfig>(text).expect("parses");
+    let err = resolve_connection("bad", &cfg).expect_err("unknown kind rejected");
+    assert!(err.contains("unknown kind 'nvidia-nim'"), "{err}");
+    for id in [
+        "echo",
+        "ollama",
+        "ollama-cloud",
+        "openrouter",
+        "kilo",
+        "openai",
+        "custom",
+    ] {
+        assert!(err.contains(id), "{err} must list {id}");
+    }
+}
+
+#[test]
+fn resolve_connection_honors_over_preset_base_url() {
+    let text = r#"
+[connections.ov]
+kind = "openrouter"
+base_url = "https://relay.example.com/v1"
+model = "or-mix"
+"#;
+    let cfg = toml::from_str::<PrricodeConfig>(text).expect("parses");
+    let resolved = resolve_connection("ov", &cfg).expect("resolves");
+    assert_eq!(resolved.kind, ProviderKind::OpenRouter);
+    assert_eq!(
+        resolved.settings.base_url.as_deref(),
+        Some("https://relay.example.com/v1"),
+        "connection url wins over the preset"
+    );
+    assert_eq!(resolved.model.as_deref(), Some("or-mix"));
+}
+
+#[test]
+fn resolve_connection_kind_without_url_falls_back_to_preset() {
+    let text = r#"
+[connections.k]
+kind = "kilo"
+"#;
+    let cfg = toml::from_str::<PrricodeConfig>(text).expect("parses");
+    let resolved = resolve_connection("k", &cfg).expect("resolves");
+    assert!(
+        resolved.settings.base_url.is_none(),
+        "the connection itself carries no url; the preset applies downstream"
+    );
+    // The preset seam is `resolve` — verify it supplies the preset URL.
+    let env = std::collections::HashMap::new();
+    let merged = resolve(
+        resolved.kind,
+        Some(&resolved.settings),
+        &HashMap::new(),
+        &env,
+    );
+    assert_eq!(
+        merged.base_url.as_str(),
+        "https://api.kilo.ai/api/gateway",
+        "preset applies when the connection sets no url"
+    );
+}
+
+#[test]
+fn connection_name_precedence_is_flag_env_config() {
+    assert_eq!(
+        connection_name(Some("a"), Some("b"), Some("c")).as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        connection_name(None, Some("b"), Some("c")).as_deref(),
+        Some("b")
+    );
+    assert_eq!(connection_name(None, None, Some("c")).as_deref(), Some("c"));
+    assert_eq!(connection_name(None, None, None), None);
+}
+
+#[test]
+fn connection_key_roundtrips_in_the_credential_store() {
+    let path = std::env::temp_dir().join(format!("prricode-conn-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut store = CredentialStore::default();
+    store
+        .providers
+        .insert("connection:fast".into(), "k1".into());
+    save_at(&store, &path).unwrap();
+    assert_eq!(
+        load_at(&path)
+            .providers
+            .get("connection:fast")
+            .map(String::as_str),
+        Some("k1")
+    );
+    assert!(remove_at(&path, "connection:fast").unwrap());
+    assert!(!load_at(&path).providers.contains_key("connection:fast"));
+    std::fs::remove_file(&path).ok();
 }

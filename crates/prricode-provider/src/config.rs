@@ -31,12 +31,50 @@ pub struct ProviderSettings {
     pub headers: HashMap<String, String>,
 }
 
+/// A named connection: one endpoint a session can be pointed at. Several
+/// connections may share a kind (two custom relays, an OpenAI key and a
+/// relay key), which the single-entry-per-kind `providers` table cannot
+/// express. Resolved through `resolve_connection`; unknown names and kinds
+/// fail with an honest message listing what exists.
+#[derive(Debug, Implementation, Default, Serialize, Deserialize)]
+pub struct ConnectionSettings {
+    /// Provider kind id: echo, ollama, ollama-cloud, openrouter, kilo,
+    /// openai, or custom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Name of an environment variable holding the API key (preferred).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Inline key. Discouraged: the credential store and env are the
+    /// sanctioned surfaces; kept so existing single-user files keep working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+}
+
+/// What `resolve_connection` returns: the kind to build, the merged
+/// settings (connection over preset), and the connection's model pick.
+#[derive(Debug, Implementation)]
+pub struct ResolvedConnection {
+    pub kind: ProviderKind,
+    pub settings: ProviderSettings,
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Implementation, Default, Serialize, Deserialize)]
 pub struct PrricodeConfig {
     #[serde(default)]
     pub defaults: Defaults,
     #[serde(default)]
     pub providers: HashMap<String, ProviderSettings>,
+    /// Named connections; empty unless the file defines them.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub connections: HashMap<String, ConnectionSettings>,
     #[serde(default)]
     pub voice: VoiceSettings,
     /// Default TUI theme slug (e.g. `dracula`); the TUI's `/theme` command
@@ -67,6 +105,10 @@ pub struct VoiceSettings {
 pub struct Defaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Named connection to start with; wins over `provider` when both are
+    /// set and the connection exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
@@ -85,6 +127,92 @@ pub fn load_config() -> PrricodeConfig {
         Ok(text) => toml::from_str(&text).unwrap_or_default(),
         Err(_) => PrricodeConfig::default(),
     }
+}
+
+/// Parse a provider kind id. Unknown ids are `None` so resolvers can report
+/// them honestly instead of guessing.
+pub fn parse_kind_id(text: &str) -> Option<ProviderKind> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "echo" => Some(ProviderKind::Echo),
+        "ollama" => Some(ProviderKind::Ollama),
+        "ollama-cloud" => Some(ProviderKind::OllamaCloud),
+        "openrouter" => Some(ProviderKind::OpenRouter),
+        "kilo" => Some(ProviderKind::Kilo),
+        "openai" => Some(ProviderKind::OpenAI),
+        "custom" => Some(ProviderKind::Custom),
+        _ => None,
+    }
+}
+
+/// The connection a launch should use: explicit flag beats environment
+/// (`PRRICODE_CONNECTION`) beats `defaults.connection`.
+pub fn connection_name(
+    flag: Option<&str>,
+    env: Option<&str>,
+    default: Option<&str>,
+) -> Option<String> {
+    let pick = flag
+        .or(env)
+        .or(default)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    pick.map(str::to_string)
+}
+
+/// Resolve a named connection to a buildable kind plus merged settings.
+/// The connection's `base_url` wins over the preset; an unset one falls
+/// back to the preset URL. Unknown names and kinds are honest errors.
+pub fn resolve_connection(
+    name: &str,
+    config: &PrricodeConfig,
+) -> Result<ResolvedConnection, String> {
+    let known: Vec<&str> = config.connections.keys().map(String::as_str).collect();
+    let conn = config.connections.get(name).ok_or_else(|| {
+        if known.is_empty() {
+            format!(
+                "unknown connection '{name}'; no connections are defined in the config file \
+                     (define [connections.{name}] with a kind)"
+            )
+        } else {
+            format!(
+                "unknown connection '{name}'; defined connections: {}",
+                known.join(", ")
+            )
+        }
+    })?;
+    let kind_id = conn.kind.as_deref().ok_or_else(|| {
+        format!(
+            "connection '{name}' has no kind; set kind to one of echo, ollama, \
+                               ollama-cloud, openrouter, kilo, openai, custom"
+        )
+    })?;
+    let kind = parse_kind_id(kind_id).ok_or_else(|| {
+        format!(
+            "unknown kind '{kind_id}' on connection '{name}'; accepted kind ids: echo, ollama, \
+             ollama-cloud, openrouter, kilo, openai, custom"
+        )
+    })?;
+    let settings = ProviderSettings {
+        base_url: conn.base_url.implementation(),
+        api_key: conn.api_key.implementation(),
+        api_key_env: conn.api_key_env.implementation(),
+        default_model: conn.model.implementation(),
+        headers: conn.headers.implementation(),
+    };
+    Ok(ResolvedConnection {
+        kind,
+        settings,
+        model: conn.model.implementation(),
+    })
+}
+
+/// Pick the startup connection name through the documented precedence.
+pub fn startup_connection(config: &PrricodeConfig, flag: Option<&str>) -> Option<String> {
+    connection_name(
+        flag,
+        std::env::var("PRRICODE_CONNECTION").ok().as_deref(),
+        config.defaults.connection.as_deref(),
+    )
 }
 
 fn preset_base_url(kind: ProviderKind) -> &'static str {
