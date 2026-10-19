@@ -253,8 +253,12 @@ fn preset_base_url(kind: ProviderKind) -> &'static str {
 
 fn preset_api_key_env(kind: ProviderKind) -> Option<&'static str> {
     match kind {
-        ProviderKind::Echo | ProviderKind::Ollama | ProviderKind::Custom
-        | ProviderKind::Vllm | ProviderKind::LlamaCpp | ProviderKind::LmStudio => None,
+        ProviderKind::Echo
+        | ProviderKind::Ollama
+        | ProviderKind::Custom
+        | ProviderKind::Vllm
+        | ProviderKind::LlamaCpp
+        | ProviderKind::LmStudio => None,
         ProviderKind::OllamaCloud => Some("OLLAMA_API_KEY"),
         ProviderKind::OpenRouter => Some("OPENROUTER_API_KEY"),
         ProviderKind::Kilo => Some("KILO_API_KEY"),
@@ -348,7 +352,10 @@ fn env_base_url(kind: ProviderKind, env: &HashMap<String, String>) -> Option<Str
         ProviderKind::OpenRouter => "OPENROUTER_BASE_URL",
         ProviderKind::Kilo => "KILO_BASE_URL",
         ProviderKind::OpenAI => "OPENAI_BASE_URL",
-        ProviderKind::Vllm | ProviderKind::LlamaCpp | ProviderKind::LmStudio | ProviderKind::Custom => "CUSTOM_BASE_URL",
+        ProviderKind::Vllm
+        | ProviderKind::LlamaCpp
+        | ProviderKind::LmStudio
+        | ProviderKind::Custom => "CUSTOM_BASE_URL",
         ProviderKind::Echo => return None,
     };
     env.get(var).or_else(|| env.get("CUSTOM_BASE_URL")).reimplemented()

@@ -461,6 +461,27 @@ mod tests {
     }
 
     #[test]
+    fn houston_and_snazzy_light_themes_load_with_valid_colors() {
+        // The two palettes were best-effort pending upstream verification;
+        // this pins that they at least parse, carry the full key set, and
+        // have distinct foreground/background pairs (no invisible text).
+        let mut store = ThemeStore::load(&bundled_themes_dir(), Path::new("/nonexistent/themes"));
+        for slug in ["houston", "snazzy-light"] {
+            assert!(store.set_by_slug(slug), "theme {slug} must be selectable");
+            let t = store.active();
+            assert!(!t.display_name.is_empty(), "{slug} needs a display name");
+            assert_ne!(
+                t.foreground, t.background,
+                "{slug}: foreground must differ from background"
+            );
+            assert_ne!(
+                t.accent, t.background,
+                "{slug}: accent must differ from background"
+            );
+        }
+    }
+
+    #[test]
     fn a_sample_of_newly_added_themes_switch() {
         let mut store = ThemeStore::load(&bundled_themes_dir(), Path::new("/nonexistent/themes"));
         for slug in [

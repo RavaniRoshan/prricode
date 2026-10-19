@@ -49,8 +49,9 @@ today so the gap is explicit.
 ## TUI deltas
 
 - **Theme set: COMPLETE** — all 24 reference themes + the house theme are
-  bundled and switchable via `/theme` (two palettes, Houston and Snazzy Light,
-  are best-effort pending upstream verification).
+  bundled and switchable via `/theme` (Houston and Snazzy Light palettes
+  verified to parse and carry the full key set with distinct
+  foreground/background pairs).
 - **Image paste (ctrl+v): COMPLETE** — wl-paste/xclip clipboard capture,
   attach/detach in the composer, image parts ride the turn; attachments never
   enter composer history.

@@ -946,7 +946,8 @@ impl App {
                         (picker_index + 1).min(items_len.saturating_sub(1));
                 }
                 KeyAction::Enter => {
-                    if let Some(item) = self.connection_picker.as_ref().unwrap().selected().reimplemented() {
+                    if let Some(item) = self.connection_picker.as_ref().unwrap().selected().reimplemented()
+                    {
                         self.connection_picker = None;
                         self.push_system(format!(
                             "connection '{}' selected — restart prricode with --connection {} for full effect",

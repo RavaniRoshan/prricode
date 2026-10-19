@@ -84,9 +84,68 @@ pub fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         render_approval(frame, app, area);
     } else if app.session_picker.is_some() {
         render_session_picker(frame, app, area);
+    } else if app.connection_picker.is_some() {
+        render_connection_picker(frame, app, area);
     } else {
         render_main(frame, app, area);
     }
+}
+
+/// The `/connections` picker: a centered modal over the conversation with
+/// one row per configured connection, navigated by arrows or j/k.
+fn render_connection_picker(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    render_main(frame, app, area);
+    let Some(picker) = &app.connection_picker else {
+        return;
+    };
+    let theme = palette(app);
+    let height = picker.items.len().clamp(3, 14) as u16 + 4;
+    let popup = centered_rect(70, height, area);
+    frame.render_widget(Clear, popup);
+    let mut text = vec![Line::from(vec![Span::styled(
+        "connections",
+        Style::default()
+            .fg(theme.system)
+            .add_modifier(Modifier::BOLD),
+    )])];
+    if picker.items.is_empty() {
+        text.push(Line::from(Span::styled(
+            "no connections configured",
+            Style::default().fg(theme.system),
+        )));
+    }
+    for (i, item) in picker.items.iter().enumerate() {
+        let selected = i == picker.index;
+        let prefix = if selected { "> " } else { "· " };
+        let mut style = Style::default().fg(theme.foreground);
+        if selected {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        text.push(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::styled(
+                format!("{} — {} ({})", item.name, item.kind, item.status),
+                style,
+            ),
+        ]));
+        if selected {
+            text.push(Line::from(Span::styled(
+                format!("    model: {}", item.model),
+                Style::default().fg(theme.system),
+            )));
+        }
+    }
+    text.push(Line::from(Span::styled(
+        "Enter select · Esc/q close · arrows or j/k navigate",
+        Style::default().fg(theme.system),
+    )));
+    let paragraph = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.rail_stage))
+            .title("connections"),
+    );
+    frame.render_widget(paragraph, popup);
 }
 
 /// The `/sessions` picker: a centered modal over the conversation with one
