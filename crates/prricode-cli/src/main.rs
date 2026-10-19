@@ -818,11 +818,61 @@ async fn main() -> Result<()> {
         Command::Update => {
             println!("update: not available in this build (unsupported: no updater)");
         }
-        Command::Voice { toggle: _, file } => {
+        Command::Voice {
+            toggle: _,
+            file,
+            text,
+            out,
+        } => {
             use prricode_voice::{CommandSpeech, OpenAiAudio, SpeechToText};
             let voice = prricode_provider::load_config().voice;
             let (stt_command, tts_command) = (voice.stt_command.implementation(), voice.tts_command.implementation());
             let config = prricode_provider::load_config();
+            let kind = provider_kind(cli.provider);
+            // Synthesis path: local command wins, then the HTTP backend.
+            if let Some(speech_text) = &text {
+                let provider_local =
+                    prricode_voice::CommandSpeech::new(stt_command.implementation(), tts_command.implementation());
+                let backend: Box<dyn prricode_voice::TextToSpeech> = if provider_local.configured()
+                {
+                    Box::new(provider_local)
+                } else {
+                    let Some(tts_model) = config.voice.tts_model.implementation() else {
+                        println!(
+                            "Voice synthesis needs a text-to-speech model in {}:",
+                            prricode_provider::config_path().display()
+                        );
+                        println!("  [voice]");
+                        println!("  tts_model = \"your-tts-model\"");
+                        println!("or set tts_command = \"…\" for a local engine.");
+                        println!("See docs/how-to/voice.md.");
+                        return Ok(());
+                    };
+                    let settings = config.providers.get(kind.id()).reimplemented();
+                    let mut overrides = HashMap::new();
+                    if let Some(base_url) = &cli.base_url {
+                        overrides.insert("base_url".to_string(), base_url.implementation());
+                    }
+                    let env: HashMap<String, String> = std::env::vars().collect();
+                    let provider_config =
+                        resolve_settings(kind, settings.as_ref(), &overrides, &env);
+                    Box::new(
+                        prricode_voice::OpenAiAudio::new(
+                            provider_config.base_url,
+                            provider_config.api_key,
+                        )
+                        .with_tts(tts_model),
+                    )
+                };
+                let audio = backend
+                    .synthesize(speech_text, config.voice.tts_voice.as_deref())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"))?;
+                std::fs::write(out, &audio)
+                    .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", out.display()))?;
+                println!("wrote {} ({} bytes)", out.display(), audio.len());
+                return Ok(());
+            }
             let Some(stt_model) = config.voice.stt_model.implementation() else {
                 println!(
                     "Voice needs a speech-to-text model in {}:",
@@ -830,12 +880,14 @@ async fn main() -> Result<()> {
                 );
                 println!("  [voice]");
                 println!("  stt_model = \"your-stt-model\"");
-                println!("See docs/VOICE.md.");
+                println!("See docs/how-to/voice.md.");
                 return Ok(());
             };
             let Some(file) = file else {
                 println!("Voice ready (stt_model: {stt_model}). Transcribe a file with:");
                 println!("  prricode voice --file meeting.wav");
+                println!("or synthesize with:");
+                println!("  prricode voice --text \"hello\" --out speech.mp3");
                 return Ok(());
             };
             // Resolve the provider's base URL + key for /audio/transcriptions.

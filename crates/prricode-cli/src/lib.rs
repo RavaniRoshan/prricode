@@ -120,6 +120,13 @@ pub enum Command {
         /// Transcribe this audio file (requires voice.stt_model in config)
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Synthesize this text to speech instead of transcribing
+        /// (requires voice.tts_model or voice.tts_command in config)
+        #[arg(long)]
+        text: Option<String>,
+        /// Output path for synthesized speech (default speech.mp3)
+        #[arg(long, default_value = "speech.mp3")]
+        out: PathBuf,
     },
     /// Manage plugins
     Plugins {

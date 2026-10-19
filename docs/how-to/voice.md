@@ -36,7 +36,7 @@ Audio is sent with a filename/extension derived from the media type
 
 ```bash
 prricode voice --file meeting.wav        # transcribe to text
-prricode voice --file note.wav --text "…" # (synthesize) writes speech.mp3
+prricode voice --text "…" --out speech.mp3  # synthesize to speech.mp3
 ```
 
 Without `stt_model`/`tts_model` configured, the commands say so plainly and
