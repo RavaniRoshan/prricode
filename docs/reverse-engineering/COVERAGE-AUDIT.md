@@ -161,6 +161,34 @@ otherwise                      -> await response.text()
 
 A frame whose `event` is in that list is `JSON.parse`d and yielded; a parse failure throws with the offending data and raw chunk. Iterating a consumed stream twice throws "Cannot iterate over a consumed stream, use `.tee()` to split the stream." The **application** bundle currently references only `agent.message` and `user.interrupt` from the extended set, so the parser is forward-compatible rather than evidence that the app implements a multi-agent event protocol. This implementation must accept the core events and **tolerate** the extended ones rather than fail on them.
 
+### 2.2a The provider adapters' wire shapes, re-derived from the pinned binary
+
+The earlier statement that the Bedrock, Vertex, and Foundry body shapes were `inference` is **closed**. The target's own bundled adapters are in `chunk-1njnz05e.js` (Bedrock and Mantle), `chunk-jdnh8sjs.js` (Vertex), and `chunk-m5c0c57d.js` (Foundry), and they were read directly.
+
+**Bedrock** (`chunk-1njnz05e.js`):
+- The body version literal is `anthropic_version: "bedrock-2023-05-31"`, and the adapter **sets it** when the body does not already carry it.
+- The rewritten paths are exactly `/v1/complete`, `/v1/messages`, and `/v1/messages?beta=true`.
+- The `anthropic-beta` **header** is moved into the body as `anthropic_beta`, split on `,` and **trimmed** — and only when the body does not already carry `anthropic_beta`.
+- The rewrite **deletes `model` and `stream` from the body** and rewrites the path to `/model/<model>/invoke` or `/model/<model>/invoke-with-response-stream`, chosen by the body's `stream` flag. It **deletes the `beta` search parameter**.
+- A request whose body is not a JSON object throws `Expected request body to be a JSON object for post <path>`.
+- Auth is SigV4 with service `bedrock`, region `awsRegion`, and the `host` header replaced by the URL's host, the `connection` header deleted, and multi-valued query parameters preserved. A missing region throws `Expected 'awsRegion' option to be passed to the client or the 'AWS_REGION' environment variable`.
+
+**Mantle** (same file): the SigV4 **service name is `bedrock-mantle`**, and the base URL is `https://<resource>.services.ai.azure.com/anthropic/`-style only for Foundry; the Mantle base is `https://bedrock-mantle.<region>.api.aws/anthropic` with the Anthropic-native body.
+
+**Vertex** (`chunk-jdnh8sjs.js`):
+- The body version literal is `anthropic_version: "vertex-2023-10-16"`, set when the body does not already carry it.
+- The rewrite **deletes `model` from the body but keeps `stream`**, and selects the endpoint suffix from `body.stream`: `streamRawPredict` when true, `rawPredict` otherwise. The path becomes `<prefix>/projects/<projectId>/locations/<region>/publishers/anthropic/models/<model>:<suffix>`, and the `beta` search parameter is deleted.
+- `count_tokens` becomes `<prefix>/projects/<projectId>/locations/<region>/publishers/anthropic/models/count-tokens:rawPredict`.
+- A missing project throws `No projectId was given and it could not be resolved from credentials. The client should be instantiated with the 'projectId' option or the 'ANTHROPIC_VERTEX_PROJECT_ID' environment variable should be set.`
+
+**Foundry** (`chunk-m5c0c57d.js`):
+- `baseURL` and `resource` are **mutually exclusive**: supplying both throws `baseURL and resource are mutually exclusive`. Supplying neither throws `Must provide one of the 'baseURL' or 'resource' arguments, or the ANTHROPIC_FOUNDRY_RESOURCE environment variable`. With only a resource, the base URL is built as `https://<resource>.services.ai.azure.com/anthropic/` — with a trailing slash.
+- `apiKey` and `azureADTokenProvider` are **mutually exclusive**: supplying both throws `The 'apiKey' and 'azureADTokenProvider' arguments are mutually exclusive; only one can be passed at a time.` Supplying neither throws `Missing credentials. Please pass one of 'apiKey' and 'azureTokenProvider', or set the ANTHROPIC_FOUNDRY_API_KEY environment variable.` (the target's own message names `azureTokenProvider` while the parameter is `azureADTokenProvider`).
+- The API key may be supplied as an **async function**; `authHeaders` awaits it.
+- The Foundry adapter exposes **no models API** (`models` is `undefined`).
+
+**This corrects two research findings.** The external research reported that the Foundry base-URL-versus-resource precedence was unstated and that a URL in `ANTHROPIC_FOUNDRY_RESOURCE` was ignored; the pinned binary instead **throws** on the conflict. The external research also reported the target's beta path as a conditional on `betaFlags`; the pinned binary's own path set contains **both** `/v1/messages` and `/v1/messages?beta=true` as distinct literals, and the Bedrock and Vertex adapters both **strip** the `beta` search parameter on the way out. This implementation must implement the target's behavior — mutual exclusion with a thrown error, and the beta marker as a distinct path variant that the non-first-party adapters remove.
+
 ### 2.3 The local gateway
 
 **Status: observed (static).**
