@@ -9,8 +9,14 @@
  *   - `credentialStatus` inspects **presence** only. It never returns a secret,
  *     and for a keychain reference it never touches the keychain at all, so a
  *     listing can never trigger an OS prompt.
- *   - `resolveCredential` is the **single** resolution point. Nothing else in the
- *     implementation calls it, and in particular no listing or catalog code path does.
+ *   - This module resolves **nothing**. This implementation's single resolution point is
+ *     `resolveConnectionCredential` in `src/provider/registry.ts`, and it is
+ *     **module-private** there: the exported surface of the provider module
+ *     offers no unguarded resolution that a future caller — CC-006's driver
+ *     layer included — could reach by accident and bypass the
+ *     untrusted-endpoint guard with. The one real call site of a resolution is
+ *     that guarded entry point, and no listing or catalog code path resolves
+ *     anything.
  *
  * ## What the target does, and what this implementation adds
  *
@@ -38,7 +44,7 @@
  * Constraints ("Credentials are references only").
  */
 
-import { access, readFile, stat } from 'node:fs/promises';
+import { access, stat } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -60,8 +66,8 @@ import { readEnvValue } from './routes.js';
  *   - `file` — the path of a file holding the secret. `format` records how the
  *     driver layer is expected to use it (`raw` for a bare secret, `bearer` for
  *     one that travels as an `Authorization: Bearer` token). It is metadata for
- *     the driver, not a transformation: `resolveCredential` returns the file's
- *     content either way;
+ *     the driver, not a transformation: the guarded resolver in
+ *     `src/provider/registry.ts` returns the file's content either way;
  *   - `keychain` — an OS credential-store entry, named by service and account.
  */
 export type CredentialRef =
@@ -279,53 +285,4 @@ export function setKeychainBackend(backend: KeychainBackend | null): void {
  */
 export function currentKeychainBackend(): KeychainBackend {
   return keychainBackend;
-}
-
-/**
- * Resolve a credential reference to a value.
- *
- * This is the **single** resolution point in this implementation. Listing code and catalog
- * code must call `credentialStatus` instead, and a caller that reaches for this
- * function is about to hand a secret to a provider client — which is exactly the
- * point at which the untrusted-endpoint guard in `src/provider/registry.ts` has
- * to have run. `resolveConnectionCredential` in that module is the guarded
- * entry point that runs the check and then resolves.
- *
- * Every kind is **trimmed** the same way, so a value never carries surrounding
- * whitespace to the provider.
- */
-export async function resolveCredential(
-  ref: CredentialRef,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<ResolvedCredential> {
-  switch (ref.kind) {
-    case 'env': {
-      // The shared environment reader trims, so a trailing newline in the
-      // variable is not part of the secret.
-      const value = readEnvValue(env, ref.name);
-      return value === undefined ? { present: false } : { present: true, value };
-    }
-    case 'file': {
-      let content: string;
-      try {
-        content = await readFile(ref.path, 'utf8');
-      } catch {
-        return { present: false };
-      }
-      const value = content.trim();
-      return value === '' ? { present: false } : { present: true, value };
-    }
-    case 'keychain': {
-      if (keychainStatus(ref) !== 'configured') return { present: false };
-      const result = await currentKeychainBackend().lookup(ref.service, ref.account);
-      if (!result.found || typeof result.value !== 'string' || result.value === '') {
-        return { present: false };
-      }
-      return { present: true, value: result.value };
-    }
-    default: {
-      const unknown: never = ref;
-      throw new Error(`unknown credential reference kind: ${JSON.stringify(unknown)}`);
-    }
-  }
 }

@@ -32,6 +32,12 @@
  * reference. `checkCredentialDelivery` and `assertCredentialDelivery` remain
  * exported for callers that want the decision itself.
  *
+ * The resolution itself is **module-private**: this module exports no unguarded
+ * resolver, so the exported surface of the provider module offers no way to
+ * obtain a secret without the guard having run. `src/provider/credentials.ts`
+ * therefore exports no resolver either — it holds the credential *references*,
+ * their presence status, and the keychain backend.
+ *
  * The credential *reference* kinds (an environment variable name, a file path,
  * an OS credential-store key) are a **implementation design** as well — see
  * `src/provider/credentials.ts` for the attribution.
@@ -40,20 +46,24 @@
  * live in `src/provider/routes.ts`.
  */
 
+import { readFile } from 'node:fs/promises';
+
 import {
   hostOfBaseUrl,
   isProviderRoute,
+  readEnvValue,
   resolveBaseUrl,
   type ProviderRoute,
 } from './routes.js';
 import {
+  credentialStatus,
+  currentKeychainBackend,
   isCredentialRef,
-  resolveCredential,
   type CredentialRef,
   type ResolvedCredential,
 } from './credentials.js';
 
-export type { CredentialRef } from './credentials.js';
+export type { CredentialRef, ResolvedCredential } from './credentials.js';
 export type { ProviderRoute } from './routes.js';
 
 /**
@@ -254,6 +264,23 @@ export interface EndpointTrust {
   baseUrl: string;
   host: string;
   isVendorHost: boolean;
+  /**
+   * Every base-URL **environment variable** of the route that was supplied, in
+   * the order the route's policy lists them.
+   *
+   * **Additive** — the plan fixes the endpoint as `{ baseUrl, isVendorHost }`,
+   * and that shape still works.
+   */
+  suppliedBaseUrlVariables?: string[];
+  /**
+   * The supplied base-URL variables that are in **conflict** under the target's
+   * own rule (the target's Foundry adapter refuses a base URL and a resource
+   * together, audit §2.2a).
+   *
+   * The conflict is carried through the registry so that the driver layer
+   * (CC-006) can raise the target's error from either entry point.
+   */
+  conflictingVariables?: string[];
 }
 
 /**
@@ -263,6 +290,9 @@ export interface EndpointTrust {
  * environment variables decide; otherwise the route's default host applies. A
  * `baseUrl` that is empty or only whitespace counts as **absent**, so such a
  * connection falls back to the route's policy.
+ *
+ * The `host` carries the **port** when the base URL has a non-default one, so a
+ * refusal names the exact endpoint it refused.
  */
 export function resolveConnectionEndpoint(
   conn: Connection,
@@ -274,6 +304,12 @@ export function resolveConnectionEndpoint(
     baseUrl: resolved.baseUrl,
     host: hostOfBaseUrl(resolved.baseUrl),
     isVendorHost: resolved.isVendorHost,
+    ...(resolved.suppliedBaseUrlVariables === undefined
+      ? {}
+      : { suppliedBaseUrlVariables: resolved.suppliedBaseUrlVariables }),
+    ...(resolved.conflictingVariables === undefined
+      ? {}
+      : { conflictingVariables: resolved.conflictingVariables }),
   };
 }
 
@@ -338,12 +374,67 @@ export function assertCredentialDelivery(
 }
 
 /**
+ * Resolve a credential reference to a value.
+ *
+ * **Module-private on purpose.** This is this implementation's single resolution point:
+ * the only path to a secret. It is deliberately **not** exported, so the
+ * exported surface of the provider module offers no unguarded resolution that a
+ * future caller — CC-006's driver layer, for instance — could reach by
+ * accident and use to bypass the untrusted-endpoint guard. The guarded entry
+ * point is `resolveConnectionCredential`, below.
+ *
+ * Every kind is **trimmed** the same way, so a value never carries surrounding
+ * whitespace to the provider.
+ */
+async function resolveCredential(
+  ref: CredentialRef,
+  env: NodeJS.ProcessEnv,
+): Promise<ResolvedCredential> {
+  switch (ref.kind) {
+    case 'env': {
+      // The shared environment reader trims, so a trailing newline in the
+      // variable is not part of the secret.
+      const value = readEnvValue(env, ref.name);
+      return value === undefined ? { present: false } : { present: true, value };
+    }
+    case 'file': {
+      let content: string;
+      try {
+        content = await readFile(ref.path, 'utf8');
+      } catch {
+        return { present: false };
+      }
+      const value = content.trim();
+      return value === '' ? { present: false } : { present: true, value };
+    }
+    case 'keychain': {
+      // The status check judges the *reference*'s completeness and never
+      // touches the keychain, so an incomplete reference short-circuits here.
+      if ((await credentialStatus(ref, env)) !== 'configured') return { present: false };
+      const result = await currentKeychainBackend().lookup(ref.service, ref.account);
+      if (!result.found || typeof result.value !== 'string' || result.value === '') {
+        return { present: false };
+      }
+      return { present: true, value: result.value };
+    }
+    default: {
+      const unknown: never = ref;
+      throw new Error(`unknown credential reference kind: ${JSON.stringify(unknown)}`);
+    }
+  }
+}
+
+/**
  * The **guarded** way to obtain a credential for a request.
  *
  * This is the documented entry point for the driver layer (CC-006's
  * `ProviderDriver.buildHeaders(req, cred)`): it runs the untrusted-endpoint
  * check **first** and only then resolves the reference, so a secret can never be
  * handed to a user-supplied host by a caller that forgot to check.
+ *
+ * It is also the **only** exported path to a secret: the resolver itself is
+ * module-private (see above), so no caller can obtain a credential without the
+ * check having run.
  *
  * When the check refuses, the error names the host that was refused.
  */

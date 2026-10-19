@@ -11,6 +11,11 @@
  *   - the dispatch order (`gateway` first, then `bedrock`, `foundry`, `anthropicAws`,
  *     `anthropicGoogleCloud`, `mantle`, `vertex`, else `firstParty`);
  *   - the per-provider base-URL environment variables and the `ownHost` shapes;
+ *   - the Foundry base-URL/resource conflict: the resolved value reports the
+ *     variables that are in conflict, because the target's own adapter throws on
+ *     them (audit §2.2a) and this implementation must not swallow the conflict;
+ *   - the port is part of the vendor-host comparison, so the vendor's host name
+ *     on a non-standard port is a user-supplied endpoint;
  *   - the registry's single-active invariant, its duplicate-id rejection, and the
  *     fact that two connections may share a route;
  *   - the untrusted-endpoint guard: a user-supplied base URL does not receive the
@@ -28,6 +33,8 @@ import { readFile } from 'node:fs/promises';
 import {
   DEFAULT_BASE_URLS,
   ENDPOINT_POLICIES,
+  FOUNDRY_MISSING_BASE_URL_ERROR,
+  FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR,
   ROUTE_FLAG_ORDER,
   ROUTE_NAMES,
   ROUTE_ORDER,
@@ -505,8 +512,13 @@ describe('the endpoint policy', () => {
   });
 
   it('prefers the Foundry base URL over the Foundry resource name', () => {
-    // Implementation choice: the target does not state the precedence, so this implementation uses
-    // the declared variable order (the base URL wins).
+    // **Implementation choice.** The target's own Foundry adapter (`chunk-m5c0c57d.js`,
+    // audit §2.2a) treats the two variables as *mutually exclusive* and throws
+    // `baseURL and resource are mutually exclusive` — it states the rule and
+    // picks **no** winner. Which variable this implementation's route-policy layer
+    // prefers (the declared variable order: the base URL wins) is therefore a
+    // implementation choice, and the conflict is reported rather than swallowed (see the
+    // next test).
     const env = {
       ANTHROPIC_FOUNDRY_BASE_URL: 'https://from-base-url.services.ai.azure.com',
       ANTHROPIC_FOUNDRY_RESOURCE: 'from-resource',
@@ -514,15 +526,143 @@ describe('the endpoint policy', () => {
     expect(resolveBaseUrl('foundry', env).baseUrl).toBe('https://from-base-url.services.ai.azure.com');
   });
 
-  it('rejects a Foundry resource that is not a bare resource name', () => {
-    // The target rejects a URL in that variable, and this implementation must not turn a
-    // malformed value into a vendor-trusted base URL either.
+  it('reports the Foundry base-URL conflict so the driver layer can raise the target\'s error', () => {
+    // The target's adapter throws `baseURL and resource are mutually exclusive`
+    // when both are supplied (audit §2.2a). This implementation's route-policy layer
+    // resolves a base URL anyway, so it must not erase the evidence: the
+    // resolved value carries the variables that are in conflict, and they are
+    // **exactly** the ones that were supplied.
+    const resolved = resolveBaseUrl('foundry', {
+      ANTHROPIC_FOUNDRY_BASE_URL: 'https://from-base-url.services.ai.azure.com',
+      ANTHROPIC_FOUNDRY_RESOURCE: 'from-resource',
+    });
+    expect(resolved.conflictingVariables).toEqual([
+      'ANTHROPIC_FOUNDRY_BASE_URL',
+      'ANTHROPIC_FOUNDRY_RESOURCE',
+    ]);
+    expect(resolved.suppliedBaseUrlVariables).toEqual([
+      'ANTHROPIC_FOUNDRY_BASE_URL',
+      'ANTHROPIC_FOUNDRY_RESOURCE',
+    ]);
+  });
+
+  it('carries the target\'s exact Foundry error strings for the driver layer', () => {
+    // The target's bundled adapter throws these verbatim (audit §2.2a). The
+    // driver layer (CC-006) raises them, so the strings are pinned here.
+    expect(FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR).toBe('baseURL and resource are mutually exclusive');
+    expect(FOUNDRY_MISSING_BASE_URL_ERROR).toBe(
+      "Must provide one of the 'baseURL' or 'resource' arguments, or the ANTHROPIC_FOUNDRY_RESOURCE environment variable",
+    );
+  });
+
+  it('reports the losing Foundry variable too, so the conflict survives the winner', () => {
+    // The base URL wins in this implementation, so the *resource* variable is exactly the
+    // evidence that must survive the resolution.
+    const resolved = resolveBaseUrl('foundry', {
+      ANTHROPIC_FOUNDRY_BASE_URL: 'https://from-base-url.services.ai.azure.com',
+      ANTHROPIC_FOUNDRY_RESOURCE: 'from-resource',
+    });
+    expect(resolved.conflictingVariables).toContain('ANTHROPIC_FOUNDRY_RESOURCE');
+  });
+
+  it('reports no conflict when only one Foundry base-URL variable is supplied', () => {
+    expect(
+      resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_BASE_URL: 'https://x.services.ai.azure.com' })
+        .conflictingVariables,
+    ).toBeUndefined();
+    expect(resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'from-resource' }).conflictingVariables)
+      .toBeUndefined();
+    expect(resolveBaseUrl('foundry', {}).conflictingVariables).toBeUndefined();
+  });
+
+  it('reports the conflict when an explicit base URL meets the Foundry resource variable', () => {
+    // The target's adapter sees a `baseURL` and a `resource` whichever way the
+    // base URL was supplied, so the explicit one conflicts too. An explicit
+    // base URL is not an environment variable, so it is not listed.
+    const resolved = resolveBaseUrl(
+      'foundry',
+      { ANTHROPIC_FOUNDRY_RESOURCE: 'from-resource' },
+      'https://explicit.services.ai.azure.com',
+    );
+    expect(resolved.conflictingVariables).toEqual(['ANTHROPIC_FOUNDRY_RESOURCE']);
+  });
+
+  it('carries the Foundry conflict through the registry\'s endpoint resolution', () => {
+    // The driver layer may resolve an endpoint through the registry rather
+    // than through `resolveBaseUrl`, so the conflict must survive that path
+    // too — otherwise the target's error could never be raised.
+    const conn = connection({ id: 'foundry', name: 'Foundry', route: 'foundry' });
+    const env = {
+      ANTHROPIC_FOUNDRY_BASE_URL: 'https://from-base-url.services.ai.azure.com',
+      ANTHROPIC_FOUNDRY_RESOURCE: 'from-resource',
+    };
+    const endpoint = resolveConnectionEndpoint(conn, env);
+    expect(endpoint.baseUrl).toBe('https://from-base-url.services.ai.azure.com');
+    expect(endpoint.conflictingVariables).toEqual([
+      'ANTHROPIC_FOUNDRY_BASE_URL',
+      'ANTHROPIC_FOUNDRY_RESOURCE',
+    ]);
+  });
+
+  it('reports no conflict for a route whose variables the target does not make exclusive', () => {
+    // Bedrock declares four base-URL variables and the audit records no
+    // mutual exclusion for them: the first one that is set simply wins.
+    const resolved = resolveBaseUrl('bedrock', {
+      ANTHROPIC_BEDROCK_BASE_URL: 'https://one.example.com',
+      AWS_ENDPOINT_URL_BEDROCK_RUNTIME: 'https://two.example.com',
+    });
+    expect(resolved.conflictingVariables).toBeUndefined();
+    expect(resolved.suppliedBaseUrlVariables).toEqual([
+      'ANTHROPIC_BEDROCK_BASE_URL',
+      'AWS_ENDPOINT_URL_BEDROCK_RUNTIME',
+    ]);
+  });
+
+  it('accepts a Foundry resource name that contains an underscore or a dot', () => {
+    // The target builds `https://<resource>.services.ai.azure.com` from
+    // whatever string it is given (audit §2.2a), so a working Foundry
+    // configuration must not be rejected by this implementation.
+    const underscored = resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'my_deployment' });
+    expect(underscored.baseUrl).toBe('https://my_deployment.services.ai.azure.com');
+    expect(underscored.isVendorHost).toBe(true);
+
+    const dotted = resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'my.deployment' });
+    expect(dotted.baseUrl).toBe('https://my.deployment.services.ai.azure.com');
+    expect(dotted.isVendorHost).toBe(true);
+  });
+
+  it('rejects a Foundry resource that is URL-shaped or an absolute path', () => {
+    // A URL or a path in that variable would put a foreign endpoint into the
+    // route's base URL, so this implementation refuses it loudly and names the variable.
     expect(() => resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'https://evil.example.com' })).toThrow(
       /ANTHROPIC_FOUNDRY_RESOURCE/,
     );
+    expect(() => resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: '/etc/passwd' })).toThrow(
+      /ANTHROPIC_FOUNDRY_RESOURCE/,
+    );
+    // **Implementation choice** (the research report's "bare resource name", not the
+    // REA record): a value with characters a host label cannot carry is
+    // refused too, rather than turned into a malformed vendor host.
     expect(() => resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'not a resource name' })).toThrow(
       /ANTHROPIC_FOUNDRY_RESOURCE/,
     );
+  });
+
+  it('does not treat a non-standard port on the vendor host as the vendor host', () => {
+    // `URL.hostname` drops the port, so `https://api.anthropic.com:8443` would
+    // compare equal to the canonical host and a credential would be delivered
+    // to a non-standard port. The port is part of the comparison.
+    expect(resolveBaseUrl('firstParty', {}, 'https://api.anthropic.com:8443').isVendorHost).toBe(false);
+    expect(resolveBaseUrl('firstParty', {}, 'https://api.anthropic.com').isVendorHost).toBe(true);
+    expect(
+      resolveBaseUrl('bedrock', {}, 'https://bedrock-runtime.us-east-1.amazonaws.com:8443').isVendorHost,
+    ).toBe(false);
+  });
+
+  it('treats the default port of the scheme as no port at all', () => {
+    // `URL` normalises the default port away, so the canonical host still
+    // matches when the port is written out.
+    expect(resolveBaseUrl('firstParty', {}, 'https://api.anthropic.com:443').isVendorHost).toBe(true);
   });
 
   it('reports the vendor default host for a route that declares no base-URL variable', () => {
@@ -615,6 +755,20 @@ describe('the untrusted-endpoint guard', () => {
       baseUrl: 'https://api.anthropic.com',
     });
     expect(checkCredentialDelivery(conn, {}).allowed).toBe(true);
+  });
+
+  it('refuses to deliver a credential to the vendor host on a non-standard port', () => {
+    // The port is part of the vendor-host comparison, so the same host name on
+    // another port is a user-supplied endpoint and the refusal names it.
+    const conn = connection({
+      id: 'first-party',
+      name: 'First party',
+      baseUrl: 'https://api.anthropic.com:8443',
+    });
+    const decision = checkCredentialDelivery(conn, {});
+    expect(decision.allowed).toBe(false);
+    expect(decision.host).toBe('api.anthropic.com:8443');
+    expect(decision.reason).toContain('api.anthropic.com:8443');
   });
 
   it('refuses to deliver a credential in cleartext to the canonical host', () => {

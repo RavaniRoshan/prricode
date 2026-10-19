@@ -14,7 +14,11 @@
  *     `vertex`, and `firstParty` otherwise;
  *   - the per-provider base-URL environment variables;
  *   - the `ownHost` host shapes, which are what distinguishes a *vendor* endpoint
- *     from a **user-supplied** one.
+ *     from a **user-supplied** one;
+ *   - the target's own Foundry rule that the base URL and the resource variable
+ *     are **mutually exclusive** (audit §2.2a, the target's bundled adapter
+ *     `chunk-m5c0c57d.js`) — this implementation *reports* that conflict rather than
+ *     silently resolving it.
  *
  * What is a **implementation choice** (the target does not pin it, so this implementation does not
  * claim compatibility):
@@ -30,10 +34,21 @@
  *     resource-derived hosts are **templates**: the target computes them at
  *     client-construction time from the deployment's region (audit §2.1) and the
  *     implementation's driver layer (CC-006) resolves the placeholder.
- *   - The precedence between `ANTHROPIC_FOUNDRY_BASE_URL` and
- *     `ANTHROPIC_FOUNDRY_RESOURCE`. The target does not state it, so this implementation
- *     uses the declared variable order (the base URL wins) and does not claim
- *     compatibility.
+ *   - The **environment-level winner** between `ANTHROPIC_FOUNDRY_BASE_URL` and
+ *     `ANTHROPIC_FOUNDRY_RESOURCE` — that is, which of the two this implementation's
+ *     route-policy layer reads when both are set. The **target's** rule is
+ *     stated by the target itself: its own bundled Foundry adapter
+ *     (`chunk-m5c0c57d.js`, audit §2.2a) treats the two as **mutually
+ *     exclusive**, throws `baseURL and resource are mutually exclusive` when
+ *     both are supplied, and throws
+ *     `Must provide one of the 'baseURL' or 'resource' arguments, or the
+ *     ANTHROPIC_FOUNDRY_RESOURCE environment variable` when neither is. The
+ *     target therefore states the rule and picks **no** winner. This implementation picks
+ *     one (the declared variable order: the base URL wins) so that a driver can
+ *     still be built, and it **reports** the conflict in the resolved value
+ *     (`conflictingVariables`) so the driver layer (CC-006) can raise the
+ *     target's own error. The winner itself is a implementation choice, not target
+ *     behavior.
  *   - The **transport rule**: only an `https:` base URL may be vendor-trusted.
  *     The audit records host *shapes* only, so the requirement that a
  *     cleartext `http://` endpoint is never the vendor's own host is the
@@ -329,9 +344,51 @@ export const ENDPOINT_POLICIES: readonly EndpointPolicy[] = [
   {
     route: 'foundry',
     baseUrlVariables: ['ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE'],
-    ownHost: /^[a-z0-9-]+\.services\.ai\.azure\.com$/,
+    // The `<name>` label is matched with the same character set this implementation
+    // accepts for a resource name, because the target builds the host from
+    // whatever string the variable holds (`https://<resource>.services.ai.azure.com`,
+    // audit §2.2a). A resource name with `_` or `.` is a working Foundry
+    // deployment, not a foreign host.
+    ownHost: /^[a-z0-9._-]+\.services\.ai\.azure\.com$/,
   },
 ];
+
+/**
+ * The target's Foundry adapter's exact error strings.
+ *
+ * **Observed** (audit §2.2a, the target's bundled `chunk-m5c0c57d.js`): the
+ * adapter treats `baseURL` and `resource` as mutually exclusive. This implementation does
+ * not throw them here — `resolveBaseUrl` is the route-policy layer, and it
+ * *reports* the conflict instead — so the strings live here for the driver
+ * layer (CC-006) to raise verbatim.
+ */
+export const FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR = 'baseURL and resource are mutually exclusive';
+
+/**
+ * The target's error for a Foundry client that is given neither a base URL nor
+ * a resource.
+ *
+ * **Observed** (audit §2.2a). This implementation's Foundry route has a `{resource}`
+ * template default, so this error belongs to the driver layer (CC-006), which
+ * knows whether a resource was actually resolved.
+ */
+export const FOUNDRY_MISSING_BASE_URL_ERROR =
+  "Must provide one of the 'baseURL' or 'resource' arguments, or the ANTHROPIC_FOUNDRY_RESOURCE environment variable";
+
+/**
+ * The base-URL variables the target treats as **mutually exclusive**, per route.
+ *
+ * **Observed.** The target's own bundled Foundry adapter throws
+ * `baseURL and resource are mutually exclusive` when it is given both a base
+ * URL and a resource (audit §2.2a), so the two Foundry variables are the pair
+ * the target refuses. No other route declares an exclusive pair: Bedrock
+ * declares four base-URL variables and the audit records no exclusion rule for
+ * them, so the first one that is set simply wins.
+ */
+const MUTUALLY_EXCLUSIVE_BASE_URL_VARIABLES: ReadonlyMap<
+  ProviderRoute,
+  Readonly<{ baseUrl: string; resource: string }>
+> = new Map([['foundry', { baseUrl: 'ANTHROPIC_FOUNDRY_BASE_URL', resource: 'ANTHROPIC_FOUNDRY_RESOURCE' }]]);
 
 /**
  * The base URL of a route when nothing configures one.
@@ -368,17 +425,27 @@ export function defaultBaseUrlFor(route: ProviderRoute): string | undefined {
 }
 
 /**
- * The host of a base URL, or the empty string when the value cannot be parsed.
+ * The host of a base URL — **with the port** when the URL carries a non-default
+ * one — or the empty string when the value cannot be parsed.
  *
  * A value without a scheme is normalized to `https://` first, so a bare host such
  * as `aiplatform.googleapis.com` is still recognised. An unparseable value
  * yields the empty string, which never matches a vendor pattern — this implementation
  * fails closed.
+ *
+ * **The port is part of the host.** `URL.hostname` drops it, so
+ * `https://api.anthropic.com:8443` would compare equal to the canonical
+ * `https://api.anthropic.com` and a credential would be delivered to a
+ * **non-standard port** of the vendor's own name. `URL` normalises the default
+ * port of the scheme away (`https://x:443` reports no port at all), so the
+ * canonical host still compares equal to itself.
  */
 export function hostOfBaseUrl(baseUrl: string): string {
   const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(baseUrl) ? baseUrl : `https://${baseUrl}`;
   try {
-    return new URL(candidate).hostname.toLowerCase();
+    const url = new URL(candidate);
+    const host = url.hostname.toLowerCase();
+    return url.port === '' ? host : `${host}:${url.port}`;
   } catch {
     return '';
   }
@@ -409,17 +476,40 @@ export function isSecureBaseUrl(baseUrl: string): boolean {
 /**
  * The base URL of the Foundry route derived from `ANTHROPIC_FOUNDRY_RESOURCE`.
  *
- * The target rejects a URL in that variable (the value must be a bare resource
- * name), so this implementation rejects it too — with a message that names the variable.
- * Silently falling through would leave the route's *default* base URL in place,
- * and that default is a `{resource}` template, so a malformed value would
- * otherwise be reported as a vendor host it does not match.
+ * The target builds `https://<resource>.services.ai.azure.com` from whatever
+ * string the variable holds (audit §2.2a), so a **working** resource name must
+ * not be rejected: the earlier `^[a-z0-9-]+$` posture refused names the target
+ * accepts, such as `my_deployment` or `my.deployment`.
+ *
+ * What this implementation refuses, and why:
+ *
+ *   - a value that looks like a **URL** (it contains `://`) or an **absolute
+ *     path** (it starts with `/`): such a value would put a foreign endpoint
+ *     into the route's base URL. The external research report records that the
+ *     documented variable takes a bare resource name and that a URL there is
+ *     rejected with a specific message — that is **product context**, not the
+ *     REA record, so this implementation cites it as such;
+ *   - a value with characters a **host label cannot carry** (whitespace and the
+ *     like). This character posture is a **implementation choice** — the research
+ *     report's "bare resource name" — and **not** target behavior: the target
+ *     simply interpolates the string.
+ *
+ * Refusing loudly is deliberate: silently falling through would leave the
+ * route's *default* base URL in place, and that default is a `{resource}`
+ * template, so a malformed value would otherwise be reported as a vendor host
+ * it does not match.
  */
 function foundryBaseUrlFromResource(resource: string): string {
-  if (resource.includes('://') || resource.startsWith('/') || !/^[a-z0-9-]+$/i.test(resource)) {
+  if (resource.includes('://') || resource.startsWith('/')) {
     throw new Error(
       'ANTHROPIC_FOUNDRY_RESOURCE must be a bare resource name (for example "my-deployment"), ' +
         `not a URL or a path: "${resource}"`,
+    );
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(resource)) {
+    throw new Error(
+      'ANTHROPIC_FOUNDRY_RESOURCE must be a bare resource name (for example "my-deployment"), ' +
+        `not a value with characters a host label cannot carry: "${resource}"`,
     );
   }
   return `https://${resource}.services.ai.azure.com`;
@@ -435,6 +525,9 @@ function foundryBaseUrlFromResource(resource: string): string {
  * A base URL that is not `https:` is never vendor-trusted (implementation security
  * posture), so a cleartext endpoint to the canonical host is treated as a
  * user-supplied one.
+ *
+ * The comparison uses the host **with its port** (see `hostOfBaseUrl`), so the
+ * vendor's host name on a non-standard port is a user-supplied endpoint.
  */
 function isVendorHostFor(route: ProviderRoute, policy: EndpointPolicy, baseUrl: string): boolean {
   if (!isSecureBaseUrl(baseUrl)) return false;
@@ -450,6 +543,60 @@ function isVendorHostFor(route: ProviderRoute, policy: EndpointPolicy, baseUrl: 
 export interface ResolvedBaseUrl {
   baseUrl: string;
   isVendorHost: boolean;
+  /**
+   * Every base-URL **environment variable** of the route that was supplied, in
+   * the order the policy lists them.
+   *
+   * **Additive.** The plan fixes the resolved value as `{ baseUrl, isVendorHost }`
+   * (CC-004), and that shape still works: this field is optional and carries no
+   * information the plan's shape lacks.
+   */
+  suppliedBaseUrlVariables?: string[];
+  /**
+   * The supplied base-URL variables that are in **conflict** under the target's
+   * own rule, in the order the policy lists them.
+   *
+   * The target's Foundry adapter treats the base URL and the resource variable
+   * as mutually exclusive and throws `baseURL and resource are mutually
+   * exclusive` when both are supplied (audit §2.2a). This implementation's route-policy
+   * layer resolves a base URL anyway — so that a driver can still be built — and
+   * therefore **reports** the conflict here instead of swallowing it: the
+   * driver layer (CC-006) can raise the target's own error from this field.
+   *
+   * The listed variables are exactly the ones that were supplied; an explicit
+   * base URL is not a variable and is therefore not listed, though it does
+   * trigger the conflict.
+   */
+  conflictingVariables?: string[];
+}
+
+/**
+ * The base-URL variables of a route that were supplied.
+ */
+function suppliedBaseUrlVariables(route: ProviderRoute, env: NodeJS.ProcessEnv): string[] {
+  const policy = endpointPolicyFor(route);
+  if (!policy) return [];
+  return policy.baseUrlVariables.filter((name) => readEnvValue(env, name) !== undefined);
+}
+
+/**
+ * The supplied base-URL variables that the target treats as mutually exclusive.
+ *
+ * The target's Foundry adapter refuses a client that is given both a base URL
+ * and a resource (audit §2.2a), so this implementation reports the same pair. A route
+ * with no exclusive pair never reports a conflict.
+ */
+function conflictingBaseUrlVariables(
+  route: ProviderRoute,
+  env: NodeJS.ProcessEnv,
+  explicitSupplied: boolean,
+): string[] {
+  const pair = MUTUALLY_EXCLUSIVE_BASE_URL_VARIABLES.get(route);
+  if (pair === undefined) return [];
+  const baseUrlSupplied = explicitSupplied || readEnvValue(env, pair.baseUrl) !== undefined;
+  const resourceSupplied = readEnvValue(env, pair.resource) !== undefined;
+  if (!baseUrlSupplied || !resourceSupplied) return [];
+  return [pair.baseUrl, pair.resource].filter((name) => readEnvValue(env, name) !== undefined);
 }
 
 /**
@@ -464,7 +611,13 @@ export interface ResolvedBaseUrl {
  * construction), and otherwise reports whether the resolved host matches the
  * provider's `ownHost` pattern **and** the base URL is an `https:` one. A host
  * that does not match is a **user-supplied endpoint**, and this implementation treats it
- * as untrusted.
+ * as untrusted. The **port** is part of the comparison, so the vendor's host
+ * name on a non-standard port is not the vendor's own host.
+ *
+ * `suppliedBaseUrlVariables` and `conflictingVariables` report what the
+ * environment supplied and whether the target's own mutual-exclusion rule is
+ * violated, so the driver layer (CC-006) can raise the target's error instead
+ * of this implementation silently picking a winner.
  */
 export function resolveBaseUrl(
   route: ProviderRoute,
@@ -477,9 +630,16 @@ export function resolveBaseUrl(
   }
 
   const explicitValue = typeof explicit === 'string' ? explicit.trim() : '';
+  const supplied = suppliedBaseUrlVariables(route, env);
+  const conflicting = conflictingBaseUrlVariables(route, env, explicitValue !== '');
+  const reported = {
+    ...(supplied.length > 0 ? { suppliedBaseUrlVariables: supplied } : {}),
+    ...(conflicting.length > 0 ? { conflictingVariables: conflicting } : {}),
+  };
+
   if (explicitValue !== '') {
     const baseUrl = normalizeBaseUrl(explicitValue);
-    return { baseUrl, isVendorHost: isVendorHostFor(route, policy, baseUrl) };
+    return { baseUrl, isVendorHost: isVendorHostFor(route, policy, baseUrl), ...reported };
   }
 
   for (const variable of policy.baseUrlVariables) {
@@ -487,7 +647,7 @@ export function resolveBaseUrl(
     if (raw === undefined) continue;
     const value = variable === 'ANTHROPIC_FOUNDRY_RESOURCE' ? foundryBaseUrlFromResource(raw) : raw;
     const baseUrl = normalizeBaseUrl(value);
-    return { baseUrl, isVendorHost: isVendorHostFor(route, policy, baseUrl) };
+    return { baseUrl, isVendorHost: isVendorHostFor(route, policy, baseUrl), ...reported };
   }
 
   const fallback = defaultBaseUrlFor(route);
@@ -497,5 +657,5 @@ export function resolveBaseUrl(
   // A route's own default is a vendor deployment by construction, so it is
   // vendor-trusted without consulting the host pattern (the Foundry default is
   // a `{resource}` template that the driver layer resolves).
-  return { baseUrl: fallback, isVendorHost: isSecureBaseUrl(fallback) };
+  return { baseUrl: fallback, isVendorHost: isSecureBaseUrl(fallback), ...reported };
 }

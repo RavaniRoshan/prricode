@@ -6,9 +6,14 @@
  * catalog must not select or read secrets, and must not choose a destination for
  * them. This test pins the three consequences:
  *
- *   1. `credentialStatus` reports **presence** only and never returns a value;
- *   2. `resolveCredential` is the single resolution point — the only function that
- *      returns a secret — and listing a registry never calls it;
+ *   1. `credentialStatus` inspects **presence** only. It never returns a secret,
+ *      and for a keychain reference it never touches the keychain at all, so a
+ *      listing can never trigger an OS prompt.
+ *   2. The **guarded** `resolveConnectionCredential` in `src/provider/registry.ts`
+ *      is the only *exported* path to a secret: the resolver itself is
+ *      module-private there, so no caller — CC-006's driver layer included — can
+ *      obtain a credential without the untrusted-endpoint guard having run.
+ *      Listing a registry never resolves anything.
  *   3. `credentialStatus` on a **keychain** reference reports the reference's
  *      presence without ever reading the keychain, so a listing can never trigger
  *      an OS prompt.
@@ -32,11 +37,16 @@ import path from 'node:path';
 
 import {
   credentialStatus,
-  resolveCredential,
   setKeychainBackend,
   type KeychainBackend,
 } from '../../src/provider/credentials.js';
-import { createProviderRegistry, type Connection } from '../../src/provider/registry.js';
+import * as credentialsModule from '../../src/provider/credentials.js';
+import {
+  createProviderRegistry,
+  resolveConnectionCredential,
+  type Connection,
+} from '../../src/provider/registry.js';
+import * as registryModule from '../../src/provider/registry.js';
 
 /**
  * `node:fs/promises` is mocked so that a **read** of a credential file can be
@@ -51,6 +61,27 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 const SECRET = 'sk-test-3f9a2c-do-not-leak-me';
 const ENV_NAME = 'PRRICODE_TEST_SECRET';
+
+/**
+ * A **compile-time** pin on the exported surface of the provider module.
+ *
+ * The untrusted-endpoint guard only protects a credential if the *only* way to
+ * obtain one goes through it. An unguarded resolver that any caller can import
+ * is therefore a hole in the guard, so the export is pinned **absent** here:
+ * `npx tsc --noEmit` fails if `resolveCredential` is ever exported again — from
+ * the credential module or from the registry.
+ */
+type AssertFalse<T extends boolean> = [T] extends [true] ? never : false;
+
+type CredentialsExports = keyof typeof credentialsModule;
+type CredentialsExportAnUnguardedResolver = 'resolveCredential' extends CredentialsExports ? true : false;
+const CREDENTIALS_MODULE_EXPORTS_NO_UNGUARDED_RESOLVER: AssertFalse<
+  CredentialsExportAnUnguardedResolver
+> = false;
+
+type RegistryExports = keyof typeof registryModule;
+type RegistryExportsAnUnguardedResolver = 'resolveCredential' extends RegistryExports ? true : false;
+const REGISTRY_MODULE_EXPORTS_NO_UNGUARDED_RESOLVER: AssertFalse<RegistryExportsAnUnguardedResolver> = false;
 
 const touchedEnv = new Set<string>();
 const tempDirs: string[] = [];
@@ -154,16 +185,18 @@ describe('credentialStatus', () => {
   });
 });
 
-describe('resolveCredential', () => {
-  it('is the only function that returns a value', async () => {
+describe('the guarded credential resolution', () => {
+  it('is the only exported path to a value', async () => {
     setEnv(ENV_NAME, SECRET);
-    const resolved = await resolveCredential({ kind: 'env', name: ENV_NAME });
+    const conn = connection({ id: 'first', credential: { kind: 'env', name: ENV_NAME } });
+    const resolved = await resolveConnectionCredential(conn, { [ENV_NAME]: SECRET });
     expect(resolved).toEqual({ present: true, value: SECRET });
   });
 
   it('reports a missing environment reference as not present', async () => {
     setEnv(ENV_NAME, undefined);
-    const resolved = await resolveCredential({ kind: 'env', name: ENV_NAME });
+    const conn = connection({ id: 'first', credential: { kind: 'env', name: ENV_NAME } });
+    const resolved = await resolveConnectionCredential(conn, {});
     expect(resolved.present).toBe(false);
     expect(resolved.value).toBeUndefined();
   });
@@ -172,7 +205,8 @@ describe('resolveCredential', () => {
     // A secret pasted with a trailing newline must not travel to the provider
     // with the newline attached.
     setEnv(ENV_NAME, `${SECRET}\n`);
-    const resolved = await resolveCredential({ kind: 'env', name: ENV_NAME });
+    const conn = connection({ id: 'first', credential: { kind: 'env', name: ENV_NAME } });
+    const resolved = await resolveConnectionCredential(conn, { [ENV_NAME]: `${SECRET}\n` });
     expect(resolved).toEqual({ present: true, value: SECRET });
   });
 
@@ -180,7 +214,8 @@ describe('resolveCredential', () => {
     const dir = tempDir();
     const file = path.join(dir, 'token');
     writeFileSync(file, `${SECRET}\n`, 'utf8');
-    const resolved = await resolveCredential({ kind: 'file', path: file, format: 'raw' });
+    const conn = connection({ id: 'first', credential: { kind: 'file', path: file, format: 'raw' } });
+    const resolved = await resolveConnectionCredential(conn, {});
     expect(resolved).toEqual({ present: true, value: SECRET });
   });
 });
@@ -201,7 +236,11 @@ describe('the keychain reference', () => {
     const backend: KeychainBackend = { name: 'spy', lookup };
     setKeychainBackend(backend);
 
-    const resolved = await resolveCredential({ kind: 'keychain', service: 'reference-agent', account: 'user' });
+    const conn = connection({
+      id: 'first',
+      credential: { kind: 'keychain', service: 'reference-agent', account: 'user' },
+    });
+    const resolved = await resolveConnectionCredential(conn, {});
     expect(lookup).toHaveBeenCalledWith('reference-agent', 'user');
     expect(resolved).toEqual({ present: true, value: SECRET });
   });
@@ -243,6 +282,23 @@ describe('the registry listing', () => {
   });
 });
 
+describe('the guarded entry point is the only exported path to a secret', () => {
+  it('does not export an unguarded resolver from the credential module', () => {
+    expect(Object.keys(credentialsModule)).not.toContain('resolveCredential');
+  });
+
+  it('does not re-export an unguarded resolver from the registry', () => {
+    expect(Object.keys(registryModule)).not.toContain('resolveCredential');
+  });
+
+  it('pins the absence of an unguarded resolver at the type level', () => {
+    // The compile-time pin is the real one: `npx tsc --noEmit` fails if the
+    // export comes back.
+    expect(CREDENTIALS_MODULE_EXPORTS_NO_UNGUARDED_RESOLVER).toBe(false);
+    expect(REGISTRY_MODULE_EXPORTS_NO_UNGUARDED_RESOLVER).toBe(false);
+  });
+});
+
 describe('the credential module attribution', () => {
   it('labels the credential-reference abstraction as a reimplementation design, not target behavior', async () => {
     const source = await readFile(new URL('../../src/provider/credentials.ts', import.meta.url), 'utf8');
@@ -250,5 +306,14 @@ describe('the credential module attribution', () => {
     expect(source).toContain('implementation design');
     // And it must not claim the target has it.
     expect(source).not.toContain("the target's own rule");
+  });
+
+  it('names the one real call site of the resolution', async () => {
+    const source = await readFile(new URL('../../src/provider/credentials.ts', import.meta.url), 'utf8');
+    // The resolution happens in the registry, behind the guard; the header must
+    // say so instead of claiming that nothing else in this implementation calls it.
+    expect(source).toContain('resolveConnectionCredential');
+    expect(source).toContain('src/provider/registry.ts');
+    expect(source).not.toContain('Nothing else in this implementation calls it');
   });
 });
