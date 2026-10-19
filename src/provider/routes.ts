@@ -34,6 +34,11 @@
  *     `ANTHROPIC_FOUNDRY_RESOURCE`. The target does not state it, so this implementation
  *     uses the declared variable order (the base URL wins) and does not claim
  *     compatibility.
+ *   - The **transport rule**: only an `https:` base URL may be vendor-trusted.
+ *     The audit records host *shapes* only, so the requirement that a
+ *     cleartext `http://` endpoint is never the vendor's own host is the
+ *     implementation's own security posture, not a target behaviour. It is what keeps a
+ *     credential from being delivered in cleartext to the canonical host.
  *
  * **Signature note.** The plan writes `selectRoute(env, settings: SettingsSource)`.
  * A bare settings-source *name* cannot carry a value, and the plan's own
@@ -84,22 +89,6 @@ export const ROUTE_NAMES: readonly ProviderRoute[] = [
 ];
 
 /**
- * The target's dispatch order (audit §2.1): the gateway first, then the
- * provider flags in the order `bedrock`, `foundry`, `anthropicAws`,
- * `anthropicGoogleCloud`, `mantle`, `vertex`, and `firstParty` as the fallback.
- */
-export const ROUTE_ORDER: readonly ProviderRoute[] = [
-  'gateway',
-  'bedrock',
-  'foundry',
-  'anthropicAws',
-  'anthropicGoogleCloud',
-  'mantle',
-  'vertex',
-  'firstParty',
-];
-
-/**
  * The routes that a single environment flag selects, in dispatch order. The
  * `gateway` route is **not** in this list: its condition is not an environment
  * flag in this implementation (see the file header).
@@ -112,6 +101,21 @@ export const ROUTE_FLAG_ORDER: readonly ProviderRoute[] = [
   'mantle',
   'vertex',
 ];
+
+/**
+ * The target's dispatch order (audit §2.1): the gateway first, then the
+ * provider flags in the order `bedrock`, `foundry`, `anthropicAws`,
+ * `anthropicGoogleCloud`, `mantle`, `vertex`, and `firstParty` as the fallback.
+ *
+ * **Derived**, not written out a second time: `selectRoute` walks
+ * `ROUTE_FLAG_ORDER`, so the published dispatch order is computed from it and
+ * the two cannot drift apart.
+ */
+export const ROUTE_ORDER: readonly ProviderRoute[] = Object.freeze([
+  'gateway',
+  ...ROUTE_FLAG_ORDER,
+  'firstParty',
+]);
 
 /**
  * The environment variable that selects each flag-driven route. A `Map` rather
@@ -172,8 +176,17 @@ export function flagEnabled(value: unknown): boolean {
  * Read an environment variable through an **own-property** check, so a name that
  * collides with an `Object.prototype` member (`constructor`, `toString`, …) is
  * reported as unset rather than resolving to the inherited member.
+ *
+ * This is the **single** environment reader of the provider module:
+ * `src/provider/credentials.ts` imports it, so the two modules cannot disagree
+ * about what a value counts as set or about how it is trimmed.
+ *
+ * The value is **trimmed**: a variable that holds only whitespace counts as
+ * unset, and a value that carries surrounding whitespace yields the trimmed
+ * text, so a secret pasted with a trailing newline never travels to a provider
+ * with the newline attached.
  */
-function readEnvValue(env: NodeJS.ProcessEnv | undefined, name: string): string | undefined {
+export function readEnvValue(env: NodeJS.ProcessEnv | undefined, name: string): string | undefined {
   if (!env) return undefined;
   if (!Object.hasOwn(env, name)) return undefined;
   const value = env[name];
@@ -202,10 +215,11 @@ export function gatewayFlagSource(settings: RouteSettings | undefined): Settings
 function gatewayEnabled(settings: RouteSettings | undefined): boolean {
   if (settings === undefined) return false;
   if (typeof settings === 'function') return flagEnabled(settings(GATEWAY_SETTINGS_KEY));
-  const source = effectiveSource(settings, GATEWAY_SETTINGS_KEY);
-  if (source === null) return false;
-  const effective = resolveTopLevelKey(settings, GATEWAY_SETTINGS_KEY)[0];
-  return flagEnabled(effective?.value);
+  // The gateway key is a **top-level** settings key, so only a tier the
+  // top-level resolution names (policy, flag, user) can supply it: a project or
+  // local tier never turns the gateway on.
+  if (gatewayFlagSource(settings) === null) return false;
+  return flagEnabled(settingsAccessor(settings)(GATEWAY_SETTINGS_KEY));
 }
 
 /**
@@ -254,6 +268,22 @@ export interface EndpointPolicy {
  * alternative **and** the broad `*.googleapis.com` alternative. This implementation
  * reproduces both alternatives rather than narrowing them, because the audit
  * calls the variable list and the host patterns "the observable contract".
+ *
+ * ## Security consequence of the `*.googleapis.com` alternative
+ *
+ * **The untrusted-endpoint guard does not protect the two Google routes.** The
+ * broad alternative matches *any* host under `*.googleapis.com`, so a base URL
+ * such as `https://attacker.googleapis.com` is reported as a **vendor host**:
+ *
+ *   - `resolveBaseUrl('vertex', { ANTHROPIC_VERTEX_BASE_URL: 'https://attacker.googleapis.com' })`
+ *     yields `isVendorHost: true`;
+ *   - the same holds for `anthropicGoogleCloud`;
+ *   - `checkCredentialDelivery` therefore *allows* the delivery, because the
+ *     host is (by the target's own pattern) the vendor's own.
+ *
+ * The shape is the target's, so this implementation keeps it — but the consequence is
+ * documented here rather than left implicit, and a test pins the current
+ * behaviour so that a future change to it is deliberate.
  */
 export const ENDPOINT_POLICIES: readonly EndpointPolicy[] = [
   {
@@ -360,13 +390,38 @@ function normalizeBaseUrl(baseUrl: string): string {
 }
 
 /**
- * The base URL of the Foundry route derived from `ANTHROPIC_FOUNDRY_RESOURCE`.
- * The target rejects a URL in that variable (the value must be a bare resource
- * name); this implementation ignores such a value and falls through to the next candidate.
+ * Whether a base URL is an `https:` URL.
+ *
+ * **Implementation security posture.** The audit records host *shapes*, not transports, so
+ * the requirement that a credential is never delivered in cleartext to the
+ * vendor's own host is this implementation's own rule. A value without a scheme is
+ * normalized to `https://` first, so a bare host counts as secure; an
+ * unparseable value does not.
  */
-function foundryBaseUrlFromResource(resource: string): string | undefined {
-  if (resource.includes('://') || resource.startsWith('/')) return undefined;
-  if (!/^[a-z0-9-]+$/i.test(resource)) return undefined;
+export function isSecureBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(normalizeBaseUrl(baseUrl)).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The base URL of the Foundry route derived from `ANTHROPIC_FOUNDRY_RESOURCE`.
+ *
+ * The target rejects a URL in that variable (the value must be a bare resource
+ * name), so this implementation rejects it too — with a message that names the variable.
+ * Silently falling through would leave the route's *default* base URL in place,
+ * and that default is a `{resource}` template, so a malformed value would
+ * otherwise be reported as a vendor host it does not match.
+ */
+function foundryBaseUrlFromResource(resource: string): string {
+  if (resource.includes('://') || resource.startsWith('/') || !/^[a-z0-9-]+$/i.test(resource)) {
+    throw new Error(
+      'ANTHROPIC_FOUNDRY_RESOURCE must be a bare resource name (for example "my-deployment"), ' +
+        `not a URL or a path: "${resource}"`,
+    );
+  }
   return `https://${resource}.services.ai.azure.com`;
 }
 
@@ -376,8 +431,14 @@ function foundryBaseUrlFromResource(resource: string): string | undefined {
  * A route that declares an `ownHost` pattern uses it. A route that declares
  * none (`firstParty`, `gateway`) has no way to recognise a vendor host other
  * than its own default host, so anything else is a user-supplied endpoint.
+ *
+ * A base URL that is not `https:` is never vendor-trusted (implementation security
+ * posture), so a cleartext endpoint to the canonical host is treated as a
+ * user-supplied one.
  */
-function isVendorHostFor(route: ProviderRoute, policy: EndpointPolicy, host: string): boolean {
+function isVendorHostFor(route: ProviderRoute, policy: EndpointPolicy, baseUrl: string): boolean {
+  if (!isSecureBaseUrl(baseUrl)) return false;
+  const host = hostOfBaseUrl(baseUrl);
   if (host === '') return false;
   if (policy.ownHost) return policy.ownHost.test(host);
   const fallback = defaultBaseUrlFor(route);
@@ -396,12 +457,14 @@ export interface ResolvedBaseUrl {
  *
  * Precedence: an **explicit** URL (the connection's own) wins, then the route's
  * declared base-URL environment variables in the order the policy lists them,
- * then the route's default base URL.
+ * then the route's default base URL. An explicit value that is empty or only
+ * whitespace counts as **absent**, so it falls through to the environment.
  *
  * `isVendorHost` is `true` for the route's own default (a vendor deployment by
  * construction), and otherwise reports whether the resolved host matches the
- * provider's `ownHost` pattern. A host that does not match is a **user-supplied
- * endpoint**, and this implementation treats it as untrusted.
+ * provider's `ownHost` pattern **and** the base URL is an `https:` one. A host
+ * that does not match is a **user-supplied endpoint**, and this implementation treats it
+ * as untrusted.
  */
 export function resolveBaseUrl(
   route: ProviderRoute,
@@ -416,21 +479,23 @@ export function resolveBaseUrl(
   const explicitValue = typeof explicit === 'string' ? explicit.trim() : '';
   if (explicitValue !== '') {
     const baseUrl = normalizeBaseUrl(explicitValue);
-    return { baseUrl, isVendorHost: isVendorHostFor(route, policy, hostOfBaseUrl(baseUrl)) };
+    return { baseUrl, isVendorHost: isVendorHostFor(route, policy, baseUrl) };
   }
 
   for (const variable of policy.baseUrlVariables) {
     const raw = readEnvValue(env, variable);
     if (raw === undefined) continue;
     const value = variable === 'ANTHROPIC_FOUNDRY_RESOURCE' ? foundryBaseUrlFromResource(raw) : raw;
-    if (value === undefined) continue;
     const baseUrl = normalizeBaseUrl(value);
-    return { baseUrl, isVendorHost: isVendorHostFor(route, policy, hostOfBaseUrl(baseUrl)) };
+    return { baseUrl, isVendorHost: isVendorHostFor(route, policy, baseUrl) };
   }
 
   const fallback = defaultBaseUrlFor(route);
   if (fallback === undefined) {
     throw new Error(`unknown provider route "${String(route)}"`);
   }
-  return { baseUrl: fallback, isVendorHost: true };
+  // A route's own default is a vendor deployment by construction, so it is
+  // vendor-trusted without consulting the host pattern (the Foundry default is
+  // a `{resource}` template that the driver layer resolves).
+  return { baseUrl: fallback, isVendorHost: isSecureBaseUrl(fallback) };
 }

@@ -26,16 +26,32 @@
  * host is a *user-supplied endpoint*, and this implementation refuses to send a credential
  * to it unless the connection explicitly opts in. The refusal names the host.
  *
+ * Because the guard is only useful if a caller *runs* it, the module exposes
+ * **one guarded entry point** for obtaining a credential for a request:
+ * `resolveConnectionCredential` runs the check and only then resolves the
+ * reference. `checkCredentialDelivery` and `assertCredentialDelivery` remain
+ * exported for callers that want the decision itself.
+ *
+ * The credential *reference* kinds (an environment variable name, a file path,
+ * an OS credential-store key) are a **implementation design** as well — see
+ * `src/provider/credentials.ts` for the attribution.
+ *
  * The target's route set, dispatch order and endpoint policy are **observed** and
  * live in `src/provider/routes.ts`.
  */
 
 import {
   hostOfBaseUrl,
+  isProviderRoute,
   resolveBaseUrl,
   type ProviderRoute,
 } from './routes.js';
-import { isCredentialRef, type CredentialRef } from './credentials.js';
+import {
+  isCredentialRef,
+  resolveCredential,
+  type CredentialRef,
+  type ResolvedCredential,
+} from './credentials.js';
 
 export type { CredentialRef } from './credentials.js';
 export type { ProviderRoute } from './routes.js';
@@ -58,6 +74,9 @@ export interface Connection {
   /**
    * A credential **reference** — an environment variable name, a file path, or an
    * OS credential-store key. It never contains a secret.
+   *
+   * **Implementation design** (see `src/provider/credentials.ts`): the target records
+   * only a per-route credential resolution order, not a reference abstraction.
    */
   credential: CredentialRef;
   /** Where the model catalog for this connection comes from. */
@@ -91,23 +110,18 @@ export interface ProviderRegistry {
 /** The catalog sources a connection may declare. */
 const CATALOG_SOURCES: readonly Connection['catalogSource'][] = ['builtin', 'file', 'url'];
 
-const ROUTE_VALUES: readonly string[] = [
-  'firstParty',
-  'gateway',
-  'bedrock',
-  'foundry',
-  'anthropicAws',
-  'anthropicGoogleCloud',
-  'mantle',
-  'vertex',
-];
-
 /**
  * Reject a malformed connection before it enters the registry.
  *
  * The checks are own-property and type based, so a connection whose `route` is
  * the string `"constructor"` is rejected rather than resolving to an inherited
- * member.
+ * member. The route list itself is **not** duplicated here: `isProviderRoute`
+ * is the single source of truth, so a route renamed in `src/provider/routes.ts`
+ * cannot be silently rejected by the registry.
+ *
+ * A `baseUrl` that is empty or only whitespace is **accepted** but counts as
+ * *absent*: the connection then uses the route's policy (see
+ * `resolveConnectionEndpoint`).
  */
 function validateConnection(conn: Connection): void {
   if (typeof conn !== 'object' || conn === null) {
@@ -119,7 +133,7 @@ function validateConnection(conn: Connection): void {
   if (typeof conn.name !== 'string' || conn.name.trim() === '') {
     throw new Error(`connection "${conn.id}" needs a non-empty name`);
   }
-  if (typeof conn.route !== 'string' || !ROUTE_VALUES.includes(conn.route)) {
+  if (!isProviderRoute(conn.route)) {
     throw new Error(`connection "${conn.id}" has an unknown provider route "${String(conn.route)}"`);
   }
   if (!isCredentialRef(conn.credential)) {
@@ -131,7 +145,7 @@ function validateConnection(conn: Connection): void {
   if (conn.baseUrl !== undefined && typeof conn.baseUrl !== 'string') {
     throw new Error(`connection "${conn.id}" has a non-string base URL`);
   }
-  if (conn.enabled !== undefined && typeof conn.enabled !== 'boolean') {
+  if (typeof conn.enabled !== 'boolean') {
     throw new Error(`connection "${conn.id}" has a non-boolean enabled flag`);
   }
 }
@@ -212,6 +226,11 @@ export function createProviderRegistry(connections: readonly Connection[] = []):
  * function is the switch. It flips the `enabled` flag on the live records the
  * registry hands out, so a registry implementation must return its own records
  * from `list()` — which `ConnectionRegistry` does.
+ *
+ * The plan's interface does **not** require `list()` to hand out live records,
+ * though, so the switch is **verified** rather than merely attempted: if the
+ * registry does not report the target as the enabled connection afterwards, the
+ * call fails loudly instead of leaving the caller believing it switched.
  */
 export function useConnection(registry: ProviderRegistry, id: string): Connection {
   const target = registry.get(id);
@@ -220,6 +239,12 @@ export function useConnection(registry: ProviderRegistry, id: string): Connectio
   }
   for (const conn of registry.list()) {
     conn.enabled = conn.id === id;
+  }
+  const active = registry.list().find((conn) => conn.enabled);
+  if (!active || active.id !== id) {
+    throw new Error(
+      `could not switch to connection "${id}": the registry did not report it as the enabled connection`,
+    );
   }
   return target;
 }
@@ -235,13 +260,16 @@ export interface EndpointTrust {
  * The effective endpoint of a connection.
  *
  * An explicit `baseUrl` wins; otherwise the route's declared base-URL
- * environment variables decide; otherwise the route's default host applies.
+ * environment variables decide; otherwise the route's default host applies. A
+ * `baseUrl` that is empty or only whitespace counts as **absent**, so such a
+ * connection falls back to the route's policy.
  */
 export function resolveConnectionEndpoint(
   conn: Connection,
   env: NodeJS.ProcessEnv = process.env,
 ): EndpointTrust {
-  const resolved = resolveBaseUrl(conn.route, env, conn.baseUrl);
+  const explicit = typeof conn.baseUrl === 'string' ? conn.baseUrl.trim() : '';
+  const resolved = resolveBaseUrl(conn.route, env, explicit === '' ? undefined : explicit);
   return {
     baseUrl: resolved.baseUrl,
     host: hostOfBaseUrl(resolved.baseUrl),
@@ -264,6 +292,14 @@ export interface CredentialDeliveryDecision {
  * deployment and the credential is delivered. A base URL that does not match is
  * a **user-supplied endpoint**: this implementation refuses to send the credential to it
  * unless the connection explicitly opted in, and the refusal names the host.
+ *
+ * **Limits of the guard** (both documented in `src/provider/routes.ts` and
+ * pinned by tests):
+ *
+ *   - the two Google routes accept *any* host under `*.googleapis.com`, so the
+ *     guard does **not** protect them;
+ *   - a base URL that is not `https:` is never vendor-trusted, so a cleartext
+ *     endpoint is treated as user-supplied.
  */
 export function checkCredentialDelivery(
   conn: Connection,
@@ -299,4 +335,22 @@ export function assertCredentialDelivery(
   if (!decision.allowed) {
     throw new Error(decision.reason ?? `refusing to send the credential of connection "${conn.id}"`);
   }
+}
+
+/**
+ * The **guarded** way to obtain a credential for a request.
+ *
+ * This is the documented entry point for the driver layer (CC-006's
+ * `ProviderDriver.buildHeaders(req, cred)`): it runs the untrusted-endpoint
+ * check **first** and only then resolves the reference, so a secret can never be
+ * handed to a user-supplied host by a caller that forgot to check.
+ *
+ * When the check refuses, the error names the host that was refused.
+ */
+export async function resolveConnectionCredential(
+  conn: Connection,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ResolvedCredential> {
+  assertCredentialDelivery(conn, env);
+  return resolveCredential(conn.credential, env);
 }

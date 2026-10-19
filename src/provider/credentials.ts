@@ -1,16 +1,30 @@
 /**
  * Provider credential **references**.
  *
- * The project's rule, and the target's own rule: a credential is a *reference* —
- * an environment variable name, a file path, or an OS credential-store key — and
- * never a value. The provider catalog must not select or read secrets, and must
- * not choose a destination for them. This module keeps that separation in code:
+ * The **project's** rule (plan §Global Constraints, "Credentials are references
+ * only") is that a credential is a *reference* and never a value: the provider
+ * catalog must not select or read secrets, and must not choose a destination for
+ * them. This module keeps that separation in code:
  *
  *   - `credentialStatus` inspects **presence** only. It never returns a secret,
  *     and for a keychain reference it never touches the keychain at all, so a
  *     listing can never trigger an OS prompt.
  *   - `resolveCredential` is the **single** resolution point. Nothing else in the
  *     implementation calls it, and in particular no listing or catalog code path does.
+ *
+ * ## What the target does, and what this implementation adds
+ *
+ * The target (audit §2.1) records exactly this about credentials: each route
+ * "resolves credentials in a distinct order (bearer-token env var → skip-auth →
+ * AWS credential chain → provider-chain resolver)". That is the whole of the
+ * observed behavior — a **per-route credential resolution order**.
+ *
+ * The three-kind `CredentialRef` below — an environment variable name, a file
+ * path, or an OS credential-store key — is a **implementation design**. The audit records
+ * no reference abstraction, no file-path credential and no OS-credential-store
+ * credential, and none of the three is attributed to the target. This implementation adds
+ * them as a product extension and labels them as such here and wherever they
+ * surface.
  *
  * The keychain backend shells out to the platform CLI. `keytar` was archived in
  * 2022, and a native binding is a hard conflict with the self-contained binary
@@ -29,9 +43,18 @@ import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+// The environment reader lives in `src/provider/routes.ts`: it is the provider
+// module's single environment reader, so the route flags and the credential
+// references cannot disagree about what counts as set or about trimming.
+import { readEnvValue } from './routes.js';
+
 /**
  * A credential **reference**. It names where a secret lives; it never contains
  * one.
+ *
+ * **Implementation design** — see the file header: the audit records only a per-route
+ * credential resolution order, and neither this abstraction nor any of the three
+ * kinds below is attributed to the target.
  *
  *   - `env` — the name of an environment variable;
  *   - `file` — the path of a file holding the secret. `format` records how the
@@ -87,19 +110,6 @@ export type CredentialStatus = 'configured' | 'missing' | 'unreadable';
 export interface ResolvedCredential {
   present: boolean;
   value?: string;
-}
-
-/**
- * Read an environment variable through an **own-property** check, so a name that
- * collides with an `Object.prototype` member (`constructor`, `toString`, …) is
- * reported as unset rather than resolving to the inherited member.
- */
-function readEnvValue(env: NodeJS.ProcessEnv | undefined, name: string): string | undefined {
-  if (!env) return undefined;
-  if (!Object.hasOwn(env, name)) return undefined;
-  const value = env[name];
-  if (typeof value !== 'string') return undefined;
-  return value.trim() === '' ? undefined : value;
 }
 
 /** The status of an environment reference. */
@@ -261,7 +271,12 @@ export function setKeychainBackend(backend: KeychainBackend | null): void {
   keychainBackend = backend ?? cliKeychainBackend;
 }
 
-/** The keychain backend that is currently installed. */
+/**
+ * The keychain backend that is currently installed.
+ *
+ * The resolver reads the backend through this accessor, so the backend that is
+ * installed at the moment of the lookup is the one that is used.
+ */
 export function currentKeychainBackend(): KeychainBackend {
   return keychainBackend;
 }
@@ -273,7 +288,11 @@ export function currentKeychainBackend(): KeychainBackend {
  * code must call `credentialStatus` instead, and a caller that reaches for this
  * function is about to hand a secret to a provider client — which is exactly the
  * point at which the untrusted-endpoint guard in `src/provider/registry.ts` has
- * to have run.
+ * to have run. `resolveConnectionCredential` in that module is the guarded
+ * entry point that runs the check and then resolves.
+ *
+ * Every kind is **trimmed** the same way, so a value never carries surrounding
+ * whitespace to the provider.
  */
 export async function resolveCredential(
   ref: CredentialRef,
@@ -281,6 +300,8 @@ export async function resolveCredential(
 ): Promise<ResolvedCredential> {
   switch (ref.kind) {
     case 'env': {
+      // The shared environment reader trims, so a trailing newline in the
+      // variable is not part of the secret.
       const value = readEnvValue(env, ref.name);
       return value === undefined ? { present: false } : { present: true, value };
     }
@@ -296,7 +317,7 @@ export async function resolveCredential(
     }
     case 'keychain': {
       if (keychainStatus(ref) !== 'configured') return { present: false };
-      const result = await keychainBackend.lookup(ref.service, ref.account);
+      const result = await currentKeychainBackend().lookup(ref.service, ref.account);
       if (!result.found || typeof result.value !== 'string' || result.value === '') {
         return { present: false };
       }

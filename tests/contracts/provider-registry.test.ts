@@ -23,11 +23,15 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
 
 import {
-  ROUTE_ORDER,
-  ROUTE_NAMES,
+  DEFAULT_BASE_URLS,
   ENDPOINT_POLICIES,
+  ROUTE_FLAG_ORDER,
+  ROUTE_NAMES,
+  ROUTE_ORDER,
+  isProviderRoute,
   resolveBaseUrl,
   selectRoute,
   type ProviderRoute,
@@ -36,23 +40,52 @@ import {
   assertCredentialDelivery,
   checkCredentialDelivery,
   createProviderRegistry,
+  resolveConnectionCredential,
   resolveConnectionEndpoint,
   useConnection,
   type Connection,
+  type ProviderRegistry,
 } from '../../src/provider/registry.js';
 import type { SettingsTierMap } from '../../src/config/tiers.js';
 import { SettingsTierEntry } from '../../src/config/tiers.js';
 
-const ALL_ROUTES: readonly ProviderRoute[] = [
-  'firstParty',
-  'gateway',
-  'bedrock',
-  'foundry',
-  'anthropicAws',
-  'anthropicGoogleCloud',
-  'mantle',
-  'vertex',
+/**
+ * The provider flag each route is selected by, in dispatch order.
+ *
+ * These are the **behavioral** pins of the route names: every one of the eight
+ * names is produced by `selectRoute` for a documented input, so the names are
+ * pinned by observable behavior rather than by a copied list.
+ */
+const PROVIDER_FLAG_CASES: ReadonlyArray<readonly [string, ProviderRoute]> = [
+  ['CLAUDE_CODE_USE_BEDROCK', 'bedrock'],
+  ['CLAUDE_CODE_USE_FOUNDRY', 'foundry'],
+  ['CLAUDE_CODE_USE_ANTHROPIC_AWS', 'anthropicAws'],
+  ['CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'anthropicGoogleCloud'],
+  ['CLAUDE_CODE_USE_MANTLE', 'mantle'],
+  ['CLAUDE_CODE_USE_VERTEX', 'vertex'],
 ];
+
+/**
+ * A **compile-time** pin on the eight route names.
+ *
+ * The runtime tests derive the route list from the implementation (so the test
+ * cannot drift from the source), which leaves the exact spelling of the names
+ * pinned only by this type-level assertion: `npx tsc --noEmit` fails if a name
+ * is added, removed or renamed.
+ */
+type ExpectedRouteName =
+  | 'firstParty'
+  | 'gateway'
+  | 'bedrock'
+  | 'foundry'
+  | 'anthropicAws'
+  | 'anthropicGoogleCloud'
+  | 'mantle'
+  | 'vertex';
+
+type AssertSameUnion<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+
+const ROUTE_NAMES_MATCH_THE_TARGET_SET: AssertSameUnion<ProviderRoute, ExpectedRouteName> = true;
 
 function tiersWith(entries: Record<string, unknown>): SettingsTierMap {
   const tiers: SettingsTierMap = new Map();
@@ -62,8 +95,19 @@ function tiersWith(entries: Record<string, unknown>): SettingsTierMap {
 
 describe('route set', () => {
   it('names exactly the eight routes the target declares', () => {
-    expect([...ROUTE_NAMES].sort()).toEqual([...ALL_ROUTES].sort());
+    expect(ROUTE_NAMES_MATCH_THE_TARGET_SET).toBe(true);
     expect(ROUTE_NAMES).toHaveLength(8);
+    expect(new Set(ROUTE_NAMES).size).toBe(8);
+    expect(ROUTE_NAMES.every((route) => isProviderRoute(route))).toBe(true);
+  });
+
+  it('reaches every declared route through the selector', () => {
+    const reachable = new Set<ProviderRoute>([selectRoute({}, undefined)]);
+    for (const [variable, route] of PROVIDER_FLAG_CASES) {
+      reachable.add(selectRoute({ [variable]: '1' }, undefined));
+    }
+    reachable.add(selectRoute({}, tiersWith({ useGateway: true })));
+    expect([...reachable].sort()).toEqual([...ROUTE_NAMES].sort());
   });
 
   it('keeps the target dispatch order, with gateway first and firstParty last', () => {
@@ -77,6 +121,24 @@ describe('route set', () => {
       'vertex',
       'firstParty',
     ]);
+  });
+
+  it('derives the dispatch order from the flag order, so the two cannot drift', () => {
+    // `selectRoute` walks `ROUTE_FLAG_ORDER`, so the published dispatch order is
+    // derived from it rather than written out a second time.
+    expect(ROUTE_ORDER).toEqual(['gateway', ...ROUTE_FLAG_ORDER, 'firstParty']);
+    expect(ROUTE_FLAG_ORDER).not.toContain('gateway');
+    expect(ROUTE_FLAG_ORDER).not.toContain('firstParty');
+  });
+
+  it('recognises a route name and rejects anything else', () => {
+    expect(isProviderRoute('vertex')).toBe(true);
+    expect(isProviderRoute('firstParty')).toBe(true);
+    expect(isProviderRoute('Vertex')).toBe(false);
+    expect(isProviderRoute('constructor')).toBe(false);
+    expect(isProviderRoute('toString')).toBe(false);
+    expect(isProviderRoute(undefined)).toBe(false);
+    expect(isProviderRoute(42)).toBe(false);
   });
 });
 
@@ -105,15 +167,7 @@ describe('selectRoute', () => {
   });
 
   it('selects each provider from its own environment flag', () => {
-    const cases: ReadonlyArray<readonly [string, ProviderRoute]> = [
-      ['CLAUDE_CODE_USE_BEDROCK', 'bedrock'],
-      ['CLAUDE_CODE_USE_FOUNDRY', 'foundry'],
-      ['CLAUDE_CODE_USE_ANTHROPIC_AWS', 'anthropicAws'],
-      ['CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'anthropicGoogleCloud'],
-      ['CLAUDE_CODE_USE_MANTLE', 'mantle'],
-      ['CLAUDE_CODE_USE_VERTEX', 'vertex'],
-    ];
-    for (const [variable, route] of cases) {
+    for (const [variable, route] of PROVIDER_FLAG_CASES) {
       expect(selectRoute({ [variable]: '1' }, undefined)).toBe(route);
     }
   });
@@ -176,7 +230,7 @@ describe('selectRoute', () => {
     expect(selectRoute({ CLAUDE_CODE_USE_BEDROCK: '' }, undefined)).toBe('firstParty');
   });
 
-  it('ignores a provider flag that a project tier sets for the gateway decision', () => {
+  it('does not let a project tier supply the top-level gateway key', () => {
     // The gateway flag is a top-level settings key, so only the policy, flag and
     // user tiers can supply it (audit §2.7 top-level resolution order).
     const tiers: SettingsTierMap = new Map();
@@ -204,6 +258,38 @@ function connection(overrides: Partial<Connection> & { id: string }): Connection
   };
 }
 
+/**
+ * A registry that hands out **copies** of its records.
+ *
+ * The plan's `ProviderRegistry` interface does not require `list()` to return
+ * live records, so a conforming implementation may return copies — and a switch
+ * that only mutates the objects `list()` returned would then silently do
+ * nothing.
+ */
+function copyingRegistry(connections: readonly Connection[]): ProviderRegistry {
+  const store = new Map<string, Connection>();
+  for (const conn of connections) store.set(conn.id, { ...conn });
+  return {
+    list: () => [...store.values()].map((conn) => ({ ...conn })),
+    get: (id) => {
+      const conn = store.get(id);
+      return conn === undefined ? undefined : { ...conn };
+    },
+    add: () => {
+      throw new Error('this registry does not support add');
+    },
+    remove: () => false,
+    active: () => {
+      const enabled = [...store.values()].filter((conn) => conn.enabled);
+      const first = enabled[0];
+      if (enabled.length !== 1 || first === undefined) {
+        throw new Error('no enabled provider connection');
+      }
+      return { ...first };
+    },
+  };
+}
+
 describe('the connection registry', () => {
   it('lists the connections it holds', () => {
     const registry = createProviderRegistry([
@@ -223,6 +309,38 @@ describe('the connection registry', () => {
     const registry = createProviderRegistry([connection({ id: 'first' })]);
     expect(() => registry.add(connection({ id: 'first' }))).toThrow(/already exists/);
     expect(registry.list()).toHaveLength(1);
+  });
+
+  it('rejects a connection whose route is not one of the eight', () => {
+    const registry = createProviderRegistry();
+    expect(() =>
+      registry.add(connection({ id: 'bogus', route: 'constructor' as unknown as ProviderRoute })),
+    ).toThrow(/unknown provider route/);
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  it('accepts every route the implementation declares', () => {
+    // The registry's notion of a route must be the implementation's: a route
+    // added to (or renamed in) `src/provider/routes.ts` is accepted here too.
+    const registry = createProviderRegistry();
+    for (const route of ROUTE_NAMES) {
+      expect(() => registry.add(connection({ id: route, route }))).not.toThrow();
+    }
+    expect(registry.list().map((conn) => conn.route)).toEqual([...ROUTE_NAMES]);
+  });
+
+  it('validates the route through the shared predicate, not a second list of names', async () => {
+    // The registry must not keep its own copy of the eight route names: a route
+    // renamed in `src/provider/routes.ts` would then be silently rejected here.
+    const source = await readFile(new URL('../../src/provider/registry.ts', import.meta.url), 'utf8');
+    expect(source).toContain('isProviderRoute');
+    expect(source).not.toMatch(/anthropicGoogleCloud/);
+  });
+
+  it('rejects a connection whose enabled flag is not a boolean', () => {
+    const registry = createProviderRegistry();
+    expect(() => registry.add(connection({ id: 'bogus', enabled: undefined }))).toThrow(/non-boolean enabled/);
+    expect(registry.list()).toHaveLength(0);
   });
 
   it('removes a known id and reports an unknown one as not removed', () => {
@@ -279,6 +397,18 @@ describe('the connection registry', () => {
     const registry = createProviderRegistry([connection({ id: 'first', enabled: true })]);
     expect(() => useConnection(registry, 'nope')).toThrow(/nope/);
   });
+
+  it('fails loudly when the registry does not apply the switch', () => {
+    // A registry that returns copies of its records is conforming: the plan's
+    // interface does not require `list()` to hand out live records. The switch
+    // must therefore be *verified*, not merely attempted.
+    const registry = copyingRegistry([
+      connection({ id: 'first', enabled: true }),
+      connection({ id: 'second', route: 'bedrock' }),
+    ]);
+    expect(() => useConnection(registry, 'second')).toThrow(/did not report it as the enabled connection/);
+    expect(registry.list().find((conn) => conn.enabled)?.id).toBe('first');
+  });
 });
 
 describe('the endpoint policy', () => {
@@ -298,6 +428,12 @@ describe('the endpoint policy', () => {
     expect(variables.get('vertex')).toEqual(['ANTHROPIC_VERTEX_BASE_URL']);
     expect(variables.get('anthropicGoogleCloud')).toEqual(['ANTHROPIC_GOOGLE_CLOUD_BASE_URL']);
     expect(variables.get('foundry')).toEqual(['ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE']);
+  });
+
+  it('gives every route an https default base URL', () => {
+    for (const route of ROUTE_NAMES) {
+      expect(DEFAULT_BASE_URLS[route].startsWith('https://')).toBe(true);
+    }
   });
 
   it('picks up the Bedrock base URL and refuses to call a foreign host a vendor host', () => {
@@ -324,6 +460,36 @@ describe('the endpoint policy', () => {
     );
   });
 
+  it('resolves the Bedrock base URL through its four variables in the declared order', () => {
+    // The audit declares four Bedrock base-URL variables; this implementation reads them in
+    // that order, so the first one that is set wins.
+    const all = {
+      ANTHROPIC_BEDROCK_BASE_URL: 'https://one.example.com',
+      AWS_ENDPOINT_URL_BEDROCK_RUNTIME: 'https://two.example.com',
+      AWS_ENDPOINT_URL_BEDROCK: 'https://three.example.com',
+      AWS_ENDPOINT_URL: 'https://four.example.com',
+    };
+    expect(resolveBaseUrl('bedrock', all).baseUrl).toBe('https://one.example.com');
+    expect(resolveBaseUrl('bedrock', { ...all, ANTHROPIC_BEDROCK_BASE_URL: undefined }).baseUrl).toBe(
+      'https://two.example.com',
+    );
+    expect(
+      resolveBaseUrl('bedrock', {
+        ...all,
+        ANTHROPIC_BEDROCK_BASE_URL: undefined,
+        AWS_ENDPOINT_URL_BEDROCK_RUNTIME: undefined,
+      }).baseUrl,
+    ).toBe('https://three.example.com');
+    expect(
+      resolveBaseUrl('bedrock', {
+        ...all,
+        ANTHROPIC_BEDROCK_BASE_URL: undefined,
+        AWS_ENDPOINT_URL_BEDROCK_RUNTIME: undefined,
+        AWS_ENDPOINT_URL_BEDROCK: undefined,
+      }).baseUrl,
+    ).toBe('https://four.example.com');
+  });
+
   it('picks up the Vertex base URL', () => {
     const env = { ANTHROPIC_VERTEX_BASE_URL: 'https://us-aiplatform.googleapis.com' };
     const resolved = resolveBaseUrl('vertex', env);
@@ -338,6 +504,27 @@ describe('the endpoint policy', () => {
     expect(resolved.isVendorHost).toBe(true);
   });
 
+  it('prefers the Foundry base URL over the Foundry resource name', () => {
+    // Implementation choice: the target does not state the precedence, so this implementation uses
+    // the declared variable order (the base URL wins).
+    const env = {
+      ANTHROPIC_FOUNDRY_BASE_URL: 'https://from-base-url.services.ai.azure.com',
+      ANTHROPIC_FOUNDRY_RESOURCE: 'from-resource',
+    };
+    expect(resolveBaseUrl('foundry', env).baseUrl).toBe('https://from-base-url.services.ai.azure.com');
+  });
+
+  it('rejects a Foundry resource that is not a bare resource name', () => {
+    // The target rejects a URL in that variable, and this implementation must not turn a
+    // malformed value into a vendor-trusted base URL either.
+    expect(() => resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'https://evil.example.com' })).toThrow(
+      /ANTHROPIC_FOUNDRY_RESOURCE/,
+    );
+    expect(() => resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'not a resource name' })).toThrow(
+      /ANTHROPIC_FOUNDRY_RESOURCE/,
+    );
+  });
+
   it('reports the vendor default host for a route that declares no base-URL variable', () => {
     const resolved = resolveBaseUrl('firstParty', {});
     expect(resolved.baseUrl).toBe('https://api.anthropic.com');
@@ -348,6 +535,12 @@ describe('the endpoint policy', () => {
     const env = { ANTHROPIC_VERTEX_BASE_URL: 'https://us-aiplatform.googleapis.com' };
     const resolved = resolveBaseUrl('vertex', env, 'https://eu-aiplatform.googleapis.com');
     expect(resolved.baseUrl).toBe('https://eu-aiplatform.googleapis.com');
+  });
+
+  it('treats a whitespace-only explicit base URL as absent', () => {
+    const env = { ANTHROPIC_VERTEX_BASE_URL: 'https://us-aiplatform.googleapis.com' };
+    expect(resolveBaseUrl('vertex', env, '   ').baseUrl).toBe('https://us-aiplatform.googleapis.com');
+    expect(resolveBaseUrl('firstParty', {}, '   ').baseUrl).toBe('https://api.anthropic.com');
   });
 
   it('treats a host that matches no vendor pattern as a user-supplied endpoint', () => {
@@ -362,6 +555,16 @@ describe('the endpoint policy', () => {
     expect(resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_BASE_URL: 'https://elsewhere.example.com' }).isVendorHost).toBe(
       false,
     );
+  });
+
+  it('never treats a cleartext base URL as a vendor host', () => {
+    // Implementation security posture: only an `https:` endpoint may be vendor-trusted,
+    // so a credential can never be delivered in cleartext to the vendor's own
+    // host.
+    expect(resolveBaseUrl('firstParty', {}, 'http://api.anthropic.com').isVendorHost).toBe(false);
+    expect(
+      resolveBaseUrl('bedrock', {}, 'http://bedrock-runtime.us-east-1.amazonaws.com').isVendorHost,
+    ).toBe(false);
   });
 });
 
@@ -397,6 +600,14 @@ describe('the untrusted-endpoint guard', () => {
     expect(decision.host).toBe('api.anthropic.com');
   });
 
+  it('treats a whitespace-only base URL on the connection as absent', () => {
+    const conn = connection({ id: 'first-party', name: 'First party', baseUrl: '   ' });
+    const endpoint = resolveConnectionEndpoint(conn, {});
+    expect(endpoint.baseUrl).toBe('https://api.anthropic.com');
+    expect(endpoint.host).toBe('api.anthropic.com');
+    expect(endpoint.isVendorHost).toBe(true);
+  });
+
   it('accepts the canonical first-party host as the vendor host', () => {
     const conn = connection({
       id: 'first-party',
@@ -404,6 +615,18 @@ describe('the untrusted-endpoint guard', () => {
       baseUrl: 'https://api.anthropic.com',
     });
     expect(checkCredentialDelivery(conn, {}).allowed).toBe(true);
+  });
+
+  it('refuses to deliver a credential in cleartext to the canonical host', () => {
+    const conn = connection({
+      id: 'first-party',
+      name: 'First party',
+      baseUrl: 'http://api.anthropic.com',
+    });
+    const decision = checkCredentialDelivery(conn, {});
+    expect(decision.allowed).toBe(false);
+    expect(decision.host).toBe('api.anthropic.com');
+    expect(decision.reason).toContain('api.anthropic.com');
   });
 
   it('delivers a credential to a user-supplied endpoint when the connection opts in', () => {
@@ -426,5 +649,63 @@ describe('the untrusted-endpoint guard', () => {
     const env = { ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock-proxy.example.com' };
     expect(checkCredentialDelivery(conn, env).allowed).toBe(false);
     expect(resolveConnectionEndpoint(conn, env).host).toBe('bedrock-proxy.example.com');
+  });
+
+  it('treats any Google host as a vendor host for the two Google routes', () => {
+    // Documented consequence of the audit's `*.googleapis.com` alternative: the
+    // untrusted-endpoint guard does **not** protect these two routes. The test
+    // pins the current behaviour so a future change to it is deliberate.
+    expect(
+      resolveBaseUrl('vertex', { ANTHROPIC_VERTEX_BASE_URL: 'https://attacker.googleapis.com' }).isVendorHost,
+    ).toBe(true);
+    expect(
+      resolveBaseUrl('anthropicGoogleCloud', {
+        ANTHROPIC_GOOGLE_CLOUD_BASE_URL: 'https://attacker.googleapis.com',
+      }).isVendorHost,
+    ).toBe(true);
+
+    const conn = connection({
+      id: 'vertex',
+      name: 'Vertex',
+      route: 'vertex',
+      baseUrl: 'https://attacker.googleapis.com',
+    });
+    expect(checkCredentialDelivery(conn, {}).allowed).toBe(true);
+  });
+});
+
+describe('the guarded credential resolution', () => {
+  it('resolves the credential of a vendor endpoint', async () => {
+    const conn = connection({
+      id: 'first-party',
+      name: 'First party',
+      credential: { kind: 'env', name: 'PRRICODE_TEST_KEY' },
+    });
+    const resolved = await resolveConnectionCredential(conn, { PRRICODE_TEST_KEY: 'sk-test' });
+    expect(resolved).toEqual({ present: true, value: 'sk-test' });
+  });
+
+  it('refuses to resolve the credential of a user-supplied endpoint, naming the host', async () => {
+    const conn = connection({
+      id: 'proxy',
+      name: 'Proxy',
+      baseUrl: 'https://proxy.internal.example',
+      credential: { kind: 'env', name: 'PRRICODE_TEST_KEY' },
+    });
+    await expect(resolveConnectionCredential(conn, { PRRICODE_TEST_KEY: 'sk-test' })).rejects.toThrow(
+      /proxy\.internal\.example/,
+    );
+  });
+
+  it('refuses to resolve the credential of a cleartext endpoint', async () => {
+    const conn = connection({
+      id: 'first-party',
+      name: 'First party',
+      baseUrl: 'http://api.anthropic.com',
+      credential: { kind: 'env', name: 'PRRICODE_TEST_KEY' },
+    });
+    await expect(resolveConnectionCredential(conn, { PRRICODE_TEST_KEY: 'sk-test' })).rejects.toThrow(
+      /api\.anthropic\.com/,
+    );
   });
 });

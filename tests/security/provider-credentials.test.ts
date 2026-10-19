@@ -1,9 +1,10 @@
 /**
  * Security test for provider credential references.
  *
- * The project's rule is that a credential is a **reference** and never a value:
- * the provider catalog must not select or read secrets, and must not choose a
- * destination for them. This test pins the three consequences:
+ * The **project's** rule (plan §Global Constraints, "Credentials are references
+ * only") is that a credential is a **reference** and never a value: the provider
+ * catalog must not select or read secrets, and must not choose a destination for
+ * them. This test pins the three consequences:
  *
  *   1. `credentialStatus` reports **presence** only and never returns a value;
  *   2. `resolveCredential` is the single resolution point — the only function that
@@ -12,12 +13,20 @@
  *      presence without ever reading the keychain, so a listing can never trigger
  *      an OS prompt.
  *
+ * **Attribution.** The three-kind credential reference (an environment variable
+ * name, a file path, or an OS credential-store key) is a **implementation design**, not
+ * target behavior: the audit records only that each route "resolves credentials
+ * in a distinct order (bearer-token env var → skip-auth → AWS credential chain →
+ * provider-chain resolver)" (audit §2.1). The last test in this file pins that
+ * attribution so the module cannot drift back into claiming the target.
+ *
  * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.1 (providers) and the
  * project's credential rule (plan §Global Constraints).
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -28,6 +37,17 @@ import {
   type KeychainBackend,
 } from '../../src/provider/credentials.js';
 import { createProviderRegistry, type Connection } from '../../src/provider/registry.js';
+
+/**
+ * `node:fs/promises` is mocked so that a **read** of a credential file can be
+ * *observed*. The mock delegates to the real implementation, so the rest of the
+ * module keeps working; what it adds is the ability to assert that
+ * `credentialStatus` never reads a file's contents.
+ */
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
 
 const SECRET = 'sk-test-3f9a2c-do-not-leak-me';
 const ENV_NAME = 'PRRICODE_TEST_SECRET';
@@ -87,9 +107,11 @@ describe('credentialStatus', () => {
   it('never returns the credential value', async () => {
     setEnv(ENV_NAME, SECRET);
     const status = await credentialStatus({ kind: 'env', name: ENV_NAME });
-    expect(typeof status).toBe('string');
+    // The result is a status token, never a value: it is one of the three known
+    // statuses and it does not contain the secret.
+    expect(['configured', 'missing', 'unreadable']).toContain(status);
     expect(status).not.toContain(SECRET);
-    expect(Object.values(status)).not.toContain(SECRET);
+    expect(JSON.stringify(status)).not.toContain(SECRET);
   });
 
   it('reports a file reference as configured, missing or unreadable', async () => {
@@ -114,6 +136,22 @@ describe('credentialStatus', () => {
     }
     chmodSync(locked, 0o600);
   });
+
+  it('never reads the contents of a file reference', async () => {
+    const dir = tempDir();
+    const present = path.join(dir, 'token');
+    writeFileSync(present, `${SECRET}\n`, 'utf8');
+
+    const readFileMock = vi.mocked(readFile);
+    const before = readFileMock.mock.calls.length;
+
+    const status = await credentialStatus({ kind: 'file', path: present, format: 'raw' });
+
+    expect(status).toBe('configured');
+    // A status check uses `stat`/`access` only: the secret is never pulled into
+    // memory, so a listing can never leak it.
+    expect(readFileMock.mock.calls.length).toBe(before);
+  });
 });
 
 describe('resolveCredential', () => {
@@ -128,6 +166,14 @@ describe('resolveCredential', () => {
     const resolved = await resolveCredential({ kind: 'env', name: ENV_NAME });
     expect(resolved.present).toBe(false);
     expect(resolved.value).toBeUndefined();
+  });
+
+  it('trims a trailing newline from an environment value, like a file value', async () => {
+    // A secret pasted with a trailing newline must not travel to the provider
+    // with the newline attached.
+    setEnv(ENV_NAME, `${SECRET}\n`);
+    const resolved = await resolveCredential({ kind: 'env', name: ENV_NAME });
+    expect(resolved).toEqual({ present: true, value: SECRET });
   });
 
   it('resolves a file reference', async () => {
@@ -194,5 +240,15 @@ describe('the registry listing', () => {
     expect(registry.list()).toHaveLength(1);
     expect(registry.active()?.id).toBe('first');
     expect(lookup).not.toHaveBeenCalled();
+  });
+});
+
+describe('the credential module attribution', () => {
+  it('labels the credential-reference abstraction as a reimplementation design, not target behavior', async () => {
+    const source = await readFile(new URL('../../src/provider/credentials.ts', import.meta.url), 'utf8');
+    // The reference abstraction is this implementation's own design: the module must say so.
+    expect(source).toContain('implementation design');
+    // And it must not claim the target has it.
+    expect(source).not.toContain("the target's own rule");
   });
 });
