@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 /// Commands the UI sends to the agent task.
+#[derive(Debug)]
 pub enum UiCommand {
     Submit {
         text: String,
@@ -77,6 +78,11 @@ pub enum UiCommand {
     /// Persist an "always allow in this workspace" policy amendment.
     RecordAmendment {
         amendment: crate::app::PolicyAmendment,
+    },
+    /// `/keybind`: persist the whole chord remap map under
+    /// `tui:keybindings` so rebinds reload at the next launch.
+    SetKeybindings {
+        json: String,
     },
     /// '!' shell mode: run a command in the workspace (spec keybinding).
     ShellRun {
@@ -524,6 +530,11 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         tracing::warn!("amendment persist failed: {e}");
                     }
                 }
+                UiCommand::SetKeybindings { json } => {
+                    if let Err(e) = agent_persistence.set_setting("tui:keybindings", &json) {
+                        tracing::warn!("keybinding persist failed: {e}");
+                    }
+                }
                 UiCommand::PipelineConcept { idea } => {
                     let concept = Concept::from_idea(&idea);
                     let question = Clarifier::new(concept.implementation()).next_question();
@@ -833,6 +844,16 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
     // Theme selection: the config file names a starting theme, and the last
     // `/theme` choice (persisted under the settings key `theme`) wins over
     // it. An unknown name falls back to the default with a log line.
+    // Rebound chords (`/keybind`) reload from `tui:keybindings` the same way.
+    if let Ok(Some(json)) = persistence.get_setting("tui:keybindings") {
+        if let Ok(map) = serde_json::from_str::<Vec<(String, String)>>(&json) {
+            for (chord, target) in map {
+                if let Some(action) = app::parse_chord(&target) {
+                    app.bindings.push((chord, action));
+                }
+            }
+        }
+    }
     if let Some(theme) = &config.theme {
         app.apply_theme_setting(theme);
     }
@@ -845,7 +866,8 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
         loop {
             terminal.draw(|frame| ui::render(frame, &app))?;
             if let Some(event) = ui::next_event(std::time::Duration::from_millis(120))? {
-                app.handle_key(event, &cmd_tx);
+                let action = app.translate(event);
+                app.handle_key(action, &cmd_tx);
             }
             while let Ok(event) = ui_rx.try_recv() {
                 app.apply_ui_event(event, &cmd_tx);

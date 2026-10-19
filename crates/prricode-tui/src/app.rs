@@ -402,6 +402,62 @@ pub enum VimMode {
     Insert,
 }
 
+/// Canonical chord name for a key action (the `/keybind` vocabulary).
+pub(crate) fn chord_key(action: &KeyAction) -> String {
+    match action {
+        KeyAction::Char(c) => c.to_string(),
+        KeyAction::Ctrl(c) => format!("ctrl+{c}"),
+        KeyAction::Alt(c) => format!("alt+{c}"),
+        KeyAction::Enter => "enter".into(),
+        KeyAction::Tab => "tab".into(),
+        KeyAction::Esc => "esc".into(),
+        KeyAction::Backspace => "backspace".into(),
+        KeyAction::Delete => "delete".into(),
+        KeyAction::Left => "left".into(),
+        KeyAction::Right => "right".into(),
+        KeyAction::Up => "up".into(),
+        KeyAction::Down => "down".into(),
+        KeyAction::Home => "home".into(),
+        KeyAction::End => "end".into(),
+        KeyAction::PageUp => "pageup".into(),
+        KeyAction::PageDown => "pagedown".into(),
+    }
+}
+
+/// Parse a chord name back into the action it names (`ctrl+j`, `enter`,
+/// `y`, `esc`, `tab`, arrows, …). Unknown names are `None`.
+pub(crate) fn parse_chord(text: &str) -> Option<KeyAction> {
+    let lower = text.trim().to_lowercase();
+    if let Some(rest) = lower.strip_prefix("ctrl+") {
+        let c = rest.chars().next()?;
+        return rest.chars().count().eq(&1).then_some(KeyAction::Ctrl(c));
+    }
+    if let Some(rest) = lower.strip_prefix("alt+") {
+        let c = rest.chars().next()?;
+        return rest.chars().count().eq(&1).then_some(KeyAction::Alt(c));
+    }
+    match lower.as_str() {
+        "enter" => Some(KeyAction::Enter),
+        "esc" | "escape" => Some(KeyAction::Esc),
+        "tab" => Some(KeyAction::Tab),
+        "backspace" => Some(KeyAction::Backspace),
+        "delete" => Some(KeyAction::Delete),
+        "left" => Some(KeyAction::Left),
+        "right" => Some(KeyAction::Right),
+        "up" => Some(KeyAction::Up),
+        "down" => Some(KeyAction::Down),
+        "home" => Some(KeyAction::Home),
+        "end" => Some(KeyAction::End),
+        "pageup" => Some(KeyAction::PageUp),
+        "pagedown" => Some(KeyAction::PageDown),
+        single if single.chars().count() == 1 => {
+            let c = single.chars().next().expect("len checked above");
+            Some(KeyAction::Char(c))
+        }
+        _ => None,
+    }
+}
+
 /// Terminal key actions, mirroring the documented composer keymap.
 #[derive(Debug, Implementation, PartialEq, Eq)]
 pub enum KeyAction {
@@ -473,6 +529,8 @@ pub struct App {
     pub vim: Option<VimMode>,
     /// Vim NORMAL is waiting for the second `d`/`c` of dd/cc.
     vim_pending: bool,
+    /// `/keybind` remaps (chord → action); empty = documented defaults.
+    pub bindings: Vec<(String, KeyAction)>,
     /// Navigable stored-session list opened by an argument-less `/sessions`.
     pub session_picker: Option<SessionPicker>,
     /// Ctrl+o: expand the last tool result in a modal.
@@ -488,6 +546,7 @@ impl App {
             approval_mode: ApprovalMode::Closed,
             vim: None,
             vim_pending: false,
+            bindings: Vec::new(),
             session_id: uuid::Uuid::now_v7().to_string(),
             messages: vec![TurnMessage {
                 role: Role::System,
@@ -625,6 +684,17 @@ impl App {
 
     fn char_len(&self) -> usize {
         self.input.chars().count()
+    }
+
+    /// Remap an incoming key through `/keybind` chords. Unbound chords
+    /// pass through untouched.
+    pub fn translate(&self, action: KeyAction) -> KeyAction {
+        let chord = chord_key(&action);
+        self.bindings
+            .iter()
+            .find(|(bound, _)| bound == &chord)
+            .map(|(_, target)| target.implementation())
+            .unwrap_or(action)
     }
 
     pub fn handle_key(
@@ -1780,6 +1850,64 @@ impl App {
                         );
                     }
                 }
+                "keybind" => {
+                    let Some(chord) = arg
+                        .split_whitespace()
+                        .next()
+                        .map(|s| s.trim().to_lowercase())
+                        .filter(|s| !s.is_empty())
+                    else {
+                        self.push_system(
+                            "usage: /keybind <chord> <target> (e.g. /keybind enter ctrl+j) \
+                             · /keybind reset"
+                                .to_string(),
+                        );
+                        return;
+                    };
+                    if chord == "reset" {
+                        self.bindings.clear();
+                        self.push_system(
+                            "keybindings: reset to the documented defaults".to_string(),
+                        );
+                        let _ = commands.send(UiCommand::SetKeybindings {
+                            json: "[]".to_string(),
+                        });
+                        return;
+                    }
+                    let target_text = arg
+                        .split_whitespace()
+                        .nth(1)
+                        .map(|s| s.trim().to_lowercase())
+                        .unwrap_or_default();
+                    let Some(target) = parse_chord(&target_text) else {
+                        self.push_system(format!(
+                            "keybind: unknown chord '{target_text}' — chords are single \
+                                     letters, ctrl+<c>, alt+<c>, enter, esc, tab, backspace, \
+                                     delete, arrows, home, end"
+                        ));
+                        return;
+                    };
+                    if chord_key(&target) == chord {
+                        self.push_system(
+                            "keybind: rebinding a chord to itself changes nothing".to_string(),
+                        );
+                        return;
+                    }
+                    self.bindings.retain(|(bound, _)| bound != &chord);
+                    self.bindings.push((chord.implementation(), target.implementation()));
+                    self.push_system(format!(
+                        "keybind: {chord} now acts as {target_text} (durable until /keybind reset)"
+                    ));
+                    // Persist the whole map so rebinds survive restarts.
+                    let map: Vec<(String, String)> = self
+                        .bindings
+                        .iter()
+                        .map(|(c, a)| (c.implementation(), chord_key(a)))
+                        .collect();
+                    let _ = commands.send(UiCommand::SetKeybindings {
+                        json: serde_json::to_string(&map).unwrap_or_default(),
+                    });
+                }
                 "voice" => {
                     self.push_system(
                         "voice: not implemented in this build (unsupported)".to_string(),
@@ -2429,6 +2557,83 @@ mod tests {
         app.handle_key(KeyAction::Esc, &tx);
         app.handle_key(KeyAction::Backspace, &tx);
         assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn chord_roundtrip_and_parse() {
+        assert_eq!(chord_key(&KeyAction::Ctrl('j')), "ctrl+j");
+        assert_eq!(chord_key(&KeyAction::Alt('v')), "alt+v");
+        assert_eq!(chord_key(&KeyAction::Enter), "enter");
+        assert_eq!(chord_key(&KeyAction::Char('y')), "y");
+        assert_eq!(chord_key(&KeyAction::Down), "down");
+        for (text, want) in [
+            ("ctrl+j", KeyAction::Ctrl('j')),
+            ("ALT+x", KeyAction::Alt('x')),
+            ("enter", KeyAction::Enter),
+            ("esc", KeyAction::Esc),
+            ("y", KeyAction::Char('y')),
+            ("tab", KeyAction::Tab),
+        ] {
+            assert_eq!(parse_chord(text), Some(want), "parse {text}");
+        }
+        assert_eq!(parse_chord("ctrl+plus"), None);
+        assert_eq!(parse_chord(""), None);
+    }
+
+    #[test]
+    fn translate_remaps_bound_chords_only() {
+        let mut app = new_app();
+        app.bindings
+            .push(("enter".to_string(), KeyAction::Ctrl('j')));
+        assert_eq!(app.translate(KeyAction::Enter), KeyAction::Ctrl('j'));
+        assert_eq!(app.translate(KeyAction::Ctrl('j')), KeyAction::Ctrl('j'));
+        // Unbound chords pass through untouched.
+        assert_eq!(app.translate(KeyAction::Esc), KeyAction::Esc);
+    }
+
+    #[test]
+    fn keybind_command_sets_a_binding_and_persists_it() {
+        use super::super::UiCommand;
+        let mut app = new_app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.submit("/keybind enter ctrl+j", &tx);
+        assert!(app
+            .bindings
+            .iter()
+            .any(|(chord, action)| chord == "enter" && *action == KeyAction::Ctrl('j')));
+        let command = rx.try_recv().expect("persistence command was sent");
+        match command {
+            UiCommand::SetKeybindings { json } => {
+                assert!(
+                    json.contains("\"enter\"") && json.contains("ctrl+j"),
+                    "{json}"
+                );
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Reset clears the map and still persists (now-empty) state.
+        app.submit("/keybind reset", &tx);
+        assert!(app.bindings.is_empty());
+        let _ = rx.try_recv();
+        // A self-mapping is refused with an honest note.
+        app.submit("/keybind enter enter", &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("rebinding a chord to itself")));
+        // Unknown target names degrade honestly, no binding recorded.
+        app.submit("/keybind enter plusminus", &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("unknown chord")));
+        assert!(app.bindings.is_empty());
+        // Missing args show usage.
+        app.submit("/keybind", &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("/keybind <chord> <target>")));
     }
 
     #[test]

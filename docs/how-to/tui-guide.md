@@ -116,6 +116,7 @@ Type `/` and the command, then `Return`.
 | `/stats` | Workspace totals from the local database: sessions, items, usage records, tokens in/out, cost |
 | `/insights` | Usage by day (`YYYY-MM-DD: <in> in / <out> out ($cost)`); honest zero state when nothing is recorded |
 | `/vim` | Modal composer editing. NORMAL: motions `h l 0 $ w b e`, `x` delete char, `D` delete to line end, `dd` delete line, `cc` change line, `i a I A o O` enter INSERT. INSERT: standard composer keys, Esc returns to NORMAL. Enter still submits; `u`/ex commands degrade honestly (`u` has no undo ring by design of the current composer state) |
+| `/keybind <chord> <target>` | Rebind a composer chord to another chord's action (e.g. `/keybind enter ctrl+j` makes Enter insert a newline). Chords: single letters, `ctrl+<c>`, `alt+<c>`, `enter`, `esc`, `tab`, `backspace`, `delete`, `left`/`right`/`up`/`down`, `home`, `end`. `/keybind reset` restores the documented defaults; the map is durable across launches (`tui:keybindings` setting). Self-mappings and unknown chord names are refused with a note |
 
 ## Approvals — three durability tiers
 
