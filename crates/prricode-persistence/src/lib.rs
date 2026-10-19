@@ -324,6 +324,46 @@ impl Persistence {
         Ok(row)
     }
 
+    /// Workspace-wide aggregates over all sessions: counts, token totals,
+    /// cost, and per-day usage buckets for trends.
+    pub fn workspace_stats(&self) -> Result<WorkspaceStats> {
+        let conn = self.conn()?;
+        let one =
+            |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?) };
+        let sessions = one("SELECT COUNT(*) FROM sessions")?;
+        let items = one("SELECT COUNT(*) FROM items")?;
+        let usage_records = one("SELECT COUNT(*) FROM usage_records")?;
+        let (input_tokens, output_tokens, cost) = conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), CAST(COALESCE(SUM(cost),0) AS REAL) FROM usage_records",
+            [],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, f64>(2)?)),
+        )?;
+        let mut by_stmt = conn.prepare(
+            "SELECT substr(recorded_at,1,10) AS day, \
+                    SUM(input_tokens), SUM(output_tokens), SUM(cost) \
+             FROM usage_records GROUP BY day ORDER BY day",
+        )?;
+        let by_day = by_stmt
+            .query_map([], |r| {
+                Ok(UsageDay {
+                    day: r.get::<_, String>(0)?,
+                    input_tokens: r.get::<_, i64>(1)? as u64,
+                    output_tokens: r.get::<_, i64>(2)? as u64,
+                    cost: r.get::<_, f64>(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(WorkspaceStats {
+            sessions: sessions as u64,
+            items: items as u64,
+            usage_records: usage_records as u64,
+            input_tokens,
+            output_tokens,
+            cost,
+            by_day,
+        })
+    }
+
     // ---- settings ----
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -397,6 +437,26 @@ impl Persistence {
 }
 
 #[derive(Debug, Implementation, Serialize, Deserialize)]
+pub struct WorkspaceStats {
+    pub sessions: u64,
+    pub items: u64,
+    pub usage_records: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: f64,
+    /// Per-day (UTC, `YYYY-MM-DD`) usage buckets, ascending by day.
+    pub by_day: Vec<UsageDay>,
+}
+
+#[derive(Debug, Implementation, Serialize, Deserialize)]
+pub struct UsageDay {
+    pub day: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: f64,
+}
+
+#[derive(Debug, Implementation, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: String,
     pub workspace_root: Option<String>,
@@ -445,6 +505,55 @@ pub struct GateRecordRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_stats_aggregates_across_sessions() {
+        let temp_path =
+            std::env::temp_dir().join(format!("prricode-stats-{}", uuid::Uuid::now_v7()));
+        let p = Persistence::new(&temp_path).unwrap();
+        p.save_session(&SessionRecord {
+            id: "s1".into(),
+            workspace_root: Some("/w".into()),
+            model_id: Some("m".into()),
+            provider_id: None,
+            approval_mode: None,
+        })
+        .unwrap();
+        p.save_session(&SessionRecord {
+            id: "s2".into(),
+            workspace_root: Some("/w".into()),
+            model_id: Some("m".into()),
+            provider_id: None,
+            approval_mode: None,
+        })
+        .unwrap();
+        p.save_usage("s1", 100, 50, 0.25).unwrap();
+        p.save_usage("s1", 10, 5, 0.0).unwrap();
+        p.save_usage("s2", 1, 1, 0.0).unwrap();
+        for (id, role) in [("a-1", "user"), ("a-2", "assistant"), ("a-3", "user")] {
+            p.save_item(&ItemRecord {
+                id: id.to_string(),
+                session_id: "s1".into(),
+                kind: "message".into(),
+                role: Some(role.to_string()),
+                content: "hi".into(),
+                created_at: String::new(),
+            })
+            .unwrap();
+        }
+        let stats = p.workspace_stats().unwrap();
+        assert_eq!(stats.sessions, 2);
+        assert_eq!(stats.items, 3);
+        assert_eq!(stats.usage_records, 3);
+        assert_eq!(stats.input_tokens, 111);
+        assert_eq!(stats.output_tokens, 56);
+        assert!((stats.cost - 0.25).abs() < 1e-9);
+        // At least one day bucket carries the day's usage.
+        assert!(!stats.by_day.is_empty());
+        let day_total: u64 = stats.by_day.iter().map(|d| d.input_tokens).sum();
+        assert_eq!(day_total, 111);
+        std::fs::remove_dir_all(&temp_path).ok();
+    }
 
     #[test]
     fn test_persistence_lifecycle_and_indices() {

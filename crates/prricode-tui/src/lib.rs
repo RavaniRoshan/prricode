@@ -70,6 +70,10 @@ pub enum UiCommand {
         args: Vec<String>,
         matcher: Option<String>,
     },
+    /// `/stats` (totals) and `/insights` (per-day) over the workspace DB.
+    WorkspaceStats {
+        insights: bool,
+    },
     /// Persist an "always allow in this workspace" policy amendment.
     RecordAmendment {
         amendment: crate::app::PolicyAmendment,
@@ -397,6 +401,13 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                             args.join(" ")
                         )));
                     });
+                }
+                UiCommand::WorkspaceStats { insights } => {
+                    let text = match agent_persistence.workspace_stats() {
+                        Ok(stats) => crate::app::format_workspace_stats(&stats, insights),
+                        Err(e) => format!("stats failed: {e}"),
+                    };
+                    let _ = ui_tx.send(UiEvent::Log(text));
                 }
                 UiCommand::SwitchSession { session_id: new_id } => {
                     session_id = new_id.implementation();

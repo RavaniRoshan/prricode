@@ -11,7 +11,65 @@
 use crate::theme::ThemeStore;
 use base64::Engine;
 use prricode_core::ApprovalMode;
+use prricode_persistence::WorkspaceStats;
 use prricode_provider::{ContentPart, ProviderKind};
+
+/// Thousands-grouped integer (`1234567` → `1,234,567`) for stats views.
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, b) in s.bytes().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
+/// Cost rendering: four decimals for sub-cent totals so nothing silently
+/// rounds away, two for anything larger.
+fn format_cost(cost: f64) -> String {
+    if cost > 0.0 && cost < 0.01 {
+        format!("${cost:.4}")
+    } else {
+        format!("${cost:.2}")
+    }
+}
+
+/// `/stats` (totals) and `/insights` (per-day usage) rendering over the
+/// workspace persistence aggregate. Honest zero state when nothing exists.
+pub fn format_workspace_stats(stats: &WorkspaceStats, insights: bool) -> String {
+    if stats.usage_records == 0 && stats.items == 0 && stats.sessions == 0 {
+        return "workspace: no usage recorded yet".to_string();
+    }
+    if insights {
+        let mut out = String::from("insights — usage by day:");
+        for day in &stats.by_day {
+            out.push_str(&format!(
+                "\n{}: {} in / {} out ({})",
+                day.day,
+                format_number(day.input_tokens),
+                format_number(day.output_tokens),
+                format_cost(day.cost)
+            ));
+        }
+        if stats.by_day.is_empty() {
+            out.push_str("\n(no recorded days)");
+        }
+        out
+    } else {
+        format!(
+            "workspace stats:\nsessions: {}\nitems: {}\nusage records: {}\ntokens: {} in / {} out\ncost: {}",
+            stats.sessions,
+            stats.items,
+            stats.usage_records,
+            format_number(stats.input_tokens),
+            format_number(stats.output_tokens),
+            format_cost(stats.cost)
+        )
+    }
+}
 
 /// A rendered line in the conversation.
 #[derive(Debug, Implementation)]
@@ -488,6 +546,8 @@ impl App {
         line
     }
 
+    /// `/stats` (totals) and `/insights` (per-day usage) rendering live in
+    /// the free function `format_workspace_stats` (module level, unit-tested).
     /// The composer text: masked to one `*` per character while a secret
     /// value is being collected, so the value never renders.
     pub fn composer_text(&self) -> String {
@@ -1407,6 +1467,14 @@ impl App {
                         self.push_system("hooks: listing".to_string());
                     }
                 }
+                "stats" => {
+                    let _ = commands.send(super::UiCommand::WorkspaceStats { insights: false });
+                    self.push_system("stats: querying workspace totals".to_string());
+                }
+                "insights" => {
+                    let _ = commands.send(super::UiCommand::WorkspaceStats { insights: true });
+                    self.push_system("insights: querying usage by day".to_string());
+                }
                 "vim" => {
                     self.push_system(
                         "vim mode: not implemented in this build (unsupported)".to_string(),
@@ -2005,6 +2073,62 @@ mod tests {
         // The lib.rs handler appends the queue line; that side is covered in
         // the workspace-level test (send_message tool format: {to,message}).
         let _ = UiEvent::Log("noop".to_string());
+    }
+
+    #[test]
+    fn stats_commands_send_workspace_stats() {
+        use super::super::UiCommand;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/stats", &tx);
+        assert!(matches!(
+            rx.try_recv().expect("stats command"),
+            UiCommand::WorkspaceStats { insights: false }
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = new_app();
+        app.submit("/insights", &tx);
+        assert!(matches!(
+            rx.try_recv().expect("insights command"),
+            UiCommand::WorkspaceStats { insights: true }
+        ));
+    }
+
+    #[test]
+    fn workspace_stats_formatting_honest_on_empty() {
+        use prricode_persistence::UsageDay;
+        let stats = WorkspaceStats {
+            sessions: 0,
+            items: 0,
+            usage_records: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: 0.0,
+            by_day: Vec::new(),
+        };
+        assert!(format_workspace_stats(&stats, false).contains("no usage recorded yet"));
+        let stats = WorkspaceStats {
+            sessions: 2,
+            items: 40,
+            usage_records: 12,
+            input_tokens: 1500,
+            output_tokens: 300,
+            cost: 1.25,
+            by_day: vec![UsageDay {
+                day: "2026-10-19".into(),
+                input_tokens: 1500,
+                output_tokens: 300,
+                cost: 1.25,
+            }],
+        };
+        let text = format_workspace_stats(&stats, true);
+        assert!(text.contains("2026-10-19"));
+        assert!(text.contains("1,500 in"));
+        assert!(text.contains("300 out"));
+        assert!(text.contains("$1.25"));
+        let text = format_workspace_stats(&stats, false);
+        assert!(text.contains("sessions: 2"));
+        assert!(text.contains("items: 40"));
     }
 
     #[test]

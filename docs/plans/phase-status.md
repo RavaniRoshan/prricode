@@ -60,7 +60,7 @@ full workspace tests green, one commit per phase item.
 | 18 | HTTP bridge `POST /jsonrpc` | done | `serve --http`, 411/413/501 integrity, 2 tests |
 | 18 | remote-control/attach | degraded | CLI honest stubs (gateway service not planned) |
 | 19 | Usage persistence (`/usage`, `/cost`) | done | usage table + TUI usage events + status tokens |
-| 19 | /stats /insights | pending | … |
+| 19 | /stats /insights | done | `Persistence::workspace_stats()` aggregate (incl. per-day buckets) + `/stats` `/insights` TUI commands; 4 tests across persistence + TUI |
 | 20 | CI gates (fmt/clippy/tests) | done | GitHub Actions green per release job |
 | 20 | Docs Diátaxis updated per slice | ongoing | per-slice doc edits along the way |
 | 20 | Release binaries (5 targets) | done | release.yml + SHA256SUMS |
