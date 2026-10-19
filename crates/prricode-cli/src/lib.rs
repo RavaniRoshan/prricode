@@ -59,6 +59,9 @@ pub enum ProviderArg {
     Openrouter,
     Kilo,
     Openai,
+    Vllm,
+    Llamacpp,
+    Lmstudio,
     Custom,
 }
 
@@ -281,6 +284,9 @@ impl ProviderArg {
             Self::Openrouter => ProviderId::OpenRouter,
             Self::Kilo => ProviderId::Kilo,
             Self::Openai => ProviderId::OpenAI,
+            Self::Vllm => ProviderId::Vllm,
+            Self::Llamacpp => ProviderId::Llamacpp,
+            Self::Lmstudio => ProviderId::Lmstudio,
             Self::Custom => ProviderId::Custom,
         }
     }

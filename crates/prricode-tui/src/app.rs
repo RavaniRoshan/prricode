@@ -144,6 +144,25 @@ impl SessionPicker {
     }
 }
 
+#[derive(Debug, Implementation)]
+pub struct ConnectionPickerItem {
+    pub name: String,
+    pub kind: String,
+    pub model: String,
+    pub status: String,
+}
+
+pub struct ConnectionPicker {
+    pub items: Vec<ConnectionPickerItem>,
+    pub index: usize,
+}
+
+impl ConnectionPicker {
+    pub fn selected(&self) -> Option<&ConnectionPickerItem> {
+        self.items.get(self.index)
+    }
+}
+
 /// Risk classes from the spec's approval footers; they relabel the modal.
 #[derive(Debug, Implementation, Copy, PartialEq, Eq)]
 pub enum RiskClass {
@@ -533,6 +552,7 @@ pub struct App {
     pub bindings: Vec<(String, KeyAction)>,
     /// Navigable stored-session list opened by an argument-less `/sessions`.
     pub session_picker: Option<SessionPicker>,
+    pub connection_picker: Option<ConnectionPicker>,
     /// Ctrl+o: expand the last tool result in a modal.
     expand_last_tool: bool,
     interview_active: bool,
@@ -583,6 +603,7 @@ impl App {
             workspace_amendments: Vec::new(),
             file_picker: None,
             session_picker: None,
+            connection_picker: None,
             expand_last_tool: false,
             interview_active: false,
         }
@@ -912,6 +933,32 @@ impl App {
         // The session picker owns the keyboard while open (same modal shape
         // as the file picker): navigate with arrows or j/k, resume with
         // Enter, close with Esc or q.
+        if self.connection_picker.is_some() {
+            let picker_index = self.connection_picker.as_ref().unwrap().index;
+            let items_len = self.connection_picker.as_ref().unwrap().items.len();
+            match action {
+                KeyAction::Esc | KeyAction::Char('q') => self.connection_picker = None,
+                KeyAction::Up | KeyAction::Char('k') => {
+                    self.connection_picker.as_mut().unwrap().index = picker_index.saturating_sub(1);
+                }
+                KeyAction::Down | KeyAction::Char('j') => {
+                    self.connection_picker.as_mut().unwrap().index =
+                        (picker_index + 1).min(items_len.saturating_sub(1));
+                }
+                KeyAction::Enter => {
+                    if let Some(item) = self.connection_picker.as_ref().unwrap().selected().reimplemented() {
+                        self.connection_picker = None;
+                        self.push_system(format!(
+                            "connection '{}' selected — restart prricode with --connection {} for full effect",
+                            item.name, item.name
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.session_picker.is_some() {
             let picker_index = self.session_picker.as_ref().unwrap().index;
             let items_len = self.session_picker.as_ref().unwrap().items.len();
@@ -1932,18 +1979,23 @@ impl App {
                                 .to_string(),
                         );
                     } else {
-                        let mut lines = vec!["connections:".to_string()];
+                        let mut items = Vec::new();
                         for (name, conn) in &config.connections {
-                            let kind = conn.kind.as_deref().unwrap_or("?");
-                            let model = conn.model.as_deref().unwrap_or("-");
-                            let status = if prricode_provider::parse_kind_id(kind).is_some() {
-                                "resolvable"
+                            let kind = conn.kind.as_deref().unwrap_or("?").to_string();
+                            let model = conn.model.as_deref().unwrap_or("-").to_string();
+                            let status = if prricode_provider::parse_kind_id(&kind).is_some() {
+                                "resolvable".to_string()
                             } else {
-                                "error: unknown kind"
+                                "error: unknown kind".to_string()
                             };
-                            lines.push(format!("  {name} — kind={kind} model={model} ({status})"));
+                            items.push(ConnectionPickerItem {
+                                name: name.implementation(),
+                                kind,
+                                model,
+                                status,
+                            });
                         }
-                        self.push_system(lines.join("\n"));
+                        self.connection_picker = Some(ConnectionPicker { items, index: 0 });
                     }
                 }
                 "voice" => {

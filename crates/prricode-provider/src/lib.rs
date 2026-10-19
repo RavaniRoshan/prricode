@@ -62,6 +62,9 @@ pub enum ProviderKind {
     OpenRouter,
     Kilo,
     OpenAI,
+    Vllm,
+    LlamaCpp,
+    LmStudio,
     Custom,
 }
 
@@ -74,6 +77,9 @@ impl ProviderKind {
             "openrouter" => Self::OpenRouter,
             "kilo" => Self::Kilo,
             "openai" => Self::OpenAI,
+            "vllm" => Self::Vllm,
+            "llama-cpp" | "llamacpp" | "llama.cpp" => Self::LlamaCpp,
+            "lm-studio" | "lmstudio" | "lm studio" => Self::LmStudio,
             _ => Self::Custom,
         }
     }
@@ -86,6 +92,9 @@ impl ProviderKind {
             Self::OpenRouter => "openrouter",
             Self::Kilo => "kilo",
             Self::OpenAI => "openai",
+            Self::Vllm => "vllm",
+            Self::LlamaCpp => "llama-cpp",
+            Self::LmStudio => "lm-studio",
             Self::Custom => "custom",
         }
     }
@@ -98,6 +107,9 @@ impl ProviderKind {
             Self::OpenRouter => "OpenRouter",
             Self::Kilo => "Kilo AI Gateway",
             Self::OpenAI => "OpenAI",
+            Self::Vllm => "vLLM (local)",
+            Self::LlamaCpp => "llama.cpp (local)",
+            Self::LmStudio => "LM Studio (local)",
             Self::Custom => "Custom endpoint",
         }
     }
@@ -389,6 +401,9 @@ pub fn create_provider(config: ProviderConfig) -> Box<dyn ModelProvider> {
         | ProviderKind::Kilo
         | ProviderKind::OpenAI
         | ProviderKind::OllamaCloud
+        | ProviderKind::Vllm
+        | ProviderKind::LlamaCpp
+        | ProviderKind::LmStudio
         | ProviderKind::Custom => Box::new(OpenAiCompatProvider::new(config)),
     }
 }

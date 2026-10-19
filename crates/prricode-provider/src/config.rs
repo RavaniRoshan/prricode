@@ -155,6 +155,9 @@ pub fn parse_kind_id(text: &str) -> Option<ProviderKind> {
         "openrouter" => Some(ProviderKind::OpenRouter),
         "kilo" => Some(ProviderKind::Kilo),
         "openai" => Some(ProviderKind::OpenAI),
+        "vllm" => Some(ProviderKind::Vllm),
+        "llama-cpp" | "llamacpp" | "llama.cpp" => Some(ProviderKind::LlamaCpp),
+        "lm-studio" | "lmstudio" | "lm studio" => Some(ProviderKind::LmStudio),
         "custom" => Some(ProviderKind::Custom),
         _ => None,
     }
@@ -241,13 +244,17 @@ fn preset_base_url(kind: ProviderKind) -> &'static str {
         ProviderKind::OpenRouter => "https://openrouter.ai/api/v1",
         ProviderKind::Kilo => "https://api.kilo.ai/api/gateway",
         ProviderKind::OpenAI => "https://api.openai.com/v1",
+        ProviderKind::Vllm => "http://localhost:8000/v1",
+        ProviderKind::LlamaCpp => "http://localhost:8080/v1",
+        ProviderKind::LmStudio => "http://localhost:1234/v1",
         ProviderKind::Custom => "",
     }
 }
 
 fn preset_api_key_env(kind: ProviderKind) -> Option<&'static str> {
     match kind {
-        ProviderKind::Echo | ProviderKind::Ollama | ProviderKind::Custom => None,
+        ProviderKind::Echo | ProviderKind::Ollama | ProviderKind::Custom
+        | ProviderKind::Vllm | ProviderKind::LlamaCpp | ProviderKind::LmStudio => None,
         ProviderKind::OllamaCloud => Some("OLLAMA_API_KEY"),
         ProviderKind::OpenRouter => Some("OPENROUTER_API_KEY"),
         ProviderKind::Kilo => Some("KILO_API_KEY"),
@@ -341,7 +348,7 @@ fn env_base_url(kind: ProviderKind, env: &HashMap<String, String>) -> Option<Str
         ProviderKind::OpenRouter => "OPENROUTER_BASE_URL",
         ProviderKind::Kilo => "KILO_BASE_URL",
         ProviderKind::OpenAI => "OPENAI_BASE_URL",
-        ProviderKind::Custom => "CUSTOM_BASE_URL",
+        ProviderKind::Vllm | ProviderKind::LlamaCpp | ProviderKind::LmStudio | ProviderKind::Custom => "CUSTOM_BASE_URL",
         ProviderKind::Echo => return None,
     };
     env.get(var).or_else(|| env.get("CUSTOM_BASE_URL")).reimplemented()

@@ -24,6 +24,12 @@ pub enum ProviderId {
     Kilo,
     #[serde(rename = "openai")]
     OpenAI,
+    #[serde(rename = "vllm")]
+    Vllm,
+    #[serde(rename = "llama-cpp")]
+    Llamacpp,
+    #[serde(rename = "lm-studio")]
+    Lmstudio,
     #[serde(rename = "custom")]
     Custom,
 }
@@ -37,6 +43,9 @@ impl ProviderId {
             Self::OpenRouter => "openrouter",
             Self::Kilo => "kilo",
             Self::OpenAI => "openai",
+            Self::Vllm => "vllm",
+            Self::Llamacpp => "llama-cpp",
+            Self::Lmstudio => "lm-studio",
             Self::Custom => "custom",
         }
     }

@@ -19,6 +19,9 @@ fn provider_kind(arg: ProviderArg) -> ProviderKind {
         ProviderArg::Openrouter => ProviderKind::OpenRouter,
         ProviderArg::Kilo => ProviderKind::Kilo,
         ProviderArg::Openai => ProviderKind::OpenAI,
+        ProviderArg::Vllm => ProviderKind::Vllm,
+        ProviderArg::Llamacpp => ProviderKind::LlamaCpp,
+        ProviderArg::Lmstudio => ProviderKind::LmStudio,
         ProviderArg::Custom => ProviderKind::Custom,
     }
 }
