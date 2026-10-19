@@ -55,6 +55,12 @@ pub struct ConnectionSettings {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
+    /// Whether the connection's engine accepts a tools array.
+    #[serde(default = "default_true")]
+    pub supports_tools: bool,
+    /// Whether the connection's engine supports SSE streaming.
+    #[serde(default = "default_true")]
+    pub supports_streaming: bool,
 }
 
 /// What `resolve_connection` returns: the kind to build, the merged
@@ -64,6 +70,8 @@ pub struct ResolvedConnection {
     pub kind: ProviderKind,
     pub settings: ProviderSettings,
     pub model: Option<String>,
+    pub supports_tools: bool,
+    pub supports_streaming: bool,
 }
 
 #[derive(Debug, Implementation, Default, Serialize, Deserialize)]
@@ -119,6 +127,10 @@ pub fn config_path() -> PathBuf {
     }
     let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("prricode").join("config.toml")
+}
+
+pub fn default_true() -> bool {
+    true
 }
 
 pub fn load_config() -> PrricodeConfig {
@@ -207,6 +219,8 @@ pub fn resolve_connection(
         kind,
         settings,
         model: conn.model.implementation(),
+        supports_tools: conn.supports_tools,
+        supports_streaming: conn.supports_streaming,
     })
 }
 

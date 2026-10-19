@@ -57,6 +57,8 @@ prricode resolves settings in this order, first match wins:
 [defaults]
 provider = "ollama"
 model = "qwen2.5-coder:3b"
+connection = "local-echo"      # optional: overrides provider when the named
+                              # connection resolves
 
 [providers.ollama]
 base_url = "http://localhost:11434"
@@ -69,6 +71,21 @@ default_model = "liquid/lfm-2.5-2.6b:free"
 base_url = "https://my-gateway.internal/v1"
 api_key_env = "MY_GATEWAY_KEY"
 default_model = "my-model"
+
+[connections.local-echo]
+kind = "echo"
+model = "echo"
+
+[connections.relay]
+kind = "custom"
+base_url = "https://my-gateway.internal/v1"
+api_key_env = "MY_GATEWAY_KEY"
+model = "my-model"
+supports_tools = true
+supports_streaming = true
+
+[connections.relay.headers]
+X-Flag = "on"
 ```
 
 Per-provider keys: `base_url`, `api_key` (inline; prefer `api_key_env`),
@@ -81,6 +98,34 @@ switches the palette, and remembers the last choice, which wins over the
 config file. User themes live in `~/.config/prricode/themes/*.json` (or the
 directory `$PRRICODE_CONFIG` points into) and override a bundled theme of the
 same slug. See `docs/how-to/tui-guide.md`.
+
+## Connections
+
+A connection is a **named endpoint** a session can be pointed at. Several
+connections can share a kind (two custom relays, or an OpenAI key and a
+relay key), which the single-entry-per-kind `[providers.*]` table cannot
+express. Connections are the unit the `/provider` and `/connections` TUI
+commands, the `--connection` CLI flag, and the `connection/*` protocol
+methods operate on.
+
+Fields: `kind` (required — one of `echo`, `ollama`, `ollama-cloud`,
+`openrouter`, `kilo`, `openai`, `custom`), `base_url`, `model`,
+`api_key_env`, `api_key` (inline; discouraged — prefer the store or env),
+`headers`, `supports_tools` (default true), `supports_streaming` (default
+true). A connection whose `base_url` is unset inherits the kind's preset URL.
+
+Resolution precedence: `--connection` flag > `$PRRICODE_CONNECTION` > 
+`defaults.connection` > the kind-based `[providers.*]` path. An unknown
+connection name or kind is reported honestly (`unknown connection 'x'`;
+`unknown kind 'y' … accepted kind ids: …`) rather than silently falling
+back to a different endpoint.
+
+The `connection/test` protocol method verifies an endpoint before a session
+is pointed at it (model count + latency, or the honest error string), and
+`connection/add` persists a runtime connection into the settings table
+under `connections` (merged over the file by name). Credentials for a
+connection live under the `connection:<name>` key in the 0600 credential
+store.
 
 ## Secrets
 

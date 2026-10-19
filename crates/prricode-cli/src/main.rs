@@ -59,7 +59,12 @@ fn build_provider(cli: &Cli) -> Box<dyn ModelProvider> {
             Ok(resolved) => {
                 let provider_config =
                     resolve_settings(resolved.kind, Some(&resolved.settings), &overrides, &env);
-                return create_provider(provider_config);
+                let inner = create_provider(provider_config);
+                return Box::new(prricode_provider::CapabilityGatedProvider::new(
+                    inner,
+                    resolved.supports_tools,
+                    resolved.supports_streaming,
+                ));
             }
             Err(e) => {
                 eprintln!("{e}");

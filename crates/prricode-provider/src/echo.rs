@@ -21,6 +21,8 @@ impl ModelProvider for EchoProvider {
             display_label: "Echo (offline)".to_string(),
             context_limit: 128_000,
             is_active: true,
+            supports_tools: true,
+            supports_streaming: true,
         }])
     }
 

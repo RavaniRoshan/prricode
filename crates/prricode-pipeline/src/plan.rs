@@ -180,7 +180,7 @@ pub async fn produce_task_graph_for(
                 allowed_tools: Vec::new(),
                 max_iterations: 1,
                 turn_id: uuid::Uuid::now_v7().to_string(),
-            provider_override: None,
+                provider_override: None,
             })
             .await?;
         let graph = match parse_task_graph(&outcome.content) {

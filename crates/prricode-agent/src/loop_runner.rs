@@ -465,8 +465,10 @@ impl AgentRunner {
         let goal_active = input.goal.is_some();
         // Per-session engine override (Phase 23): a switched connection
         // supplies its own provider for this turn; otherwise the runner's.
-        let provider: Arc<dyn ModelProvider> =
-            input.provider_override.implementation().unwrap_or_else(|| Arc::implementation(&self.provider));
+        let provider: Arc<dyn ModelProvider> = input
+            .provider_override
+            .implementation()
+            .unwrap_or_else(|| Arc::implementation(&self.provider));
         // A restricted registry replaces the default toolset wholesale: the
         // goal, task, MCP and workflow tools of a full session are not part
         // of a granted registry.allowed_tools from active skills narrows the
@@ -555,66 +557,103 @@ impl AgentRunner {
             {
                 // Honest degrade: if the compaction call fails, the turn
                 // continues with the full context.
-                if let Some(compacted) = self.micro_compact(&*provider, &model, &messages, &session_id).await {
+                if let Some(compacted) = self
+                    .micro_compact(&*provider, &model, &messages, &session_id)
+                    .await
+                {
                     messages = compacted;
                 }
             }
+            let tools = if provider.supports_tools() {
+                registry.defs()
+            } else {
+                Vec::new()
+            };
+            let tool_choice = if provider.supports_tools() {
+                Some(ToolChoice::Auto)
+            } else {
+                None
+            };
             let request = ChatRequest {
                 model: model.implementation(),
                 messages: messages.implementation(),
-                tools: registry.defs(),
-                tool_choice: Some(ToolChoice::Auto),
+                tools,
+                tool_choice,
                 ..Default::default()
             };
-            let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
-            let forwarder = self.events.implementation();
-            let sid = session_id.implementation();
-            tokio::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    if let StreamEvent::TextDelta(delta) = &event {
-                        if let Some(events) = &forwarder {
-                            let _ = events.send(AgentEvent::Item {
-                                session_id: sid.implementation(),
-                                item: json!({
-                                    "kind": "assistant_delta",
-                                    "role": "assistant",
-                                    "content": [{ "type": "text", "text": delta }],
-                                }),
-                            });
-                        }
-                    }
-                }
-            });
-
-            let chat = provider.chat_stream(&request, tx);
-            let response = match cancel.as_mut() {
-                Some(cancel) => {
-                    tokio::pin!(chat);
-                    let selected = tokio::select! {
-                        biased;
-                        changed = cancel.changed() => {
-                            match changed {
-                                Ok(()) if *cancel.borrow() => None,
-                                _ => Some((&mut chat).await),
+            let response = if provider.supports_streaming() {
+                let (tx, mut rx) = mpsc::unbounded_channel::<StreamEvent>();
+                let forwarder = self.events.implementation();
+                let sid = session_id.implementation();
+                tokio::spawn(async move {
+                    while let Some(event) = rx.recv().await {
+                        if let StreamEvent::TextDelta(delta) = &event {
+                            if let Some(events) = &forwarder {
+                                let _ = events.send(AgentEvent::Item {
+                                    session_id: sid.implementation(),
+                                    item: json!({
+                                        "kind": "assistant_delta",
+                                        "role": "assistant",
+                                        "content": [{ "type": "text", "text": delta }],
+                                    }),
+                                });
                             }
                         }
-                        result = &mut chat => Some(result),
-                    };
-                    match selected {
-                        Some(result) => match result {
-                            Ok(r) => r,
-                            Err(e) => return self.fail(&session_id, &turn_id, e).await,
-                        },
-                        None => {
-                            completed = false;
-                            break 'turn;
+                    }
+                });
+
+                let chat = provider.chat_stream(&request, tx);
+                match cancel.as_mut() {
+                    Some(cancel) => {
+                        tokio::pin!(chat);
+                        let selected = tokio::select! {
+                            biased;
+                            changed = cancel.changed() => {
+                                match changed {
+                                    Ok(()) if *cancel.borrow() => None,
+                                    _ => Some((&mut chat).await),
+                                }
+                            }
+                            result = &mut chat => Some(result),
+                        };
+                        match selected {
+                            Some(result) => match result {
+                                Ok(r) => r,
+                                Err(e) => return self.fail(&session_id, &turn_id, e).await,
+                            },
+                            None => {
+                                completed = false;
+                                break 'turn;
+                            }
                         }
                     }
+                    None => match chat.await {
+                        Ok(r) => r,
+                        Err(e) => return self.fail(&session_id, &turn_id, e).await,
+                    },
                 }
-                None => match chat.await {
+            } else {
+                // Honest degrade for non-streaming engines: one request,
+                // the full text delivered as a single delta so the transcript
+                // still renders.
+                let resp = match provider.chat(&request).await {
                     Ok(r) => r,
                     Err(e) => return self.fail(&session_id, &turn_id, e).await,
-                },
+                };
+                if let Some(events) = &self.events {
+                    let text = resp.message.text();
+                    if !text.is_empty() {
+                        let _ = events.send(AgentEvent::Item {
+                            session_id: session_id.implementation(),
+                            item: json!({
+                                "kind": "assistant_delta",
+                                "role": "assistant",
+                                "content": [{ "type": "text", "text": text }],
+                            }),
+                        });
+                    }
+                }
+                resp
             };
 
             total_input += response.usage.input_tokens;
@@ -1151,6 +1190,7 @@ mod tests {
                 allowed_tools: Vec::new(),
                 max_iterations: 1,
                 turn_id: "turn-derived".into(),
+                provider_override: None,
             })
             .await
             .expect("subagent turn runs");
@@ -1384,6 +1424,7 @@ mod tests {
                 allowed_tools: Vec::new(),
                 max_iterations: 4,
                 turn_id: "turn-micro-compact".into(),
+                provider_override: None,
             })
             .await
             .expect("turn completes");
@@ -1427,6 +1468,7 @@ mod tests {
                 allowed_tools: Vec::new(),
                 max_iterations: 4,
                 turn_id: "turn-no-compaction".into(),
+                provider_override: None,
             })
             .await
             .expect("turn completes");
@@ -1472,6 +1514,7 @@ mod tests {
                 allowed_tools: Vec::new(),
                 max_iterations: 4,
                 turn_id: "turn-approval-timeout".into(),
+                provider_override: None,
             })
             .await
             .expect("turn runs to completion despite the denial");
@@ -1488,5 +1531,73 @@ mod tests {
             }
         }
         assert!(denied, "the timed-out approval must deny the tool call");
+    }
+
+    struct CapabilityOffProvider;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for CapabilityOffProvider {
+        fn kind(&self) -> prricode_provider::ProviderKind {
+            prricode_provider::ProviderKind::Echo
+        }
+        async fn list_models(
+            &self,
+        ) -> prricode_provider::ProviderResult<Vec<prricode_provider::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat(
+            &self,
+            _request: &prricode_provider::ChatRequest,
+        ) -> prricode_provider::ProviderResult<prricode_provider::ChatResponse> {
+            Ok(prricode_provider::ChatResponse {
+                message: prricode_provider::AssistantMessage {
+                    content_parts: vec![prricode_provider::ContentPart::text(
+                        "capability-off reply",
+                    )],
+                    tool_calls: vec![],
+                },
+                usage: prricode_provider::Usage::default(),
+                cost_usd: None,
+                finish_reason: "stop".into(),
+            })
+        }
+        async fn chat_stream(
+            &self,
+            _request: &prricode_provider::ChatRequest,
+            _events: tokio::sync::mpsc::UnboundedSender<prricode_provider::StreamEvent>,
+        ) -> prricode_provider::ProviderResult<prricode_provider::ChatResponse> {
+            panic!("chat_stream must not be called when supports_streaming is false");
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
+        fn supports_streaming(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_off_engine_runs_text_only_turn() {
+        let provider = Arc::new(CapabilityOffProvider);
+        let runner = AgentRunner::new(provider, Arc::new(ApprovalEngine::new()));
+        let outcome = runner
+            .run_turn(TurnInput {
+                session_id: "cap-off".into(),
+                model: String::new(),
+                approval_mode: ApprovalMode::Open,
+                workspace_root: std::env::temp_dir(),
+                data_dir: std::env::temp_dir(),
+                history: vec![],
+                user_content: vec![ContentPart::text("hi")],
+                goal: None,
+                skills_prompt: None,
+                allowed_tools: Vec::new(),
+                max_iterations: 4,
+                turn_id: "turn-cap-off".into(),
+                provider_override: None,
+            })
+            .await
+            .expect("turn runs");
+        assert_eq!(outcome.content, "capability-off reply");
     }
 }

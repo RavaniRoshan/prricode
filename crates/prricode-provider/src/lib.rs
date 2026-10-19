@@ -114,6 +114,10 @@ pub struct ModelInfo {
     pub display_label: String,
     pub context_limit: u32,
     pub is_active: bool,
+    /// Whether the model accepts a tools array in the request.
+    pub supports_tools: bool,
+    /// Whether the model's endpoint supports SSE streaming.
+    pub supports_streaming: bool,
 }
 
 #[derive(Debug, Implementation)]
@@ -312,8 +316,70 @@ pub trait ModelProvider: Send + Sync {
         request: &ChatRequest,
         events: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
     ) -> ProviderResult<ChatResponse>;
+
+    /// Whether this engine accepts a tools array in the request. Defaults to
+    /// true; engines that cannot (or connections configured as text-only)
+    /// report false and the turn loop omits tools honestly.
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    /// Whether this engine supports SSE streaming. Defaults to true; false
+    /// engines are driven through `chat` and the full text is delivered as
+    /// one delta.
+    fn supports_streaming(&self) -> bool {
+        true
+    }
 }
 
+/// A provider wrapper that downgrades capability flags for a connection
+/// configured as text-only or non-streaming. Delegates everything else
+/// (chat, chat_stream, list_models) to the inner provider.
+pub struct CapabilityGatedProvider {
+    inner: Box<dyn ModelProvider>,
+    tools: bool,
+    streaming: bool,
+}
+
+impl CapabilityGatedProvider {
+    pub fn new(
+        inner: Box<dyn ModelProvider>,
+        supports_tools: bool,
+        supports_streaming: bool,
+    ) -> Self {
+        Self {
+            inner,
+            tools: supports_tools,
+            streaming: supports_streaming,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for CapabilityGatedProvider {
+    fn kind(&self) -> ProviderKind {
+        self.inner.kind()
+    }
+    async fn list_models(&self) -> ProviderResult<Vec<ModelInfo>> {
+        self.inner.list_models().await
+    }
+    async fn chat(&self, request: &ChatRequest) -> ProviderResult<ChatResponse> {
+        self.inner.chat(request).await
+    }
+    async fn chat_stream(
+        &self,
+        request: &ChatRequest,
+        events: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+    ) -> ProviderResult<ChatResponse> {
+        self.inner.chat_stream(request, events).await
+    }
+    fn supports_tools(&self) -> bool {
+        self.tools
+    }
+    fn supports_streaming(&self) -> bool {
+        self.streaming
+    }
+}
 /// Build a provider from resolved configuration.
 pub fn create_provider(config: ProviderConfig) -> Box<dyn ModelProvider> {
     match config.kind {

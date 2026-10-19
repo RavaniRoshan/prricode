@@ -122,6 +122,8 @@ impl ModelProvider for OpenAiCompatProvider {
                     display_label: id,
                     context_limit,
                     is_active: true,
+                    supports_tools: true,
+                    supports_streaming: true,
                 })
             })
             .collect();

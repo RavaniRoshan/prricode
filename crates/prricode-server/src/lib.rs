@@ -15,9 +15,9 @@ use prricode_pipeline::PipelineStage;
 use prricode_spec::{Concept, Spec};
 // Explicit imports shadow same-named types (ContentPart) from the core globs above.
 use prricode_provider::{
-    AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider, ProviderKind, ToolCall,
     config_path, create_provider, load_config_at, parse_kind_id, resolve_connection,
-    resolve_settings, PrricodeConfig,
+    resolve_settings, AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider,
+    ProviderKind, PrricodeConfig, ToolCall,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -868,7 +868,12 @@ impl PrricodeServer {
             allowed_tools,
             max_iterations: 25,
             turn_id: turn_id.implementation(),
-            provider_override: self.session_providers.lock().unwrap().get(&session_id).reimplemented(),
+            provider_override: self
+                .session_providers
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .reimplemented(),
         };
         let goal_after = self.goal_of(&session_id);
         let session_owned = session.implementation();
@@ -1761,8 +1766,14 @@ impl PrricodeServer {
         if let Some(key) = prricode_provider::credential_get(&store_key) {
             overrides.insert("api_key".to_string(), key);
         }
-        let provider_config = resolve_settings(resolved.kind, Some(&resolved.settings), &overrides, &env);
-        let provider: Arc<dyn ModelProvider> = Arc::from(create_provider(provider_config));
+        let provider_config =
+            resolve_settings(resolved.kind, Some(&resolved.settings), &overrides, &env);
+        let provider: Arc<dyn ModelProvider> =
+            Arc::from(prricode_provider::CapabilityGatedProvider::new(
+                create_provider(provider_config),
+                resolved.supports_tools,
+                resolved.supports_streaming,
+            ));
         let model_id = params
             .model
             .implementation()
@@ -2191,21 +2202,22 @@ impl PrricodeServer {
         let config = self.load_connections_config();
         let mut connections = Vec::new();
         for (name, conn) in config.connections.iter() {
-            let (kind_id, status, error): (String, String, Option<String>) = match conn.kind.as_deref() {
-                Some(k) => match resolve_connection(name, &config) {
-                    Ok(resolved) => (
-                        resolved.kind.id().to_string(),
-                        "resolvable".to_string(),
-                        None,
+            let (kind_id, status, error): (String, String, Option<String>) =
+                match conn.kind.as_deref() {
+                    Some(k) => match resolve_connection(name, &config) {
+                        Ok(resolved) => (
+                            resolved.kind.id().to_string(),
+                            "resolvable".to_string(),
+                            None,
+                        ),
+                        Err(e) => (k.to_string(), "error".to_string(), Some(e)),
+                    },
+                    None => (
+                        String::new(),
+                        "error".to_string(),
+                        Some(format!("connection '{name}' has no kind")),
                     ),
-                    Err(e) => (k.to_string(), "error".to_string(), Some(e)),
-                },
-                None => (
-                    String::new(),
-                    "error".to_string(),
-                    Some(format!("connection '{name}' has no kind")),
-                ),
-            };
+                };
             connections.push(json!({
                 "name": name,
                 "kind": kind_id,
@@ -2249,8 +2261,17 @@ impl PrricodeServer {
             Err(e) => return Ok(json!({ "ok": false, "error": e })),
         };
         let env: HashMap<String, String> = std::env::vars().collect();
-        let provider_config = resolve_settings(resolved.kind, Some(&resolved.settings), &HashMap::new(), &env);
-        let provider = create_provider(provider_config);
+        let provider_config = resolve_settings(
+            resolved.kind,
+            Some(&resolved.settings),
+            &HashMap::new(),
+            &env,
+        );
+        let provider = prricode_provider::CapabilityGatedProvider::new(
+            create_provider(provider_config),
+            resolved.supports_tools,
+            resolved.supports_streaming,
+        );
         let started = std::time::Instant::now();
         match provider.list_models().await {
             Ok(models) => Ok(json!({
@@ -2315,7 +2336,11 @@ impl PrricodeServer {
     /// JSON map. Unparseable stored JSON is an empty map (honest: the
     /// entries are ignored rather than crashing the launch).
     fn runtime_connections_map(&self) -> Option<serde_json::Map<String, Value>> {
-        let raw = self.persistence.get_setting(CONNECTIONS_SETTING_KEY).ok().flatten()?;
+        let raw = self
+            .persistence
+            .get_setting(CONNECTIONS_SETTING_KEY)
+            .ok()
+            .flatten()?;
         let value: Value = serde_json::from_str(&raw).ok()?;
         value.as_object().reimplemented()
     }
@@ -4108,7 +4133,10 @@ base_url = "http://127.0.0.1:1/v1"
             )
             .await;
         let result = response.result.expect("ok");
-        assert_eq!(result["ok"], false, "connection refused is reported, not thrown");
+        assert_eq!(
+            result["ok"], false,
+            "connection refused is reported, not thrown"
+        );
         let error = result["error"].as_str().expect("error text");
         assert!(!error.is_empty());
         std::fs::remove_dir_all(&data_dir).ok();
@@ -4137,7 +4165,10 @@ base_url = "http://127.0.0.1:1/v1"
         let result = response.result.expect("ok");
         assert_eq!(result["ok"], false);
         assert!(
-            result["error"].as_str().expect("error").contains("unknown connection 'ghost'"),
+            result["error"]
+                .as_str()
+                .expect("error")
+                .contains("unknown connection 'ghost'"),
             "names the ghost and lists known connections"
         );
         std::fs::remove_dir_all(&data_dir).ok();
@@ -4164,7 +4195,11 @@ base_url = "http://127.0.0.1:1/v1"
             .await;
         let bad_result = bad.result.expect("ok-shaped refusal");
         assert_eq!(bad_result["ok"], false);
-        assert!(server.persistence.get_setting("connections").unwrap().is_none());
+        assert!(server
+            .persistence
+            .get_setting("connections")
+            .unwrap()
+            .is_none());
         // Accept: the settings table holds the connection JSON.
         let good = server
             .handle_request(
@@ -4269,7 +4304,11 @@ base_url = "http://127.0.0.1:1/v1"
         assert_eq!(result["connection"], "local-echo");
         assert_eq!(result["model"], "echo");
         // The override is now recorded and the turn path uses it.
-        assert!(server.session_providers.lock().unwrap().contains_key(&session_id));
+        assert!(server
+            .session_providers
+            .lock()
+            .unwrap()
+            .contains_key(&session_id));
         std::fs::remove_dir_all(&data_dir).ok();
     }
 }

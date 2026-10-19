@@ -1616,10 +1616,25 @@ impl App {
                             kind.id()
                         ));
                     } else {
-                        self.push_system(
-                            "unknown provider; known: echo, ollama, openrouter, kilo, openai"
-                                .to_string(),
-                        );
+                        let config = prricode_provider::load_config();
+                        if config.connections.contains_key(arg) {
+                            self.push_system(format!(
+                                "connection '{arg}' selected — restart prricode with \
+                                 --connection {arg} (or set defaults.connection) for full effect"
+                            ));
+                        } else {
+                            self.push_system(
+                                "unknown provider or connection; known kinds: echo, ollama, \
+                                 openrouter, kilo, openai; defined connections: "
+                                    .to_string()
+                                    + &config
+                                        .connections
+                                        .keys()
+                                        .reimplemented()
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                            );
+                        }
                     }
                 }
                 "concept" => {
@@ -1907,6 +1922,29 @@ impl App {
                     let _ = commands.send(UiCommand::SetKeybindings {
                         json: serde_json::to_string(&map).unwrap_or_default(),
                     });
+                }
+                "connections" => {
+                    let config = prricode_provider::load_config();
+                    if config.connections.is_empty() {
+                        self.push_system(
+                            "connections: none defined — add a [connections.<name>] table to \
+                             config.toml"
+                                .to_string(),
+                        );
+                    } else {
+                        let mut lines = vec!["connections:".to_string()];
+                        for (name, conn) in &config.connections {
+                            let kind = conn.kind.as_deref().unwrap_or("?");
+                            let model = conn.model.as_deref().unwrap_or("-");
+                            let status = if prricode_provider::parse_kind_id(kind).is_some() {
+                                "resolvable"
+                            } else {
+                                "error: unknown kind"
+                            };
+                            lines.push(format!("  {name} — kind={kind} model={model} ({status})"));
+                        }
+                        self.push_system(lines.join("\n"));
+                    }
                 }
                 "voice" => {
                     self.push_system(

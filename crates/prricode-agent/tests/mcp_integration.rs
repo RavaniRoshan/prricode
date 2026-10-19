@@ -115,6 +115,7 @@ async fn agent_calls_mcp_tool_through_registry() {
             allowed_tools: Vec::new(),
             max_iterations: 5,
             turn_id: "turn-1".into(),
+            provider_override: None,
         })
         .await
         .expect("turn runs");

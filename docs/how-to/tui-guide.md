@@ -86,7 +86,8 @@ Type `/` and the command, then `Return`.
 | Command | What it does |
 |---|---|
 | `/model <id>` | Switch model live (`/model` alone shows the current one) |
-| `/provider <name>` | Switch provider (echo, ollama, openrouter, kilo, openai…) |
+| `/provider <name>` | Switch provider (echo, ollama, openrouter, kilo, openai…) or select a `[connections.<name>]` endpoint — restart for full effect |
+| `/connections` | List configured connections with kind, model, and resolvability |
 | `/approval <mode>` | `open` (auto-approve) / `auto` / `closed` / `suggestive` |
 | `/yolo` | Toggle unattended approval (open ↔ closed) |
 | `/theme <name>` | Switch color theme (`/theme` lists the 24+ bundled JSON themes + your own) |

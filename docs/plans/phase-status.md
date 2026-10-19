@@ -78,10 +78,10 @@ full workspace tests green, one commit per phase item.
 | 22 | `connection/add` (settings-table persisted) | pending | … |
 | 23 | Runtime engine switch (`session/setEngine`) | done | `session/setEngine {commandId, sessionId, connection, model?}` resolves + builds the provider, persists the session's provider_id/model_id, caches the provider per session, emits `session/modelChanged`, and the turn path uses `provider_override` from the cache; unknown session/connection are honest errors; 2 tests |
 | 23 | TUI live `/provider <connection>` + `/connections` | done | protocol surface + per-session override are the live switch; the embedded TUI's `/provider` keeps its honest restart-required note (no fake live switch), and `/connections` lists configured connections from the config file with their status; the TUI turn path passes `provider_override` through (None today → runner's provider, unchanged behavior) |
-| 24 | Capability metadata (`supports_tools`/`supports_streaming`) | pending | … |
-| 24 | Loop degrade on capability-off engines | pending | … |
-| 25 | connect-a-provider.md connections-first | pending | … |
-| 25 | tui-guide.md + run-the-tests.md connection steps | pending | … |
+| 24 | Capability metadata (`supports_tools`/`supports_streaming`) | done | `ModelInfo` + `ConnectionSettings` (serde default true via `default_true`) gain both flags; `ModelProvider` trait gains default `supports_tools()`/`supports_streaming()` methods; `CapabilityGatedProvider` wraps a built provider and overrides them; connections carry the flags through `ResolvedConnection`; `provider/list` surfaces them via connection status |
+| 24 | Loop degrade on capability-off engines | done | the turn loop omits tools + tool_choice when `supports_tools()` is false and drives `chat` (delivering the full text as one delta) instead of `chat_stream` when `supports_streaming()` is false; tested by `capability_off_engine_runs_text_only_turn` (chat_stream must not be called) |
+| 25 | connect-a-provider.md connections-first | done | config doc rewritten connections-first: [connections.<name>] table, resolution precedence, connection/test + connection/add surfaces, credential store connection:<name> keys, supports_tools/supports_streaming fields |
+| 25 | tui-guide.md + run-the-tests.md connection steps | done | tui-guide documents /connections and /provider connection selection; run-the-tests.md gains connection-test + switch steps |
 
 ## Working instructions for the tracker
 

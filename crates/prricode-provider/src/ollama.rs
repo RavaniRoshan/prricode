@@ -217,6 +217,8 @@ impl ModelProvider for OllamaProvider {
                             display_label: name,
                             context_limit: 128_000,
                             is_active: true,
+                            supports_tools: true,
+                            supports_streaming: true,
                         })
                     })
                     .collect()

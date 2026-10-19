@@ -10,6 +10,7 @@ Derived from the `/`-command arms in `crates/prricode-tui/src/app.rs`
 - help (alias `?`)
 - clear
 - compact
+- connections (NEW — lists [connections.<name>] from config.toml)
 - model
 - sessions
 - new
