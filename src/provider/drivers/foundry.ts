@@ -37,6 +37,19 @@
  * here verbatim; the two **credential** error strings are the adapter's own and
  * live here.
  *
+ * ## The base URL is the route layer's business
+ *
+ * The **audited** base URL — `https://<resource>.services.ai.azure.com/anthropic/`,
+ * with the trailing slash — is what the request path is appended to. The
+ * route-policy layer (`src/provider/routes.ts`) resolves the Foundry route's
+ * base URL to exactly that string, so the driver does not rebuild it: the
+ * `baseUrl` argument of `buildUrl` is the **resolved** route base URL, not a
+ * second user-supplied value.
+ *
+ * The target's mutual-exclusion rule is about the **user's** two inputs — a
+ * base URL and a resource — and the route layer reports that conflict in
+ * `conflictingVariables`; the driver raises the target's own error from it.
+ *
  * ## The credential sources are the driver's business
  *
  * The target validates its credential **options** when the client is built.
@@ -56,7 +69,6 @@ import {
   classifyErrorStatus,
   createStreamState,
   eventsFromMessage,
-  hostOf,
   isAnthropicStreamState,
   joinUrl,
   parseSseChunk,
@@ -74,10 +86,20 @@ import {
   type ProviderRoute,
 } from '../routes.js';
 
-/** The base-URL environment variable of the Foundry route. */
+/**
+ * The base-URL environment variable of the Foundry route.
+ *
+ * The driver reads it to apply the target's mutual-exclusion rule: the base
+ * URL and the resource are **mutually exclusive** (audit §2.2a).
+ */
 export const FOUNDRY_BASE_URL_VARIABLE = 'ANTHROPIC_FOUNDRY_BASE_URL';
 
-/** The resource environment variable of the Foundry route. */
+/**
+ * The resource environment variable of the Foundry route.
+ *
+ * The driver reads it to apply the target's mutual-exclusion rule, the same
+ * way it reads `FOUNDRY_BASE_URL_VARIABLE`.
+ */
 export const FOUNDRY_RESOURCE_VARIABLE = 'ANTHROPIC_FOUNDRY_RESOURCE';
 
 /** The path segment the Foundry Anthropic endpoint lives under. */
@@ -134,28 +156,6 @@ export function foundryAnthropicBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.replace(/\/+$/, '');
   if (trimmed.endsWith(FOUNDRY_ANTHROPIC_PATH)) return `${trimmed}/`;
   return `${trimmed}${FOUNDRY_ANTHROPIC_PATH}/`;
-}
-
-/**
- * The Foundry resource name a resolved base URL carries.
- *
- * The route-policy layer (`src/provider/routes.ts`) turns the resource
- * variable into a **base** URL — `https://<resource>.services.ai.azure.com`,
- * without the `/anthropic/` segment, because that is the *host* the resource
- * names. The driver turns that host back into the **audited** base URL, which
- * carries the `/anthropic/` segment and the trailing slash. The two builders
- * are therefore not two answers to the same question: the route layer answers
- * "which host?", the driver answers "which URL does the Anthropic endpoint
- * live at?".
- */
-export function foundryResourceFromBaseUrl(baseUrl: string): string | undefined {
-  const host = hostOf(baseUrl);
-  if (!host.endsWith(FOUNDRY_RESOURCE_HOST_SUFFIX)) return undefined;
-  const name = host.slice(0, host.length - FOUNDRY_RESOURCE_HOST_SUFFIX.length);
-  // An **unresolved** template (`{resource}`) is not a resource name: the
-  // route-policy layer reports that case as "no base URL at all".
-  if (name === '' || name.includes('{') || name.includes('}')) return undefined;
-  return name;
 }
 
 /**
@@ -233,6 +233,11 @@ export function createFoundryDriver(overrides: { baseUrl?: string } = {}): Found
 
   /**
    * The base URL of a request — the **audited** one.
+   *
+   * The `baseUrl` argument is the **resolved** route base URL (the one the
+   * route-policy layer resolved), not a second user-supplied value: the
+   * mutual-exclusion rule is about the *user's* two inputs, and the route
+   * layer reports that conflict in `conflictingVariables`.
    */
   const baseUrlFor = (req: ProviderRequest, baseUrl?: string): string => {
     const endpoint = req.endpoint;
@@ -243,24 +248,29 @@ export function createFoundryDriver(overrides: { baseUrl?: string } = {}): Found
       throw new Error(FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR);
     }
 
+    // The same rule, for a request that carries the supplied variables
+    // without the route layer's report: the two Foundry base-URL variables are
+    // mutually exclusive under the target's own rule (audit §2.2a).
     const supplied = endpoint?.suppliedBaseUrlVariables ?? [];
-    const resourceSupplied = supplied.includes(FOUNDRY_RESOURCE_VARIABLE);
-    const explicit = baseUrl !== undefined && baseUrl.trim() !== '' ? baseUrl.trim() : '';
-
-    if (explicit !== '') {
-      if (resourceSupplied) {
-        throw new Error(FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR);
-      }
-      return foundryAnthropicBaseUrl(explicit);
+    if (supplied.includes(FOUNDRY_BASE_URL_VARIABLE) && supplied.includes(FOUNDRY_RESOURCE_VARIABLE)) {
+      throw new Error(FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR);
     }
 
-    // The **resource** the connection supplies builds the audited base URL.
-    const resource = req.foundryResource ?? foundryResourceFromBaseUrl(endpoint?.baseUrl ?? '');
+    // The connection's own **resource name** builds the audited base URL.
+    const resource = req.foundryResource;
     if (resource !== undefined && resource !== '') {
       return foundryBaseUrlForResource(resource);
     }
 
-    const resolved = endpoint?.baseUrl ?? defaultBase;
+    // The **resolved** base URL is the audited one already: the route layer
+    // resolves the resource variable to
+    // `https://<resource>.services.ai.azure.com/anthropic/`, with the trailing
+    // slash, so the driver only has to make sure the `/anthropic/` segment is
+    // there.
+    const resolved =
+      baseUrl !== undefined && baseUrl.trim() !== ''
+        ? baseUrl.trim()
+        : (endpoint?.baseUrl ?? defaultBase);
     if (resolved === '' || resolved.includes('{resource}')) {
       // **Observed** (audit §2.2a): the target's error for a client that was
       // given neither.

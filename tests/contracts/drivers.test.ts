@@ -87,7 +87,7 @@ import {
   translateBetaFlags,
   type ProviderEvent,
 } from '../../src/provider/drivers/types.js';
-import { ROUTE_NAMES, type ProviderRoute } from '../../src/provider/routes.js';
+import { ROUTE_NAMES, resolveBaseUrl, type ProviderRoute } from '../../src/provider/routes.js';
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                      */
@@ -405,6 +405,21 @@ describe('the SSE parser', () => {
     expect(events[3]).toEqual({ type: 'message_stop', stopReason: 'end_turn' });
   });
 
+  it('parses a CRLF-terminated stream exactly like an LF-terminated one', () => {
+    // The SSE specification allows CRLF line endings. A frame whose data
+    // payload carries no `type` member is named by its `event:` line, so a
+    // stray carriage return would make the name unrecognisable and the frame
+    // would yield nothing at all.
+    const lf = 'event: message_stop\ndata: {"stop_reason":"end_turn"}\n\n';
+    const crlf = 'event: message_stop\r\ndata: {"stop_reason":"end_turn"}\r\n\r\n';
+
+    const lfEvents = anthropicDriver.parseStream(lf, undefined).events;
+    const crlfEvents = anthropicDriver.parseStream(crlf, undefined).events;
+    expect(eventTypes(lfEvents)).toEqual(['message_stop']);
+    expect(eventTypes(crlfEvents)).toEqual(['message_stop']);
+    expect(crlfEvents[0]).toEqual({ type: 'message_stop', stopReason: 'end_turn' });
+  });
+
   it('does not lose a frame that straddles a chunk boundary', () => {
     const frame = 'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n';
     const cut = Math.floor(frame.length / 2);
@@ -636,6 +651,12 @@ describe('the SSE frame parser', () => {
 
   it('ignores a comment-only frame', () => {
     expect(parseSseFrame(': keep-alive')).toBeUndefined();
+  });
+
+  it('strips the carriage return of a CRLF-terminated line', () => {
+    const frame = parseSseFrame('event: message_stop\r\ndata: {"stop_reason":"end_turn"}');
+    expect(frame?.event).toBe('message_stop');
+    expect(frame?.data).toBe('{"stop_reason":"end_turn"}');
   });
 });
 
@@ -1038,6 +1059,65 @@ describe('the foundry driver', () => {
     );
   });
 
+  it('uses the resolved base url of a resource-configured connection as it is', () => {
+    // The route-policy layer resolves the Foundry base URL to the **audited**
+    // one — `https://<resource>.services.ai.azure.com/anthropic/`, with the
+    // trailing slash — so the driver has nothing to rebuild.
+    const req = request({
+      endpoint: {
+        baseUrl: 'https://my-deployment.services.ai.azure.com/anthropic/',
+        isVendorHost: true,
+        suppliedBaseUrlVariables: ['ANTHROPIC_FOUNDRY_RESOURCE'],
+      },
+    });
+    expect(foundryDriver.baseUrlFor(req)).toBe('https://my-deployment.services.ai.azure.com/anthropic/');
+    expect(foundryDriver.buildUrl(req)).toBe('https://my-deployment.services.ai.azure.com/anthropic/v1/messages');
+  });
+
+  it('accepts the resolved base url a transport passes to buildUrl', () => {
+    // The `baseUrl` argument is the **resolved** route base URL, not a second
+    // user-supplied value: a transport that hands the driver the endpoint it
+    // resolved must not hit the mutual-exclusion error.
+    const req = request({
+      endpoint: {
+        baseUrl: 'https://my-deployment.services.ai.azure.com/anthropic/',
+        isVendorHost: true,
+        suppliedBaseUrlVariables: ['ANTHROPIC_FOUNDRY_RESOURCE'],
+      },
+    });
+    const resolved = req.endpoint?.baseUrl;
+    expect(resolved).toBeDefined();
+    expect(() => foundryDriver.buildUrl(req, resolved)).not.toThrow();
+    expect(foundryDriver.buildUrl(req, resolved)).toBe('https://my-deployment.services.ai.azure.com/anthropic/v1/messages');
+  });
+
+  it('produces the audited url for an explicit base url', () => {
+    // The explicit base URL is the user's own endpoint; the Foundry Anthropic
+    // endpoint lives under the `/anthropic/` segment (audit §2.2a), so the
+    // driver produces the audited URL for it too.
+    const req = request({
+      endpoint: { baseUrl: 'https://my-deployment.services.ai.azure.com', isVendorHost: true },
+    });
+    expect(foundryDriver.baseUrlFor(req, 'https://my-deployment.services.ai.azure.com')).toBe(
+      'https://my-deployment.services.ai.azure.com/anthropic/',
+    );
+    expect(foundryDriver.buildUrl(req, 'https://my-deployment.services.ai.azure.com')).toBe(
+      'https://my-deployment.services.ai.azure.com/anthropic/v1/messages',
+    );
+  });
+
+  it('produces a url under the audited /anthropic/ base', () => {
+    const req = request({
+      endpoint: {
+        baseUrl: 'https://my-deployment.services.ai.azure.com/anthropic/',
+        isVendorHost: true,
+        suppliedBaseUrlVariables: ['ANTHROPIC_FOUNDRY_RESOURCE'],
+      },
+    });
+    expect(foundryDriver.baseUrlFor(req).endsWith('/anthropic/')).toBe(true);
+    expect(foundryDriver.buildUrl(req)).toContain('/anthropic/v1/messages');
+  });
+
   it('throws the target\'s exact error when a base url and a resource conflict', () => {
     const req = request({
       endpoint: {
@@ -1051,13 +1131,62 @@ describe('the foundry driver', () => {
     expect(FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR).toBe('baseURL and resource are mutually exclusive');
   });
 
+  it('throws the target\'s exact error for a conflict, with a resolved base url or without', () => {
+    // The conflict is the **user's** — the route-policy layer reports it in
+    // `conflictingVariables` — and it is raised whatever the caller passes as
+    // the base URL.
+    const req = request({
+      endpoint: {
+        baseUrl: 'https://my-deployment.services.ai.azure.com/anthropic/',
+        isVendorHost: true,
+        suppliedBaseUrlVariables: ['ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE'],
+        conflictingVariables: ['ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE'],
+      },
+    });
+    expect(() => foundryDriver.buildUrl(req)).toThrow(FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR);
+    expect(() => foundryDriver.buildUrl(req, 'https://my-deployment.services.ai.azure.com/anthropic/')).toThrow(
+      FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR,
+    );
+  });
+
+  it('throws the target\'s exact error when both of the Foundry base-URL variables are supplied', () => {
+    // The target's adapter refuses a client that is given both a base URL and
+    // a resource, whichever way the base URL was supplied (audit §2.2a).
+    const req = request({
+      endpoint: {
+        baseUrl: 'https://my-deployment.services.ai.azure.com/anthropic/',
+        isVendorHost: true,
+        suppliedBaseUrlVariables: ['ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE'],
+      },
+    });
+    expect(() => foundryDriver.buildUrl(req)).toThrow(FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR);
+  });
+
   it('throws the target\'s exact error when neither a base url nor a resource is given', () => {
     const req = request({
       endpoint: { baseUrl: 'https://{resource}.services.ai.azure.com', isVendorHost: true },
     });
     expect(() => foundryDriver.buildUrl(req)).toThrow(FOUNDRY_MISSING_BASE_URL_ERROR);
+    // The route's own default is the `{resource}` **template** — with the
+    // audited `/anthropic/` segment — and a template is not a base URL.
+    const template = request({
+      endpoint: { baseUrl: 'https://{resource}.services.ai.azure.com/anthropic/', isVendorHost: true },
+    });
+    expect(() => foundryDriver.buildUrl(template)).toThrow(FOUNDRY_MISSING_BASE_URL_ERROR);
     expect(FOUNDRY_MISSING_BASE_URL_ERROR).toBe(
       "Must provide one of the 'baseURL' or 'resource' arguments, or the ANTHROPIC_FOUNDRY_RESOURCE environment variable",
+    );
+  });
+
+  it('produces the very base url the route layer resolves for a resource', () => {
+    // The two layers answer the same question with the same string: the route
+    // layer resolves the Foundry base URL to the audited one, and the driver
+    // uses it as it is.
+    const resolved = resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'my-deployment' });
+    const req = request({ endpoint: resolved });
+    expect(foundryDriver.baseUrlFor(req, resolved.baseUrl)).toBe(resolved.baseUrl);
+    expect(foundryDriver.buildUrl(req, resolved.baseUrl)).toBe(
+      'https://my-deployment.services.ai.azure.com/anthropic/v1/messages',
     );
   });
 
@@ -1200,6 +1329,18 @@ describe('the anthropic-on-aws and anthropic-on-google-cloud drivers', () => {
     const headers = headersOf(anthropicAwsDriver, request({ aws: { region: 'us-east-1' } }), undefined);
     expect(headers['x-api-key']).toBeUndefined();
     expect(headers['authorization']).toBeUndefined();
+  });
+
+  it('resolves the region placeholder of the anthropic-on-aws base url', () => {
+    // The route's default base URL is a template; the driver resolves the
+    // `{region}` placeholder, the way the other regional routes do.
+    const url = anthropicAwsDriver.buildUrl(request({ aws: { region: 'us-east-1' } }));
+    expect(url).toBe('https://aws-external-anthropic.us-east-1.amazonaws.com/v1/messages');
+    expect(url).not.toContain('{region}');
+  });
+
+  it('reports the missing region for the anthropic-on-aws route', () => {
+    expect(() => anthropicAwsDriver.buildUrl(request())).toThrow(AWS_REGION_REQUIRED_ERROR);
   });
 
   it('signs the aws route with its own service name', () => {
@@ -1381,6 +1522,28 @@ describe('the gateway driver', () => {
     expect(body['anthropic_beta']).toEqual(['a-beta']);
     expect(body['anthropic_version']).toBe('bedrock-2023-05-31');
     expect(Object.hasOwn(body, 'model')).toBe(false);
+  });
+
+  it('moves the anthropic-beta header into the upstream body instead of forwarding it', () => {
+    // **Observed** (audit §2.3): the gateway "moves an `anthropic-beta` header
+    // into the request body for Bedrock upstreams". "Moved" is literal: the
+    // forwarded request must not carry the header **and** the body array.
+    const req = request({
+      credentialKind: 'bearer',
+      betaFlags: ['a-beta'],
+      aws: { region: 'us-east-1' },
+    });
+
+    const forwarded = gatewayUpstreamRequest(
+      { driver: bedrockDriver, credential: 'bedrock-bearer' },
+      req,
+      { headers: { authorization: 'Bearer gateway-jwt', 'anthropic-beta': 'a-beta' } },
+    );
+
+    const body = forwarded.body as Record<string, unknown>;
+    expect(body['anthropic_beta']).toEqual(['a-beta']);
+    expect(forwarded.headers['anthropic-beta']).toBeUndefined();
+    expect(Object.hasOwn(forwarded.headers, 'anthropic-beta')).toBe(false);
   });
 
   it('never forwards the gateway\'s own credential to the upstream', () => {

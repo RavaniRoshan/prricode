@@ -36,7 +36,6 @@
  */
 
 import {
-  ANTHROPIC_MESSAGE_PATHS,
   anthropicPathFor,
   applySigV4Service,
   applyTokenScope,
@@ -62,9 +61,6 @@ import type { ProviderRoute } from '../routes.js';
 
 /** The first-party default base URL. */
 export const FIRST_PARTY_BASE_URL = 'https://api.anthropic.com';
-
-/** The two first-party path variants, re-exported for a caller that wants them. */
-export const FIRST_PARTY_PATHS = ANTHROPIC_MESSAGE_PATHS;
 
 /**
  * How an Anthropic-native route is configured.

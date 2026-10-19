@@ -505,10 +505,24 @@ describe('the endpoint policy', () => {
   });
 
   it('derives the Foundry base URL from the resource name', () => {
+    // **Observed** (audit §2.2a): the base URL is built as
+    // `https://<resource>.services.ai.azure.com/anthropic/` — with a trailing
+    // slash. The route-policy layer resolves it to the audited URL, so that
+    // the driver has nothing to rebuild.
     const env = { ANTHROPIC_FOUNDRY_RESOURCE: 'my-deployment' };
     const resolved = resolveBaseUrl('foundry', env);
-    expect(resolved.baseUrl).toBe('https://my-deployment.services.ai.azure.com');
+    expect(resolved.baseUrl).toBe('https://my-deployment.services.ai.azure.com/anthropic/');
     expect(resolved.isVendorHost).toBe(true);
+  });
+
+  it('recognises the audited Foundry host shape as the vendor\'s own host', () => {
+    // The audited base URL carries the `/anthropic/` segment; the host — the
+    // part the `ownHost` pattern matches — is the deployment's own host.
+    expect(resolveBaseUrl('foundry', {}, 'https://my-deployment.services.ai.azure.com/anthropic/').isVendorHost).toBe(
+      true,
+    );
+    expect(resolveBaseUrl('foundry', {}, 'https://my-deployment.services.ai.azure.com').isVendorHost).toBe(true);
+    expect(resolveBaseUrl('foundry', {}, 'https://elsewhere.example.com/anthropic/').isVendorHost).toBe(false);
   });
 
   it('prefers the Foundry base URL over the Foundry resource name', () => {
@@ -619,15 +633,15 @@ describe('the endpoint policy', () => {
   });
 
   it('accepts a Foundry resource name that contains an underscore or a dot', () => {
-    // The target builds `https://<resource>.services.ai.azure.com` from
-    // whatever string it is given (audit §2.2a), so a working Foundry
+    // The target builds `https://<resource>.services.ai.azure.com/anthropic/`
+    // from whatever string it is given (audit §2.2a), so a working Foundry
     // configuration must not be rejected by this implementation.
     const underscored = resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'my_deployment' });
-    expect(underscored.baseUrl).toBe('https://my_deployment.services.ai.azure.com');
+    expect(underscored.baseUrl).toBe('https://my_deployment.services.ai.azure.com/anthropic/');
     expect(underscored.isVendorHost).toBe(true);
 
     const dotted = resolveBaseUrl('foundry', { ANTHROPIC_FOUNDRY_RESOURCE: 'my.deployment' });
-    expect(dotted.baseUrl).toBe('https://my.deployment.services.ai.azure.com');
+    expect(dotted.baseUrl).toBe('https://my.deployment.services.ai.azure.com/anthropic/');
     expect(dotted.isVendorHost).toBe(true);
   });
 

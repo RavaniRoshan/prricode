@@ -10,6 +10,10 @@
  * The body is **Anthropic-native** and the route carries a **workspace id
  * header**; the auth is an **AWS credential chain**.
  *
+ * The base URL is the **regional** one — `https://aws-external-anthropic.<region>.amazonaws.com`
+ * — so the driver resolves the `{region}` placeholder from the request's
+ * region, the way the other regional routes do.
+ *
  * The audit does not record a SigV4 **service name** for this route — it names
  * one only for Bedrock (`bedrock`) and Mantle (`bedrock-mantle`). This implementation
  * therefore uses `anthropic` and **labels it as a implementation choice** rather than
@@ -18,7 +22,8 @@
  */
 
 import { createAnthropicNativeDriver } from './anthropic.js';
-import type { ProviderDriver } from './types.js';
+import { AWS_REGION_REQUIRED_ERROR, resolveRegionTemplate } from './types.js';
+import type { ProviderDriver, ProviderRequest } from './types.js';
 
 /** The Anthropic-on-AWS default base URL, with the region placeholder. */
 export const ANTHROPIC_AWS_BASE_URL_TEMPLATE = 'https://aws-external-anthropic.{region}.amazonaws.com';
@@ -39,7 +44,7 @@ export const anthropicAwsDriver: ProviderDriver = createAnthropicAwsDriver();
  * Build an Anthropic-on-AWS driver.
  */
 export function createAnthropicAwsDriver(overrides: { baseUrl?: string } = {}): ProviderDriver {
-  return createAnthropicNativeDriver({
+  const base = createAnthropicNativeDriver({
     route: 'anthropicAws',
     baseUrl: overrides.baseUrl ?? ANTHROPIC_AWS_BASE_URL_TEMPLATE,
     // The AWS credential chain.
@@ -53,4 +58,22 @@ export function createAnthropicAwsDriver(overrides: { baseUrl?: string } = {}): 
     // another one.
     sigV4Service: ANTHROPIC_AWS_SIGV4_SERVICE,
   });
+
+  return {
+    ...base,
+    buildUrl(req: ProviderRequest, baseUrl?: string): string {
+      // The route's base URL is a **template**: the target derives the host
+      // from the deployment's region at client-construction time (audit §2.1),
+      // and this implementation's driver layer resolves the placeholder — the way the
+      // other regional routes do.
+      const template =
+        baseUrl !== undefined && baseUrl.trim() !== '' ? baseUrl.trim() : (overrides.baseUrl ?? ANTHROPIC_AWS_BASE_URL_TEMPLATE);
+      const resolved = resolveRegionTemplate(template, req.aws?.region);
+      if (resolved.includes('{region}')) {
+        // **Observed** (audit §2.2a): the target's missing-region error.
+        throw new Error(AWS_REGION_REQUIRED_ERROR);
+      }
+      return base.buildUrl(req, resolved);
+    },
+  };
 }

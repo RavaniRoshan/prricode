@@ -49,6 +49,7 @@
  */
 
 import {
+  ANTHROPIC_BETA_HEADER,
   anthropicPathFor,
   buildAnthropicBody,
   buildAnthropicHeaders,
@@ -294,6 +295,9 @@ export function gatewayErrorFrame(message: string, status?: number): string {
  * the same rule the Bedrock adapter uses: the header's value is split on `,`
  * and **trimmed**, and the body field is only set when the body does not
  * already carry `anthropic_beta`.
+ *
+ * The move is **literal**: the header does not survive alongside the body
+ * field, so the caller deletes it from the forwarded headers.
  */
 export function gatewayMoveBetaHeaderIntoBody(
   body: Record<string, unknown>,
@@ -362,6 +366,14 @@ export function gatewayUpstreamRequest(
     upstream.driver.route === 'bedrock' && isRecord(built.body)
       ? gatewayMoveBetaHeaderIntoBody(built.body, headers)
       : built.body;
+
+  if (upstream.driver.route === 'bedrock') {
+    // The header is **moved**, not copied: the forwarded request carries the
+    // body's `anthropic_beta` array and **not** the header (audit §2.3). The
+    // Bedrock adapter's own move is literal — it deletes the header — so the
+    // gateway does the same.
+    delete headers[ANTHROPIC_BETA_HEADER];
+  }
 
   return { url, headers, body };
 }

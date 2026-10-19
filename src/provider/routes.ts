@@ -346,9 +346,10 @@ export const ENDPOINT_POLICIES: readonly EndpointPolicy[] = [
     baseUrlVariables: ['ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE'],
     // The `<name>` label is matched with the same character set this implementation
     // accepts for a resource name, because the target builds the host from
-    // whatever string the variable holds (`https://<resource>.services.ai.azure.com`,
-    // audit §2.2a). A resource name with `_` or `.` is a working Foundry
-    // deployment, not a foreign host.
+    // whatever string the variable holds: the audited base URL is
+    // `https://<resource>.services.ai.azure.com/anthropic/` (audit §2.2a), and
+    // the **host** is the part this pattern matches. A resource name with `_`
+    // or `.` is a working Foundry deployment, not a foreign host.
     ownHost: /^[a-z0-9._-]+\.services\.ai\.azure\.com$/,
   },
 ];
@@ -410,7 +411,7 @@ export const DEFAULT_BASE_URLS: Readonly<Record<ProviderRoute, string>> = Object
   anthropicAws: 'https://aws-external-anthropic.{region}.amazonaws.com',
   vertex: 'https://aiplatform.googleapis.com',
   anthropicGoogleCloud: 'https://claude.googleapis.com',
-  foundry: 'https://{resource}.services.ai.azure.com',
+  foundry: 'https://{resource}.services.ai.azure.com/anthropic/',
 });
 
 /** The endpoint policy of a route, or `undefined` for a route that is not one of the eight. */
@@ -476,10 +477,11 @@ export function isSecureBaseUrl(baseUrl: string): boolean {
 /**
  * The base URL of the Foundry route derived from `ANTHROPIC_FOUNDRY_RESOURCE`.
  *
- * The target builds `https://<resource>.services.ai.azure.com` from whatever
- * string the variable holds (audit §2.2a), so a **working** resource name must
- * not be rejected: the earlier `^[a-z0-9-]+$` posture refused names the target
- * accepts, such as `my_deployment` or `my.deployment`.
+ * The target builds `https://<resource>.services.ai.azure.com/anthropic/` —
+ * **with a trailing slash** — from whatever string the variable holds (audit
+ * §2.2a), so a **working** resource name must not be rejected: the earlier
+ * `^[a-z0-9-]+$` posture refused names the target accepts, such as
+ * `my_deployment` or `my.deployment`.
  *
  * What this implementation refuses, and why:
  *
@@ -498,6 +500,10 @@ export function isSecureBaseUrl(baseUrl: string): boolean {
  * route's *default* base URL in place, and that default is a `{resource}`
  * template, so a malformed value would otherwise be reported as a vendor host
  * it does not match.
+ *
+ * The URL this returns is the **audited** one — the base URL the Anthropic
+ * endpoint lives at, with the `/anthropic/` segment and the trailing slash —
+ * so the driver layer has nothing to rebuild.
  */
 function foundryBaseUrlFromResource(resource: string): string {
   if (resource.includes('://') || resource.startsWith('/')) {
@@ -512,7 +518,7 @@ function foundryBaseUrlFromResource(resource: string): string {
         `not a value with characters a host label cannot carry: "${resource}"`,
     );
   }
-  return `https://${resource}.services.ai.azure.com`;
+  return `https://${resource}.services.ai.azure.com/anthropic/`;
 }
 
 /**

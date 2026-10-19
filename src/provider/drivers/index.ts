@@ -114,7 +114,6 @@ export {
   createFoundryDriver,
   foundryBaseUrlForResource,
   foundryAnthropicBaseUrl,
-  foundryResourceFromBaseUrl,
   FOUNDRY_AZURE_AD_SCOPE,
   FOUNDRY_CREDENTIALS_MUTUALLY_EXCLUSIVE_ERROR,
   FOUNDRY_MISSING_CREDENTIALS_ERROR,

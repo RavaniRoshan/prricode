@@ -224,11 +224,17 @@ export interface SseFrame {
  * `undefined`. A frame with **several** `data:` lines joins them with a
  * newline, as the SSE specification requires. The `id:` and `retry:` lines
  * carry no meaning for this implementation and are ignored.
+ *
+ * **CRLF.** A CRLF-terminated line ends in a carriage return, and that
+ * character is stripped before the line is read: a frame whose `event:` name
+ * keeps its `\r` names an event this implementation does not know, so the frame would
+ * yield nothing at all.
  */
 export function parseSseFrame(frame: string): SseFrame | undefined {
   let event: string | undefined;
   const data: string[] = [];
-  for (const line of frame.split('\n')) {
+  for (const rawLine of frame.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (line === '' || line.startsWith(':')) continue;
     const colon = line.indexOf(':');
     const field = colon === -1 ? line : line.slice(0, colon);
