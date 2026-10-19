@@ -49,7 +49,7 @@ full workspace tests green, one commit per phase item.
 | 13 | Status line | done | `status_line()` with provider/turn/tokens |
 | 13 | Turn diffs in TUI | pending | … |
 | 13 | Keybinding rebind | pending | … |
-| 14 | Vim input mode | partial | `/vim` toggle exists; motions pending |
+| 14 | Vim input mode | done | `/vim` toggles NORMAL/INSERT composer editing: motions `h l 0 $ w b e`, `x`, `D`, `dd`/`cc` (pending-operator state), `i a I A o O`, Esc exits INSERT; Enter still submits, Ctrl-keys fall through; composer title shows the active mode; `u`/ex commands degrade honestly; 9 tests |
 | 14 | Voice STT/TTS | partial | OpenAI-compatible `/audio/*` backend wired; local engines probed |
 | 15 | Computer use X11 | done | XGetImage/scrot + XTEST |
 | 15 | Wayland input | degraded | `unsupported: no live compositor on build host`; probe code present |

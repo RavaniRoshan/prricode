@@ -394,6 +394,14 @@ pub enum UiEvent {
     },
 }
 
+/// Composer modal state behind `/vim`: NORMAL is motions-only, INSERT is
+/// the composer's standard typing with Esc returning to NORMAL.
+#[derive(Debug, Implementation, Copy, PartialEq, Eq)]
+pub enum VimMode {
+    Normal,
+    Insert,
+}
+
 /// Terminal key actions, mirroring the documented composer keymap.
 #[derive(Debug, Implementation, PartialEq, Eq)]
 pub enum KeyAction {
@@ -461,6 +469,10 @@ pub struct App {
     workspace_amendments: Vec<PolicyAmendment>,
     /// File-path picker opened by '@' (spec keybinding).
     file_picker: Option<FilePicker>,
+    /// `/vim` modal editing: None = plain composer, otherwise the mode.
+    pub vim: Option<VimMode>,
+    /// Vim NORMAL is waiting for the second `d`/`c` of dd/cc.
+    vim_pending: bool,
     /// Navigable stored-session list opened by an argument-less `/sessions`.
     pub session_picker: Option<SessionPicker>,
     /// Ctrl+o: expand the last tool result in a modal.
@@ -474,6 +486,8 @@ impl App {
             provider,
             model,
             approval_mode: ApprovalMode::Closed,
+            vim: None,
+            vim_pending: false,
             session_id: uuid::Uuid::now_v7().to_string(),
             messages: vec![TurnMessage {
                 role: Role::System,
@@ -858,6 +872,25 @@ impl App {
             return;
         }
 
+        // Vim layer: NORMAL consumes motions/operators and never types text;
+        // INSERT falls through to the composer's standard keys (Esc exits to
+        // NORMAL first). Off state is fully unaffected.
+        if !self.secret_input
+            && self.vim == Some(VimMode::Normal)
+            && self.vim_normal(action.implementation())
+        {
+            return;
+        }
+        if self.vim == Some(VimMode::Insert) {
+            if let KeyAction::Esc = action {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+                self.vim = Some(VimMode::Normal);
+                return;
+            }
+        }
+
         match action {
             KeyAction::Char('?') if self.input.is_empty() => {
                 // Roadmap keybinding: '?' on an empty composer opens help.
@@ -1050,6 +1083,264 @@ impl App {
             .nth(self.cursor)
             .map(|(i, _)| i)
             .unwrap_or(self.input.len())
+    }
+
+    fn byte_of(&self, char_index: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(char_index)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len())
+    }
+
+    fn chars(&self) -> Vec<char> {
+        self.input.chars().collect()
+    }
+
+    /// Char-index bounds of the line containing the cursor gap.
+    fn line_bounds(&self) -> (usize, usize) {
+        let chars = self.chars();
+        let cursor = self.cursor.min(chars.len());
+        let mut start = 0;
+        for i in (0..cursor).rev() {
+            if chars[i] == '\n' {
+                start = i + 1;
+                break;
+            }
+        }
+        let mut end = chars.len();
+        if let Some(nl) = chars[cursor..].iter().position(|&c| c == '\n') {
+            end = cursor + nl;
+        }
+        (start, end)
+    }
+
+    /// Vim-NORMAL word class: 0 whitespace, 1 word/other run.
+    fn char_class(c: char) -> u8 {
+        if c.is_whitespace() {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Raw composer input text. The ui path reads it directly; kept for
+    /// symmetry with composer_text().
+    fn input_chars(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    /// Vim NORMAL handler. Returns true when the key was consumed; false
+    /// falls through to the plain composer arms (Enter submit, Ctrl-\*).
+    fn vim_normal(&mut self, action: KeyAction) -> bool {
+        let char_len = self.input_chars();
+        let c = match action {
+            KeyAction::Char(c) => c,
+            KeyAction::Left | KeyAction::Backspace => {
+                self.cursor = self.cursor.saturating_sub(1);
+                return true;
+            }
+            KeyAction::Right => {
+                self.cursor = (self.cursor + 1).min(char_len);
+                return true;
+            }
+            KeyAction::Delete => {
+                self.vim_x();
+                return true;
+            }
+            KeyAction::Home => {
+                let (start, _) = self.line_bounds();
+                self.cursor = start;
+                return true;
+            }
+            KeyAction::End => {
+                let (_, end) = self.line_bounds();
+                self.cursor = end;
+                return true;
+            }
+            KeyAction::Esc => {
+                self.vim_pending = false;
+                return true;
+            }
+            _ => return false,
+        };
+        let mut pending = std::mem::take(&mut self.vim_pending);
+        match c {
+            'h' => self.cursor = self.cursor.saturating_sub(1),
+            'l' => self.cursor = (self.cursor + 1).min(char_len),
+            '0' => {
+                let (start, _) = self.line_bounds();
+                self.cursor = start;
+            }
+            '$' => {
+                let (_, end) = self.line_bounds();
+                self.cursor = end;
+            }
+            'w' => self.vim_word_forward(),
+            'b' => self.vim_word_back(),
+            'e' => self.vim_word_end(),
+            'i' => self.vim = Some(VimMode::Insert),
+            'a' => {
+                self.cursor = (self.cursor + 1).min(char_len);
+                self.vim = Some(VimMode::Insert);
+            }
+            'I' => {
+                let (start, _) = self.line_bounds();
+                self.cursor = start;
+                self.vim = Some(VimMode::Insert);
+            }
+            'A' => {
+                let (_, end) = self.line_bounds();
+                self.cursor = end;
+                self.vim = Some(VimMode::Insert);
+            }
+            'o' => {
+                let (_, end) = self.line_bounds();
+                self.cursor = end;
+                self.open_line_below();
+                self.vim = Some(VimMode::Insert);
+            }
+            'O' => {
+                let (start, _) = self.line_bounds();
+                self.cursor = start;
+                self.open_line_above();
+                self.vim = Some(VimMode::Insert);
+            }
+            'x' => self.vim_x(),
+            'D' => self.vim_delete_to_line_end(),
+            'd' if pending => {
+                self.vim_delete_line();
+                pending = false;
+            }
+            'd' => pending = true,
+            'c' if pending => {
+                // Change line: clear it, keep the newline, enter INSERT.
+                let (start, end) = self.line_bounds();
+                let byte_s = self.byte_of(start);
+                let byte_e = self.byte_of(end);
+                self.input.replace_range(byte_s..byte_e, "");
+                self.cursor = start;
+                self.vim = Some(VimMode::Insert);
+                pending = false;
+            }
+            'c' => pending = true,
+            'u' => self.push_system(
+                "vim: undo is not implemented in this build (unsupported)".to_string(),
+            ),
+            ':' => self.push_system(
+                "vim: ex commands are unsupported here — use the / command bar".to_string(),
+            ),
+            _ => {}
+        }
+        self.vim_pending = pending;
+        true
+    }
+
+    fn vim_x(&mut self) {
+        let chars = self.chars();
+        if let Some(&c) = chars.get(self.cursor) {
+            let start = self.byte_index();
+            self.input.replace_range(start..start + c.len_utf8(), "");
+        }
+    }
+
+    fn vim_delete_to_line_end(&mut self) {
+        let (_, end) = self.line_bounds();
+        let start = self.byte_index();
+        let stop = self.byte_of(end);
+        self.input
+            .replace_range(start.min(stop)..stop.max(start), "");
+    }
+
+    fn vim_delete_line(&mut self) {
+        let (start, end) = self.line_bounds();
+        let chars = self.chars();
+        let mut remove = end;
+        if chars.get(end) == Some(&'\n') {
+            remove = end + 1;
+        } else if start > 0 {
+            // Last line without a trailing newline: eat the previous \n too.
+            return self.vim_delete_line_last();
+        }
+        let byte_s = self.byte_of(start);
+        let byte_e = self.byte_of(remove);
+        self.input.replace_range(byte_s..byte_e, "");
+        self.cursor = start.min(self.input_chars());
+        self.vim_pending = false;
+    }
+
+    fn vim_delete_line_last(&mut self) {
+        let (start, end) = self.line_bounds();
+        let byte_s = self.byte_of(start.saturating_sub(1));
+        let byte_e = self.byte_of(end);
+        self.input.replace_range(byte_s..byte_e, "");
+        self.cursor = start.saturating_sub(1);
+        self.vim_pending = false;
+    }
+
+    fn open_line_below(&mut self) {
+        let idx = self.byte_index();
+        self.input.insert(idx, '\n');
+        self.cursor += 1;
+    }
+
+    fn open_line_above(&mut self) {
+        // Insert the separator before the current line; the cursor parks on
+        // the new empty line (gap just after its newline).
+        let (start, _) = self.line_bounds();
+        let byte = self.byte_of(start);
+        self.input.insert(byte, '\n');
+        self.cursor = start + 1;
+    }
+
+    fn vim_word_forward(&mut self) {
+        let chars = self.chars();
+        let n = chars.len();
+        let mut j = self.cursor.min(n);
+        if j >= n {
+            return;
+        }
+        if Self::char_class(chars[j]) == 0 {
+            while j < n && Self::char_class(chars[j]) == 0 {
+                j += 1;
+            }
+        } else {
+            while j < n && Self::char_class(chars[j]) == 1 {
+                j += 1;
+            }
+            while j < n && Self::char_class(chars[j]) == 0 {
+                j += 1;
+            }
+        }
+        self.cursor = j;
+    }
+
+    fn vim_word_back(&mut self) {
+        let chars = self.chars();
+        let mut j = self.cursor.min(chars.len());
+        while j > 0 && Self::char_class(chars[j - 1]) == 0 {
+            j -= 1;
+        }
+        while j > 0 && Self::char_class(chars[j - 1]) == 1 {
+            j -= 1;
+        }
+        self.cursor = j;
+    }
+
+    fn vim_word_end(&mut self) {
+        let chars = self.chars();
+        let n = chars.len();
+        let mut j = self.cursor.min(n);
+        if j >= n {
+            return;
+        }
+        while j < n && Self::char_class(chars[j]) == 0 {
+            j += 1;
+        }
+        while j + 1 < n && Self::char_class(chars[j + 1]) == 1 {
+            j += 1;
+        }
+        self.cursor = j;
     }
 
     fn word_left_len(&self) -> usize {
@@ -1476,9 +1767,18 @@ impl App {
                     self.push_system("insights: querying usage by day".to_string());
                 }
                 "vim" => {
-                    self.push_system(
-                        "vim mode: not implemented in this build (unsupported)".to_string(),
-                    );
+                    if self.vim.is_some() {
+                        self.vim = None;
+                        self.vim_pending = false;
+                        self.push_system("vim mode off".to_string());
+                    } else {
+                        self.vim = Some(VimMode::Normal);
+                        self.push_system(
+                            "vim mode on — NORMAL (motions h l 0 $ w b e x D dd cc i a I A o O; \
+                             /vim to exit)"
+                                .to_string(),
+                        );
+                    }
                 }
                 "voice" => {
                     self.push_system(
@@ -1983,6 +2283,152 @@ mod tests {
 
     fn new_app() -> App {
         App::new(ProviderKind::Echo, "echo".into())
+    }
+
+    #[test]
+    fn vim_toggle_through_the_command_bar() {
+        let mut app = new_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.submit("/vim", &tx);
+        assert_eq!(app.vim, Some(VimMode::Normal));
+        assert!(app.messages.iter().any(|m| m.text.contains("vim mode on")));
+        app.submit("/vim", &tx);
+        assert_eq!(app.vim, None);
+    }
+
+    #[test]
+    fn vim_insert_typing_then_esc_returns_to_normal() {
+        let mut app = new_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.submit("/vim", &tx);
+        // From NORMAL: i enters insert; typing lands in the buffer.
+        app.handle_key(KeyAction::Char('i'), &tx);
+        assert_eq!(app.vim, Some(VimMode::Insert));
+        for c in "hi".chars() {
+            app.handle_key(KeyAction::Char(c), &tx);
+        }
+        assert_eq!(app.input, "hi");
+        app.handle_key(KeyAction::Esc, &tx);
+        assert_eq!(app.vim, Some(VimMode::Normal));
+        assert_eq!(app.cursor, app.input.chars().count() - 1);
+        // Normal-mode letters must not keep typing text.
+        app.handle_key(KeyAction::Char('l'), &tx);
+        assert_eq!(app.input, "hi");
+    }
+
+    #[test]
+    fn vim_normal_motions_h_l_ww_bb() {
+        let mut app = new_app();
+        app.input = "alpha beta gamma".to_string();
+        app.vim = Some(VimMode::Normal);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyAction::Char('w'), &tx);
+        assert_eq!(app.cursor, 6); // before "beta"
+        app.handle_key(KeyAction::Char('w'), &tx);
+        assert_eq!(app.cursor, 11); // before "gamma"
+        app.handle_key(KeyAction::Char('b'), &tx);
+        assert_eq!(app.cursor, 6);
+        app.handle_key(KeyAction::Char('b'), &tx);
+        assert_eq!(app.cursor, 0);
+        app.handle_key(KeyAction::Char('e'), &tx);
+        assert_eq!(app.cursor, 4); // end of "alpha" gap semantics
+        app.handle_key(KeyAction::Right, &tx); // alias of l
+        assert_eq!(app.cursor, 5);
+    }
+
+    #[test]
+    fn vim_x_deletes_the_char_under_the_cursor() {
+        let mut app = new_app();
+        app.input = "abc".to_string();
+        app.cursor = 1;
+        app.vim = Some(VimMode::Normal);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyAction::Char('x'), &tx);
+        assert_eq!(app.input, "ac");
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.vim, Some(VimMode::Normal));
+    }
+
+    #[test]
+    fn vim_dd_deletes_the_current_line() {
+        let mut app = new_app();
+        app.input = "one\ntwo\nthree".to_string();
+        app.cursor = 5; // inside "two"
+        app.vim = Some(VimMode::Normal);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyAction::Char('d'), &tx);
+        assert_eq!(app.cursor, 5, "dd waits: one d is pending");
+        app.handle_key(KeyAction::Char('d'), &tx);
+        assert_eq!(app.input, "one\nthree");
+        assert_eq!(app.cursor, 4, "cursor parked at the next line start");
+    }
+
+    #[test]
+    fn vim_d_capital_deletes_to_line_end_and_i_a_go_to_line_edges() {
+        let mut app = new_app();
+        app.input = "keep drop".to_string();
+        app.cursor = 5;
+        app.vim = Some(VimMode::Normal);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyAction::Char('D'), &tx);
+        assert_eq!(app.input, "keep ");
+        // I at line start, A at line end; both enter insert.
+        app.handle_key(KeyAction::Char('I'), &tx);
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.vim, Some(VimMode::Insert));
+        app.handle_key(KeyAction::Esc, &tx);
+        app.handle_key(KeyAction::Char('A'), &tx);
+        assert_eq!(app.cursor, "keep ".chars().count(), "A parks at line end");
+        assert_eq!(app.vim, Some(VimMode::Insert));
+    }
+
+    #[test]
+    fn vim_o_opens_line_below_and_o_big_inserts_above() {
+        let mut app = new_app();
+        app.input = "one".to_string();
+        app.cursor = 1;
+        app.vim = Some(VimMode::Normal);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyAction::Char('o'), &tx);
+        assert_eq!(app.input, "one\n");
+        assert_eq!(app.cursor, 4);
+        assert_eq!(app.vim, Some(VimMode::Insert));
+        app.handle_key(KeyAction::Esc, &tx);
+        app.handle_key(KeyAction::Char('O'), &tx);
+        // Cursor was at line ("one\n") start 0; O inserts the newline above.
+        assert_eq!(app.input, "\none\n");
+        assert_eq!(app.cursor, 1, "cursor sits on the empty new line");
+        assert_eq!(app.vim, Some(VimMode::Insert));
+    }
+
+    #[test]
+    fn vim_undo_reports_honest_supported_gap() {
+        let mut app = new_app();
+        app.vim = Some(VimMode::Normal);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyAction::Char('u'), &tx);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.text.contains("undo") && m.text.contains("not implemented")));
+    }
+
+    #[test]
+    fn vim_backspace_and_a_append_respect_cursor() {
+        let mut app = new_app();
+        app.input = "abc".to_string();
+        app.cursor = 1;
+        app.vim = Some(VimMode::Normal);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // a: move right once, then insert.
+        app.handle_key(KeyAction::Char('a'), &tx);
+        assert_eq!(app.vim, Some(VimMode::Insert));
+        app.handle_key(KeyAction::Char('X'), &tx);
+        assert_eq!(app.input, "abXc");
+        // Backspace in normal mode moves the gap left (h).
+        app.handle_key(KeyAction::Esc, &tx);
+        app.handle_key(KeyAction::Backspace, &tx);
+        assert_eq!(app.cursor, 1);
     }
 
     #[test]

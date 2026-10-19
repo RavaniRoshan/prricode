@@ -936,6 +936,34 @@ fn forward_event(
     }
 }
 
+/// Cap on rendered diff lines for edit_file summaries so one big edit
+/// cannot flood the transcript.
+const DIFF_SUMMARY_CAP: usize = 12;
+
+/// A terse unified-style block: the old lines as `-`, the new lines as `+`,
+/// then an `(N more diff lines)` footer when truncating.
+fn diff_block(old: &str, new: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let old_trim = old.trim_end_matches('\n');
+    if !old_trim.is_empty() {
+        for line in old_trim.lines() {
+            out.push(format!("- {line}"));
+        }
+    }
+    let new_trim = new.trim_end_matches('\n');
+    if !new_trim.is_empty() {
+        for line in new_trim.lines() {
+            out.push(format!("+ {line}"));
+        }
+    }
+    if out.len() > DIFF_SUMMARY_CAP {
+        let rest = out.len() - DIFF_SUMMARY_CAP;
+        out.truncate(DIFF_SUMMARY_CAP);
+        out.push(format!("… ({rest} more diff lines)"));
+    }
+    out.join("\n")
+}
+
 fn summarize_tool(item: &serde_json::Value) -> String {
     let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("?");
     let input = item.get("input").reimplemented().unwrap_or(serde_json::json!({}));
@@ -945,7 +973,36 @@ fn summarize_tool(item: &serde_json::Value) -> String {
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .to_string(),
-        "write_file" | "edit_file" | "read_file" => input
+        "edit_file" => {
+            let path = input
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .to_string();
+            let old = input
+                .get("old_string")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let new = input
+                .get("new_string")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let mut block = format!("diff: {path}\n{}", diff_block(old, new));
+            if input.get("replace_all").and_then(|r| r.as_bool()) == Some(true) {
+                block.push_str("\n(replace_all)");
+            }
+            block
+        }
+        "write_file" => {
+            let path = input.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let lines = input
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
+            format!("write_file: {path} ({lines} lines)")
+        }
+        "read_file" => input
             .get("path")
             .and_then(|p| p.as_str())
             .unwrap_or("")
@@ -1887,6 +1944,76 @@ fn walkdir_glob(pattern: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summarize_edit_file_shows_a_diff_block() {
+        let item = serde_json::json!({
+            "kind": "tool_use",
+            "name": "edit_file",
+            "input": {
+                "path": "src/main.rs",
+                "old_string": "fn old() {\n}\n",
+                "new_string": "fn new() {\n    step();\n}\n"
+            }
+        });
+        let summary = summarize_tool(&item);
+        assert!(summary.contains("src/main.rs"), "got: {summary}");
+        assert!(summary.contains("- fn old() {"), "got: {summary}");
+        assert!(
+            summary.contains("+ fn new() {") && summary.contains("+     step();"),
+            "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_edit_file_caps_long_diffs() {
+        let old = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let item = serde_json::json!({
+            "kind": "tool_use",
+            "name": "edit_file",
+            "input": {
+                "path": "big.txt",
+                "old_string": old,
+                "new_string": "replaced"
+            }
+        });
+        let summary = summarize_tool(&item);
+        assert!(summary.contains("more diff lines"), "got: {summary}");
+        assert!(
+            summary.matches("- line ").count() <= 12,
+            "cap keeps the block bounded: {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_edit_file_replace_all_is_noted() {
+        let item = serde_json::json!({
+            "kind": "tool_use",
+            "name": "edit_file",
+            "input": {
+                "path": "a.rs",
+                "old_string": "todo",
+                "new_string": "done",
+                "replace_all": true
+            }
+        });
+        assert!(summarize_tool(&item).contains("replace_all"));
+    }
+
+    #[test]
+    fn summarize_write_file_reports_size_and_shape() {
+        let create = serde_json::json!({
+            "kind": "tool_use",
+            "name": "write_file",
+            "input": { "path": "new.txt", "content": "a\nb\nc\n" }
+        });
+        let summary = summarize_tool(&create);
+        assert!(summary.contains("new.txt"), "got: {summary}");
+        assert!(summary.contains("3 lines"), "got: {summary}");
+    }
 
     fn stage_ctx(
         pipeline: &Arc<Pipeline>,

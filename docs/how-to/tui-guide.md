@@ -115,6 +115,7 @@ Type `/` and the command, then `Return`.
 | `/hooks add <event>[@tool] <command> [args…]` | Register a command hook for this session. The event name is case-insensitive (`pretooluse` works). `@tool` optionally filters by tool-name pattern (`*` matches everything). Unknown events are answered with the full event list; hooks live for the lifetime of the TUI process |
 | `/stats` | Workspace totals from the local database: sessions, items, usage records, tokens in/out, cost |
 | `/insights` | Usage by day (`YYYY-MM-DD: <in> in / <out> out ($cost)`); honest zero state when nothing is recorded |
+| `/vim` | Modal composer editing. NORMAL: motions `h l 0 $ w b e`, `x` delete char, `D` delete to line end, `dd` delete line, `cc` change line, `i a I A o O` enter INSERT. INSERT: standard composer keys, Esc returns to NORMAL. Enter still submits; `u`/ex commands degrade honestly (`u` has no undo ring by design of the current composer state) |
 
 ## Approvals — three durability tiers
 

@@ -1,6 +1,6 @@
 //! Terminal setup, event polling, and rendering.
 
-use crate::app::{App, KeyAction, Role};
+use crate::app::{App, KeyAction, Role, VimMode};
 use crate::theme::Theme;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
@@ -281,11 +281,17 @@ fn render_main(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         )
     } else {
         // A pending image paste shows in the input box; the hint is cleared
-        // with Esc and replaced by another Ctrl+V.
+        // with Esc and replaced by another Ctrl+V. Vim mode adds its own
+        // segment so the composer always states the active mode.
         let title = if let Some(hint) = app.image_hint() {
             format!("input  (Enter send · {hint} — Esc clears · Ctrl+V replace)")
         } else {
             "input  (Enter send · Esc cancel · Ctrl+V paste image · /help)".to_string()
+        };
+        let title = match app.vim {
+            Some(VimMode::Normal) => format!("{title} · vim NORMAL (i to insert)"),
+            Some(VimMode::Insert) => format!("{title} · vim INSERT (Esc to normal)"),
+            None => title,
         };
         (app.input.implementation(), title)
     };
