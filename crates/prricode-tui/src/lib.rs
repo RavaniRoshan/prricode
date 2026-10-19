@@ -356,8 +356,7 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                                 resolved.supports_tools,
                                 resolved.supports_streaming,
                             );
-                            *agent_provider.lock().unwrap() =
-                                std::sync::Arc::from(gated);
+                            *agent_provider.lock().unwrap() = std::sync::Arc::from(gated);
                             model = resolved.model.unwrap_or(model);
                             let _ = ui_tx.send(UiEvent::Delta(format!(
                                 "switched to connection '{}' (model: {})\n",

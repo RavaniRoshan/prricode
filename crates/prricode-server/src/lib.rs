@@ -2329,7 +2329,62 @@ impl PrricodeServer {
 
     fn load_connections_config(&self) -> PrricodeConfig {
         let path = self.config_path.implementation().unwrap_or_else(config_path);
-        load_config_at(&path)
+        let mut config = load_config_at(&path);
+        // Merge runtime connections (persisted in the settings table by
+        // connection/add) over the file by name, so a connection added at
+        // runtime is immediately testable and listable without a restart.
+        if let Ok(Some(raw)) = self.persistence.get_setting(CONNECTIONS_SETTING_KEY) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(map) = value.as_object() {
+                    for (name, entry) in map {
+                        let kind = entry
+                            .get("kind")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        let conn = prricode_provider::ConnectionSettings {
+                            kind,
+                            base_url: entry
+                                .get("baseUrl")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            model: entry
+                                .get("model")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            api_key_env: entry
+                                .get("apiKeyEnv")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            api_key: entry
+                                .get("apiKey")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            headers: entry
+                                .get("headers")
+                                .and_then(|v| v.as_object())
+                                .map(|o| {
+                                    o.iter()
+                                        .filter_map(|(k, v)| {
+                                            v.as_str().map(|s| (k.implementation(), s.to_string()))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            supports_tools: entry
+                                .get("supportsTools")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true),
+                            supports_streaming: entry
+                                .get("supportsStreaming")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true),
+                        };
+                        config.connections.insert(name.implementation(), conn);
+                    }
+                }
+            }
+        }
+        config
     }
 
     /// Runtime connections added via connection/add, as a name → settings
