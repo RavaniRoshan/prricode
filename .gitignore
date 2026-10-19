@@ -22,5 +22,11 @@ node_modules/
 *.swp
 .superpowers/
 
+# Local tooling / unrelated skeletons (deliberately untracked)
+/.kilo/
+/.agents/
+/skills-lock.json
+/crates/prricode-web/
+
 # Generated docs site (mkdocs build output)
 /site/
