@@ -322,6 +322,22 @@ describe('settings scope separation', () => {
     });
   });
 
+  it('resolves a restricted key from the user tier on the top-level path too', () => {
+    // The restriction is a capability-level rule: `spellcheck` is scoped to the
+    // user tier, so no other tier may supply it — whichever resolution path is
+    // used. The paths must not disagree about a restricted key.
+    const tiers = new Map<SettingsSource, unknown>([
+      ['policySettings', { spellcheck: { enabled: false } }],
+      ['flagSettings', { spellcheck: { enabled: false } }],
+      ['userSettings', { spellcheck: { enabled: true } }],
+    ]);
+
+    expect(resolveTopLevelKey(tiers, 'spellcheck')).toEqual([
+      { source: 'userSettings', value: { enabled: true } },
+    ]);
+    expect(effectiveSource(tiers, 'spellcheck')).toBe('userSettings');
+  });
+
   it('reports per-tier settings together with the tier that supplied them', () => {
     const tiers = new Map<SettingsSource, unknown>([
       ['userSettings', { apiKeyHelper: 'user-helper' }],
@@ -533,6 +549,14 @@ describe('settings lookup hardening', () => {
       expect((error as Error).message).toMatch(/explicit source union/);
       expect(error).not.toBeInstanceOf(TypeError);
     }
+  });
+
+  it('reports no scope for a source that is not in the scope map', () => {
+    // The scope map is a plain object, so its lookup must be an own-property
+    // check: a caller that passes an `Object.prototype` member name gets no
+    // scope rather than the inherited member.
+    expect(scopeFor('constructor' as unknown as SettingsSource)).toBeNull();
+    expect(scopeFor('toString' as unknown as SettingsSource)).toBeNull();
   });
 
   it('loads a settings file with prototype-named keys and resolves them without crashing', () => {
