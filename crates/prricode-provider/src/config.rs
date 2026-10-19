@@ -122,8 +122,12 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn load_config() -> PrricodeConfig {
-    let path = config_path();
-    match std::fs::read_to_string(&path) {
+    load_config_at(&config_path())
+}
+
+/// Load from an explicit path (the testable seam).
+pub fn load_config_at(path: &std::path::Path) -> PrricodeConfig {
+    match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text).unwrap_or_default(),
         Err(_) => PrricodeConfig::default(),
     }

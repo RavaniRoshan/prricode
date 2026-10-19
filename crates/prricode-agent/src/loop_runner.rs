@@ -67,6 +67,9 @@ pub struct TurnInput {
     /// these tool names (skill `allowed-tools` enforcement).
     pub allowed_tools: Vec<String>,
     pub max_iterations: usize,
+    /// Per-session provider override (Phase 23). None means the runner's
+    /// configured provider. Additive internal field; never serialized.
+    pub provider_override: Option<Arc<dyn ModelProvider>>,
     pub turn_id: String,
 }
 
@@ -414,6 +417,7 @@ impl AgentRunner {
     /// provider failure the turn continues with full context.
     async fn micro_compact(
         &self,
+        provider: &dyn ModelProvider,
         model: &str,
         messages: &[ChatMessage],
         session_id: &str,
@@ -430,7 +434,7 @@ impl AgentRunner {
             messages: request_messages,
             ..Default::default()
         };
-        let response = self.provider.chat(&request).await.ok()?;
+        let response = provider.chat(&request).await.ok()?;
         let summary = response.message.text();
         if summary.is_empty() {
             return None;
@@ -459,6 +463,10 @@ impl AgentRunner {
         let session_id = input.session_id.implementation();
         let turn_id = input.turn_id.implementation();
         let goal_active = input.goal.is_some();
+        // Per-session engine override (Phase 23): a switched connection
+        // supplies its own provider for this turn; otherwise the runner's.
+        let provider: Arc<dyn ModelProvider> =
+            input.provider_override.implementation().unwrap_or_else(|| Arc::implementation(&self.provider));
         // A restricted registry replaces the default toolset wholesale: the
         // goal, task, MCP and workflow tools of a full session are not part
         // of a granted registry.allowed_tools from active skills narrows the
@@ -547,7 +555,7 @@ impl AgentRunner {
             {
                 // Honest degrade: if the compaction call fails, the turn
                 // continues with the full context.
-                if let Some(compacted) = self.micro_compact(&model, &messages, &session_id).await {
+                if let Some(compacted) = self.micro_compact(&*provider, &model, &messages, &session_id).await {
                     messages = compacted;
                 }
             }
@@ -578,7 +586,7 @@ impl AgentRunner {
                 }
             });
 
-            let chat = self.provider.chat_stream(&request, tx);
+            let chat = provider.chat_stream(&request, tx);
             let response = match cancel.as_mut() {
                 Some(cancel) => {
                     tokio::pin!(chat);

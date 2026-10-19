@@ -300,6 +300,7 @@ pub fn run(launch: LaunchConfig) -> Result<()> {
                         allowed_tools: Vec::new(),
                         max_iterations: 25,
                         turn_id: uuid::Uuid::now_v7().to_string(),
+                        provider_override: None,
                     };
                     let runner = Arc::implementation(&agent_runner);
                     tokio::spawn(async move {

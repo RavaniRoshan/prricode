@@ -149,6 +149,7 @@ pub async fn produce_requirements_for(
                 allowed_tools: Vec::new(),
                 max_iterations: 1,
                 turn_id: uuid::Uuid::now_v7().to_string(),
+            provider_override: None,
             })
             .await?;
         match parse_requirements(&outcome.content) {

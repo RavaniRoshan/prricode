@@ -15,7 +15,7 @@ mod openai_compat;
 mod tests;
 
 pub use config::{
-    config_path, connection_name, load_config, parse_kind_id, resolve_connection,
+    config_path, connection_name, load_config, load_config_at, parse_kind_id, resolve_connection,
     startup_connection, ConnectionSettings, ProviderConfig, ProviderSettings, PrricodeConfig,
     ResolvedConnection,
 };

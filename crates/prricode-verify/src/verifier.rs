@@ -182,6 +182,7 @@ pub async fn verify(
             allowed_tools: Vec::new(),
             max_iterations: 1,
             turn_id: Uuid::now_v7().to_string(),
+            provider_override: None,
         })
         .await
         .map_err(|e| VerifyError::Provider(e.to_string()))?;

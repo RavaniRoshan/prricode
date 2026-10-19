@@ -63,6 +63,7 @@ impl Tool for AgentTool {
                 allowed_tools: Vec::new(),
                 max_iterations: 15,
                 turn_id: uuid::Uuid::now_v7().to_string(),
+                provider_override: None,
             })
             .await
             .map_err(|e| super::ToolError::Execution(format!("subagent failed: {e}")))?;

@@ -136,6 +136,7 @@ pub async fn run_build(
                 allowed_tools: Vec::new(),
                 max_iterations: 15,
                 turn_id: Uuid::now_v7().to_string(),
+                provider_override: None,
             }));
         }
         let outcomes = join_all(pending).await;

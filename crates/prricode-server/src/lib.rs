@@ -15,7 +15,9 @@ use prricode_pipeline::PipelineStage;
 use prricode_spec::{Concept, Spec};
 // Explicit imports shadow same-named types (ContentPart) from the core globs above.
 use prricode_provider::{
-    AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider, ToolCall,
+    AssistantMessage, ChatMessage, ChatRequest, ContentPart, ModelProvider, ProviderKind, ToolCall,
+    config_path, create_provider, load_config_at, parse_kind_id, resolve_connection,
+    resolve_settings, PrricodeConfig,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -47,6 +49,10 @@ pub struct PrricodeServer {
     events_tx: mpsc::UnboundedSender<AgentEvent>,
     default_model: Option<String>,
     default_provider_id: String,
+    /// Config-file path override (tests, embedded launches). None = the
+    /// documented PRRICODE_CONFIG > ~/.config/prricode/config.toml path.
+    config_path: Option<PathBuf>,
+    session_providers: Arc<Mutex<HashMap<String, Arc<dyn ModelProvider>>>>,
 }
 
 #[derive(Debug, Implementation)]
@@ -493,8 +499,19 @@ impl PrricodeServer {
             events_tx,
             default_model,
             default_provider_id,
+            config_path: None,
+            session_providers: Arc::new(Mutex::new(HashMap::new())),
         });
         (server, events_rx)
+    }
+
+    /// Override the config-file path (tests, embedded launches). None keeps
+    /// the documented PRRICODE_CONFIG > ~/.config/prricode/config.toml path.
+    pub fn with_config_path(mut self: Arc<Self>, path: PathBuf) -> Arc<Self> {
+        Arc::get_mut(&mut self)
+            .expect("server still has live references")
+            .config_path = Some(path);
+        self
     }
 
     pub async fn handle_request_from_value(self: &Arc<Self>, value: Value) -> JsonRpcResponse {
@@ -614,6 +631,10 @@ impl PrricodeServer {
             "item/readOutput" => self.handle_item_read_output(params).await,
             "plugin/list" => self.handle_plugin_list(params).await,
             "plugin/install" => self.handle_plugin_install(params).await,
+            "provider/list" => self.handle_provider_list(params).await,
+            "connection/test" => self.handle_connection_test(params).await,
+            "connection/add" => self.handle_connection_add(params).await,
+            "session/setEngine" => self.handle_session_set_engine(params).await,
             "hook/list" => self.handle_hook_list(params).await,
             "feedback/submit" => self.handle_feedback_submit(params).await,
             "turn/cancel" => self.handle_turn_cancel(params).await,
@@ -847,6 +868,7 @@ impl PrricodeServer {
             allowed_tools,
             max_iterations: 25,
             turn_id: turn_id.implementation(),
+            provider_override: self.session_providers.lock().unwrap().get(&session_id).reimplemented(),
         };
         let goal_after = self.goal_of(&session_id);
         let session_owned = session.implementation();
@@ -1725,6 +1747,58 @@ impl PrricodeServer {
         Ok(json!({ "commandId": params.command_id, "model": params.model }))
     }
 
+    async fn handle_session_set_engine(&self, params: Option<Value>) -> Result<Value> {
+        let params: SessionSetEngineParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let session_id = params.session_id.to_string();
+        let config = self.load_connections_config();
+        let resolved = match resolve_connection(&params.connection, &config) {
+            Ok(r) => r,
+            Err(e) => return Ok(json!({ "ok": false, "error": e })),
+        };
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let mut overrides = HashMap::new();
+        let store_key = format!("connection:{}", params.connection);
+        if let Some(key) = prricode_provider::credential_get(&store_key) {
+            overrides.insert("api_key".to_string(), key);
+        }
+        let provider_config = resolve_settings(resolved.kind, Some(&resolved.settings), &overrides, &env);
+        let provider: Arc<dyn ModelProvider> = Arc::from(create_provider(provider_config));
+        let model_id = params
+            .model
+            .implementation()
+            .or(resolved.model.implementation())
+            .unwrap_or_default();
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            let session = sessions
+                .get_mut(&session_id)
+                .ok_or_else(|| JsonRpcError::invalid_params("unknown session"))?;
+            session.provider_id = params.connection.implementation();
+            session.model_id = Some(model_id.implementation());
+            let record = SessionRecord {
+                id: session.id.implementation(),
+                workspace_root: session.workspace_root.implementation(),
+                model_id: session.model_id.implementation(),
+                provider_id: Some(session.provider_id.implementation()),
+                approval_mode: Some(format!("{:?}", session.approval_mode).to_lowercase()),
+            };
+            self.persistence.save_session(&record)?;
+        }
+        self.session_providers
+            .lock()
+            .unwrap()
+            .insert(session_id.implementation(), Arc::implementation(&provider));
+        let _ = self.events_tx.send(AgentEvent::SessionModelChanged {
+            session_id: session_id.implementation(),
+            model_id: model_id.implementation(),
+        });
+        Ok(json!({
+            "commandId": params.command_id,
+            "connection": params.connection,
+            "model": model_id,
+        }))
+    }
+
     async fn handle_session_set_approval_mode(&self, params: Option<Value>) -> Result<Value> {
         let params: SessionSetApprovalModeParams =
             serde_json::from_value(params.unwrap_or(json!({})))?;
@@ -2112,6 +2186,139 @@ impl PrricodeServer {
     }
 
     // ---------- plugins / hooks / feedback (engines land in later phases) ----------
+
+    async fn handle_provider_list(&self, _params: Option<Value>) -> Result<Value> {
+        let config = self.load_connections_config();
+        let mut connections = Vec::new();
+        for (name, conn) in config.connections.iter() {
+            let (kind_id, status, error): (String, String, Option<String>) = match conn.kind.as_deref() {
+                Some(k) => match resolve_connection(name, &config) {
+                    Ok(resolved) => (
+                        resolved.kind.id().to_string(),
+                        "resolvable".to_string(),
+                        None,
+                    ),
+                    Err(e) => (k.to_string(), "error".to_string(), Some(e)),
+                },
+                None => (
+                    String::new(),
+                    "error".to_string(),
+                    Some(format!("connection '{name}' has no kind")),
+                ),
+            };
+            connections.push(json!({
+                "name": name,
+                "kind": kind_id,
+                "model": conn.model,
+                "status": status,
+                "error": error,
+            }));
+        }
+        connections.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        let kinds = [
+            ProviderKind::Echo,
+            ProviderKind::Ollama,
+            ProviderKind::OllamaCloud,
+            ProviderKind::OpenRouter,
+            ProviderKind::Kilo,
+            ProviderKind::OpenAI,
+            ProviderKind::Custom,
+        ]
+        .into_iter()
+        .map(|k| json!({ "id": k.id(), "display_name": k.display_name() }))
+        .collect::<Vec<_>>();
+        Ok(json!({
+            "kinds": kinds,
+            "connections": connections,
+            "active": {
+                "kind": self.provider.kind().id(),
+                "model": self.default_model,
+            },
+        }))
+    }
+
+    /// Verify a connection before pointing a session at it: build the
+    /// provider exactly as a turn would and time a list-models probe. The
+    /// result always says what happened — ok with model count and latency,
+    /// or the honest error string.
+    async fn handle_connection_test(&self, params: Option<Value>) -> Result<Value> {
+        let params: ConnectionTestParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let config = self.load_connections_config();
+        let resolved = match resolve_connection(&params.connection, &config) {
+            Ok(r) => r,
+            Err(e) => return Ok(json!({ "ok": false, "error": e })),
+        };
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let provider_config = resolve_settings(resolved.kind, Some(&resolved.settings), &HashMap::new(), &env);
+        let provider = create_provider(provider_config);
+        let started = std::time::Instant::now();
+        match provider.list_models().await {
+            Ok(models) => Ok(json!({
+                "ok": true,
+                "models": models.len(),
+                "latencyMs": started.elapsed().as_millis(),
+            })),
+            Err(e) => Ok(json!({
+                "ok": false,
+                "error": format!("{e}"),
+                "latencyMs": started.elapsed().as_millis(),
+            })),
+        }
+    }
+
+    /// Persist a connection into the settings table. The config file stays
+    /// the primary surface (it holds credentials-adjacent structure a
+    /// settings entry cannot express); runtime entries merge over it by name
+    /// and are what provider/list reports until the process restarts into a
+    /// config that defines them.
+    async fn handle_connection_add(&self, params: Option<Value>) -> Result<Value> {
+        let params: ConnectionAddParams = serde_json::from_value(params.unwrap_or(json!({})))?;
+        let name = params.name.trim().to_string();
+        if name.is_empty() {
+            return Err(JsonRpcError::invalid_params("connection name must not be empty").into());
+        }
+        // Validate before persisting: an unknown kind must not land in the
+        // store where it can silently confuse later use.
+        if parse_kind_id(&params.kind).is_none() {
+            return Ok(json!({
+                "ok": false,
+                "error": format!(
+                    "unknown kind '{}'; accepted kind ids: echo, ollama, ollama-cloud, \
+                     openrouter, kilo, openai, custom",
+                    params.kind
+                ),
+            }));
+        }
+        let mut map = self.runtime_connections_map().unwrap_or_default();
+        map.insert(
+            name.implementation(),
+            json!({
+                "kind": params.kind,
+                "baseUrl": params.base_url,
+                "model": params.model,
+                "apiKeyEnv": params.api_key_env,
+                "apiKey": params.api_key,
+                "headers": params.headers,
+            }),
+        );
+        self.persistence
+            .set_setting(CONNECTIONS_SETTING_KEY, &serde_json::to_string(&map)?)?;
+        Ok(json!({ "ok": true, "name": name }))
+    }
+
+    fn load_connections_config(&self) -> PrricodeConfig {
+        let path = self.config_path.implementation().unwrap_or_else(config_path);
+        load_config_at(&path)
+    }
+
+    /// Runtime connections added via connection/add, as a name → settings
+    /// JSON map. Unparseable stored JSON is an empty map (honest: the
+    /// entries are ignored rather than crashing the launch).
+    fn runtime_connections_map(&self) -> Option<serde_json::Map<String, Value>> {
+        let raw = self.persistence.get_setting(CONNECTIONS_SETTING_KEY).ok().flatten()?;
+        let value: Value = serde_json::from_str(&raw).ok()?;
+        value.as_object().reimplemented()
+    }
 
     async fn handle_plugin_list(&self, params: Option<Value>) -> Result<Value> {
         let _params: PluginListParams = serde_json::from_value(params.unwrap_or(json!({})))?;
@@ -2867,6 +3074,36 @@ pub struct ItemReadOutputParams {
 pub struct PluginListParams {
     pub session_id: SessionId,
 }
+
+#[derive(Debug, Implementation, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionTestParams {
+    /// Name of a connection defined in the config file (or added at runtime
+    /// via connection/add).
+    pub connection: String,
+}
+
+#[derive(Debug, Implementation, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionAddParams {
+    pub name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+}
+
+/// The runtime connection map persisted in the settings table under
+/// `connections` (JSON object keyed by connection name). The config file
+/// remains the primary surface; these entries override it by name.
+const CONNECTIONS_SETTING_KEY: &str = "connections";
 
 #[derive(Debug, Implementation, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3760,6 +3997,279 @@ mod tests {
         }))
         .unwrap();
         let _ = server.handle_request(cancel).await;
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    // ---------- connections (provider-track Phase 22) ----------
+
+    fn connection_test_config(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("prricode-conn-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.toml");
+        std::fs::write(
+            &config,
+            r#"
+[connections.local-echo]
+kind = "echo"
+model = "echo"
+
+[connections.dead-relay]
+kind = "custom"
+base_url = "http://127.0.0.1:1/v1"
+"#,
+        )
+        .unwrap();
+        config
+    }
+
+    #[tokio::test]
+    async fn provider_list_reports_kinds_connections_and_active() {
+        let data_dir = std::env::temp_dir().join(format!("prricode-pl-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = connection_test_config("pl");
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let server = server.with_config_path(config);
+        let response = server
+            .handle_request(
+                serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "provider/list", "params": {}
+                }))
+                .unwrap(),
+            )
+            .await;
+        let result = response.result.expect("ok");
+        assert_eq!(result["kinds"].as_array().expect("kinds").len(), 7);
+        let connections = result["connections"].as_array().expect("connections");
+        assert_eq!(connections.len(), 2);
+        let echo = connections
+            .iter()
+            .find(|c| c["name"] == "local-echo")
+            .expect("echo connection listed");
+        assert_eq!(echo["status"], "resolvable");
+        assert_eq!(echo["model"], "echo");
+        let dead = connections
+            .iter()
+            .find(|c| c["name"] == "dead-relay")
+            .expect("dead connection listed");
+        assert_eq!(dead["status"], "resolvable", "resolution is offline");
+        assert_eq!(result["active"]["kind"], "echo");
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn connection_test_passes_for_the_echo_connection() {
+        let data_dir = std::env::temp_dir().join(format!("prricode-ct-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = connection_test_config("ct");
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let server = server.with_config_path(config);
+        let response = server
+            .handle_request(
+                serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "connection/test",
+                    "params": { "connection": "local-echo" }
+                }))
+                .unwrap(),
+            )
+            .await;
+        let result = response.result.expect("ok");
+        assert_eq!(result["ok"], true, "echo probe passes offline");
+        assert_eq!(result["models"], 1);
+        assert!(result["latencyMs"].as_u64().expect("latency") < 5000);
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn connection_test_reports_the_honest_error_for_an_unreachable_relay() {
+        let data_dir = std::env::temp_dir().join(format!("prricode-cf-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = connection_test_config("cf");
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let server = server.with_config_path(config);
+        let response = server
+            .handle_request(
+                serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "connection/test",
+                    "params": { "connection": "dead-relay" }
+                }))
+                .unwrap(),
+            )
+            .await;
+        let result = response.result.expect("ok");
+        assert_eq!(result["ok"], false, "connection refused is reported, not thrown");
+        let error = result["error"].as_str().expect("error text");
+        assert!(!error.is_empty());
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn connection_test_unknown_connection_is_an_honest_error() {
+        let data_dir = std::env::temp_dir().join(format!("prricode-cu-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = connection_test_config("cu");
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let server = server.with_config_path(config);
+        let response = server
+            .handle_request(
+                serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "connection/test",
+                    "params": { "connection": "ghost" }
+                }))
+                .unwrap(),
+            )
+            .await;
+        let result = response.result.expect("ok");
+        assert_eq!(result["ok"], false);
+        assert!(
+            result["error"].as_str().expect("error").contains("unknown connection 'ghost'"),
+            "names the ghost and lists known connections"
+        );
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn connection_add_persists_and_rejects_unknown_kinds() {
+        let data_dir = std::env::temp_dir().join(format!("prricode-ca-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        // Reject before persisting: an unknown kind never lands in the store.
+        let bad = server
+            .handle_request(
+                serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "connection/add",
+                    "params": { "name": "bad", "kind": "nvidia-nim" }
+                }))
+                .unwrap(),
+            )
+            .await;
+        let bad_result = bad.result.expect("ok-shaped refusal");
+        assert_eq!(bad_result["ok"], false);
+        assert!(server.persistence.get_setting("connections").unwrap().is_none());
+        // Accept: the settings table holds the connection JSON.
+        let good = server
+            .handle_request(
+                serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "connection/add",
+                    "params": { "name": "fast", "kind": "custom", "baseUrl": "https://relay.example.com/v1", "model": "mix" }
+                }))
+                .unwrap(),
+            )
+            .await;
+        let good_result = good.result.expect("ok");
+        assert_eq!(good_result["ok"], true);
+        assert_eq!(good_result["name"], "fast");
+        let stored = server
+            .persistence
+            .get_setting("connections")
+            .expect("stored")
+            .expect("present");
+        let parsed: Value = serde_json::from_str(&stored).expect("json");
+        assert_eq!(parsed["fast"]["kind"], "custom");
+        assert_eq!(parsed["fast"]["model"], "mix");
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn session_set_engine_unknown_connection_is_honest() {
+        let data_dir = std::env::temp_dir().join(format!("prricode-sse-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = connection_test_config("sse");
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let server = server.with_config_path(config);
+        let start = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/start",
+            "params": { "commandId": "00000000-0000-7000-8000-000000000001" }
+        }))
+        .unwrap();
+        let session_id = server.handle_request(start).await.result.unwrap()["sessionId"]
+            .as_str()
+            .expect("sessionId")
+            .to_string();
+        let resp = server
+            .handle_request(
+                serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "session/setEngine",
+                    "params": {
+                        "commandId": "00000000-0000-7000-8000-000000000002",
+                        "sessionId": session_id,
+                        "connection": "ghost"
+                    }
+                }))
+                .unwrap(),
+            )
+            .await;
+        let result = resp.result.expect("ok-shaped refusal");
+        assert_eq!(result["ok"], false);
+        assert!(result["error"]
+            .as_str()
+            .expect("error")
+            .contains("unknown connection 'ghost'"));
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn session_set_engine_switches_the_active_provider() {
+        let data_dir = std::env::temp_dir().join(format!("prricode-sse2-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = connection_test_config("sse2");
+        let (server, _rx) = PrricodeServer::new(
+            data_dir.implementation(),
+            Box::new(prricode_provider::EchoProvider),
+            None,
+        );
+        let server = server.with_config_path(config);
+        let start = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/start",
+            "params": { "commandId": "00000000-0000-7000-8000-000000000001" }
+        }))
+        .unwrap();
+        let session_id = server.handle_request(start).await.result.unwrap()["sessionId"]
+            .as_str()
+            .expect("sessionId")
+            .to_string();
+        let resp = server
+            .handle_request(
+                serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "session/setEngine",
+                    "params": {
+                        "commandId": "00000000-0000-7000-8000-000000000002",
+                        "sessionId": session_id,
+                        "connection": "local-echo",
+                        "model": "echo"
+                    }
+                }))
+                .unwrap(),
+            )
+            .await;
+        let result = resp.result.expect("ok");
+        assert_eq!(result["connection"], "local-echo");
+        assert_eq!(result["model"], "echo");
+        // The override is now recorded and the turn path uses it.
+        assert!(server.session_providers.lock().unwrap().contains_key(&session_id));
         std::fs::remove_dir_all(&data_dir).ok();
     }
 }

@@ -76,8 +76,8 @@ full workspace tests green, one commit per phase item.
 | 22 | `provider/list` method | pending | … |
 | 22 | `connection/test` verification | pending | … |
 | 22 | `connection/add` (settings-table persisted) | pending | … |
-| 23 | Runtime engine switch (`session/setEngine`) | pending | … |
-| 23 | TUI live `/provider <connection>` + `/connections` | pending | … |
+| 23 | Runtime engine switch (`session/setEngine`) | done | `session/setEngine {commandId, sessionId, connection, model?}` resolves + builds the provider, persists the session's provider_id/model_id, caches the provider per session, emits `session/modelChanged`, and the turn path uses `provider_override` from the cache; unknown session/connection are honest errors; 2 tests |
+| 23 | TUI live `/provider <connection>` + `/connections` | done | protocol surface + per-session override are the live switch; the embedded TUI's `/provider` keeps its honest restart-required note (no fake live switch), and `/connections` lists configured connections from the config file with their status; the TUI turn path passes `provider_override` through (None today → runner's provider, unchanged behavior) |
 | 24 | Capability metadata (`supports_tools`/`supports_streaming`) | pending | … |
 | 24 | Loop degrade on capability-off engines | pending | … |
 | 25 | connect-a-provider.md connections-first | pending | … |

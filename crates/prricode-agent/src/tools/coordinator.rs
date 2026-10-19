@@ -85,6 +85,7 @@ impl Tool for CoordinatorTool {
                         allowed_tools: Vec::new(),
                         max_iterations: 15,
                         turn_id: uuid::Uuid::now_v7().to_string(),
+                        provider_override: None,
                     })
                     .await;
                 (prompt, outcome)

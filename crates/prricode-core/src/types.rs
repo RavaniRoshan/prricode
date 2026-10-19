@@ -521,6 +521,18 @@ pub struct SessionSetModelParams {
     pub session_id: SessionId,
 }
 
+/// Switch a session's engine (connection) at runtime. Additive method:
+/// `session/setEngine`. `model` overrides the connection's default model.
+#[derive(Debug, Implementation, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetEngineParams {
+    pub command_id: CommandId,
+    pub connection: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub session_id: SessionId,
+}
+
 #[derive(Debug, Implementation, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSelection {
