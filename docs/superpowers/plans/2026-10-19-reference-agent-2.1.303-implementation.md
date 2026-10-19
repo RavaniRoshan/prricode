@@ -275,7 +275,7 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 **Files:** Create `src/provider/catalog.ts`, `src/provider/normalize.ts`, `src/provider/catalogs/builtin.json`; Create `tests/contracts/provider-catalog.test.ts`.
 
 **Interfaces:**
-- Consumes: `src/provider/registry.ts` (`Connection`, `ProviderRoute`).
+- Consumes: `src/provider/registry.ts` (`Connection`, `ProviderRoute`, `resolveConnectionCredential`), `src/provider/routes.ts` (`ROUTE_NAMES`, `isProviderRoute`, `ResolvedBaseUrl`).
 - Produces:
   ```ts
   export interface CatalogModel {
@@ -308,19 +308,19 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   export function importCatalog(raw: unknown): ModelCatalog;   // validates schema_version and providerIds
   ```
 
-- [ ] **Step 1: Write the failing catalog test** — a model whose `providerIds` has no `bedrock` key is *not served* by bedrock; `providerIdFor` returns `undefined`, and the test asserts the difference from "unknown" by requiring an explicit `absent` result rather than a nullable field that conflates the two.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
-- [ ] **Step 3: Implement `src/provider/catalog.ts`** with the four functions above. Use `Partial<Record<...>>` deliberately: an absent key means "not served", and there is no representation for "unknown".
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing builtin test** — `src/provider/catalogs/builtin.json` parses, has `schemaVersion: 1`, and contains at least one model whose `providerIds` covers all eight routes plus at least one model that omits at least one route.
-- [ ] **Step 6: Create `src/provider/catalogs/builtin.json`** by transcribing the target's catalog literal from `chunk-w4f5s3e0.js`, preserving `provider_ids` key names and `null` as *absent*. Cite the source module and offset in a `_provenance` field in the file.
+- [x] **Step 1: Write the failing catalog test** — a model whose `providerIds` has no `bedrock` key is *not served* by bedrock; `providerIdFor` returns `undefined`, and the test asserts the difference from "unknown" by requiring an explicit `absent` result rather than a nullable field that conflates the two.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
+- [x] **Step 3: Implement `src/provider/catalog.ts`** with the four functions above. Use `Partial<Record<...>>` deliberately: an absent key means "not served", and there is no representation for "unknown".
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing builtin test** — `src/provider/catalogs/builtin.json` parses, has `schemaVersion: 1`, and contains at least one model whose `providerIds` covers all eight routes plus at least one model that omits at least one route.
+- [x] **Step 6: Create `src/provider/catalogs/builtin.json`** by transcribing the target's catalog literal from `chunk-w4f5s3e0.js`, preserving `provider_ids` key names and `null` as *absent*. Cite the source module and offset in a `_provenance` field in the file.
 
   **The literal has already been extracted** to `/home/shiva/opt/reference-agent-rea/analysis/target-model-catalog.json` — the full object with `schema_version: 1`, eleven `pricing_tiers`, and **22 models**. Use it as the transcription source rather than re-deriving it by hand. Nine of the 22 models carry all eight route ids and thirteen omit at least one, so both cases in Step 5 are present. The catalog also carries fields beyond the plan's first draft — `advisor_rank`, `context`, `default_effort`, `effort_cost_index`, `fallback_3p`, `image_limits` — and families beyond haiku/sonnet/opus: **`fable`** and **`mythos`**. Preserve those rather than dropping them; the interface above has been widened accordingly.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing normalize test** — a model with `eagerInputStreaming.vertex === true` yields a capability flag; `maxOutputTokens.upper` bounds the request `max_tokens`; a model with no `providerIds` for the active route is filtered out of the model's usable list.
-- [ ] **Step 9: Implement `src/provider/normalize.ts`** producing a driver-agnostic capability object.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Commit.**
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing normalize test** — a model with `eagerInputStreaming.vertex === true` yields a capability flag; `maxOutputTokens.upper` bounds the request `max_tokens`; a model with no `providerIds` for the active route is filtered out of the model's usable list.
+- [x] **Step 9: Implement `src/provider/normalize.ts`** producing a driver-agnostic capability object.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Commit.**
   ```bash
   git add src/provider tests/contracts/provider-catalog.test.ts
   git commit -m "feat(provider): provider-owned model catalog"
@@ -331,7 +331,7 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 **Files:** Create `src/provider/drivers/types.ts`, `src/provider/drivers/anthropic.ts`, `src/provider/drivers/bedrock.ts`, `src/provider/drivers/vertex.ts`, `src/provider/drivers/foundry.ts`, `src/provider/drivers/gateway.ts`, `src/provider/drivers/mantle.ts`, `src/provider/drivers/anthropicAws.ts`, `src/provider/drivers/anthropicGoogleCloud.ts`; Create `src/provider/drivers/index.ts`; Create `tests/contracts/drivers.test.ts`.
 
 **Interfaces:**
-- Consumes: `src/provider/credentials.ts` (`resolveCredential`), `src/provider/catalog.ts` (`CatalogModel`, `providerIdFor`).
+- Consumes: `src/provider/registry.ts` (`resolveConnectionCredential` — the **only** path to a secret; `resolveCredential` is module-private), `src/provider/catalog.ts` (`CatalogModel`, `providerIdFor`), `src/provider/routes.ts` (`ResolvedBaseUrl`, `FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR`, `FOUNDRY_MISSING_BASE_URL_ERROR`).
 - Produces:
   ```ts
   export interface ProviderRequest {
