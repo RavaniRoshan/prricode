@@ -104,7 +104,7 @@ Read from the target's own bundled adapters — `chunk-1njnz05e.js` (Bedrock and
 | A non-`https:` base URL is never vendor-trusted | same file — "the untrusted-endpoint guard" |
 | `credentialStatus` reports presence only and never returns a secret | `tests/security/provider-credentials.test.ts` — "credentialStatus" |
 | `credentialStatus` on a keychain reference never reads the keychain | same file — "the keychain reference" |
-| `credentialStatus` on a file reference never reads the contents | same file — "the keychain reference" |
+| `credentialStatus` on a file reference never reads the contents | same file — the `credentialStatus` block |
 | `registry.list()` resolves no credential and contains no secret | same file — "the registry listing" |
 | `resolveConnectionCredential` runs the endpoint check and then resolves | `src/provider/registry.ts` + its test |
 | A malformed `ANTHROPIC_FOUNDRY_RESOURCE` is not vendor-trusted | `tests/contracts/provider-registry.test.ts` — "the endpoint policy" |
@@ -112,3 +112,30 @@ Read from the target's own bundled adapters — `chunk-1njnz05e.js` (Bedrock and
 | `useConnection` fails loudly rather than silently not switching | same file — "the connection registry" |
 | A registered flag that is explicitly disabled is not treated as set | same file — "selectRoute" |
 | Two connections may share the same route | same file — "the connection registry" |
+
+## Catalog conformance
+
+| Audit claim | Pinned by |
+|---|---|
+| The built-in catalog is the target's literal, digest for digest | `tests/contracts/provider-catalog.test.ts` — "is the target's literal, digest for digest" (pinned SHA-256 `77b3c0cadfe76ee1dccaadc617edf8ad9c7d488d50e05782087be987cf91a8f8`, `_provenance` excluded) |
+| The pinned digest changes when a model id or a provider id changes | same file — "changes the pinned digest when a model id or a provider id changes" |
+| All 22 model ids, in order, and every per-provider id, are pinned | same file — "pins every model id and every provider id of the target's literal" |
+| The 11 pricing-tier keys and the 4 alias keys are pinned | same file — "pins the pricing-tier keys and the alias keys" |
+| The catalog's `provider_ids` key names are the target's own eight (`anthropic_aws`, `anthropic_google_cloud`, `bedrock`, `first_party`, `foundry`, `gateway`, `mantle`, `vertex`) | same file — "maps the target's provider ids onto the routes explicitly" |
+| Nine models are served by all eight routes and thirteen omit at least one | same file — "serves one model by all eight routes", "omits at least one route for another model" |
+| A `null` provider id means "not served", and is distinct from "unknown" | same file — "reports a route the model does not serve as absent, not as unknown" |
+| An `Object.prototype` member name never resolves to a provider id | same file — "does not resolve inherited Object.prototype members as provider ids" |
+| The mantle half of the target's `wd(model)` rule is implemented | same file — "implements the mantle half of the target's rule" |
+| The Bedrock+Mantle `anthropic.*` override is **not** implemented, and says so | same file — "does not implement the Bedrock+Mantle anthropic.* override, and says so" |
+| "Not served" is a documented superset of the audited `=== null` predicate, differing by exactly one row | same file — "is a superset of the audited predicate, and the difference is exactly one row" |
+| A caller cannot corrupt the shared catalog table | same file — "hands out copies, so a caller cannot corrupt the shared table" |
+| The catalog never reads the credential store | same file — "never reads the credential store while the catalog is listed, imported, normalized or resolved" |
+| A model that declares no `context` still normalizes | same file — "normalizes a model that declares no context" |
+| `listModels` matches the family and the query case-insensitively | same file — "matches the family and the query case-insensitively" |
+| `importCatalog` rejects an unknown `eager_input_streaming` key, a malformed alias key, and a `context` with no `window` | same file — the three "rejects …" tests |
+
+**Catalog facts, for the record.** 22 models. Families: `haiku`, `sonnet`, `opus`, `fable`, `mythos` (the target's order of first appearance). Nine models carry all eight route ids — `claude-haiku-4-5`, `claude-sonnet-5`, `claude-sonnet-5-5`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-fable-5`, `claude-fable-5-1` — and thirteen omit at least one. Eleven pricing tiers. Four aliases (`opus`, `sonnet`, `haiku`, `fable`) and four `latest_per_family` entries.
+
+**Known limit, stated plainly.** The target's `wd(model)` rule has two halves. This implementation implements the "no id for the selected route but one for `mantle`" half. The **Bedrock+Mantle `anthropic.*` override is target-observed and not implemented**, because it needs the enabled-flag set, which the catalog API does not take. The wiring point is `resolveRouteForModel` in `src/provider/catalog.ts`; the code says so in the file header and on the function.
+
+**A second, smaller divergence.** This implementation treats an **absent** `provider_ids` key as "not served", which is a superset of the audited `provider_ids[route] === null` predicate. The two agree on 21 of 22 rows; the difference is exactly `claude-haiku-5-5` on `gateway`, the one row whose `gateway` key the target's literal omits entirely rather than setting to `null`. The superset is documented and pinned, not silently kept.
