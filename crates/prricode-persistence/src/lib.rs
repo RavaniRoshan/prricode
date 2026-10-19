@@ -109,6 +109,16 @@ CREATE TABLE IF NOT EXISTS usage_records (
     recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    fire_at INTEGER NOT NULL,
+    workspace TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS gate_records (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -364,6 +374,55 @@ impl Persistence {
         })
     }
 
+    /// Persist a scheduled task so it survives restarts.
+    pub fn save_scheduled_task(&self, task: &ScheduledTaskRecord) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO scheduled_tasks (id, session_id, command, fire_at, workspace, status, created_at)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+            rusqlite::params![
+                task.id,
+                task.session_id,
+                task.command,
+                task.fire_at,
+                task.workspace,
+                task.status
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// All not-yet-fired scheduled tasks (across sessions).
+    pub fn pending_scheduled_tasks(&self) -> Result<Vec<ScheduledTaskRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, command, fire_at, workspace, status, created_at\n             FROM scheduled_tasks WHERE status='pending' ORDER BY fire_at",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ScheduledTaskRecord {
+                    id: r.get(0)?,
+                    session_id: r.get(1)?,
+                    command: r.get(2)?,
+                    fire_at: r.get(3)?,
+                    workspace: r.get(4)?,
+                    status: r.get(5)?,
+                    created_at: r.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Mark a scheduled task fired (terminal, idempotent).
+    pub fn mark_scheduled_task_fired(&self, id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE scheduled_tasks SET status='fired' WHERE id=?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
     // ---- settings ----
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -457,6 +516,19 @@ pub struct UsageDay {
 }
 
 #[derive(Debug, Implementation, Serialize, Deserialize)]
+pub struct ScheduledTaskRecord {
+    pub id: String,
+    pub session_id: String,
+    pub command: String,
+    /// Unix epoch milliseconds when the task should fire.
+    pub fire_at: i64,
+    /// Workspace the command runs in.
+    pub workspace: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Implementation, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: String,
     pub workspace_root: Option<String>,
@@ -505,6 +577,38 @@ pub struct GateRecordRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_tasks_survive_reopen_and_mark_fired() {
+        let dir = std::env::temp_dir().join(format!("prricode-sched-{}", uuid::Uuid::now_v7()));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let record = ScheduledTaskRecord {
+            id: "t-1".into(),
+            session_id: "s-1".into(),
+            command: "echo later".into(),
+            fire_at: now_ms + 60_000,
+            workspace: "/tmp/opencode".into(),
+            status: "pending".into(),
+            created_at: String::new(),
+        };
+        {
+            let p = Persistence::new(&dir).unwrap();
+            p.save_scheduled_task(&record).unwrap();
+        }
+        {
+            let p = Persistence::new(&dir).unwrap();
+            let pending = p.pending_scheduled_tasks().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].id, "t-1");
+            assert_eq!(pending[0].command, "echo later");
+            p.mark_scheduled_task_fired("t-1").unwrap();
+            assert!(p.pending_scheduled_tasks().unwrap().is_empty());
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn workspace_stats_aggregates_across_sessions() {

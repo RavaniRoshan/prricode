@@ -55,8 +55,8 @@ full workspace tests green, one commit per phase item.
 | 15 | Wayland input | degraded | `unsupported: no live compositor on build host`; probe code present |
 | 15 | macOS/Windows backends | degraded | platform-N/A; documented in roadmap |
 | 16 | LSP integration | done | `crates/prricode-agent/src/tools/lsp.rs` — two-phase framed JSON-RPC client, server discovery by extension (rust-analyzer/clangd/gopls/pyright/typescript-language-server), diagnostics + hover + definition; honest `unsupported:` when no server binary; 15s timeout; 9 tests incl. fake-server round-trips |
-| 17 | ScheduleCron tool | done | delayed command via sandbox (process-local lifetime, documented) |
-| 17 | Cron persistence across restarts | pending | … |
+| 17 | ScheduleCron tool | done | delayed command via sandbox; now persists `ScheduledTaskRecord` (id/command/fire_at/workspace) before spawn |
+| 17 | Cron persistence across restarts | done | `pending_scheduled_tasks` reloaded at server start (overdue fires late with a warning); `mark_scheduled_task_fired` is terminal; `scheduled/fired` notification emitted; persistence tests + tool test |
 | 18 | HTTP bridge `POST /jsonrpc` | done | `serve --http`, 411/413/501 integrity, 2 tests |
 | 18 | remote-control/attach | degraded | CLI honest stubs (gateway service not planned) |
 | 19 | Usage persistence (`/usage`, `/cost`) | done | usage table + TUI usage events + status tokens |

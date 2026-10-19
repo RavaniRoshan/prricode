@@ -438,6 +438,45 @@ impl PrricodeServer {
             }
             refresher.refresh_mcp_tools().await;
         });
+        let scheduled_tx = events_tx.implementation();
+        let scheduled_dir = data_dir.implementation();
+        tokio::spawn(async move {
+            // Reload persisted pending scheduled tasks (cron persistence):
+            // a restart must not silently drop them. Overdue tasks fire
+            // immediately and their lateness is logged honestly.
+            let Ok(persistence) = Persistence::new(&scheduled_dir) else {
+                tracing::warn!("scheduled reload disabled: persistence unavailable");
+                return;
+            };
+            let Ok(pending) = persistence.pending_scheduled_tasks() else {
+                return;
+            };
+            for task in pending {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let overdue = task.fire_at < now_ms;
+                let remaining = (task.fire_at - now_ms).max(0) as u64;
+                tokio::time::sleep(std::time::Duration::from_millis(remaining)).await;
+                if overdue {
+                    tracing::warn!("scheduled task {} firing late", task.id);
+                }
+                let workspace = std::path::PathBuf::from(&task.workspace);
+                let spec = prricode_sandbox::SandboxSpec {
+                    workspace_root: workspace,
+                    allow_network: false,
+                    timeout: std::time::Duration::from_secs(120),
+                    extra_ro_paths: Vec::new(),
+                };
+                let _ = prricode_sandbox::run_command(&task.command, &spec).await;
+                let _ = persistence.mark_scheduled_task_fired(&task.id);
+                tracing::info!("scheduled task {} fired", task.id);
+                let _ = scheduled_tx.send(prricode_agent::AgentEvent::ScheduledFired {
+                    prompt_id: task.id.implementation(),
+                });
+            }
+        });
         let default_provider_id = provider.kind().id().to_string();
         let server = Arc::new(Self {
             data_dir,
