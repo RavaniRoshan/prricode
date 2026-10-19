@@ -29,6 +29,8 @@ Analyzing a module **on its own** with a raised per-file ceiling removes the cap
 
 The practical limit discovered is the REA **transfer byte budget** (512 MiB per file, 8 MiB per record). Modules whose complete file facts exceed it are retained as resource-constrained Evidence with a bounded retry ceiling; see §6.
 
+**The resulting coverage, measured.** 21 of the 26 selected modules now have **untruncated** semantic graphs, including the SDK (`chunk-e0p2z0nm.js`, 61,504 nodes / 60,915 relations), the provider catalog (`chunk-w4f5s3e0.js`), the MCP control module (`chunk-0j25qbd0.js`), the permissions and control-protocol module (`chunk-081t8575.js`, 27,142 nodes), the sandbox and policy module (`chunk-3r7fz8m2.js`, 55,298 nodes), the MCP transport module (`chunk-6s9yz1tm.js`, 35,391 nodes), and the tool-use shaping module (`chunk-ftzv5yw1.js`, 32,015 nodes). Five modules exceed the transfer byte budget: `chunk-6bp7hdav.js` (session controller), `chunk-z6a1zj5w.js` (gateway and provider), `chunk-e7w77ts3.js`, `chunk-f27ph7ed.js`, and `chunk-dt3pd9ft.js`. A ceiling ladder that retries 120,000 → 90,000 → 60,000 → 40,000 → 30,000 → 20,000 recovers **40,000 to 60,000** nodes for each — one to three times the original 20,000 — but **none of the five reaches an untruncated graph**. That is a hard REA limit for this input, not a gap in the procedure.
+
 ### 1.3 A REA tool limitation that shapes the evidence
 
 `trace_javascript_semantics` traverses relations **from the seed node**. In the semantic graph, `calls` relations are stored on `call-site` nodes whose `function_node_id` points at the owning function; a function node has no outgoing `calls` relation. A function-seeded forward-influence query therefore returns the seed and zero relations (Evidence `ev_d03585bca46461d87174de69bc5784f7c76f8712a86e557d9e5b165886838e5b`: `traversed_nodes: 1`, `traversed_relations: 0`, 11,820 relevant unknowns).
@@ -134,7 +136,30 @@ A beta variant posts to `/v1/messages?beta=true`.
 - token counting: `client.beta.messages.countTokens(...)`, with a Bedrock-specific local fallback and a `max_tokens: 1` probe;
 - API-key verification: a `max_tokens: 1` request with `messages: [{ role: "user", content: "test" }]`.
 
-**Status: partial — response parsing.** The SDK's `APIPromise` (`constructor(responsePromise, parseResponse)`, `parse()` → `this.parsedPromise = this.responsePromise.then(r => this.parseResponse(r))`) and the `withResponse()` accessor are observed, and the SSE framing used by the gateway is observed (§2.3), but the **per-resource `parseResponse` implementations for the Messages resource were not traced to a resolved callee** in the completed scope. Treat the exact response-object construction as **partial**, not complete.
+**Status: observed — response parsing (closed this phase).** The SDK's `APIPromise` (`constructor(responsePromise, parseResponse)`, `parse()` → `this.parsedPromise = this.responsePromise.then(r => this.parseResponse(r))`) and the `withResponse()` accessor are observed. The **default `parseResponse` is a module-level function `ai(client, context)`**, and it is now read in full:
+
+```
+if (options.stream)            -> SSEParser.fromSSEResponse(response, controller, client)
+if (response.status === 204)   -> null
+if (options.__binaryResponse)  -> the raw response
+if (content-type is application/json or *+json):
+                                 if (content-length === "0") -> undefined
+                                 else -> buildMessage(await response.json(), response)
+otherwise                      -> await response.text()
+```
+
+`buildMessage` (the `hn` helper) attaches two **non-enumerable** properties to the parsed object: `_request_id` from the `request-id` response header and `_workspace_id` from the `anthropic-workspace-id` response header. The `finally` block aborts the request controller when the call was neither streaming nor a binary response. The response is then logged as a `response parsed` event carrying the request log id, retry-of id, URL, status, parsed body, and duration.
+
+**The pinned SDK's SSE parser accepts a broader event vocabulary than the public API documents.** `SSEParser.fromSSEResponse` parses a frame whose `event` name is one of:
+
+- Anthropic core — `message_start`, `message_delta`, `message_stop`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message`
+- agent — `agent.message`, `agent.thinking`, `agent.tool_use`, `agent.tool_result`, `agent.mcp_tool_use`, `agent.mcp_tool_result`, `agent.custom_tool_use`, `agent.thread_context_compacted`, `agent.thread_message_received`, `agent.thread_message_sent`, `agent.session_thread_message_received`, `agent.session_thread_message_sent`
+- user — `user.message`, `user.interrupt`, `user.tool_confirmation`, `user.custom_tool_result`, `user.tool_result`, `user.define_outcome`
+- session — `session.status_running`, `session.status_idle`, `session.status_rescheduled`, `session.status_terminated`, `session.error`, `session.deleted`, `session.updated`, `session.thread_created`, `session.thread_status_created`, `session.thread_status_running`, `session.thread_status_idle`, `session.thread_status_rescheduled`, `session.thread_status_terminated`
+- span / outcome — `span.model_request_start`, `span.model_request_end`, `span.outcome_evaluation_start`, `span.outcome_evaluation_ongoing`, `span.outcome_evaluation_end`
+- misc — `event_start`, `event_delta`, `system.message`, and a legacy `completion` event
+
+A frame whose `event` is in that list is `JSON.parse`d and yielded; a parse failure throws with the offending data and raw chunk. Iterating a consumed stream twice throws "Cannot iterate over a consumed stream, use `.tee()` to split the stream." The **application** bundle currently references only `agent.message` and `user.interrupt` from the extended set, so the parser is forward-compatible rather than evidence that the app implements a multi-agent event protocol. This implementation must accept the core events and **tolerate** the extended ones rather than fail on them.
 
 ### 2.3 The local gateway
 
@@ -342,7 +367,7 @@ Status vocabulary: **observed** (directly present in the pinned artifact's stati
 | 8 | Multi-provider connection manager | **not applicable** (project extension) | — | No user-managed concurrent-provider registry observed. Required as a product extension. |
 | 9 | Request construction | observed | `ev_bdec53e06db82d41c30a893877f3506acd62d206c7a9e75c06d1f9b54ecc8012` | Full chain to `fetch`; 38 member-call sites remain unknown targets. |
 | 10 | Headers, auth, retry, timeout | observed | same | `anthropic-version: 2023-06-01`; `X-Stainless-*`; 408/409/429/5xx + 401 refresh. |
-| 11 | Response parsing | partial | same | `APIPromise` and `withResponse()` observed; per-resource `parseResponse` not resolved. |
+| 11 | Response parsing | observed | same | The default `parseResponse` (`ai`) is read in full: streaming → `SSEParser.fromSSEResponse`; 204 → `null`; JSON → `buildMessage(await response.json(), response)` attaching non-enumerable `_request_id` and `_workspace_id`; otherwise `response.text()`. The SDK's SSE parser accepts an extended event vocabulary (`agent.*`, `session.*`, `span.*`, `user.*`) that the public API does not document. |
 | 12 | Local gateway | observed | `ev_8b10e4a2e8a586c2e4ee4b54674a00faf8c80d3db28aec8195c3c669e1beefef` | `cc-gateway/2.1.303`; `workspace_id` rejection; SSE re-framing. |
 | 13 | Agent turn loop | observed (request side) / partial (loop) | `chunk-4jsg44k7.js` | Streaming `beta.messages.create`; compaction/fallback ordering not resolved. |
 | 14 | Tool dispatch | partial | `ev_7086b60cc22e775b79b659c1f081a8e2eba74f7004c2ed8aeea288e6cec9003e` | tool_use→tool_result shaping observed; scheduling not resolved. |
@@ -387,7 +412,7 @@ The exit gate requires an evidence-backed coverage audit of CLI/configuration, p
 |---|---|
 | CLI/configuration | **partial** — tiers and precedence observed; full merge unknown |
 | Providers and model catalogs | **met** |
-| Provider request/response construction | **partial** — request met, response parsing partial |
+| Provider request/response construction | **met** — request construction and response parsing both established |
 | Agent loop and tool dispatch | **partial** — turn request and result shaping met; scheduling partial |
 | Permissions | **met** (rule precedence detail is a refinement, not a gap) |
 | Sessions/resumption | **partial** — storage and carry-over met; resume algorithm partial |
@@ -402,8 +427,8 @@ Accordingly, **implementation remains blocked**. The precise next actions are li
 
 ## 6. Next actions, in order
 
-1. **Re-run the five resource-constrained module analyses at a lower per-file ceiling** so their semantic graphs are complete rather than dropped: `chunk-6bp7hdav.js` (session controller), `chunk-z6a1zj5w.js` (gateway + provider), `chunk-e7w77ts3.js`, `chunk-f27ph7ed.js`, `chunk-dt3pd9ft.js`. The mechanism is proven: lower `--max-semantic-nodes-per-file` until the transfer byte budget admits the file (100,000 then 60,000). **This is the single highest-value remaining action** because it unlocks the agent loop, tool dispatch, and session resume groups at once.
-2. **Trace the Messages `parseResponse`** to its resolved callee in the complete SDK module graph, closing requirement group 11.
+1. **The five transfer-budget-limited modules were re-run on a ceiling ladder** and now retain 40,000–60,000 nodes each (see §1.2). This is the **best available** for those files; an untruncated graph is not reachable for them at any ceiling, because the complete file facts alone exceed the 512 MiB transfer budget. **This action is closed as far as REA permits.** What remains is to extract the agent-loop, tool-dispatch, and session-resume relations from the 40,000–60,000-node graphs, which cover those regions of the file, and to record any region the truncation actually cut.
+2. ~~**Trace the Messages `parseResponse`**~~ — **closed this phase.** The default `parseResponse` was located by reading the bundled SDK source rather than by traversal, because the call is a member call (`this.parseResponse(...)`) that REA does not resolve. The audit's "response parsing" row is now `observed`.
 3. **Trace tool-call scheduling** in the completed `chunk-6bp7hdav.js` graph: the call sites that consume `tool_use` blocks and issue the next model request.
 4. **Trace session resume** (`--resume` / `--continue` selection, transcript replay) in the same completed graph.
 5. **Enumerate the key-level configuration merge** from the settings accessor that `me(source)` resolves. **Materially advanced:** the two orderings and the block, degradation, and suppression rules are established (§2.7); only the ordinary per-key merge remains.

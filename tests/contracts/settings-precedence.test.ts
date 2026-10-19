@@ -387,6 +387,54 @@ describe('settings scope separation', () => {
     // A caller that knows the union can still read the flag.
     expect(readBooleanFlag(tiers, 'someFlag', POLICY_AND_USER_SOURCES)).toBeUndefined();
   });
+
+  it('ignores a project or local spellcheck block in the merged-key path', () => {
+    // The merged-key order is local, project, user — but a spellcheck block in
+    // project or local settings is ignored *entirely*, not merely out-ranked.
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { spellcheck: { enabled: true } }],
+      ['projectSettings', { spellcheck: { enabled: false } }],
+      ['localSettings', { spellcheck: { enabled: false } }],
+    ]);
+
+    expect(resolveMergedKey(tiers, 'spellcheck')).toEqual([
+      { source: 'userSettings', value: { enabled: true } },
+    ]);
+  });
+
+  it('resolves no spellcheck at all when only a project or local tier defines it', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['projectSettings', { spellcheck: { enabled: false } }],
+      ['localSettings', { spellcheck: { enabled: false } }],
+    ]);
+
+    expect(resolveMergedKey(tiers, 'spellcheck')).toEqual([]);
+    expect(resolveBlock(tiers, 'spellcheck')).toBeUndefined();
+  });
+
+  it('ignores a project or local spellcheck block in the merged-settings document', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { spellcheck: { enabled: true } }],
+      ['localSettings', { spellcheck: { enabled: false } }],
+    ]);
+
+    const merged = mergeMergedSettings(tiers);
+
+    // The local block is ignored entirely, so the user block survives unchanged.
+    expect(merged['spellcheck']).toEqual({ enabled: true });
+  });
+
+  it('merges no spellcheck block when only a project or local tier defines it', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['projectSettings', { spellcheck: { enabled: false } }],
+      ['localSettings', { spellcheck: { enabled: false } }],
+    ]);
+
+    const merged = mergeMergedSettings(tiers);
+
+    expect(Object.hasOwn(merged, 'spellcheck')).toBe(false);
+    expect(merged['spellcheck']).toBeUndefined();
+  });
 });
 
 describe('tier wrapper discrimination', () => {
@@ -411,6 +459,23 @@ describe('tier wrapper discrimination', () => {
     expect(effectiveSource(documentsOf(tiers), 'model')).toBe('userSettings');
   });
 
+  it('does not mistake a document that merely carries a value key for a wrapper', () => {
+    // The target preserves unknown keys, so a legal settings document may carry a
+    // `value` key. A wrapper is recognised by a `source` *and* a `value` key, so
+    // the document is never unwrapped and its own keys survive.
+    const document = JSON.parse('{"value": 42, "model": "user-model"}') as Record<
+      string,
+      unknown
+    >;
+    const tiers = new Map<SettingsSource, unknown>([['userSettings', document]]);
+
+    const documents = documentsOf(tiers);
+
+    expect(documents.get('userSettings')).toBe(document);
+    expect(effectiveSource(documents, 'model')).toBe('userSettings');
+    expect(effectiveSource(documents, 'value')).toBe('userSettings');
+  });
+
   it('merges documents without letting a settings file replace the prototype', () => {
     const hostile = JSON.parse('{"__proto__": {"polluted": true}}') as Record<string, unknown>;
 
@@ -419,6 +484,82 @@ describe('tier wrapper discrimination', () => {
     expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
     expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(merged, '__proto__')).toBe(false);
+  });
+});
+
+describe('settings lookup hardening', () => {
+  /**
+   * The names of the `Object.prototype` members a legal settings document may
+   * carry as an ordinary key: the target preserves unknown keys, so a document
+   * that contains `constructor` is legal.
+   */
+  const PROTOTYPE_NAMED_KEYS = [
+    'constructor',
+    'toString',
+    'hasOwnProperty',
+    'valueOf',
+    '__proto__',
+  ] as const;
+
+  function captureError(run: () => unknown): unknown {
+    try {
+      run();
+      return undefined;
+    } catch (error) {
+      return error;
+    }
+  }
+
+  it('does not crash on a settings document that carries prototype-named keys', () => {
+    // A legal document: every key here is an unknown key the target preserves.
+    const document = JSON.parse(
+      '{"constructor": 1, "toString": 2, "hasOwnProperty": 3, "valueOf": 4, "__proto__": 5}',
+    ) as Record<string, unknown>;
+    const tiers = new Map<SettingsSource, unknown>([['userSettings', document]]);
+
+    for (const [index, key] of PROTOTYPE_NAMED_KEYS.entries()) {
+      const value = index + 1;
+      // No lookup may throw for a key that is merely an `Object.prototype` member.
+      expect(() => resolveBlock(tiers, key)).not.toThrow();
+      expect(() => readPerTier(tiers, key)).not.toThrow();
+      expect(() => effectiveOrdinarySource(tiers, key)).not.toThrow();
+      // Such a key is simply unrestricted: it resolves like any other key.
+      expect(resolveBlock(tiers, key)).toEqual({ source: 'userSettings', value });
+      expect(effectiveOrdinarySource(tiers, key)).toBe('userSettings');
+      expect(readPerTier(tiers, key)).toEqual([{ source: 'userSettings', value }]);
+      // A boolean flag with no registered union is a clear error, not a crash.
+      const error = captureError(() => readBooleanFlag(tiers, key));
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/explicit source union/);
+      expect(error).not.toBeInstanceOf(TypeError);
+    }
+  });
+
+  it('loads a settings file with prototype-named keys and resolves them without crashing', () => {
+    const workspace = makeWorkspace();
+    const document = JSON.parse(
+      '{"constructor": "ctor", "toString": "ts", "hasOwnProperty": "hop", "valueOf": "vo", "__proto__": "proto", "model": "user-model"}',
+    ) as Record<string, unknown>;
+    writeJson(path.join(workspace.configDir, 'settings.json'), document);
+
+    const result = loadSettings({
+      cwd: workspace.cwd,
+      configDir: workspace.configDir,
+      restricted: false,
+    });
+
+    const tiers = result.tiers;
+    for (const key of PROTOTYPE_NAMED_KEYS) {
+      expect(() => resolveBlock(tiers, key)).not.toThrow();
+      expect(() => readPerTier(tiers, key)).not.toThrow();
+      expect(() => effectiveOrdinarySource(tiers, key)).not.toThrow();
+      expect(() => readBooleanFlag(tiers, key)).toThrow(/explicit source union/);
+    }
+    // The unknown keys survive the load; `__proto__` is dropped by the schema, so
+    // a settings file can never replace the prototype of the object it lands in.
+    expect(resolveBlock(tiers, 'constructor')?.value).toBe('ctor');
+    expect(resolveBlock(tiers, 'toString')?.value).toBe('ts');
+    expect(effectiveOrdinarySource(tiers, 'model')).toBe('userSettings');
   });
 });
 
@@ -457,6 +598,7 @@ describe('settings loader', () => {
 
     expect(result.linkedAway).toContain('projectSettings');
     expect(result.tiers.has('projectSettings')).toBe(false);
+    expect(result.readMode.get('projectSettings')).toBe('none');
   });
 
   it('skips a project tier that resolves to the user settings file and reports it as read', () => {
