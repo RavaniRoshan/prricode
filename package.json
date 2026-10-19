@@ -1,0 +1,33 @@
+{
+  "name": "prricode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An independently implemented coding-agent CLI with observable compatibility with the pinned reference build (2.1.303), plus a first-class multi-provider manager.",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "bun@1.4.3",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "cross-keychain": "^1.1.0",
+    "ink": "^8.0.0",
+    "markdansi": "^0.3.5",
+    "react": "^19.3.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.4.0",
+    "vitest": "^5.0.5"
+  }
+}

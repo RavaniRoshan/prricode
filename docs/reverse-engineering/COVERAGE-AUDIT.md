@@ -1,0 +1,424 @@
+# The pinned reference build (2.1.303) — REA Coverage Audit
+
+**Audit date:** 2026-10-19
+**Target:** `the pinned reference build @ 2.1.303`, Linux x86-64
+**Target SHA-256:** `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`
+**REA:** `rea-agents@6.7.0` CLI; Ghidra `12.1.4`; Java 21
+**Runtime scope:** only the bounded `--version` check on the pinned binary was ever executed. No authenticated session, model request, or MCP server was started.
+
+This document is the exit-gate artifact for the REA phase. It states, per requirement group, what is **observed** in the pinned artifact, what is only **inferred** from static structure, what is **documented only** (official docs, not target evidence), what is **partial**, and what remains **unknown**. Direct observations, static inference, official documentation, runtime behavior, and unknowns are kept separate throughout.
+
+---
+
+## 1. Method and how to read this audit
+
+### 1.1 Inputs
+
+| Class | Source | Notes |
+|---|---|---|
+| Static source | Bun payload extracted byte-exactly from the pinned ELF into `/home/shiva/opt/reference-agent-rea/extracted-raw`, plus a path-rewritten copy in `extracted-patched` | Parsed as inert text. Never executed. |
+| Semantic graph | REA `analyze_javascript_application` Evidence records, each embedding a JavaScript Semantic Relation Graph (51k–66k nodes) | Node and relation IDs are content-derived and stable across runs. |
+| Native disassembly | REA/Ghidra `analyze_function` and `read_bytes` Evidence for the ELF startup path, bundled helpers, and the seccomp pair | Bounded to selected functions; whole-image inventory timed out. |
+| Official documentation | the vendor's setup and CLI reference, Kimi Code provider docs | Product reference only. **Not** evidence about the pinned binary. |
+
+### 1.2 A newly established REA capability
+
+The earlier multi-module selections were **truncated**: REA caps retained semantic nodes at 20,000 per source file, and the larger selected modules hit that cap. `chunk-e0p2z0nm.js` and `chunk-z6a1zj5w.js` were therefore analyzed at 20,000 nodes each, and `chunk-dt3pd9ft.js` retained a single node.
+
+Analyzing a module **on its own** with a raised per-file ceiling removes the cap. For the bundled Anthropic SDK module this raised the retained semantic graph from 20,000 nodes to **59,067 nodes** with `truncated: false` (`ev_bdec53e06db82d41c30a893877f3506acd62d206c7a9e75c06d1f9b54ecc8012`). This is the single largest coverage improvement of this phase and it is what made the provider request pipeline, the provider client factory, and the model catalog legible as *relationships* rather than as source text.
+
+The practical limit discovered is the REA **transfer byte budget** (512 MiB per file, 8 MiB per record). Modules whose complete file facts exceed it are retained as resource-constrained Evidence with a bounded retry ceiling; see §6.
+
+### 1.3 A REA tool limitation that shapes the evidence
+
+`trace_javascript_semantics` traverses relations **from the seed node**. In the semantic graph, `calls` relations are stored on `call-site` nodes whose `function_node_id` points at the owning function; a function node has no outgoing `calls` relation. A function-seeded forward-influence query therefore returns the seed and zero relations (Evidence `ev_d03585bca46461d87174de69bc5784f7c76f8712a86e557d9e5b165886838e5b`: `traversed_nodes: 1`, `traversed_relations: 0`, 11,820 relevant unknowns).
+
+Consequence for the audit: **call-graph facts in this report were read from the retained semantic graphs directly** (relation endpoints inspected per call-site), not from a traversal. Where a call site has no `calls` relation, the exact call expression and source location are retained and the target is recorded as **unknown** rather than inferred.
+
+The corrected seed form was then verified. Evidence `ev_07c6555c7cc727a9ae4bd4db0ed932444ed7d7438d07e49773d6e8e20239b4cb` seeds the query with a **call-site** node id (`jsrg_node_6d8af3dd113b395c539c4a8de3ac6e18ef039fdc296badd89b996becc42fb99f`, a call inside the provider client factory `GU`) and traverses one resolved `calls` relation to the transport-override function `Qw` (`callable:callable:function:280617:283067`), with `traversed_nodes: 2`, `traversed_relations: 1`, `traversed_functions: 2`, and one relevant unknown. The same graph queried from the *function* node returns nothing.
+
+---
+
+## 2. Requirement-group findings
+
+### 2.1 Providers and model catalogs
+
+**Status: observed (static), complete for the route/catalog surface.**
+
+**Model catalog.** `chunk-w4f5s3e0.js` contains a structured catalog literal with `schema_version: 1`, a `pricing_tiers` table, and a `models` array. Each catalog entry carries:
+
+```
+{ id, family, display_name, knowledge_cutoff,
+  provider_ids: { first_party, bedrock, vertex, foundry,
+                  anthropic_aws, anthropic_google_cloud, mantle, gateway },
+  eager_input_streaming, vertex_region_env_var,
+  max_output_tokens: { default, upper },
+  pricing, capabilities }
+```
+
+`provider_ids` values are per-provider model identifiers; `null` marks a provider that does not serve that model. This is a **built-in, provider-owned model catalog**: one catalog row per logical model, eight provider-specific IDs per row. Example: `claude-haiku-4-5` maps to `claude-haiku-4-5-20251001` (first-party), `us.anthropic.claude-haiku-4-5-20251001-v1:0` (Bedrock), `claude-haiku-4-5@20251001` (Vertex), `claude-haiku-4-5` (Foundry), `anthropic.claude-haiku-4-5` (Mantle), and the same date-stamped ID for Anthropic-on-AWS, Anthropic-on-Google-Cloud, and gateway.
+
+**Route selection.** The selector `xe()` in the same module returns exactly one active route:
+
+```
+if (Br() || aet() || cet()) return "gateway";
+CLAUDE_CODE_USE_BEDROCK           -> "bedrock"
+CLAUDE_CODE_USE_FOUNDRY           -> "foundry"
+CLAUDE_CODE_USE_ANTHROPIC_AWS     -> "anthropicAws"
+CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD -> "anthropicGoogleCloud"
+CLAUDE_CODE_USE_MANTLE            -> "mantle"
+CLAUDE_CODE_USE_VERTEX            -> "vertex"
+otherwise                         -> "firstParty"
+```
+
+`wd(model)` layers a per-model override on top: with Bedrock+Mantle enabled, an `anthropic.*` model resolves to `mantle`; otherwise, if the catalog has `provider_ids[route] === null` while `provider_ids[mantle] !== null`, the model resolves to `mantle`.
+
+**Per-provider endpoint policy.** A literal `E` in `chunk-w4f5s3e0.js` maps each provider to its base-URL environment variables and an `ownHost` regular expression used to detect a user-supplied endpoint rather than the vendor's:
+
+| Provider | Base-URL variables | `ownHost` shape |
+|---|---|---|
+| `firstParty` | (none declared) | — |
+| `gateway` | (none declared) | — |
+| `bedrock` | `ANTHROPIC_BEDROCK_BASE_URL`, `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`, `AWS_ENDPOINT_URL_BEDROCK`, `AWS_ENDPOINT_URL` | `bedrock(-runtime)?` regional host |
+| `mantle` | `ANTHROPIC_BEDROCK_MANTLE_BASE_URL` | `bedrock-mantle` regional host |
+| `anthropicAws` | `ANTHROPIC_AWS_BASE_URL` | `aws-external-anthropic` regional host |
+| `vertex` | `ANTHROPIC_VERTEX_BASE_URL` | `aiplatform` / `*.googleapis.com` |
+| `anthropicGoogleCloud` | `ANTHROPIC_GOOGLE_CLOUD_BASE_URL` | `claude` / `*.googleapis.com` |
+| `foundry` | `ANTHROPIC_FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_RESOURCE` (→ `https://<resource>.services.ai.azure.com`) | `<name>.services.ai.azure.com` |
+
+**Runtime client construction.** The SDK-client factory `GU` in `chunk-e0p2z0nm.js` turns the resolved route into a concrete client instance. Observed branches, in dispatch order: `gateway` → plain client with `baseURL: <pinned gateway url>` and `Authorization: Bearer <jwt>`; `bedrock` → `AnthropicBedrock` (dynamic import of `chunk-1njnz05e.js`); `foundry` → `AnthropicFoundry` (`chunk-m5c0c57d.js`) with an Azure AD `DefaultAzureCredential` bearer-token provider; `anthropicAws` → `AnthropicAws` (`chunk-a3dhk724.js`); `anthropicGoogleCloud` → `AnthropicGoogleCloud` (`chunk-7qjrjq0k.js`); `mantle` → `AnthropicBedrockMantle` (`chunk-1njnz05e.js`); `vertex` → `AnthropicVertex` (`chunk-jdnh8sjs.js`) with `buildVertexGoogleAuth` (`chunk-hcq5r9nd.js`); otherwise the first-party client with an API key or OAuth token. Each branch resolves credentials in a distinct order (bearer-token env var → skip-auth → AWS credential chain → provider-chain resolver) and emits distinct default headers.
+
+**Important negative finding (product-critical).** No source in the analyzed scope provides a **user-managed registry of multiple simultaneously configured provider connections**. The catalog is provider-owned and built in; route selection is by environment flag and yields exactly one active route. A UI or configuration surface that adds, lists, tests, and concurrently uses several provider connections was **not observed**. Any such surface in this implementation is a **deliberate product extension** (per the project brief), not the reference agent's behavior.
+
+**Unknown:** whether the "gateway" route is a first-party service reachable only when signed in, or a locally-run proxy. See §2.3 — a local gateway proxy *is* present and is described there.
+
+### 2.2 Provider request construction
+
+**Status: observed (static), complete for the request path; response parsing is partial.**
+
+**Call chain.** In `chunk-e0p2z0nm.js` the bundled SDK client resolves as:
+
+```
+Messages.create  ->  this._client.post("/v1/messages", {...})
+  -> APIClient.request -> methodRequest -> makeRequest
+       -> buildRequest  -> buildURL + buildBody + buildHeaders
+            -> buildHeaders -> authHeaders -> apiKeyAuth | bearerAuth
+            -> validateHeaders
+       -> fetchWithTimeout -> fetch
+       -> shouldRetry / retryRequest / calculateDefaultRetryTimeoutMillis
+       -> makeStatusError
+```
+
+**`Messages.create`** (role `callable:callable:method:158992:160013`, fingerprint `6e1275dc68e406b039ca27fb52f8a802d84012244001d5d34468179b2c5cb2ba`):
+
+- warns when the requested model is in the deprecation table, and warns when `thinking.type === "enabled"` for a model in the adaptive-thinking warning list;
+- computes the timeout as `options.timeout ?? client._options.timeout`, and when the call is non-streaming with no explicit timeout, calls `calculateNonstreamingTimeout(max_tokens, modelTimeoutTable[model])`;
+- merges beta headers derived from `tools` and `messages`;
+- issues `this._client.post("/v1/messages", { body, timeout: timeout ?? 600000, ...options, headers, stream: options.stream ?? false })`.
+
+A beta variant posts to `/v1/messages?beta=true`.
+
+**`makeRequest`** (role `callable:callable:method:169951:172697`, fingerprint `75c0bf92d7deb464ca8d5422f705b5e7226c34fd9f8e780e28cd2f1881cafacf`) resolves 27 callees in the complete module graph, including the logger (`Gy`), the log-event emitter (`yt`), the abort helper (`_t`), the body drain helper (`lu`), the timeout validator (`Ko`), the retryability classifier (`Iu`), the status-error builder (`Xo`), the response-body guard (`sa`), and the stream guard (`su`). Its own source shows: a per-request log ID `log_<6 hex digits>`, a `retryOf` chain, `prepareOptions`, `buildRequest`, `fetchWithTimeout` with an `AbortController`, a 401-aware token-cache invalidation path, `retryRequest`, and `makeStatusError`. **38 call sites remain unresolved** (member calls such as `this.buildRequest(...)`, `this.fetchWithTimeout(...)`, `this.retryRequest(...)`); their exact expressions are retained and their targets are recorded as unknown.
+
+**`shouldRetry`** (source, complete): retries on `401` when the response used a cached token that has not already been refreshed, honours the `x-should-retry` response header in both directions, and retries `408`, `409`, `429`, and any status `>= 500`.
+
+**`buildHeaders`** (complete): `Accept: application/json`, `User-Agent` (`Anthropic/JS <version>`), `X-Stainless-Retry-Count`, `X-Stainless-Timeout` (seconds), `anthropic-version: 2023-06-01`, `anthropic-dangerous-direct-browser-access: true` when `dangerouslyAllowBrowser` is set, then the auth headers, then client default headers, then per-call headers. `validateHeaders` throws a specific error when no auth method can be resolved and neither `X-Api-Key` nor `Authorization` was explicitly omitted.
+
+**`buildURL`** (complete): resolves the base URL (`options.baseURL` override, auth-state base URL, or `this.baseURL`), joins the path, applies `defaultQuery()` and `stringifyQuery()`.
+
+**Application call sites.** In `chunk-4jsg44k7.js` the agent issues `client.beta.messages.create(...)`:
+
+- streaming turn: `client.beta.messages.create({ ...request, stream: true }, { signal, headers }).withResponse()`;
+- non-streaming turn: `client.beta.messages.create({ ...request, stream: false }, { signal: AbortSignal.any([...]), timeout, headers }).withResponse()`;
+- a side-query dispatch with `maxRetries: 0` and a per-request model override;
+- token counting: `client.beta.messages.countTokens(...)`, with a Bedrock-specific local fallback and a `max_tokens: 1` probe;
+- API-key verification: a `max_tokens: 1` request with `messages: [{ role: "user", content: "test" }]`.
+
+**Status: partial — response parsing.** The SDK's `APIPromise` (`constructor(responsePromise, parseResponse)`, `parse()` → `this.parsedPromise = this.responsePromise.then(r => this.parseResponse(r))`) and the `withResponse()` accessor are observed, and the SSE framing used by the gateway is observed (§2.3), but the **per-resource `parseResponse` implementations for the Messages resource were not traced to a resolved callee** in the completed scope. Treat the exact response-object construction as **partial**, not complete.
+
+### 2.3 The local gateway
+
+**Status: observed (static).**
+
+`chunk-z6a1zj5w.js` contains a first-party local gateway that proxies Anthropic-shaped traffic:
+
+- accepts `/v1/messages` and `/v1/messages/count_tokens`;
+- sets or extends the user agent to `cc-gateway/2.1.303`;
+- applies the upstream provider's auth (`client.applyAuth(headers)`) and the provider's base URL;
+- rejects a request whose body contains `workspace_id` with `400 invalid_request_error: "workspace_id: not supported through the gateway"`;
+- for a Bedrock upstream, computes `count_tokens` locally and otherwise returns `501 not_supported` with `x-should-retry: false`;
+- for streaming, re-frames the SDK stream into SSE itself, injecting keep-alive comments, rewriting `message_start.message.model` to the wire model, and emitting `event: error` frames on upstream failure;
+- moves an `anthropic-beta` header into the request body for Bedrock upstreams.
+
+This is a **second, locally implemented request path** in addition to the direct SDK path. Its relationship to the `gateway` catalog route (which returns a remote pinned URL and a JWT) is **not established** by the analyzed scope — see §4.
+
+### 2.4 Agent loop and tool dispatch
+
+**Status: observed for the turn request and the tool-result shaping; partial for the dispatch loop itself.**
+
+**Observed:**
+
+- The agent turn is a streaming `beta.messages.create` (§2.2). Response events are consumed as `stream_event`s.
+- Tool results are shaped by dedicated helpers in `chunk-ftzv5yw1.js`:
+  - `vo(e)` builds the tool-result metadata object: `{ id: tool_use_id, non_execution_kind, user_feedback, remedy, permission_decision: { decision, source, reason_type } }`;
+  - `gn(content, results)` filters assistant content blocks down to those that have a matching `tool_result`;
+  - `uo(blocks, registry)` maps `tool_use` blocks to display metadata, attaching MCP provenance when the tool belongs to an MCP server: `server_display_name`, `icon_url`, `server_id`, `server_id_stamp`, `tool_name`.
+- Permission decisions are threaded back to the model through the tool result, so the model observes the decision and its reason type.
+
+**Partial:** the exact scheduling of concurrent tool calls, the ordering of tool execution against the next model request, and the sub-agent / task delegation scheduler were not traced to resolved relations. `chunk-6bp7hdav.js` (the session controller) is the orchestration module, but its complete facts exceed the REA transfer byte budget and its semantic graph is therefore **bounded**, not complete (§6).
+
+**Unknown:** the retry/fallback chain between a failed turn and a re-issued turn, and the exact compaction trigger conditions.
+
+### 2.5 Permissions
+
+**Status: observed (static).**
+
+**Decision shape.** Every tool permission check returns a decision of the form:
+
+```
+{ behavior: "allow" | "deny" | "ask",
+  updatedInput?,          // when a rule rewrites the tool input
+  message?,               // shown to the user on "ask"
+  decisionReason: { type: "rule" | "safetyCheck" | "other", ... } }
+```
+
+**Decision sources.** The permission decision carries a `source` field classified as `classifier` (an auto-mode classifier), `hook`, `user_permanent`, `user_temporary`, `user_abort`, `user_reject`, or `unknown`. The classifier path is separate: an auto-mode classifier verdict yields `classifier_verdict: "allow"` or `classifier_verdict: "block"` with an optional category, and it is only consulted for the `auto-mode` classifier.
+
+**Decision reasons.** The observed reason kinds are:
+
+| Reason kind | Meaning |
+|---|---|
+| `rule` | A named permission rule matched; the message names the rule and the tier it came from ("Permission rule '<rule>' from <source> requires approval for this <tool> command"). |
+| `subcommandResults` | A Bash command contains multiple operations, some of which require approval; the message lists the offending sub-commands (redirections stripped) and counts how many parts require approval. |
+| `permissionPromptTool` | A named tool requires approval for this command. |
+| `sandboxOverride` | "Run outside of the sandbox". |
+| `workingDir` | The working directory is the reason. |
+| `safetyCheck` | A safety check refused, independently of the rule engine. |
+
+**File-mutating tools.** `["Edit", "Write", "NotebookEdit"]` is the observed set of file-mutating tools, used to decide when a permission decision needs a path and a detected language attached to the decision record.
+
+**Tool contract.** A tool's `create()` returns `checkPermissions(input, context)`, `permissionCheckFailureDecision(input)`, `validateInput(input, context)`, `preparePermissionMatcher`, `inputsEquivalent`, `backfillObservableInput`, `getPath`, and `suppressesAllPermissionUpdates`. A concrete example (the file-write tool) shows the full sequence: normalize the path, stash the permission decision keyed by `toolUseId`, evaluate the rules, fall back to a path-specific rule, allow a modified input only when a rule rewrites it, then run input validation which returns typed failures with numeric `errorCode` values (for example `errorCode: 7` for an invalid path, `errorCode: 14` for a suppressed write) and `meta.reason` strings.
+
+**Rule sources.** Settings expose `permissions.allow`, `permissions.deny`, `permissions.ask` rule lists plus `permissions.defaultMode`; the permission modes include `default`, `acceptEdits`, `bypassPermissions`, `plan`, and `auto`. A `sandbox.filesystem` block carries `allowRead`, `allowWrite`, `denyRead`, `denyWrite`, and `credentials` lists.
+
+**Host-level gates.**
+
+- `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` blocks every prompt and tool call when the personal configuration has problems; the exact message is built from the offending file paths.
+- A hook failure of severity `stop` denies all tool calls with the reason "A problem with your own settings or hooks is blocking tool calls"; other hook failures produce a notice and leave the rest of the session intact.
+- `permissionDecision` reasons of type `safetyCheck` exist as a distinct class: for example, a `PermissionRequest` hook may approve a WebFetch, and a safety check then refuses to run a fetch whose approved arguments the tool cannot verify.
+
+**Remote permission transport.** `chunk-6bp7hdav.js` contains a `TransportPermissionDispatcher` for the `can_use_tool` control request. Observed behavior: it accepts only the `can_use_tool` subtype; it drops a request whose `request_id` is not a string (no response is possible); it denies a malformed `can_use_tool` with a synthesized denial; it recognizes a repository-trust question and a computer-folder prompt with strict argument validation (exactly three string arguments, no CR/LF/U+2028/U+2029, path and computer name must equal their normalized form); it deduplicates by `request_id`; and it builds the permission prompt text from the tool's `description` and `decision_reason`.
+
+**Unknown:** the complete rule-matching precedence between the allow/deny/ask lists when several match, beyond the observed "deny wins over allow" behavior in individual tool checkers.
+
+### 2.6 Sessions, persistence, and resumption
+
+**Status: observed for layout and transport selection; partial for the resume algorithm.**
+
+**Storage layout.** A `~/.claude` directory listing in `chunk-4jsg44k7.js` enumerates 55 subdirectories, including `projects`, `sessions`, `tasks`, `todos`, `plans`, `plugins`, `skills`-adjacent caches (`mcp-skill-archives`, `mcp-discovery-cache`), `agent-memory`, `agent-memory-local`, `agent-memory-project`, `file-history`, `shell-snapshots`, `local`, `local-settings`, `project-settings`, `remote`, `remote-control`, `storage-v2`, `state`, `telemetry`, `traces`, `usage-data`, `backups`, `cache`, `logs`, `paste-cache`, `image-cache`, `ide`, `jobs`, `daemon`, `downloads`, `uploads`, `shares`, `teams`, `scratch`, `session-env`, `startup-perf`, `statsig`, `systemd`, `api-dumps`, `chrome`, `cowork_plugins`, `dump-prompts`, `feedback`, `feedback-bundles`, `file-transfers`, `debug`, `seed-admin`, and `local-settings`.
+
+**Transcript format.** A path classifier in the same module returns `"session_transcript"` for any path containing `/projects/` that ends in `.jsonl`, and `"session_transcript"` for any path containing `.jsonl` or `projects`/`*.jsonl`. Session transcripts are therefore **JSONL files under a `projects` directory**.
+
+**Transcript source.** The session controller exposes `transcriptSource` with the two observed values `ccr-api` (remote) and `local-jsonl` (local), and switches between them when the active remote changes.
+
+**Cross-restart prompt carry-over.** A `carried-prompts` mechanism reads a file, parses prompts, filters out prompts marked `perhapsDelivered`, and returns them only under a strict age and binding policy. The observed outcome vocabulary is `sent`, `bound`, `altered`, `no_row`, `job_has_run`, `too_old`, `future_dated`, with a `tengu_carried_prompts_taken` telemetry event.
+
+**Partial:** the exact `--resume` / `--continue` selection algorithm, the session-row index, and the transcript replay path were not traced to resolved relations. `resumeAdoptedAgents` and `resumeOrphanedAgents` exist in `chunk-6bp7hdav.js` (roles `callable:callable:method:368542:369796` and `369796:370819`) but their call graphs are bounded by the module's transfer-budget truncation.
+
+### 2.7 Configuration
+
+**Status: observed (static), with the full precedence rule still partial.**
+
+**Tiers.** Settings sources are named `userSettings`, `projectSettings`, `localSettings`, `policySettings`, and `flagSettings`. The module that owns the settings store (`chunk-4sn6hdt2.js`, with the tier constants exported from `chunk-16tfbg7w.js`) declares four distinct orderings, all observed as literals:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `C7s` | `["policySettings", "flagSettings", "userSettings"]` | Resolution order for a **top-level settings key** (highest first). `Gge(key)` returns `[{source, value}]` for each source that defines the key; the first entry is the effective value. |
+| `Ble` | `["localSettings", "projectSettings", "userSettings"]` | Per-key merge order for **merged settings** such as skill overrides; the first source that defines a key wins. |
+| `D_` | `["userSettings", "projectSettings", "localSettings"]` | Source enumeration order, with the scope map `{userSettings: "user", projectSettings: "project", localSettings: "local"}`. |
+| `VD` (= `ef`) | `["projectSettings", "localSettings"]` | The project-side tiers — and exactly the set that `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` suppresses: `me(source)` returns `null` for these when the restriction is active. |
+
+Project settings live at `.claude/settings.json` and local settings at `.claude/settings.local.json`; the project tier is conditional on a `gateProject` decision, and the local tier is conditional on an "indeterminate → tracked" rule.
+
+**Precedence.** Two distinct rules are observed, and they are not the same rule.
+
+1. *Top-level keys* resolve strictly through `C7s`: machine policy beats feature flags, which beat user settings.
+2. *Merged keys* resolve through `Ble`: local settings beat project settings, which beat user settings — first source defining the key wins.
+
+A third rule applies at **block** granularity rather than key granularity: a higher tier's block applies as a whole, overriding any lower tier, and is not merged key by key. This is stated by the product's own message: "the spellcheck block in `<source>` applies (as a whole, over any lower tier)". The same message states that a spellcheck block in project or local settings is ignored, and instructs the user to set it in user settings.
+
+**Tier degradation and suppression.**
+
+- The project tier is **skipped entirely** when the project settings path and the user settings path resolve to the same file (the `Jy()` check). A `projectSettings` source is consequently reported with the read mode `as_read` rather than `none` in that case.
+- A project settings file that is a symlink or hard link to a user settings path is reported as "linked away" and is not applied.
+- Local settings are merged over a **legacy** local settings file, with the local file taking precedence.
+- Per-source read modes are `none`, `as_read`, and `machine_admin`; `policySettings` is read as `machine_admin`.
+
+**Scope separation.** Several capabilities are deliberately scoped to a single tier: `spellcheck` to user settings; `otelHeadersHelper` and `apiKeyHelper` are read per tier and reported with the tier that supplied them; `autoMemoryDirectory` is reported per tier. Boolean flags such as `skipDangerousModePermissionPrompt` and `skipWorkflowUsageWarning` are read from an explicit union of sources (for example user, local, flag, and policy), and one variant deliberately reads only `policySettings` and `userSettings`.
+
+**Policy tier.** `policySettings` is read directly by the sandbox/policy module and contributes `sandbox` blocks and `env` restrictions; the sandbox policy raises distinct, specific errors for `sandbox.enabledPlatforms excludes <platform>`, `sandbox.enabled is false`, `sandbox.failIfUnavailable is false (a missing backend would run the shell unconfined)`, and `sandbox.allowUnsandboxedCommands is true`, and reports every `excludedCommands` exemption.
+
+**Config file security.** Sandbox configuration is written to `<configDir>/settings.json` with mode `0o600`, and path entries are canonicalized (including symlink resolution) before being written.
+
+**Partial:** the per-key merge for ordinary (non-merged, non-top-level) settings keys is not derived. The available evidence establishes the tier set, the two distinct orderings, the whole-block override rule, and the tier degradation and suppression rules.
+
+### 2.8 MCP, plugins, and hooks
+
+**Status: observed for the control surface and the transport; partial for the full server lifecycle.**
+
+**Control-request surface.** `chunk-0j25qbd0.js` implements the host control-request dispatcher. The complete set of 23 handled subtypes is:
+
+```
+initialize, set_model, set_max_thinking_tokens, set_permission_mode,
+rename_session, set_color, file_suggestions, read_file, get_workspace_diff,
+get_context_usage, get_usage, mcp_status, mcp_authenticate,
+mcp_oauth_callback_url, mcp_reconnect, interrupt, apply_flag_settings,
+mcp_set_servers, stop_task, background_tasks, cancel_async_message,
+side_question, fork_conversation
+```
+
+- `mcp_authenticate` → the registered `onMcpAuthenticate(request, request.redirectUri)` callback;
+- `mcp_oauth_callback_url` → the registered `onMcpOauthCallbackUrl(request, request.callbackUrl)` callback;
+- `mcp_reconnect` → the registered `onMcpReconnect` callback;
+- if the required callback is not registered, the dispatcher replies with a `control_response` of subtype `error` and the message `"<subtype> is not supported in this context (callback not registered)"`;
+- `mcp_status` replies with `{ mcpServers: [] }` in the observed context;
+- other control requests are rejected while the process is exiting, and `fork_conversation` returns `{ forked: false, error: "unsupported", reason: "requires_remote_control_server" }` when the remote control server is absent.
+
+**Directional policy.** A separate table in `chunk-081t8575.js` rejects control-request subtypes by direction: `mcp_tasks_changed` is "sent to a cloud agent by the service, not by a host"; `register_device_hooks`, `upload_device_hook_template`, `remote_tools_announce` are "sent to a cloud agent by the attached client, not by a host"; and `can_use_tool`, `hook_callback`, `elicitation`, `request_user_dialog`, `oauth_token_refresh`, `host_auth_token_refresh`, `remote_tool_call`, `remote_plumbing_call`, `remote_tools_probe`, `remote_tools_reannounce`, `remote_control_work_secret` are "agent-originated and cannot be sent by a host".
+
+**MCP transport.** `chunk-6s9yz1tm.js` contains the SDK's `StdioClientTransport`: `start()` spawns the configured command with `args`, `cwd`, `shell: false`, `windowsHide` on Windows, `stdio: ["pipe", "pipe", stderr ?? "inherit"]`, and an environment merged from the parent environment plus the server's `env`. Read errors close the transport; `close` events clear the process. Connection batching is `MCP_SERVER_CONNECTION_BATCH_SIZE` (default **3**) for local servers and `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` (default **20**) for remote servers. Server types are `stdio` or `sdk`. The protocol methods observed are `initialize`, `tools/list`, and `tools/call`. `mcp__ide__` tools are special-cased: `mcp__ide__executeCode` and `mcp__ide__getDiagnostics` are excluded from a general "hide `mcp__ide__` tools" filter. Remote servers are matched against host allow/deny lists (for example a legacy URL-elicitation server denylist), using hostname matching including sub-domain matching.
+
+**MCP configuration writes.** Adding or removing an MCP server re-reads the configuration file and verifies that the change landed, retrying on transient read errors, and reports distinct `mcp_config_write_unconfirmed` / `mcp_config_write_failed` telemetry. The configuration object is scoped `user` or `local`, with a per-project `projects` map.
+
+**Hook event matrix.** `chunk-f27ph7ed.js` contains the complete hook event surface, in three parts.
+
+*Decision-capable events* (`yL`): `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `PermissionDenied`.
+
+*Full event set* with the observed per-event execution classification (`wL`):
+
+| Classification | Events |
+|---|---|
+| `runs_locally` | `SessionStart`, `SessionEnd`, `Notification` |
+| `later` | `PermissionRequest`, `PreModelSwitch`, `PostModelSwitch` |
+| `low_value` | `Setup`, `PreCompact`, `PostCompact`, `TeammateIdle`, `TaskCreated`, `TaskCompleted`, `Elicitation`, `ElicitationResult` |
+| `container_internal` | `ConfigChange`, `WorktreeCreate`, `WorktreeRemove`, `InstructionsLoaded`, `CwdChanged`, `FileChanged`, `DirectoryAdded`, `MessageDisplay` |
+
+Additional observed event names: `StatusLine`, `FileSuggestion`, `PermissionRequest`, `PostToolUseFailure`, `SubagentStart`. A separate `Ten` set lists the surfaced/notification-class events.
+
+*Hook outputs.* Hook results carry `hookEventName`, an optional `additionalContext`, an optional `retry`, and — for `PermissionRequest` — a `decision` whose `behavior` is `allow` or `deny`. `Elicitation` / `ElicitationResult` map a `decline`/`cancel` action to a distinct result. `SessionStart` and `SessionEnd` results can carry `watchPaths`, and `SessionStart` can carry `reloadSkills`.
+
+*Hook matchers.* `PostToolUse`, `PostToolUseFailure`, and `PostToolBatch` support tool-name matchers, including a write-tool set (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`) and a matcher syntax of `/^[a-zA-Z0-9_|, -]+$/` with `|` and `,` separators and `*` wildcards. A `severityByModel` table gives per-model thresholds, for example `claude-opus-4-8[1m]: { t1: 45, t2: 35 }` and `claude-sonnet-5: { t1: 25, t2: 35 }`.
+
+*Hook sources.* Hooks may be of type `mcp_tool`, in which case they carry a `server` field; the registry collects the set of MCP servers that contribute `mcp_tool` hooks, and a helper reports whether a given server contributes any hook at all.
+
+*Partial:* the complete server lifecycle (config discovery → spawn → initialize → tool list refresh → reconnect → shutdown), the plugin install/marketplace lifecycle, the skills registry, and the subagent definition lifecycle were not traced to resolved relations. The `mcp-discovery-cache`, `mcp-skill-archives`, `plugins`, `plans`, `todos`, and `tasks` directories in the storage layout indicate these subsystems exist, but the analyzed scope does not establish their behavior.
+
+### 2.9 Native and platform sandbox
+
+**Status: observed for the helper and supervisor structure; partial for the per-syscall policy.**
+
+- `apply-seccomp` worker `0x1d21790`: 29 direct callees named, zero unresolved call destinations (`ev_03f243709e8d7a715417e1b5423040b0699e83e080e8a3e34d2bab35c52b75b0`). It reads `SRT_OBSERVE_SOCK` and `SRT_ENCODED_CMD`, creates a socketpair, unshares PID/mount and user namespaces, forks, performs private/root and `/proc` mounts, sets `prctl` (including `PR_SET_NO_NEW_PRIVS`), installs a seccomp filter with `SECCOMP_FILTER_FLAG_TSYNC_ESRCH` and a listener with `SECCOMP_FILTER_FLAG_NEW_LISTENER`, transfers descriptors with `sendmsg`, waits with `waitpid`, and finally `execvp`s.
+- Seccomp user-notification supervisor `0x1d22440`: 16 direct callees named, zero unresolved (`ev_675b0f67ffcb65b3210844369bc84963d66b4e552360bc61aa68ae7987fcaf7d`). It allocates kernel-reported notification buffers with fallbacks, opens a `pidfd`, polls the listener, receives notifications with ioctl request `0xc0502100`, dispatches on the notified syscall number, and responds with `0xc0182101`. A 241-case switch table is reported at `0xfa0f30`.
+- The static table at `0x6c749c0` was read byte-exactly (648 bytes, 27 six-word records) (`ev_7f3b70f348ad82e0462ade7bb1e07dec88154d51f868884e8f809f20d40c5ef8`). The first word of each record maps to a filesystem syscall (`openat`, `unlinkat`, `renameat2`, `fchmodat2`, `utimensat`, …) and the pointer at record offset `+8` resolves to that syscall's name. Selected syscall cases read fields at `+0x10` and `+0x13` and use the resulting indices to read one or two notified-process arguments with `process_vm_readv`; relative paths are resolved with `readlinkat` against `/proc/<pid>/cwd` or `/proc/<pid>/fd`; the supervisor can emit JSON records containing the syscall name, PID, path, and an optional encoded command.
+- **Unknown:** the exact metadata encoding of the per-record fields and the allow/deny/observe decision for every syscall. The earlier hypothesis that field `0x2463b9` is a handler function pointer was rejected: it is data, not code.
+
+**Known gap (carried forward):** the whole-image Ghidra inventory timed out at 330 s, 360 s, and 900 s and produced no Evidence. The selected-function workflow is viable; the whole-image inventory is not currently available. This is a **coverage gap, not evidence of absence**.
+
+---
+
+## 3. Feature matrix
+
+Status vocabulary: **observed** (directly present in the pinned artifact's static structure), **inferred** (strongly implied but not directly established), **documented only** (official docs; not target evidence), **partial** (some of the surface established, some not), **unknown** (not established by the analyzed scope), **not applicable**.
+
+| # | Requirement group | Status | Evidence | Notes |
+|---|---|---|---|---|
+| 1 | CLI entry, flags, subcommands | partial | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`, `ev_55449a84611a36ea464f40e34521dc3eda4ed244d6ff37baa2fc163d64070fe5` | CLI/config modules parsed; the full flag surface was not enumerated. `--version` is the only command ever executed. |
+| 2 | Configuration file tiers | observed | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b` | Five named tiers; four distinct orderings observed as literals. |
+| 3 | Configuration precedence algorithm | partial (materially advanced) | same | Two distinct orderings (`C7s`, `Ble`) plus a whole-block override rule and tier degradation/suppression. Per-key merge for ordinary keys still not derived. |
+| 4 | Provider adapters (8 routes) | observed | `ev_bdec53e06db82d41c30a893877f3506acd62d206c7a9e75c06d1f9b54ecc8012` | gateway, bedrock, foundry, anthropicAws, anthropicGoogleCloud, mantle, vertex, firstParty. |
+| 5 | Model catalog (provider-owned) | observed | `chunk-w4f5s3e0.js` (in `ev_9ba468...`) | `provider_ids` per model across 8 providers; `null` where unsupported. |
+| 6 | Route selection | observed | same | `xe()` / `wd(model)`; one active route; env-flag driven. |
+| 7 | Per-provider endpoint policy | observed | same | Base-URL env vars and `ownHost` regexes per provider. |
+| 8 | Multi-provider connection manager | **not applicable** (project extension) | — | No user-managed concurrent-provider registry observed. Required as a product extension. |
+| 9 | Request construction | observed | `ev_bdec53e06db82d41c30a893877f3506acd62d206c7a9e75c06d1f9b54ecc8012` | Full chain to `fetch`; 38 member-call sites remain unknown targets. |
+| 10 | Headers, auth, retry, timeout | observed | same | `anthropic-version: 2023-06-01`; `X-Stainless-*`; 408/409/429/5xx + 401 refresh. |
+| 11 | Response parsing | partial | same | `APIPromise` and `withResponse()` observed; per-resource `parseResponse` not resolved. |
+| 12 | Local gateway | observed | `ev_8b10e4a2e8a586c2e4ee4b54674a00faf8c80d3db28aec8195c3c669e1beefef` | `cc-gateway/2.1.303`; `workspace_id` rejection; SSE re-framing. |
+| 13 | Agent turn loop | observed (request side) / partial (loop) | `chunk-4jsg44k7.js` | Streaming `beta.messages.create`; compaction/fallback ordering not resolved. |
+| 14 | Tool dispatch | partial | `ev_7086b60cc22e775b79b659c1f081a8e2eba74f7004c2ed8aeea288e6cec9003e` | tool_use→tool_result shaping observed; scheduling not resolved. |
+| 15 | Permission decisions | observed | `ev_bdec53e06db82d41c30a893877f3506acd62d206c7a9e75c06d1f9b54ecc8012`, `ev_9b2fbff46f81bf00e4937bf22c035b7f51aebb8ce323369480e28854298c3d80` | Decision shape, rule tiers, safety checks, host gates. |
+| 16 | Permission transport (remote) | observed | `ev_9b2fbff46f81bf00e4937bf22c035b7f51aebb8ce323369480e28854298c3d80` | `TransportPermissionDispatcher`; dedup; malformed → deny. |
+| 17 | Hooks | observed (event matrix) | `ev_da3ebe58a838f10c641ef6ce892283c7db5ee8d8444b7f27159efaeada6531d3` | 30+ events, per-event classification, decision shapes, matchers, MCP-tool hooks. |
+| 18 | Session storage layout | observed | `chunk-4jsg44k7.js` | 55 `~/.claude` subdirectories; JSONL transcripts under `projects`. |
+| 19 | Session resumption | partial | `ev_9b2fbff46f81bf00e4937bf22c035b7f51aebb8ce323369480e28854298c3d80` | `resumeAdoptedAgents` / `resumeOrphanedAgents` exist; algorithms bounded by truncation. |
+| 20 | Cross-restart prompt carry-over | observed | `chunk-6bp7hdav.js` | Outcome vocabulary and age/binding policy observed. |
+| 21 | MCP control surface | observed | `ev_592745079e22b1a97e0aaad8b97eabf04fe71d9d71f275007cf6e77f7528e5b7` | 23 subtypes enumerated; MCP callbacks and their absence error. |
+| 22 | MCP transport | observed | `chunk-6s9yz1tm.js` | stdio spawn semantics; batching 3/20; `tools/list`, `tools/call`. |
+| 23 | MCP server lifecycle | partial | `ev_592745079e22b1a97e0aaad8b97eabf04fe71d9d71f275007cf6e77f7528e5b7` | Config writes verified; full lifecycle not traced. |
+| 24 | Plugins, skills, subagents, marketplaces | partial | `ev_ee1b36b7a95edd9e7093244a33c103225fe3581a6c73eaba485c297180a37515` | Named subsystems and storage present; behavior not traced. |
+| 25 | Native sandbox helper | observed | `ev_03f243709e8d7a715417e1b5423040b0699e83e080e8a3e34d2bab35c52b75b0` | 29 named callees; namespaces, mounts, seccomp, execvp. |
+| 26 | Native seccomp supervisor | partial | `ev_675b0f67ffcb65b3210844369bc84963d66b4e552360bc61aa68ae7987fcaf7d`, `ev_7f3b70f348ad82e0462ade7bb1e07dec88154d51f868884e8f809f20d40c5ef8` | 16 named callees; 241-case switch; 27-record table; per-syscall policy unknown. |
+| 27 | Whole-image native inventory | unknown | three timed-out attempts | Not available; does not imply absence. |
+
+---
+
+## 4. Material unknowns
+
+These are gaps a reimplementation cannot close from the current evidence, listed with the specific artifact that would close them.
+
+1. **Per-syscall seccomp policy.** The 27-record table at `0x6c749c0` is read byte-exactly, but the field encoding and the per-syscall action are unresolved. Closing it needs a targeted Ghidra pass over the switch-case handlers that consume records at `+0x10` / `+0x13`.
+2. **Whole-image native inventory.** Three whole-binary attempts timed out (330 s, 360 s, 900 s). Only the selected-function workflow is viable at present.
+3. **Response-object construction for the Messages resource.** `APIPromise.parseResponse` is observed as a contract, but the per-resource implementation was not resolved to a callee.
+4. **Tool-call scheduling and continuation.** The order of concurrent tool execution and the point at which the next model request is issued are not established.
+5. **Session resume algorithm.** The selection and replay logic behind `--resume` / `--continue` is bounded by the session controller's transfer-budget truncation.
+6. **Key-level configuration merge.** The tier set and block-level override are established; the full key-level merge is not.
+7. **Plugin / skill / subagent / marketplace lifecycles.** Storage and names are observed; behavior is not.
+8. **Gateway route relationship to the local gateway.** The `gateway` catalog route returns a pinned remote URL plus a JWT; the locally implemented `cc-gateway` proxy is a separate code path. Whether they are the same system, a client and a server of the same system, or unrelated is **not established**.
+9. **Hook event matrix.** Now enumerated (§2.8): 30+ events, per-event execution classification, decision shapes, matchers. **Closed.**
+10. **Member-call targets.** 38 call sites inside `makeRequest` alone have no resolved `calls` relation. Their exact expressions are retained; their targets are unknown. The same limit applies across the whole graph and is a property of REA's member-call handling, not of the artifact.
+
+---
+
+## 5. Exit-gate decision
+
+The exit gate requires an evidence-backed coverage audit of CLI/configuration, providers and model catalogs, provider request/response construction, agent loop and tool dispatch, permissions, sessions/resumption, MCP/plugins/hooks/extensions, and native/platform sandbox paths.
+
+| Group | Gate state |
+|---|---|
+| CLI/configuration | **partial** — tiers and precedence observed; full merge unknown |
+| Providers and model catalogs | **met** |
+| Provider request/response construction | **partial** — request met, response parsing partial |
+| Agent loop and tool dispatch | **partial** — turn request and result shaping met; scheduling partial |
+| Permissions | **met** (rule precedence detail is a refinement, not a gap) |
+| Sessions/resumption | **partial** — storage and carry-over met; resume algorithm partial |
+| MCP/plugins/hooks/extensions | **partial** — control surface and transport met; lifecycles partial |
+| Native/platform sandbox | **partial** — helper and supervisor structure met; per-syscall policy partial |
+
+**Decision: the REA exit gate is NOT met.** Four groups are partial on a specific, named artifact each, and no group's gap is a "cannot be done" gap — every one of them is a bounded, tractable REA operation that has not been run yet.
+
+Accordingly, **implementation remains blocked**. The precise next actions are listed in §6 and mirrored in `docs/PROGRESS.md`.
+
+---
+
+## 6. Next actions, in order
+
+1. **Re-run the five resource-constrained module analyses at a lower per-file ceiling** so their semantic graphs are complete rather than dropped: `chunk-6bp7hdav.js` (session controller), `chunk-z6a1zj5w.js` (gateway + provider), `chunk-e7w77ts3.js`, `chunk-f27ph7ed.js`, `chunk-dt3pd9ft.js`. The mechanism is proven: lower `--max-semantic-nodes-per-file` until the transfer byte budget admits the file (100,000 then 60,000). **This is the single highest-value remaining action** because it unlocks the agent loop, tool dispatch, and session resume groups at once.
+2. **Trace the Messages `parseResponse`** to its resolved callee in the complete SDK module graph, closing requirement group 11.
+3. **Trace tool-call scheduling** in the completed `chunk-6bp7hdav.js` graph: the call sites that consume `tool_use` blocks and issue the next model request.
+4. **Trace session resume** (`--resume` / `--continue` selection, transcript replay) in the same completed graph.
+5. **Enumerate the key-level configuration merge** from the settings accessor that `me(source)` resolves. **Materially advanced:** the two orderings and the block, degradation, and suppression rules are established (§2.7); only the ordinary per-key merge remains.
+6. **Enumerate the hook event matrix** from the hook registry in `chunk-081t8575.js` / `chunk-f27ph7ed.js`.
+7. **Targeted Ghidra pass** over the seccomp supervisor's switch-case handlers to decode the per-record metadata and the per-syscall action, closing native group 26.
+8. Re-run the coverage audit; only then lift the implementation block.
+
+---
+
+## 7. Limits of this audit
+
+- Every statement marked **observed** is a static reading of the pinned artifact's extracted JavaScript or of Ghidra output for that artifact. No statement in this document is a runtime observation of the CLI.
+- The target was executed exactly once, with its `--version` flag. No authenticated session, model request, MCP server, or sandbox helper was run.
+- String presence is not proof of reachable behavior. Where this document names a subsystem, it names a code path or a storage location, not a proven execution.
+- Function fingerprints are static candidates; equal digests can remain ambiguous and do not prove behavioral equivalence.
+- The semantic graphs are **partial** by construction: the parent result budget, the per-file semantic-node ceiling, the transfer byte budget, and the semantic-unknown ceiling all truncate. Coverage numbers describe what REA retained, not what the artifact contains.
+- The `ev_da577...`, `ev_3cdd...`, `ev_592...`, `ev_832...`, `ev_27fa...`, `ev_88e9...`, and `ev_9ba...` multi-module records remain valid evidence but are **superseded for semantic-graph purposes** by the per-module records, which are not truncated for the same modules.
+- Official the reference agent documentation is referenced for product context only. Where documentation and this audit differ, the audit reports the artifact.
