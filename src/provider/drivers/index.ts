@@ -81,23 +81,30 @@ export function listDrivers(): ProviderDriver[] {
   return ROUTE_NAMES.map((route) => driverFor(route));
 }
 
-export { anthropicDriver, createAnthropicNativeDriver, createFirstPartyDriver } from './anthropic.js';
+export { anthropicDriver, createAnthropicNativeDriver } from './anthropic.js';
 export {
   bedrockDriver,
   createBedrockDriver,
   rewriteBedrockBody,
   bedrockInvokePath,
+  bedrockRewritePath,
+  isBedrockRewrittenPath,
+  bedrockCountTokensLocally,
   bedrockSigningHeaders,
   BEDROCK_ANTHROPIC_VERSION,
   BEDROCK_BASE_URL_TEMPLATE,
+  BEDROCK_COUNT_TOKENS_LOCAL_MESSAGE,
   BEDROCK_REWRITTEN_PATHS,
   BEDROCK_SIGV4_SERVICE,
+  BEDROCK_UNREWRITTEN_PATH_ERROR,
 } from './bedrock.js';
+export type { BedrockDriver } from './bedrock.js';
 export {
   vertexDriver,
   createVertexDriver,
   vertexPredictPath,
   vertexCountTokensPath,
+  vertexBaseUrlForRegion,
   VERTEX_ANTHROPIC_VERSION,
   VERTEX_BASE_URL,
   VERTEX_MISSING_PROJECT_ERROR,
@@ -107,17 +114,23 @@ export {
   createFoundryDriver,
   foundryBaseUrlForResource,
   foundryAnthropicBaseUrl,
+  foundryResourceFromBaseUrl,
   FOUNDRY_AZURE_AD_SCOPE,
+  FOUNDRY_CREDENTIALS_MUTUALLY_EXCLUSIVE_ERROR,
+  FOUNDRY_MISSING_CREDENTIALS_ERROR,
 } from './foundry.js';
+export type { FoundryDriver } from './foundry.js';
 export {
   gatewayDriver,
   createGatewayDriver,
+  estimateTokenCount,
   gatewayWorkspaceIdRejection,
   gatewayRejectsWorkspaceId,
   gatewayCountTokensResponse,
   gatewayCountTokensUnsupported,
   gatewayErrorFrame,
   gatewayMoveBetaHeaderIntoBody,
+  gatewayUpstreamRequest,
   reframeAsSse,
   GatewayRequestError,
   GATEWAY_BASE_URL,
@@ -126,6 +139,7 @@ export {
   GATEWAY_VERSION,
   GATEWAY_WORKSPACE_ID_MESSAGE,
 } from './gateway.js';
+export type { GatewayUpstream, GatewayUpstreamRequest } from './gateway.js';
 export { mantleDriver, createMantleDriver, MANTLE_BASE_URL_TEMPLATE, MANTLE_SIGV4_SERVICE } from './mantle.js';
 export {
   anthropicAwsDriver,
@@ -143,7 +157,6 @@ export {
 export {
   ANTHROPIC_BETA_HEADER,
   ANTHROPIC_MESSAGE_PATHS,
-  ANTHROPIC_MESSAGE_PATH_VARIANTS,
   ANTHROPIC_VERSION,
   AWS_REGION_REQUIRED_ERROR,
   BETA_FLAG_TRANSLATIONS,
@@ -151,13 +164,23 @@ export {
   CACHED_TOKEN_REFRESHED_FLAG,
   CORE_SSE_EVENTS,
   EXTENDED_SSE_EVENTS,
+  LOCAL_TOKEN_ESTIMATE_CHARS_PER_TOKEN,
   NONSTREAMING_TIMEOUT_FALLBACK_MS,
   RETRYABLE_STATUSES,
+  SDK_USER_AGENT,
+  SDK_USER_AGENT_VERSION,
+  STAINLESS_RETRY_COUNT_HEADER,
+  STAINLESS_TIMEOUT_HEADER,
   WORKSPACE_ID_HEADER,
+  buildMessage,
   calculateNonstreamingTimeoutMs,
   classifyErrorStatus,
+  estimateTokenCountForCharacters,
+  isJsonContentType,
   isKnownSseEvent,
   isRetryableStatus,
+  parseResponse,
+  promptCharacterCount,
   resolveRequestTimeout,
   splitCommaList,
   stripBetaSearchParam,
@@ -174,11 +197,15 @@ export type {
   AwsRequestContext,
   CredentialKind,
   ErrorClassificationOptions,
+  ParseResponseOptions,
   ProviderContentBlock,
+  ProviderCredentialSources,
   ProviderDriver,
   ProviderEvent,
   ProviderMessage,
   ProviderRequest,
+  ProviderResponseHeaders,
+  ProviderResponseLike,
   ProviderTool,
   StopReason,
   Usage,

@@ -28,6 +28,7 @@
  */
 
 import {
+  applyTokenScope,
   buildAnthropicBody,
   buildAnthropicHeaders,
   calculateNonstreamingTimeoutMs,
@@ -77,10 +78,36 @@ export const VERTEX_PREDICT_SUFFIXES = Object.freeze({
 export const VERTEX_COUNT_TOKENS_MODEL = 'count-tokens';
 
 /**
+ * The base URL a Vertex **region** is served from.
+ *
+ * **Observed** (research §1, not superseded by audit §2.2a): the regional host
+ * convention is `global` → `aiplatform.googleapis.com`, `us` →
+ * `aiplatform.us.rep.googleapis.com`, `eu` → `aiplatform.eu.rep.googleapis.com`,
+ * and any other region → `{region}-aiplatform.googleapis.com`.
+ *
+ * The region selects the **host**; the location selects the **path segment**.
+ */
+export function vertexBaseUrlForRegion(region: string): string {
+  switch (region) {
+    case 'global':
+      return VERTEX_BASE_URL;
+    case 'us':
+      return 'https://aiplatform.us.rep.googleapis.com';
+    case 'eu':
+      return 'https://aiplatform.eu.rep.googleapis.com';
+    default:
+      return `https://${region}-aiplatform.googleapis.com`;
+  }
+}
+
+/**
  * The path a Vertex request goes to.
  *
  * **Observed** (audit §2.2a): the path is
  * `<prefix>/projects/<projectId>/locations/<region>/publishers/anthropic/models/<model>:<suffix>`.
+ *
+ * The project id, the location and the model name are interpolated
+ * **unencoded**, as the target does.
  */
 export function vertexPredictPath(
   projectId: string,
@@ -110,7 +137,7 @@ export const vertexDriver: ProviderDriver = createVertexDriver();
  * Build a Vertex driver.
  */
 export function createVertexDriver(overrides: { baseUrl?: string } = {}): ProviderDriver {
-  const base = overrides.baseUrl ?? VERTEX_BASE_URL;
+  const configuredBase = overrides.baseUrl ?? '';
 
   const headerOptions = {
     // Vertex authenticates with a Google OAuth2 bearer and **never** with an
@@ -121,6 +148,9 @@ export function createVertexDriver(overrides: { baseUrl?: string } = {}): Provid
 
   const headersFor = (req: ProviderRequest, cred: string | undefined): Record<string, string> => {
     const kind = resolveCredentialKind(req, 'bearer');
+    // The Google OAuth2 scope the bearer token is acquired with reaches the
+    // transport through the request's token context.
+    applyTokenScope(req, VERTEX_GOOGLE_SCOPE);
     return buildAnthropicHeaders(req, cred, {
       ...headerOptions,
       // An `apiKey` credential is still a Google bearer token on Vertex: the
@@ -133,7 +163,6 @@ export function createVertexDriver(overrides: { baseUrl?: string } = {}): Provid
     route: 'vertex',
 
     buildUrl(req: ProviderRequest, baseUrl?: string): string {
-      const endpoint = baseUrl !== undefined && baseUrl.trim() !== '' ? baseUrl.trim() : base;
       const vertex = req.vertex;
       if (vertex === undefined || typeof vertex.projectId !== 'string' || vertex.projectId.trim() === '') {
         // **Observed** (audit §2.2a): the target's exact error.
@@ -141,6 +170,16 @@ export function createVertexDriver(overrides: { baseUrl?: string } = {}): Provid
       }
       const projectId = vertex.projectId.trim();
       const location = typeof vertex.location === 'string' && vertex.location.trim() !== '' ? vertex.location.trim() : 'global';
+      // The regional host convention selects the host; an explicit base URL —
+      // the per-call one or the driver's own — overrides it.
+      const region =
+        typeof vertex.region === 'string' && vertex.region.trim() !== '' ? vertex.region.trim() : 'global';
+      const endpoint =
+        baseUrl !== undefined && baseUrl.trim() !== ''
+          ? baseUrl.trim()
+          : configuredBase !== ''
+            ? configuredBase
+            : vertexBaseUrlForRegion(region);
 
       const path =
         req.operation === 'count_tokens'
@@ -167,6 +206,7 @@ export function createVertexDriver(overrides: { baseUrl?: string } = {}): Provid
         includeModel: false,
         includeStream: true,
         anthropicVersion: VERTEX_ANTHROPIC_VERSION,
+        countTokens: req.operation === 'count_tokens',
       });
       return { body, headers };
     },

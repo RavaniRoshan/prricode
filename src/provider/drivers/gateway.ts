@@ -29,22 +29,33 @@
  * scope (audit §4, unknown 8). This implementation implements both halves of what the
  * audit records, and does not claim they are the same system.
  *
+ * ## The upstream hop
+ *
+ * The hop onto the upstream provider — the upstream's base URL and the
+ * upstream's auth — is implemented here, as `gatewayUpstreamRequest`: it asks
+ * the **upstream's own driver** for the URL, the headers and the body, so the
+ * upstream's wire shape (Bedrock's body mutations, for instance) is the one
+ * that is forwarded, and the gateway's own credential never reaches the
+ * upstream.
+ *
  * ## The version in the user agent
  *
  * The gateway's user agent carries the **pinned target's** version,
  * `cc-gateway/2.1.303`. The user agent is part of the observable wire
  * contract, so this implementation emits the target's string rather than its own; the
- * version is a constant so that a caller can override it.
+ * version is a constant so that a caller can override it. The gateway
+ * **extends** the base user agent (`Anthropic/JS <version>`) rather than
+ * replacing it, as the audit describes.
  */
 
 import {
-  ANTHROPIC_VERSION,
   anthropicPathFor,
   buildAnthropicBody,
   buildAnthropicHeaders,
   calculateNonstreamingTimeoutMs,
   classifyErrorStatus,
   createStreamState,
+  estimateTokenCountForCharacters,
   eventsFromMessage,
   isAnthropicStreamState,
   isRecord,
@@ -52,6 +63,7 @@ import {
   ownString,
   parseSseChunk,
   parseSseFrame,
+  promptCharacterCount,
   resolveCredentialKind,
   splitCommaList,
   splitSseFrames,
@@ -157,7 +169,7 @@ export function gatewayCountTokensUnsupported(): {
  * upstream; the audit does not record its estimator, so this implementation uses the
  * conventional four-characters-per-token approximation.
  */
-export const LOCAL_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
+export { LOCAL_TOKEN_ESTIMATE_CHARS_PER_TOKEN } from './types.js';
 
 /**
  * Estimate the number of tokens of a text.
@@ -167,7 +179,7 @@ export const LOCAL_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
  */
 export function estimateTokenCount(text: string): number {
   if (typeof text !== 'string' || text === '') return 0;
-  return Math.ceil(text.length / LOCAL_TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+  return estimateTokenCountForCharacters(text.length);
 }
 
 /**
@@ -183,26 +195,12 @@ export function gatewayCountTokensResponse(
   if (upstream !== 'bedrock') {
     return gatewayCountTokensUnsupported();
   }
-  let characters = 0;
-  if (typeof request.system === 'string') characters += request.system.length;
-  const messages = Array.isArray(request.messages) ? request.messages : [];
-  for (const message of messages) {
-    if (!isRecord(message)) continue;
-    const content = message['content'];
-    if (typeof content === 'string') {
-      characters += content.length;
-      continue;
-    }
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!isRecord(block)) continue;
-      const text = ownString(block, 'text') ?? ownString(block, 'thinking');
-      if (text !== undefined) characters += text.length;
-    }
-  }
+  // The count is computed from the prompt's **length**: this implementation never
+  // materialises a copy of the prompt to measure it.
+  const characters = promptCharacterCount(request.messages, request.system);
   return {
     status: 200,
-    body: { input_tokens: estimateTokenCount('x'.repeat(characters)) },
+    body: { input_tokens: estimateTokenCountForCharacters(characters) },
     headers: {},
   };
 }
@@ -308,6 +306,67 @@ export function gatewayMoveBetaHeaderIntoBody(
 }
 
 /**
+ * The upstream a local gateway forwards to.
+ *
+ * **Observed** (audit §2.3): the gateway "applies the upstream provider's auth
+ * (`client.applyAuth(headers)`) and the provider's base URL".
+ */
+export interface GatewayUpstream {
+  /** The upstream's driver — it carries the upstream's auth and wire shape. */
+  driver: ProviderDriver;
+  /** The upstream's base URL, when it is not the driver's own default. */
+  baseUrl?: string;
+  /** The upstream's credential. */
+  credential?: string;
+}
+
+/** The request a local gateway forwards to its upstream. */
+export interface GatewayUpstreamRequest {
+  /** The URL the upstream request goes to. */
+  url: string;
+  /** The headers the upstream request carries. */
+  headers: Record<string, string>;
+  /** The body the upstream request carries. */
+  body: unknown;
+}
+
+/**
+ * Build the request a local gateway forwards to its upstream.
+ *
+ * **Observed** (audit §2.3): the gateway applies the upstream provider's auth
+ * and the provider's base URL. This implementation asks the **upstream's own driver**
+ * for the URL, the headers and the body, so the upstream's wire shape (the
+ * Bedrock body mutations, for instance) is the one that is forwarded.
+ *
+ * The gateway's **own** credential never reaches the upstream: the inbound
+ * auth headers are dropped before the upstream's are applied.
+ */
+export function gatewayUpstreamRequest(
+  upstream: GatewayUpstream,
+  req: ProviderRequest,
+  options: { headers?: Record<string, string> } = {},
+): GatewayUpstreamRequest {
+  const url = upstream.driver.buildUrl(req, upstream.baseUrl);
+  const built = upstream.driver.buildBody(req, upstream.credential);
+
+  // A null-prototype bag: a header name is caller-supplied data, and
+  // `'__proto__'` must not reach the prototype chain on its way in.
+  const headers: Record<string, string> = Object.create(null) as Record<string, string>;
+  Object.assign(headers, options.headers ?? {});
+  // The gateway's own auth is replaced by the upstream's, never forwarded.
+  delete headers['authorization'];
+  delete headers['x-api-key'];
+  Object.assign(headers, built.headers);
+
+  const body =
+    upstream.driver.route === 'bedrock' && isRecord(built.body)
+      ? gatewayMoveBetaHeaderIntoBody(built.body, headers)
+      : built.body;
+
+  return { url, headers, body };
+}
+
+/**
  * The gateway driver.
  */
 export const gatewayDriver: ProviderDriver = createGatewayDriver();
@@ -352,12 +411,14 @@ export function createGatewayDriver(overrides: { baseUrl?: string; version?: str
 
     buildBody(req: ProviderRequest, cred: string | undefined): { body: unknown; headers: Record<string, string> } {
       const headers = headersFor(req, cred);
-      const body = buildAnthropicBody(req);
-      // A workspace id travels in the body of a first-party request, and the
-      // gateway refuses it (audit §2.3).
+      // The gateway refuses a request that carries a workspace id (audit
+      // §2.3). This implementation's driver does **not** put one into the body — it would
+      // only reject its own request — it refuses the *incoming* request that
+      // carries one, and it refuses it **before** it builds a body.
       if (typeof req.workspaceId === 'string' && req.workspaceId !== '') {
-        body['workspace_id'] = req.workspaceId;
+        throw gatewayWorkspaceIdRejection();
       }
+      const body = buildAnthropicBody(req, { countTokens: req.operation === 'count_tokens' });
       if (gatewayRejectsWorkspaceId(body)) {
         throw gatewayWorkspaceIdRejection();
       }
@@ -390,11 +451,3 @@ export function createGatewayDriver(overrides: { baseUrl?: string; version?: str
     },
   };
 }
-
-/**
- * The Anthropic version the gateway's upstream requests carry.
- *
- * Re-exported so that a caller of the local gateway does not have to reach
- * into the shared module.
- */
-export const GATEWAY_ANTHROPIC_VERSION = ANTHROPIC_VERSION;

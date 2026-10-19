@@ -38,6 +38,8 @@
 import {
   ANTHROPIC_MESSAGE_PATHS,
   anthropicPathFor,
+  applySigV4Service,
+  applyTokenScope,
   buildAnthropicBody,
   buildAnthropicHeaders,
   calculateNonstreamingTimeoutMs,
@@ -80,14 +82,30 @@ export interface AnthropicNativeDriverConfig {
   betaDialect?: ProviderRoute;
   /** Whether the `anthropic-version` header is sent. Default `true`. */
   anthropicVersion?: boolean;
+  /**
+   * The SigV4 **service name** the route signs with.
+   *
+   * The service name is the one thing a transport cannot learn from the rest
+   * of the request, so the driver writes it into the request's signing context
+   * (see `AwsRequestContext.service`).
+   */
+  sigV4Service?: string;
+  /**
+   * The OAuth2 **scope** the route's bearer token is acquired with.
+   *
+   * The driver writes it into the request's token context, and the transport
+   * reads it when it acquires the token (see `ProviderRequest.tokenScope`).
+   */
+  tokenScope?: string;
 }
 
 /**
  * Build a driver for an Anthropic-native route.
  *
  * The differences between the Anthropic-native routes are **configuration**,
- * not code: the base URL, the auth mode, the workspace header and the beta
- * dialect. The body, the header set and the parsers are the same shape.
+ * not code: the base URL, the auth mode, the workspace header, the beta
+ * dialect, the SigV4 service name and the OAuth2 scope. The body, the header
+ * set and the parsers are the same shape.
  */
 export function createAnthropicNativeDriver(config: AnthropicNativeDriverConfig): ProviderDriver {
   const defaultKind: CredentialKind = config.credentialKind ?? 'apiKey';
@@ -99,6 +117,23 @@ export function createAnthropicNativeDriver(config: AnthropicNativeDriverConfig)
     ...(config.anthropicVersion !== undefined ? { anthropicVersion: config.anthropicVersion } : {}),
   };
 
+  const headersFor = (req: ProviderRequest, cred: string | undefined): Record<string, string> => {
+    const kind = resolveCredentialKind(req, defaultKind);
+    // The route's own seams: the SigV4 service name and the OAuth2 scope.
+    // Both are written into the request, so that the transport — which signs
+    // and acquires the token — reads them from the request it is handed.
+    if (config.sigV4Service !== undefined && kind === 'awsSigV4') {
+      applySigV4Service(req, config.sigV4Service);
+    }
+    if (config.tokenScope !== undefined) {
+      applyTokenScope(req, config.tokenScope);
+    }
+    return buildAnthropicHeaders(req, cred, {
+      ...headerOptions,
+      credentialKind: kind,
+    });
+  };
+
   return {
     route: config.route,
 
@@ -108,18 +143,12 @@ export function createAnthropicNativeDriver(config: AnthropicNativeDriverConfig)
     },
 
     buildHeaders(req: ProviderRequest, cred: string | undefined): Record<string, string> {
-      return buildAnthropicHeaders(req, cred, {
-        ...headerOptions,
-        credentialKind: resolveCredentialKind(req, defaultKind),
-      });
+      return headersFor(req, cred);
     },
 
     buildBody(req: ProviderRequest, cred: string | undefined): { body: unknown; headers: Record<string, string> } {
-      const headers = buildAnthropicHeaders(req, cred, {
-        ...headerOptions,
-        credentialKind: resolveCredentialKind(req, defaultKind),
-      });
-      const body = buildAnthropicBody(req);
+      const headers = headersFor(req, cred);
+      const body = buildAnthropicBody(req, { countTokens: req.operation === 'count_tokens' });
       return { body, headers };
     },
 
@@ -164,22 +193,3 @@ export const anthropicDriver: ProviderDriver = createAnthropicNativeDriver({
   betaDialect: 'firstParty',
   anthropicVersion: true,
 });
-
-/**
- * Build a first-party driver with a different base URL or auth default.
- *
- * The extension's connection registry may point a first-party connection at
- * another endpoint, so the base URL is configurable.
- */
-export function createFirstPartyDriver(
-  overrides: Partial<AnthropicNativeDriverConfig> = {},
-): ProviderDriver {
-  return createAnthropicNativeDriver({
-    route: 'firstParty',
-    baseUrl: FIRST_PARTY_BASE_URL,
-    credentialKind: 'apiKey',
-    betaDialect: 'firstParty',
-    anthropicVersion: true,
-    ...overrides,
-  });
-}

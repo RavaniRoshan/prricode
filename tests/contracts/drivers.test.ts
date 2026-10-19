@@ -11,14 +11,19 @@
  *   - the target's **retry rule** and the `x-should-retry` header;
  *   - the **SSE** parsing, including the chunk-boundary case, the cumulative
  *     usage rule, and the **tolerance** of the extended event vocabulary;
+ *   - the default **`parseResponse`** branch set and the non-enumerable
+ *     `_request_id` / `_workspace_id` it attaches;
  *   - each of the **eight routes**' concrete wire shape: Bedrock's body
- *     mutations and its binary eventstream, Vertex's `rawPredict` /
- *     `streamRawPredict` selection, Foundry's mutual exclusion and its
- *     deployment-name body, the Mantle/Google/AWS shapes, and the gateway's
- *     workspace-id rejection, `count_tokens` handling and SSE re-framing;
+ *     mutations, its path rewrite and its binary eventstream, Vertex's
+ *     `rawPredict` / `streamRawPredict` selection and its regional hosts,
+ *     Foundry's mutual exclusions and its deployment-name body, the
+ *     Mantle/Google/AWS shapes, and the gateway's workspace-id rejection,
+ *     `count_tokens` handling, SSE re-framing and upstream hop;
  *   - the per-driver **beta dialect** translation and the trimming of a
  *     per-dialect beta list;
- *   - the **non-streaming timeout** and the `600000` ms cap.
+ *   - the **non-streaming timeout** and the `600000` ms cap;
+ *   - the two **seams** a transport depends on: the SigV4 service name and the
+ *     OAuth2 scope.
  *
  * The Bedrock, Vertex, Mantle and Foundry shapes are **REA-observed** (the
  * target's own bundled adapters), not inferred from the public SDKs; where the
@@ -31,25 +36,27 @@ import {
   ANTHROPIC_MESSAGE_PATHS,
   AWS_REGION_REQUIRED_ERROR,
   BEDROCK_ANTHROPIC_VERSION,
-  BEDROCK_REWRITTEN_PATHS,
-  BEDROCK_SIGV4_SERVICE,
-  FOUNDRY_AZURE_AD_SCOPE,
+  BEDROCK_COUNT_TOKENS_LOCAL_MESSAGE,
+  FOUNDRY_CREDENTIALS_MUTUALLY_EXCLUSIVE_ERROR,
+  FOUNDRY_MISSING_CREDENTIALS_ERROR,
   FOUNDRY_MUTUALLY_EXCLUSIVE_ERROR,
   FOUNDRY_MISSING_BASE_URL_ERROR,
   GATEWAY_USER_AGENT,
   GATEWAY_WORKSPACE_ID_MESSAGE,
-  MANTLE_SIGV4_SERVICE,
   NONSTREAMING_TIMEOUT_FALLBACK_MS,
+  SDK_USER_AGENT,
   VERTEX_ANTHROPIC_VERSION,
   VERTEX_MISSING_PROJECT_ERROR,
   anthropicAwsDriver,
   anthropicDriver,
   anthropicGoogleCloudDriver,
+  bedrockCountTokensLocally,
   bedrockDriver,
+  bedrockRewritePath,
   bedrockSigningHeaders,
   createGatewayDriver,
   driverFor,
-  foundryBaseUrlForResource,
+  estimateTokenCount,
   foundryDriver,
   gatewayCountTokensResponse,
   gatewayCountTokensUnsupported,
@@ -57,18 +64,23 @@ import {
   gatewayMoveBetaHeaderIntoBody,
   gatewayDriver,
   gatewayRejectsWorkspaceId,
+  gatewayUpstreamRequest,
   gatewayWorkspaceIdRejection,
   listDrivers,
   mantleDriver,
+  parseResponse,
   reframeAsSse,
   rewriteBedrockBody,
   vertexDriver,
   GatewayRequestError,
   type ProviderDriver,
+  type ProviderMessage,
   type ProviderRequest,
+  type ProviderResponseLike,
 } from '../../src/provider/drivers/index.js';
 import {
   isRecord,
+  parseSseFrame,
   resolveRequestTimeout,
   splitCommaList,
   stripBetaSearchParam,
@@ -130,6 +142,32 @@ function bedrockFrame(event: unknown): string {
   return eventStreamFrame({ chunk: JSON.stringify(event) }).toString('latin1');
 }
 
+/**
+ * A response the default `parseResponse` accepts.
+ *
+ * The shape is the subset of the platform `Response` the SDK's own
+ * `parseResponse` uses: the status, the headers, `json()` and `text()`.
+ */
+function fakeResponse(init: {
+  status?: number;
+  contentType?: string;
+  body?: unknown;
+  text?: string;
+  headers?: Record<string, string>;
+}): ProviderResponseLike {
+  const headers = new Map<string, string>();
+  for (const [key, value] of Object.entries(init.headers ?? {})) {
+    headers.set(key.toLowerCase(), value);
+  }
+  if (init.contentType !== undefined) headers.set('content-type', init.contentType);
+  return {
+    status: init.status ?? 200,
+    headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
+    json: async () => init.body,
+    text: async () => init.text ?? '',
+  };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Step 1 — the first-party driver                                              */
 /* -------------------------------------------------------------------------- */
@@ -174,6 +212,25 @@ describe('the first-party driver', () => {
     expect(headers['content-type']).toBe('application/json');
   });
 
+  it('sends the first-party user agent and the stainless headers', () => {
+    // **Observed** (audit §2.2, `buildHeaders`): `User-Agent`
+    // (`Anthropic/JS <version>`), `X-Stainless-Retry-Count` and
+    // `X-Stainless-Timeout` (seconds).
+    const headers = headersOf(anthropicDriver, request(), 'sk-test');
+    expect(headers['user-agent']).toBe(SDK_USER_AGENT);
+    expect(headers['user-agent']).toMatch(/^Anthropic\/JS \d+\.\d+\.\d+$/);
+    expect(headers['x-stainless-retry-count']).toBe('0');
+    expect(headers['x-stainless-timeout']).toBe(
+      String(Math.ceil(resolveRequestTimeout(request(), undefined) / 1000)),
+    );
+    expect(Number(headers['x-stainless-timeout'])).toBeGreaterThan(0);
+  });
+
+  it('carries the explicit timeout in the stainless timeout header, in seconds', () => {
+    const headers = headersOf(anthropicDriver, request({ timeout: 5_000 }), 'sk-test');
+    expect(headers['x-stainless-timeout']).toBe('5');
+  });
+
   it('sends an api key and never a bearer token', () => {
     const headers = headersOf(anthropicDriver, request({ credentialKind: 'apiKey' }), 'sk-test');
     expect(headers['x-api-key']).toBe('sk-test');
@@ -207,6 +264,55 @@ describe('the first-party driver', () => {
     const body = bodyOf(anthropicDriver, request({ model: 'constructor' }));
     expect(body['model']).toBe('constructor');
     expect(bodyOf(anthropicDriver, request({ model: 'toString' }))['model']).toBe('toString');
+  });
+
+  it('sends a count-tokens body without the generation knobs', () => {
+    // A count-tokens request carries the prompt and the tools, and none of
+    // the knobs that only a generation request has.
+    const body = bodyOf(
+      anthropicDriver,
+      request({
+        operation: 'count_tokens',
+        stream: true,
+        temperature: 0.5,
+        thinking: { type: 'enabled', budgetTokens: 1024 },
+      }),
+    );
+    expect(Object.hasOwn(body, 'max_tokens')).toBe(false);
+    expect(Object.hasOwn(body, 'stream')).toBe(false);
+    expect(Object.hasOwn(body, 'temperature')).toBe(false);
+    expect(Object.hasOwn(body, 'thinking')).toBe(false);
+    expect(body['model']).toBe('claude-sonnet-4-5');
+    expect(body['messages']).toEqual([{ role: 'user', content: 'hello' }]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The header bag                                                               */
+/* -------------------------------------------------------------------------- */
+
+describe('the header bag', () => {
+  it('writes a caller-supplied header name that collides with a prototype member', () => {
+    // A header name is caller-supplied data: `'__proto__'` must not vanish
+    // into the prototype chain and `'constructor'` must not shadow an
+    // inherited member in a way a lookup cannot tell apart from an own one.
+    //
+    // `JSON.parse` is what creates an **own** `__proto__` member — an object
+    // literal would set the prototype instead.
+    const extra = JSON.parse('{"__proto__": "x"}') as Record<string, string>;
+    const headers = headersOf(anthropicDriver, request({ extraHeaders: extra }));
+    expect(Object.hasOwn(headers, '__proto__')).toBe(true);
+    expect(headers['__proto__']).toBe('x');
+
+    const named = headersOf(anthropicDriver, request({ extraHeaders: { constructor: 'yes' } }));
+    expect(Object.hasOwn(named, 'constructor')).toBe(true);
+    expect(named['constructor']).toBe('yes');
+  });
+
+  it('has no inherited member a lookup could mistake for an own one', () => {
+    const headers = headersOf(anthropicDriver, request());
+    expect(Object.getPrototypeOf(headers)).toBeNull();
+    expect(Object.hasOwn(headers, 'toString')).toBe(false);
   });
 });
 
@@ -368,6 +474,26 @@ describe('the SSE parser', () => {
     expect(events.filter((event) => event.type === 'error')).toHaveLength(0);
   });
 
+  it('maps the tool-shaped extended events onto this implementation\'s tool events', () => {
+    // The extended vocabulary is not merely tolerated: its tool-shaped events
+    // are the only way the `tool_result` member of the event union is
+    // reachable.
+    const stream = [
+      'event: agent.tool_use',
+      'data: {"type":"agent.tool_use","tool_use_id":"toolu_x","name":"Read","input":{"path":"a.ts"}}',
+      '',
+      'event: agent.tool_result',
+      'data: {"type":"agent.tool_result","tool_use_id":"toolu_x","content":"ok","is_error":false}',
+      '',
+      '',
+    ].join('\n');
+
+    const { events } = anthropicDriver.parseStream(stream, undefined);
+    expect(eventTypes(events)).toEqual(['tool_use', 'tool_result']);
+    expect(events[0]).toEqual({ type: 'tool_use', id: 'toolu_x', name: 'Read', input: { path: 'a.ts' } });
+    expect(events[1]).toEqual({ type: 'tool_result', id: 'toolu_x', content: 'ok', isError: false });
+  });
+
   it('keeps the core events that follow an extended one', () => {
     const stream = [
       'event: agent.message',
@@ -382,15 +508,35 @@ describe('the SSE parser', () => {
     expect(eventTypes(events)).toEqual(['message_stop']);
   });
 
+  it('tolerates a ping frame', () => {
+    // A keep-alive `ping` is not one of the events the pinned SDK lists, so it
+    // yields nothing — and it never fails the stream.
+    const stream = [
+      'event: ping',
+      'data: {"type": "ping"}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+      '',
+    ].join('\n');
+
+    const { events } = anthropicDriver.parseStream(stream, undefined);
+    expect(eventTypes(events)).toEqual(['message_stop']);
+  });
+
   it('carries the cumulative usage rather than an accumulated one', () => {
     // **Observed**: the usage in a `message_delta` is cumulative, not
-    // incremental — a driver that accumulates it double-counts.
+    // incremental — a driver that accumulates it double-counts. The wire's
+    // `message_delta` carries **only** `output_tokens`, so the cumulative
+    // counter is replaced **field-wise**: the `input_tokens` the
+    // `message_start` reported survive the merge.
     const stream = [
       'event: message_start',
       'data: {"type":"message_start","message":{"id":"m","model":"m","usage":{"input_tokens":10,"output_tokens":1}}}',
       '',
       'event: message_delta',
-      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":10,"output_tokens":25}}',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}',
       '',
       'event: message_stop',
       'data: {"type":"message_stop"}',
@@ -444,6 +590,20 @@ describe('the SSE parser', () => {
     expect(events[3]).toMatchObject({ type: 'message_stop', stopReason: 'tool_use' });
   });
 
+  it('maps the message event\'s id and role', () => {
+    const body = {
+      id: 'msg_role',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-sonnet-4-5',
+      content: [{ type: 'text', text: 'hi' }],
+      stop_reason: 'end_turn',
+    };
+    const { events } = anthropicDriver.parseStream(`event: message\ndata: ${JSON.stringify(body)}\n\n`, undefined);
+    expect(events[0]).toMatchObject({ type: 'message_start', messageId: 'msg_role', role: 'assistant' });
+    expect(eventTypes(events)).toEqual(['message_start', 'text_delta', 'message_stop']);
+  });
+
   it('parses a non-streaming body into the same events', () => {
     const { events } = anthropicDriver.parseNonStreaming({
       id: 'msg_3',
@@ -454,6 +614,110 @@ describe('the SSE parser', () => {
     });
     expect(eventTypes(events)).toEqual(['message_start', 'text_delta', 'message_stop']);
     expect(events[0]).toMatchObject({ messageId: 'msg_3', usage: { inputTokens: 1, outputTokens: 2 } });
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The frame parser                                                             */
+/* -------------------------------------------------------------------------- */
+
+describe('the SSE frame parser', () => {
+  it('joins a multi-line data payload with a newline', () => {
+    const frame = parseSseFrame('event: content_block_delta\ndata: {"type":"content_block_delta",\ndata: "index":0}');
+    expect(frame?.data).toBe('{"type":"content_block_delta",\n"index":0}');
+    expect(frame?.event).toBe('content_block_delta');
+  });
+
+  it('ignores the id and retry lines', () => {
+    const frame = parseSseFrame('id: 42\nretry: 1000\ndata: {"type":"message_stop"}');
+    expect(frame?.data).toBe('{"type":"message_stop"}');
+    expect(frame?.event).toBeUndefined();
+  });
+
+  it('ignores a comment-only frame', () => {
+    expect(parseSseFrame(': keep-alive')).toBeUndefined();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The default parseResponse                                                    */
+/* -------------------------------------------------------------------------- */
+
+describe('the default parseResponse', () => {
+  it('returns null for a 204', async () => {
+    expect(await parseResponse(fakeResponse({ status: 204 }))).toBeNull();
+  });
+
+  it('returns the raw response for a binary response', async () => {
+    const response = fakeResponse({ contentType: 'application/octet-stream' });
+    expect(await parseResponse(response, { binaryResponse: true })).toBe(response);
+  });
+
+  it('parses a JSON body and attaches the request and workspace ids, non-enumerably', async () => {
+    const response = fakeResponse({
+      contentType: 'application/json',
+      body: { id: 'msg_1', type: 'message', role: 'assistant' },
+      headers: { 'request-id': 'req_123', 'anthropic-workspace-id': 'ws_9' },
+    });
+
+    const parsed = await parseResponse(response);
+    expect(parsed).toEqual({ id: 'msg_1', type: 'message', role: 'assistant' });
+
+    const body = parsed as Record<string, unknown>;
+    // The identifiers are **not** part of the message: they must not be
+    // enumerable.
+    expect(Object.keys(body)).not.toContain('_request_id');
+    expect(Object.keys(body)).not.toContain('_workspace_id');
+    expect(body['_request_id']).toBe('req_123');
+    expect(body['_workspace_id']).toBe('ws_9');
+  });
+
+  it('parses a JSON body whose content type carries a suffix', async () => {
+    const response = fakeResponse({ contentType: 'application/vnd.api+json', body: { id: 'msg_2' } });
+    expect(await parseResponse(response)).toEqual({ id: 'msg_2' });
+  });
+
+  it('returns undefined for a JSON body of length zero', async () => {
+    const response = fakeResponse({
+      contentType: 'application/json',
+      headers: { 'content-length': '0' },
+      body: { id: 'msg_3' },
+    });
+    expect(await parseResponse(response)).toBeUndefined();
+  });
+
+  it('falls back to the response text', async () => {
+    const response = fakeResponse({ contentType: 'text/plain', text: 'not json at all' });
+    expect(await parseResponse(response)).toBe('not json at all');
+  });
+
+  it('returns the SSE events for a streaming request', async () => {
+    const response = fakeResponse({
+      contentType: 'text/event-stream',
+      text: 'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_s","model":"m"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+    });
+
+    const stream = (await parseResponse(response, { stream: true })) as AsyncIterable<ProviderEvent>;
+    const events: ProviderEvent[] = [];
+    for await (const event of stream) events.push(event);
+    expect(eventTypes(events)).toEqual(['message_start', 'message_stop']);
+  });
+
+  it('throws with the offending data and the raw chunk on a parse failure', () => {
+    // **Observed** (audit §2.2): "a parse failure throws with the offending
+    // data and raw chunk".
+    expect(() => anthropicDriver.parseStream('event: message_stop\ndata: not-json\n\n', undefined)).toThrow(
+      /not-json/,
+    );
+    let caught: unknown;
+    try {
+      anthropicDriver.parseStream('event: message_stop\ndata: not-json\n\n', undefined);
+    } catch (error) {
+      caught = error;
+    }
+    const message = caught instanceof Error ? caught.message : String(caught);
+    expect(message).toContain('not-json');
+    expect(message).toContain('event: message_stop');
   });
 });
 
@@ -522,11 +786,37 @@ describe('the bedrock driver', () => {
     expect(stripBetaSearchParam('/v1/messages?beta=true')).toBe('/v1/messages');
     // A multi-valued parameter survives.
     expect(stripBetaSearchParam('/v1/messages?beta=true&x=1&x=2')).toBe('/v1/messages?x=1&x=2');
-    expect(bedrockDriver.buildUrl(bedrockRequest({ betaFlags: ['a'] }))).not.toContain('beta=');
   });
 
-  it('names the three paths the target rewrites', () => {
-    expect(BEDROCK_REWRITTEN_PATHS).toEqual(['/v1/complete', '/v1/messages', '/v1/messages?beta=true']);
+  it('deletes the beta search parameter without re-encoding the rest of the query', () => {
+    // A SigV4 signature covers the **canonical query**, so the surviving
+    // parameters must keep their bytes.
+    expect(stripBetaSearchParam('/v1/messages?beta=true&q=a%20b')).toBe('/v1/messages?q=a%20b');
+    expect(stripBetaSearchParam('/v1/messages?beta=true&x=1&x=2')).toBe('/v1/messages?x=1&x=2');
+    expect(stripBetaSearchParam('/v1/messages?beta=true&r=%2Fx&s=a+b')).toBe('/v1/messages?r=%2Fx&s=a+b');
+    // A parameter whose name merely starts with `beta` survives.
+    expect(stripBetaSearchParam('/v1/messages?beta=true&betax=1')).toBe('/v1/messages?betax=1');
+  });
+
+  it('rewrites the beta path variant to the same outbound path', () => {
+    // The beta marker never reaches the wire: the rewritten path carries no
+    // query at all.
+    expect(bedrockDriver.buildUrl(bedrockRequest({ betaFlags: ['a'] }))).toBe(
+      bedrockDriver.buildUrl(bedrockRequest()),
+    );
+  });
+
+  it('rewrites exactly the three paths the target rewrites', () => {
+    // **Observed** (audit §2.2a): "The rewritten paths are exactly
+    // `/v1/complete`, `/v1/messages`, and `/v1/messages?beta=true`."
+    expect(bedrockRewritePath('/v1/complete', { model: 'm', stream: false })).toBe('/model/m/invoke');
+    expect(bedrockRewritePath('/v1/messages', { model: 'm', stream: false })).toBe('/model/m/invoke');
+    expect(bedrockRewritePath('/v1/messages', { model: 'm', stream: true })).toBe(
+      '/model/m/invoke-with-response-stream',
+    );
+    // The `beta` marker is deleted on the way out.
+    expect(bedrockRewritePath('/v1/messages?beta=true', { model: 'm', stream: false })).toBe('/model/m/invoke');
+    expect(() => bedrockRewritePath('/v1/nope', { model: 'm', stream: false })).toThrow(/rewrites only/);
   });
 
   it('throws the target\'s exact error for a body that is not a JSON object', () => {
@@ -535,6 +825,14 @@ describe('the bedrock driver', () => {
     );
     expect(() => rewriteBedrockBody(null, { path: '/v1/messages', model: 'm', stream: false })).toThrow(
       /Expected request body to be a JSON object for post \/v1\/messages/,
+    );
+  });
+
+  it('names the request\'s own path in the non-JSON-body error', () => {
+    // The error is reachable **through the driver**, and it names the path the
+    // request is actually posted to.
+    expect(() => bedrockDriver.rewriteBody('not-an-object', bedrockRequest())).toThrow(
+      'Expected request body to be a JSON object for post /model/us.anthropic.claude-sonnet-4-5-v1:0/invoke',
     );
   });
 
@@ -557,6 +855,23 @@ describe('the bedrock driver', () => {
     expect(Object.hasOwn(headers, 'x-amz-security-token')).toBe(false);
   });
 
+  it('signs with the bedrock service name', () => {
+    // The service name reaches the transport through the request's signing
+    // context: a transport cannot learn it from the URL.
+    const req = bedrockRequest();
+    headersOf(bedrockDriver, req, undefined);
+    expect(req.aws?.service).toBe('bedrock');
+  });
+
+  it('refuses an HTTP token count and counts locally instead', () => {
+    // **Observed** (audit §2.2): the token-counting call has "a
+    // Bedrock-specific local fallback" — Bedrock has no count-tokens
+    // endpoint.
+    const req = bedrockRequest({ operation: 'count_tokens' });
+    expect(() => bedrockDriver.buildUrl(req)).toThrow(BEDROCK_COUNT_TOKENS_LOCAL_MESSAGE);
+    expect(bedrockCountTokensLocally(req)).toEqual({ input_tokens: 2 });
+  });
+
   it('replaces the host header and deletes the connection header when signing', () => {
     const signed = bedrockSigningHeaders(
       { host: 'stale.example', connection: 'keep-alive', 'content-type': 'application/json' },
@@ -575,6 +890,13 @@ describe('the bedrock driver', () => {
     const { events } = bedrockDriver.parseStream(frame, undefined);
     expect(eventTypes(events)).toEqual(['message_start']);
     expect(events[0]).toMatchObject({ messageId: 'msg_b' });
+  });
+
+  it('decodes a frame that carries the base64 bytes member', () => {
+    const payload = { bytes: Buffer.from(JSON.stringify({ type: 'message_stop' }), 'utf8').toString('base64') };
+    const frame = eventStreamFrame(payload).toString('latin1');
+    const { events } = bedrockDriver.parseStream(frame, undefined);
+    expect(eventTypes(events)).toEqual(['message_stop']);
   });
 
   it('keeps a Bedrock frame that straddles a chunk boundary', () => {
@@ -616,12 +938,37 @@ describe('the vertex driver', () => {
   });
 
   it('deletes the beta search parameter on the way out', () => {
-    expect(vertexDriver.buildUrl(vertexRequest({ betaFlags: ['a'] }))).not.toContain('beta=');
+    // The rewritten path carries no query at all.
+    expect(vertexDriver.buildUrl(vertexRequest({ betaFlags: ['a'] }))).toBe(
+      vertexDriver.buildUrl(vertexRequest()),
+    );
   });
 
   it('routes count_tokens to the count-tokens model', () => {
     expect(vertexDriver.buildUrl(vertexRequest({ operation: 'count_tokens' }))).toBe(
       'https://aiplatform.googleapis.com/v1/projects/proj-1/locations/us-central1/publishers/anthropic/models/count-tokens:rawPredict',
+    );
+  });
+
+  it('uses the regional host convention', () => {
+    // **Observed** (research §1): `global` → `aiplatform.googleapis.com`, `us`
+    // → `aiplatform.us.rep.googleapis.com`, `eu` →
+    // `aiplatform.eu.rep.googleapis.com`, otherwise
+    // `{region}-aiplatform.googleapis.com`.
+    const at = (region: string): string =>
+      vertexDriver.buildUrl(vertexRequest({ vertex: { projectId: 'proj-1', location: 'us-central1', region } }));
+
+    expect(at('global')).toBe(
+      'https://aiplatform.googleapis.com/v1/projects/proj-1/locations/us-central1/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict',
+    );
+    expect(at('us')).toBe(
+      'https://aiplatform.us.rep.googleapis.com/v1/projects/proj-1/locations/us-central1/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict',
+    );
+    expect(at('eu')).toBe(
+      'https://aiplatform.eu.rep.googleapis.com/v1/projects/proj-1/locations/us-central1/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict',
+    );
+    expect(at('asia-east1')).toBe(
+      'https://asia-east1-aiplatform.googleapis.com/v1/projects/proj-1/locations/us-central1/publishers/anthropic/models/claude-haiku-4-5@20251001:rawPredict',
     );
   });
 
@@ -642,6 +989,14 @@ describe('the vertex driver', () => {
     const headers = headersOf(vertexDriver, vertexRequest({ credentialKind: 'apiKey' }), 'sk-ant');
     expect(headers['x-api-key']).toBeUndefined();
     expect(headers['authorization']).toBe('Bearer sk-ant');
+  });
+
+  it('publishes the Google OAuth2 scope for the transport', () => {
+    // The scope has to have a home: the driver writes it into the request's
+    // token context and the transport reads it there.
+    const req = vertexRequest();
+    headersOf(vertexDriver, req, 'ya29.token');
+    expect(req.tokenScope).toBe('cloud-platform');
   });
 
   it('reads only one anthropic-beta header, so the flags share one header', () => {
@@ -666,12 +1021,20 @@ describe('the foundry driver', () => {
     );
   });
 
-  it('builds the resource base url with a trailing slash', () => {
-    // **Observed** (audit §2.2a): the base URL is
+  it('builds the audited resource base url, with its trailing slash', () => {
+    // **Observed** (audit §2.2a): the base URL is built as
     // `https://<resource>.services.ai.azure.com/anthropic/` — with a trailing
-    // slash.
-    expect(foundryBaseUrlForResource('my-deployment')).toBe(
-      'https://my-deployment.services.ai.azure.com/anthropic/',
+    // slash. The audited URL is the one the **driver** produces.
+    const req = request({
+      endpoint: {
+        baseUrl: 'https://my-deployment.services.ai.azure.com',
+        isVendorHost: true,
+        suppliedBaseUrlVariables: ['ANTHROPIC_FOUNDRY_RESOURCE'],
+      },
+    });
+    expect(foundryDriver.baseUrlFor(req)).toBe('https://my-deployment.services.ai.azure.com/anthropic/');
+    expect(foundryDriver.baseUrlFor(request({ foundryResource: 'other-deployment' }))).toBe(
+      'https://other-deployment.services.ai.azure.com/anthropic/',
     );
   });
 
@@ -713,8 +1076,53 @@ describe('the foundry driver', () => {
     expect(bearer['x-api-key']).toBeUndefined();
   });
 
-  it('acquires its Azure AD token with the ai.azure.com scope', () => {
-    expect(FOUNDRY_AZURE_AD_SCOPE).toBe('https://ai.azure.com/.default');
+  it('throws the target\'s exact error when both credential sources are supplied', () => {
+    // **Observed** (audit §2.2a): `apiKey` and `azureADTokenProvider` are
+    // mutually exclusive.
+    const req = request({
+      credentialSources: { apiKey: 'azure-key', azureADToken: 'aad-token' },
+    });
+    expect(() => foundryDriver.buildHeaders(req, undefined)).toThrow(
+      FOUNDRY_CREDENTIALS_MUTUALLY_EXCLUSIVE_ERROR,
+    );
+    expect(FOUNDRY_CREDENTIALS_MUTUALLY_EXCLUSIVE_ERROR).toBe(
+      "The 'apiKey' and 'azureADTokenProvider' arguments are mutually exclusive; only one can be passed at a time.",
+    );
+  });
+
+  it('throws the target\'s exact error when no credential source is supplied', () => {
+    // The target's own message names `azureTokenProvider` while the parameter
+    // is `azureADTokenProvider`; this implementation reproduces it verbatim.
+    expect(() => foundryDriver.buildHeaders(request({ credentialSources: {} }), undefined)).toThrow(
+      FOUNDRY_MISSING_CREDENTIALS_ERROR,
+    );
+    expect(FOUNDRY_MISSING_CREDENTIALS_ERROR).toBe(
+      "Missing credentials. Please pass one of 'apiKey' and 'azureTokenProvider', or set the ANTHROPIC_FOUNDRY_API_KEY environment variable.",
+    );
+  });
+
+  it('sends the credential the request\'s sources name', () => {
+    const apiKey = headersOf(
+      foundryDriver,
+      request({ credentialSources: { apiKey: 'azure-key' } }),
+      'resolved-key',
+    );
+    expect(apiKey['x-api-key']).toBe('azure-key');
+
+    const bearer = headersOf(
+      foundryDriver,
+      request({ credentialKind: 'bearer', credentialSources: { azureADToken: 'aad-token' } }),
+      'resolved-token',
+    );
+    expect(bearer['authorization']).toBe('Bearer aad-token');
+  });
+
+  it('publishes the Azure AD scope for the transport', () => {
+    // The scope has to have a home: the driver writes it into the request's
+    // token context and the transport reads it there.
+    const req = request();
+    headersOf(foundryDriver, req, 'azure-key');
+    expect(req.tokenScope).toBe('https://ai.azure.com/.default');
   });
 
   it('exposes no models API', () => {
@@ -745,8 +1153,11 @@ describe('the mantle driver', () => {
   });
 
   it('signs with the bedrock-mantle service name, not bedrock\'s', () => {
-    expect(MANTLE_SIGV4_SERVICE).toBe('bedrock-mantle');
-    expect(BEDROCK_SIGV4_SERVICE).toBe('bedrock');
+    // The service name is the one thing that makes Mantle a driver of its
+    // own, so it reaches the transport through the request's signing context.
+    const req = request({ aws: { region: 'us-east-1' } });
+    headersOf(mantleDriver, req, undefined);
+    expect(req.aws?.service).toBe('bedrock-mantle');
   });
 
   it('takes a bearer token when the request names one', () => {
@@ -790,6 +1201,18 @@ describe('the anthropic-on-aws and anthropic-on-google-cloud drivers', () => {
     expect(headers['x-api-key']).toBeUndefined();
     expect(headers['authorization']).toBeUndefined();
   });
+
+  it('signs the aws route with its own service name', () => {
+    const req = request({ aws: { region: 'us-east-1' } });
+    headersOf(anthropicAwsDriver, req, undefined);
+    expect(req.aws?.service).toBe('anthropic');
+  });
+
+  it('publishes the Google OAuth2 scope for the google route', () => {
+    const req = request();
+    headersOf(anthropicGoogleCloudDriver, req, 'ya29.token');
+    expect(req.tokenScope).toBe('cloud-platform');
+  });
 });
 
 describe('the gateway driver', () => {
@@ -802,9 +1225,11 @@ describe('the gateway driver', () => {
     );
   });
 
-  it('sets the cc-gateway user agent', () => {
+  it('extends the first-party user agent with the cc-gateway agent', () => {
+    // **Observed** (audit §2.3): the gateway "sets or extends the user agent
+    // to `cc-gateway/2.1.303`".
     const headers = headersOf(gatewayDriver, request(), 'jwt');
-    expect(headers['user-agent']).toBe(GATEWAY_USER_AGENT);
+    expect(headers['user-agent']).toBe(`${SDK_USER_AGENT} cc-gateway/2.1.303`);
     expect(GATEWAY_USER_AGENT).toBe('cc-gateway/2.1.303');
   });
 
@@ -836,12 +1261,45 @@ describe('the gateway driver', () => {
     expect(GATEWAY_WORKSPACE_ID_MESSAGE).toBe('workspace_id: not supported through the gateway');
   });
 
+  it('never puts a workspace id into the body it builds', () => {
+    // The gateway refuses a workspace id, so it does not write one into the
+    // body and then reject its own request.
+    const built = gatewayDriver.buildBody(request(), 'jwt');
+    expect(Object.hasOwn(built.body as Record<string, unknown>, 'workspace_id')).toBe(false);
+  });
+
+  it('refuses a workspace-id request before it builds a body', () => {
+    // The rejection happens **first**: the gateway does not build a body it is
+    // going to refuse.
+    let read = false;
+    const req: ProviderRequest = {
+      model: 'claude-sonnet-4-5',
+      maxTokens: 1024,
+      get messages(): ProviderMessage[] {
+        read = true;
+        return [{ role: 'user', content: 'hello' }];
+      },
+      tools: [],
+      stream: false,
+      workspaceId: 'ws_1',
+    };
+
+    expect(() => gatewayDriver.buildBody(req, 'jwt')).toThrow(GatewayRequestError);
+    expect(read).toBe(false);
+  });
+
   it('counts tokens locally for a Bedrock upstream', () => {
     const response = gatewayCountTokensResponse('bedrock', {
       messages: [{ role: 'user', content: 'a'.repeat(40) }],
     });
     expect(response.status).toBe(200);
     expect(response.body['input_tokens']).toBe(10);
+  });
+
+  it('estimates a token count from a text without materialising a copy of it', () => {
+    expect(estimateTokenCount('a'.repeat(40))).toBe(10);
+    expect(estimateTokenCount('')).toBe(0);
+    expect(estimateTokenCount('abc')).toBe(1);
   });
 
   it('answers 501 not_supported with x-should-retry false for any other upstream', () => {
@@ -870,6 +1328,24 @@ describe('the gateway driver', () => {
     expect(reframed).toContain('event: message_stop');
   });
 
+  it('emits an event: error frame on an upstream failure', () => {
+    // **Observed** (audit §2.3): the gateway "emits `event: error` frames on
+    // an upstream failure".
+    const frame = gatewayErrorFrame('the upstream exploded', 502);
+    expect(frame.startsWith('event: error\ndata: ')).toBe(true);
+    expect(frame.endsWith('\n\n')).toBe(true);
+
+    const payload = JSON.parse(frame.slice('event: error\ndata: '.length)) as Record<string, unknown>;
+    expect(payload).toEqual({
+      type: 'error',
+      error: { type: 'api_error', message: 'the upstream exploded', status: 502 },
+    });
+
+    // The frame is a frame the SSE parser understands.
+    const { events } = gatewayDriver.parseStream(frame, undefined);
+    expect(events[0]).toMatchObject({ type: 'error', message: 'the upstream exploded', status: 502 });
+  });
+
   it('moves the anthropic-beta header into the body for a Bedrock upstream', () => {
     const moved = gatewayMoveBetaHeaderIntoBody({}, { 'anthropic-beta': ' a , b ' });
     expect(moved['anthropic_beta']).toEqual(['a', 'b']);
@@ -877,6 +1353,55 @@ describe('the gateway driver', () => {
     // The body field wins when it already carries one.
     const kept = gatewayMoveBetaHeaderIntoBody({ anthropic_beta: ['already'] }, { 'anthropic-beta': 'a' });
     expect(kept['anthropic_beta']).toEqual(['already']);
+  });
+
+  it('forwards to the upstream with the upstream\'s auth and base url', () => {
+    // **Observed** (audit §2.3): the gateway "applies the upstream provider's
+    // auth (`client.applyAuth(headers)`) and the provider's base URL".
+    const req = request({
+      credentialKind: 'bearer',
+      betaFlags: ['a-beta'],
+      aws: { region: 'us-east-1' },
+    });
+
+    const forwarded = gatewayUpstreamRequest(
+      { driver: bedrockDriver, credential: 'bedrock-bearer' },
+      req,
+      { headers: { authorization: 'Bearer gateway-jwt', 'anthropic-beta': 'a-beta' } },
+    );
+
+    expect(forwarded.url).toBe(
+      'https://bedrock-runtime.us-east-1.amazonaws.com/model/claude-sonnet-4-5/invoke',
+    );
+    // The upstream's auth replaces the gateway's own.
+    expect(forwarded.headers['authorization']).toBe('Bearer bedrock-bearer');
+    expect(forwarded.headers['x-api-key']).toBeUndefined();
+
+    const body = forwarded.body as Record<string, unknown>;
+    expect(body['anthropic_beta']).toEqual(['a-beta']);
+    expect(body['anthropic_version']).toBe('bedrock-2023-05-31');
+    expect(Object.hasOwn(body, 'model')).toBe(false);
+  });
+
+  it('never forwards the gateway\'s own credential to the upstream', () => {
+    // An upstream without a credential of its own must not receive the
+    // gateway's own auth.
+    const req = request({ credentialKind: 'bearer', aws: { region: 'us-east-1' } });
+    const forwarded = gatewayUpstreamRequest({ driver: bedrockDriver }, req, {
+      headers: { authorization: 'Bearer gateway-jwt', 'x-api-key': 'gateway-key' },
+    });
+    expect(forwarded.headers['authorization']).toBeUndefined();
+    expect(forwarded.headers['x-api-key']).toBeUndefined();
+  });
+
+  it('sends a count-tokens body without the generation knobs', () => {
+    const body = bodyOf(
+      gatewayDriver,
+      request({ operation: 'count_tokens', stream: true, temperature: 0.5 }),
+    );
+    expect(Object.hasOwn(body, 'max_tokens')).toBe(false);
+    expect(Object.hasOwn(body, 'stream')).toBe(false);
+    expect(Object.hasOwn(body, 'temperature')).toBe(false);
   });
 });
 
@@ -918,9 +1443,20 @@ describe('the beta dialects', () => {
   });
 
   it('surfaces an upstream 400 for a rejected beta flag instead of retrying it', () => {
-    const classified = bedrockDriver.classifyError(400, { error: { message: 'invalid beta flag' } });
+    // The beta-specific part: the flag that was **sent** is the Bedrock
+    // spelling, and the upstream's rejection of it is surfaced verbatim.
+    const built = bedrockDriver.buildBody(
+      request({ betaFlags: ['tool-search-tool-2025-10-19'], aws: { region: 'us-east-1' } }),
+      undefined,
+    );
+    const body = built.body as Record<string, unknown>;
+    expect(body['anthropic_beta']).toEqual(['advanced-tool-use-2025-11-20']);
+
+    const classified = bedrockDriver.classifyError(400, {
+      error: { message: 'invalid beta flag: advanced-tool-use-2025-11-20' },
+    });
     expect(classified.retryable).toBe(false);
-    expect(classified.message).toBe('invalid beta flag');
+    expect(classified.message).toBe('invalid beta flag: advanced-tool-use-2025-11-20');
   });
 });
 

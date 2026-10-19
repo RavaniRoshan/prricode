@@ -18,9 +18,24 @@
  *   4. the **beta dialect** — the spelling of a beta flag differs per platform,
  *      and Bedrock rejects the **whole** request for a flag it does not know.
  *
- * This module therefore holds the shared Anthropic-native shape (body, headers,
- * SSE parsing, error classification, timeouts) and the small per-platform
- * configuration that varies it. The eight drivers live in their own files.
+ * This module therefore holds the shared Anthropic-native shape (the type
+ * vocabulary, the body and header builders, the response parser, the error
+ * classifier and the timeout policy) and the small per-platform configuration
+ * that varies it. The eight drivers live in their own files, and the **SSE
+ * parser** — the frame parser, the chunk parser and the event mapper — lives
+ * in `sse.ts`, whose public surface is re-exported from here.
+ *
+ * ## The two seams a transport depends on
+ *
+ * A driver never signs a request and never acquires a token: the transport
+ * does both. Two members of the request carry what the transport needs, and
+ * the **driver writes them**:
+ *
+ *   - `AwsRequestContext.service` — the SigV4 **service name** (Bedrock signs
+ *     with `bedrock`, Mantle with `bedrock-mantle`); a transport cannot learn
+ *     it from the URL;
+ *   - `ProviderRequest.tokenScope` — the OAuth2 **scope** the bearer token is
+ *     acquired with (`cloud-platform`, `https://ai.azure.com/.default`).
  *
  * ## What is observed and what is a implementation choice
  *
@@ -34,6 +49,12 @@
  *   - the default `parseResponse` branches: SSE for a streaming request, `null`
  *     for a `204`, the raw response for a binary response, `buildMessage` for a
  *     JSON response, and `response.text()` otherwise;
+ *   - `buildMessage` attaches the **non-enumerable** `_request_id` (from the
+ *     `request-id` header) and `_workspace_id` (from the
+ *     `anthropic-workspace-id` header);
+ *   - the first-party header set: `Accept`, `User-Agent` (`Anthropic/JS
+ *     <version>`), `X-Stainless-Retry-Count` and `X-Stainless-Timeout` (in
+ *     seconds);
  *   - the SSE parser accepts an **extended event vocabulary** beyond the public
  *     API — `agent.*`, `session.*`, `span.*`, `user.*`, plus `event_start`,
  *     `event_delta`, `system.message` and a legacy `completion` — and this implementation
@@ -44,6 +65,8 @@
  *
  *   - the **per-token generation rate** used to derive the non-streaming
  *     timeout from `max_tokens`, and the constant overhead added to it;
+ *   - the **version string** the `Anthropic/JS <version>` user agent carries
+ *     (the audit records the shape, not the version);
  *   - the **beta dialect table**'s contents beyond the one spelling the
  *     research report records (see `BETA_FLAG_TRANSLATIONS`);
  *   - the marker this implementation uses for the target's "the request used a cached
@@ -55,10 +78,12 @@
  *     not ship an AWS credential chain (that would need a dependency, and the
  *     driver may not read the environment), so the driver owns the *request
  *     shape* — the `host` replacement, the `connection` deletion, the query
- *     preservation — and the transport supplies the signed headers.
+ *     preservation, and the service name — and the transport supplies the
+ *     signed headers.
  */
 
 import type { ProviderRoute, ResolvedBaseUrl } from '../routes.js';
+import { sseEventsFromText } from './sse.js';
 
 /* -------------------------------------------------------------------------- */
 /* Constants                                                                   */
@@ -105,14 +130,32 @@ export const ANTHROPIC_MESSAGE_PATHS = Object.freeze({
   betaMessages: '/v1/messages?beta=true',
 });
 
-/** The two first-party path variants, as a list. */
-export const ANTHROPIC_MESSAGE_PATH_VARIANTS: readonly (keyof typeof ANTHROPIC_MESSAGE_PATHS)[] = Object.freeze([
-  'messages',
-  'betaMessages',
-]);
-
 /** The fallback non-streaming request timeout, in milliseconds. */
 export const NONSTREAMING_TIMEOUT_FALLBACK_MS = 600_000;
+
+/* -------------------------------------------------------------------------- */
+/* The first-party header set                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The version this implementation's `Anthropic/JS <version>` user agent carries.
+ *
+ * **Implementation choice.** The audit records the **shape** of the user agent
+ * (`Anthropic/JS <version>`) but not the version string it carries. This implementation
+ * uses the pinned target's version — the same one the gateway's user agent
+ * carries — so that the two are consistent and the gateway's user agent is
+ * the base one **extended**, as the audit describes.
+ */
+export const SDK_USER_AGENT_VERSION = '2.1.303';
+
+/** The first-party user agent. **Observed shape** (audit §2.2). */
+export const SDK_USER_AGENT = `Anthropic/JS ${SDK_USER_AGENT_VERSION}`;
+
+/** The header that carries the transport's retry count. */
+export const STAINLESS_RETRY_COUNT_HEADER = 'x-stainless-retry-count';
+
+/** The header that carries the request's timeout, in seconds. */
+export const STAINLESS_TIMEOUT_HEADER = 'x-stainless-timeout';
 
 /**
  * The target's error for a client that was given neither a region nor the
@@ -215,6 +258,31 @@ export interface VertexRequestContext {
   projectId: string;
   /** The location, e.g. `us-central1`. */
   location: string;
+  /**
+   * The **region** the endpoint is served from, e.g. `global`, `us` or `eu`.
+   *
+   * The regional host convention (research §1, not superseded by audit §2.2a)
+   * selects the *host*; the `location` selects the *path segment*. The two
+   * are different things: a request to `us-central1` is served by the `us`
+   * regional endpoint.
+   */
+  region?: string;
+}
+
+/**
+ * The credential **sources** a request supplies.
+ *
+ * The target's Foundry adapter treats its `apiKey` and its
+ * `azureADTokenProvider` arguments as **mutually exclusive** and throws when
+ * both or neither are given (audit §2.2a). This implementation's driver receives one
+ * *resolved* credential, so the **set** of sources travels on the request and
+ * the driver validates it.
+ */
+export interface ProviderCredentialSources {
+  /** The API key the connection supplies. */
+  apiKey?: string;
+  /** The Azure AD (Entra ID) token the connection supplies. */
+  azureADToken?: string;
 }
 
 /**
@@ -271,6 +339,43 @@ export interface ProviderRequest {
    * beta flags, which is what the plan's Step 1 requires.
    */
   pathVariant?: 'messages' | 'betaMessages';
+  /**
+   * The OAuth2 scope a bearer token for this request must be acquired with.
+   *
+   * **The scope seam.** The route's scope is a *route* property, and a
+   * transport — not a driver — acquires the token. The driver therefore
+   * **writes** its own scope here and the transport **reads** it:
+   *
+   *   - `vertex` and `anthropicGoogleCloud` → `cloud-platform`;
+   *   - `foundry` → `https://ai.azure.com/.default`.
+   *
+   * The member is written by the driver (see `applyTokenScope`), so a caller
+   * that inspects the request after `buildHeaders` sees the scope that the
+   * token must be acquired with.
+   */
+  tokenScope?: string;
+  /**
+   * The credential **sources** the connection supplies.
+   *
+   * The Foundry driver validates them (the target's mutual exclusion) and
+   * uses them: the API key and the Azure AD token are never both sent.
+   */
+  credentialSources?: ProviderCredentialSources;
+  /**
+   * The retry count the transport reports.
+   *
+   * It travels in the `x-stainless-retry-count` header (audit §2.2). The
+   * implementation's driver does not retry — the transport does — so the count is `0`
+   * unless the caller sets it.
+   */
+  retryCount?: number;
+  /**
+   * The Foundry resource (deployment) name, when the connection supplies one.
+   *
+   * The driver builds the **audited** base URL from it:
+   * `https://<resource>.services.ai.azure.com/anthropic/`.
+   */
+  foundryResource?: string;
 }
 
 /**
@@ -283,7 +388,7 @@ export interface ProviderRequest {
  * of the turn.
  */
 export type ProviderEvent =
-  | { type: 'message_start'; messageId: string; model: string; usage?: Usage }
+  | { type: 'message_start'; messageId: string; model: string; role?: string; usage?: Usage }
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
@@ -382,21 +487,46 @@ export function joinUrl(baseUrl: string, path: string): string {
 
 /**
  * Delete the `beta` search parameter from a path, keeping every other
- * parameter — including a repeated one.
+ * parameter — including a repeated one — **byte for byte**.
  *
  * **Observed** (audit §2.2a): the Bedrock and Vertex adapters both "delete the
  * `beta` search parameter" on the way out. The other parameters survive, which
  * is the same requirement the SigV4 signer has ("multi-valued query parameters
  * preserved").
+ *
+ * The surviving query is **not** re-serialized: a `URLSearchParams` round trip
+ * would rewrite `%20` as `+` and `%2F` as `%2F`, and a SigV4 signature covers
+ * the **canonical query** — so a re-encoded query would not match the
+ * signature the transport computed. The parameter is therefore removed
+ * textually and every other byte is left alone.
  */
 export function stripBetaSearchParam(path: string): string {
   const separator = path.indexOf('?');
   if (separator === -1) return path;
   const base = path.slice(0, separator);
-  const params = new URLSearchParams(path.slice(separator + 1));
-  params.delete(BETA_SEARCH_PARAM);
-  const rest = params.toString();
-  return rest === '' ? base : `${base}?${rest}`;
+  const query = path.slice(separator + 1);
+  if (query === '') return base;
+
+  const kept = query.split('&').filter((pair) => !isBetaParam(pair));
+  return kept.length === 0 ? base : `${base}?${kept.join('&')}`;
+}
+
+/**
+ * Whether one `name=value` pair of a query string is the `beta` parameter.
+ *
+ * The name is compared **decoded** (so a percent-encoded spelling is caught)
+ * and **exactly** (so a parameter whose name merely starts with `beta`
+ * survives).
+ */
+function isBetaParam(pair: string): boolean {
+  const equals = pair.indexOf('=');
+  const raw = equals === -1 ? pair : pair.slice(0, equals);
+  if (raw === BETA_SEARCH_PARAM) return true;
+  try {
+    return decodeURIComponent(raw) === BETA_SEARCH_PARAM;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -690,6 +820,15 @@ export interface AnthropicBodyOptions {
    * carry one.
    */
   anthropicVersion?: string;
+  /**
+   * Whether the request **counts tokens**.
+   *
+   * A `count_tokens` body carries the prompt and the tools, and **none** of
+   * the generation knobs: no `max_tokens`, no `stream`, no `temperature` and
+   * no `thinking`. A count-tokens request that carried them would be a
+   * messages request wearing a count-tokens URL.
+   */
+  countTokens?: boolean;
 }
 
 /**
@@ -704,7 +843,6 @@ export function buildAnthropicBody(
   options: AnthropicBodyOptions = {},
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
-    max_tokens: req.maxTokens,
     messages: req.messages.map((message) => ({ role: message.role, content: message.content })),
     tools: req.tools.map((tool) => ({
       name: tool.name,
@@ -713,16 +851,20 @@ export function buildAnthropicBody(
     })),
   };
 
-  if (options.includeModel !== false) body['model'] = req.model;
-  if (options.includeStream !== false) body['stream'] = req.stream;
-  if (req.system !== undefined) body['system'] = req.system;
-  if (req.temperature !== undefined) body['temperature'] = req.temperature;
-  if (req.thinking !== undefined) {
-    body['thinking'] =
-      req.thinking.budgetTokens !== undefined
-        ? { type: req.thinking.type, budget_tokens: req.thinking.budgetTokens }
-        : { type: req.thinking.type };
+  if (options.countTokens !== true) {
+    body['max_tokens'] = req.maxTokens;
+    if (req.temperature !== undefined) body['temperature'] = req.temperature;
+    if (req.thinking !== undefined) {
+      body['thinking'] =
+        req.thinking.budgetTokens !== undefined
+          ? { type: req.thinking.type, budget_tokens: req.thinking.budgetTokens }
+          : { type: req.thinking.type };
+    }
   }
+
+  if (options.includeModel !== false) body['model'] = req.model;
+  if (options.includeStream !== false && options.countTokens !== true) body['stream'] = req.stream;
+  if (req.system !== undefined) body['system'] = req.system;
 
   if (options.anthropicVersion !== undefined && !Object.hasOwn(body, 'anthropic_version')) {
     body['anthropic_version'] = options.anthropicVersion;
@@ -762,18 +904,26 @@ export function resolveCredentialKind(req: ProviderRequest, fallback: Credential
  * Build the Anthropic-native headers.
  *
  * **Observed** (audit §2.2, `buildHeaders`): `Accept: application/json`,
- * `anthropic-version: 2023-06-01`, then the auth headers, then the client
- * default headers, then the per-call headers.
+ * `User-Agent` (`Anthropic/JS <version>`), `X-Stainless-Retry-Count`,
+ * `X-Stainless-Timeout` (seconds), `anthropic-version: 2023-06-01`, then the
+ * auth headers, then the client default headers, then the per-call headers.
+ *
+ * The header bag is a **null-prototype** object: a caller-supplied header
+ * name is caller-supplied *data*, and `'__proto__'` must not silently vanish
+ * into the prototype chain (and `'constructor'` must not shadow an inherited
+ * member in a way a later lookup cannot tell apart from an own member).
  */
 export function buildAnthropicHeaders(
   req: ProviderRequest,
   cred: string | undefined,
   options: AnthropicHeaderOptions = {},
 ): Record<string, string> {
-  const headers: Record<string, string> = {
-    accept: 'application/json',
-    'content-type': 'application/json',
-  };
+  const headers: Record<string, string> = Object.create(null) as Record<string, string>;
+  headers['accept'] = 'application/json';
+  headers['content-type'] = 'application/json';
+  headers['user-agent'] = SDK_USER_AGENT;
+  headers[STAINLESS_RETRY_COUNT_HEADER] = String(req.retryCount ?? 0);
+  headers[STAINLESS_TIMEOUT_HEADER] = String(timeoutSecondsFor(req));
 
   if (options.anthropicVersion !== false) headers['anthropic-version'] = ANTHROPIC_VERSION;
 
@@ -795,6 +945,19 @@ export function buildAnthropicHeaders(
   }
 
   return headers;
+}
+
+/**
+ * The request's timeout, in **seconds** — the unit the
+ * `x-stainless-timeout` header carries.
+ *
+ * **Observed** (audit §2.2): the header carries the timeout in seconds. The
+ * timeout itself is the explicit one when there is one, and otherwise the
+ * computed non-streaming timeout (the model limit is not known to the driver).
+ */
+export function timeoutSecondsFor(req: ProviderRequest): number {
+  const ms = resolveRequestTimeout(req, undefined);
+  return Math.max(0, Math.ceil(ms / 1000));
 }
 
 /**
@@ -845,6 +1008,38 @@ export function applyAwsSigningContext(headers: Record<string, string>, req: Pro
   if (typeof aws.authorization === 'string' && aws.authorization !== '') {
     headers['authorization'] = aws.authorization;
   }
+}
+
+/**
+ * Write the route's **SigV4 service name** into the request's signing context.
+ *
+ * **The service-name seam.** This implementation ships no AWS credential chain: the
+ * *driver* owns the request's shape and the *transport* computes the
+ * signature. The service name is the one thing the transport cannot learn
+ * from the request's other parts — Bedrock signs with `bedrock`, Mantle with
+ * `bedrock-mantle` — so the driver writes it into the signing context it
+ * hands the transport (`AwsRequestContext.service`).
+ *
+ * A request with no signing context is left alone: the region error is raised
+ * by `applyAwsSigningContext`, which is where the target raises it.
+ */
+export function applySigV4Service(req: ProviderRequest, service: string): void {
+  const aws = req.aws;
+  if (aws === undefined) return;
+  aws.service = service;
+}
+
+/**
+ * Write the route's **OAuth2 scope** into the request's token context.
+ *
+ * **The scope seam.** The bearer token for the Google and Azure routes is
+ * acquired with a scope: `cloud-platform` for Vertex and Anthropic-on-Google-
+ * Cloud, `https://ai.azure.com/.default` for Foundry (audit §2.2a). The driver
+ * owns the route, so the driver owns the scope; the *transport* acquires the
+ * token and therefore reads the scope from the request.
+ */
+export function applyTokenScope(req: ProviderRequest, scope: string): void {
+  req.tokenScope = scope;
 }
 
 /**
@@ -932,501 +1127,200 @@ export function stopReasonFromWire(value: unknown): StopReason {
 }
 
 /* -------------------------------------------------------------------------- */
-/* The SSE parser                                                               */
+/* The local token estimate                                                     */
 /* -------------------------------------------------------------------------- */
 
 /**
- * The Anthropic **core** SSE events.
+ * The number of characters per token this implementation assumes.
  *
- * **Observed** (audit §2.2): the pinned SDK's SSE parser accepts a broader
- * event vocabulary than the public API documents.
- *
- * `error` is part of the core set: the plan's Step 8 requires that "a `data:`
- * frame carrying an `error` object emits `{ type: 'error' }`", and the
- * Anthropic API delivers a stream failure as an `event: error` frame.
+ * **Implementation choice.** The target computes a token count locally for a Bedrock
+ * upstream (audit §2.3); the audit does not record its estimator, so this implementation
+ * uses the conventional four-characters-per-token approximation.
  */
-export const CORE_SSE_EVENTS: ReadonlySet<string> = new Set([
-  'message_start',
-  'message_delta',
-  'message_stop',
-  'content_block_start',
-  'content_block_delta',
-  'content_block_stop',
-  'message',
-  'error',
-]);
+export const LOCAL_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
 
 /**
- * The **extended** SSE events the pinned SDK accepts.
+ * The token count of a number of **characters**.
  *
- * **Observed** (audit §2.2): `agent.*`, `user.*`, `session.*`, `span.*`, plus
- * `event_start`, `event_delta`, `system.message` and a legacy `completion`.
- *
- * This implementation **tolerates** them: a frame whose event is in this set is parsed
- * and never fails the stream.
+ * The count is computed from the length alone: this implementation never materialises a
+ * copy of the prompt to measure it (a prompt can be megabytes long, and the
+ * copy would double the memory the turn needs).
  */
-export const EXTENDED_SSE_EVENTS: ReadonlySet<string> = new Set([
-  // agent
-  'agent.message',
-  'agent.thinking',
-  'agent.tool_use',
-  'agent.tool_result',
-  'agent.mcp_tool_use',
-  'agent.mcp_tool_result',
-  'agent.custom_tool_use',
-  'agent.thread_context_compacted',
-  'agent.thread_message_received',
-  'agent.thread_message_sent',
-  'agent.session_thread_message_received',
-  'agent.session_thread_message_sent',
-  // user
-  'user.message',
-  'user.interrupt',
-  'user.tool_confirmation',
-  'user.custom_tool_result',
-  'user.tool_result',
-  'user.define_outcome',
-  // session
-  'session.status_running',
-  'session.status_idle',
-  'session.status_rescheduled',
-  'session.status_terminated',
-  'session.error',
-  'session.deleted',
-  'session.updated',
-  'session.thread_created',
-  'session.thread_status_created',
-  'session.thread_status_running',
-  'session.thread_status_idle',
-  'session.thread_status_rescheduled',
-  'session.thread_status_terminated',
-  // span / outcome
-  'span.model_request_start',
-  'span.model_request_end',
-  'span.outcome_evaluation_start',
-  'span.outcome_evaluation_ongoing',
-  'span.outcome_evaluation_end',
-  // misc
-  'event_start',
-  'event_delta',
-  'system.message',
-  'completion',
-]);
-
-/** Whether an event name is in the pinned SDK's accepted vocabulary. */
-export function isKnownSseEvent(name: string): boolean {
-  return CORE_SSE_EVENTS.has(name) || EXTENDED_SSE_EVENTS.has(name);
+export function estimateTokenCountForCharacters(characters: number): number {
+  if (!Number.isFinite(characters) || characters <= 0) return 0;
+  return Math.ceil(characters / LOCAL_TOKEN_ESTIMATE_CHARS_PER_TOKEN);
 }
 
 /**
- * The parse state of an Anthropic SSE stream.
+ * The number of characters a prompt occupies.
  *
- * The state is **explicit** (the plan's Step 9) so that a chunk boundary in the
- * middle of a frame does not lose data: the unparsed remainder is carried
- * forward.
+ * The system prompt and every message's text (or thinking) count towards the
+ * local token estimate.
  */
-export interface AnthropicStreamState {
-  /** The unparsed remainder of the last chunk. */
-  buffer: string;
-  /** Whether a `message_start` has already been emitted. */
-  started: boolean;
-  /** The latest **cumulative** usage the stream reported. */
-  usage?: Usage;
-  /** The stop reason the stream reported. */
-  stopReason?: StopReason;
-  /** The tool blocks that are still accumulating their JSON input. */
-  pendingTools: Map<number, PendingToolBlock>;
-}
-
-/** A tool block whose input is still arriving. */
-export interface PendingToolBlock {
-  id: string;
-  name: string;
-  /** The accumulated partial JSON. */
-  json: string;
-  /** The input the block carried at its start, when it carried one. */
-  input?: unknown;
-}
-
-/** A fresh parse state. */
-export function createStreamState(): AnthropicStreamState {
-  return { buffer: '', started: false, pendingTools: new Map() };
-}
-
-/** Whether an opaque parse state is an Anthropic stream state. */
-export function isAnthropicStreamState(state: unknown): state is AnthropicStreamState {
-  if (!isRecord(state)) return false;
-  if (typeof state['buffer'] !== 'string') return false;
-  return true;
-}
-
-/**
- * The SSE frame separator: a blank line, with either line ending.
- */
-const FRAME_SEPARATOR = /\r?\n\r?\n/;
-
-/**
- * Split a buffer into complete frames and the remainder.
- *
- * The remainder is the partial frame at the end of the buffer, which the caller
- * carries forward.
- */
-export function splitSseFrames(buffer: string): { frames: string[]; rest: string } {
-  const frames: string[] = [];
-  let rest = buffer;
-  for (;;) {
-    const match = FRAME_SEPARATOR.exec(rest);
-    if (match === null) break;
-    frames.push(rest.slice(0, match.index));
-    rest = rest.slice(match.index + match[0].length);
-  }
-  return { frames, rest };
-}
-
-/** One parsed SSE frame. */
-export interface SseFrame {
-  /** The `event:` name, when the frame carried one. */
-  event?: string;
-  /** The concatenated `data:` payload. */
-  data: string;
-  /** The raw frame, for an error message. */
-  raw: string;
-}
-
-/**
- * Parse one SSE frame.
- *
- * A frame with no `data:` line (a keep-alive comment, for instance) yields
- * `undefined`.
- */
-export function parseSseFrame(frame: string): SseFrame | undefined {
-  let event: string | undefined;
-  const data: string[] = [];
-  for (const line of frame.split('\n')) {
-    if (line === '' || line.startsWith(':')) continue;
-    const colon = line.indexOf(':');
-    const field = colon === -1 ? line : line.slice(0, colon);
-    let value = colon === -1 ? '' : line.slice(colon + 1);
-    if (value.startsWith(' ')) value = value.slice(1);
-    if (field === 'event') {
-      event = value;
+export function promptCharacterCount(messages: unknown, system: unknown): number {
+  let characters = 0;
+  if (typeof system === 'string') characters += system.length;
+  const list = Array.isArray(messages) ? messages : [];
+  for (const message of list) {
+    if (!isRecord(message)) continue;
+    const content = Object.hasOwn(message, 'content') ? message['content'] : undefined;
+    if (typeof content === 'string') {
+      characters += content.length;
       continue;
     }
-    if (field === 'data') {
-      data.push(value);
-      continue;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!isRecord(block)) continue;
+      const text = ownString(block, 'text') ?? ownString(block, 'thinking');
+      if (text !== undefined) characters += text.length;
     }
-    // `id:` and `retry:` carry no meaning for this implementation.
   }
-  if (data.length === 0) return undefined;
-  return event !== undefined ? { event, data: data.join('\n'), raw: frame } : { data: data.join('\n'), raw: frame };
+  return characters;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Response parsing                                                             */
+/* -------------------------------------------------------------------------- */
+
+/** The response headers `parseResponse` reads. */
+export interface ProviderResponseHeaders {
+  /** The value of a header, or `null` when it is absent. */
+  get(name: string): string | null | undefined;
 }
 
 /**
- * Parse a chunk of an Anthropic SSE stream.
+ * The response shape `parseResponse` accepts.
  *
- * A frame whose payload is not JSON throws with the offending data and the raw
- * frame — **observed** (audit §2.2): "a parse failure throws with the
- * offending data and raw chunk".
+ * It is the subset of the platform `Response` the SDK's own `parseResponse`
+ * uses: the status, the headers, `json()` and `text()`.
  */
-export function parseSseChunk(
-  chunk: string,
-  state: AnthropicStreamState,
-): { events: ProviderEvent[]; state: AnthropicStreamState } {
-  const { frames, rest } = splitSseFrames(state.buffer + chunk);
-  const events: ProviderEvent[] = [];
-  const next: AnthropicStreamState = {
-    buffer: rest,
-    started: state.started,
-    pendingTools: state.pendingTools,
-  };
-  if (state.usage !== undefined) next.usage = state.usage;
-  if (state.stopReason !== undefined) next.stopReason = state.stopReason;
+export interface ProviderResponseLike {
+  /** The response status. */
+  readonly status: number;
+  /** The response headers. */
+  readonly headers: ProviderResponseHeaders;
+  /** The body, parsed as JSON. */
+  json(): Promise<unknown>;
+  /** The body, as text. */
+  text(): Promise<string>;
+}
 
-  for (const frame of frames) {
-    const parsed = parseSseFrame(frame);
-    if (parsed === undefined) continue;
-    events.push(...eventsFromSseFrame(parsed, next));
-  }
-
-  return { events, state: next };
+/** The options `parseResponse` takes. */
+export interface ParseResponseOptions {
+  /** Whether the request was a **streaming** one. */
+  stream?: boolean;
+  /** Whether the caller asked for the raw (binary) response. */
+  binaryResponse?: boolean;
 }
 
 /**
- * Turn one SSE frame into this implementation's events.
+ * Parse a provider response — the default `parseResponse`.
  *
- * The **extended** vocabulary is tolerated: a frame whose event is in
- * `EXTENDED_SSE_EVENTS` never fails the stream. The tool-shaped extended
- * events are surfaced, because the plan's `ProviderEvent` union has a
- * `tool_result` member that would otherwise be unreachable; every other
- * extended event is ignored.
- */
-export function eventsFromSseFrame(frame: SseFrame, state: AnthropicStreamState): ProviderEvent[] {
-  let payload: unknown;
-  try {
-    payload = JSON.parse(frame.data);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `failed to parse the SSE payload ${JSON.stringify(frame.data)} (frame ${JSON.stringify(frame.raw)}): ${reason}`,
-    );
-  }
-
-  const type = isRecord(payload) ? (ownString(payload, 'type') ?? frame.event ?? '') : (frame.event ?? '');
-
-  if (!isKnownSseEvent(type)) {
-    // An event the pinned SDK does not know is not a failure: this implementation
-    // tolerates what it does not recognise.
-    return [];
-  }
-
-  if (EXTENDED_SSE_EVENTS.has(type) && !CORE_SSE_EVENTS.has(type)) {
-    return extendedEventToEvents(type, payload);
-  }
-
-  return coreEventToEvents(type, payload, state);
-}
-
-/**
- * Map an extended event onto this implementation's events.
+ * **Observed** (audit §2.2): the SDK's default `parseResponse` is read in
+ * full, and its branch set is exactly:
  *
- * Only the tool-shaped events are surfaced; the rest are ignored (this implementation
- * tolerates them).
- */
-function extendedEventToEvents(type: string, payload: unknown): ProviderEvent[] {
-  if (!isRecord(payload)) return [];
-  if (type === 'agent.tool_use' || type === 'agent.mcp_tool_use' || type === 'agent.custom_tool_use') {
-    const id = ownString(payload, 'tool_use_id') ?? ownString(payload, 'id') ?? '';
-    const name = ownString(payload, 'name') ?? '';
-    if (id === '' || name === '') return [];
-    const input = Object.hasOwn(payload, 'input') ? payload['input'] : {};
-    return [{ type: 'tool_use', id, name, input }];
-  }
-  if (
-    type === 'agent.tool_result' ||
-    type === 'agent.mcp_tool_result' ||
-    type === 'user.tool_result' ||
-    type === 'user.custom_tool_result'
-  ) {
-    const id = ownString(payload, 'tool_use_id') ?? ownString(payload, 'id') ?? '';
-    if (id === '') return [];
-    const content = Object.hasOwn(payload, 'content') ? payload['content'] : '';
-    const isError = ownBoolean(payload, 'is_error') ?? ownBoolean(payload, 'isError') ?? false;
-    return [{ type: 'tool_result', id, content, isError }];
-  }
-  return [];
-}
-
-/**
- * Map a core event onto this implementation's events.
- */
-function coreEventToEvents(type: string, payload: unknown, state: AnthropicStreamState): ProviderEvent[] {
-  if (!isRecord(payload)) return [];
-
-  switch (type) {
-    case 'message_start': {
-      if (state.started) return [];
-      state.started = true;
-      const message = ownRecord(payload, 'message');
-      const messageId = message !== undefined ? (ownString(message, 'id') ?? '') : (ownString(payload, 'id') ?? '');
-      const model = message !== undefined ? (ownString(message, 'model') ?? '') : (ownString(payload, 'model') ?? '');
-      const usage = message !== undefined ? usageFromWire(message['usage']) : usageFromWire(payload['usage']);
-      if (usage !== undefined) state.usage = usage;
-      return [
-        {
-          type: 'message_start',
-          messageId,
-          model,
-          ...(usage !== undefined ? { usage } : {}),
-        },
-      ];
-    }
-    case 'message_delta': {
-      // **The usage in a `message_delta` is cumulative, not incremental**
-      // (audit §2.2 and the research report's streaming note). It therefore
-      // *replaces* the state's usage rather than being added to it.
-      const usage = usageFromWire(payload['usage']);
-      if (usage !== undefined) state.usage = usage;
-      const delta = ownRecord(payload, 'delta');
-      if (delta !== undefined) {
-        const stopReason = ownString(delta, 'stop_reason');
-        if (stopReason !== undefined) state.stopReason = stopReasonFromWire(stopReason);
-      }
-      return [];
-    }
-    case 'message_stop': {
-      const stopReason = state.stopReason ?? 'end_turn';
-      const usage = state.usage;
-      return [{ type: 'message_stop', stopReason, ...(usage !== undefined ? { usage } : {}) }];
-    }
-    case 'content_block_start': {
-      const block = ownRecord(payload, 'content_block');
-      if (block === undefined) return [];
-      const blockType = ownString(block, 'type');
-      const index = ownNumber(payload, 'index') ?? 0;
-      if (blockType === 'tool_use') {
-        const id = ownString(block, 'id') ?? '';
-        const name = ownString(block, 'name') ?? '';
-        const pending: PendingToolBlock = { id, name, json: '' };
-        if (Object.hasOwn(block, 'input')) pending.input = block['input'];
-        state.pendingTools.set(index, pending);
-        return [];
-      }
-      return [];
-    }
-    case 'content_block_delta': {
-      const index = ownNumber(payload, 'index') ?? 0;
-      const delta = ownRecord(payload, 'delta');
-      if (delta === undefined) return [];
-      const deltaType = ownString(delta, 'type');
-      if (deltaType === 'text_delta') {
-        const text = ownString(delta, 'text');
-        return text === undefined ? [] : [{ type: 'text_delta', text }];
-      }
-      if (deltaType === 'thinking_delta') {
-        const text = ownString(delta, 'thinking');
-        return text === undefined ? [] : [{ type: 'thinking_delta', text }];
-      }
-      if (deltaType === 'input_json_delta') {
-        const pending = state.pendingTools.get(index);
-        if (pending === undefined) return [];
-        const partial = ownString(delta, 'partial_json');
-        if (partial !== undefined) pending.json += partial;
-        return [];
-      }
-      return [];
-    }
-    case 'content_block_stop': {
-      const index = ownNumber(payload, 'index') ?? 0;
-      const pending = state.pendingTools.get(index);
-      if (pending === undefined) return [];
-      state.pendingTools.delete(index);
-      return [{ type: 'tool_use', id: pending.id, name: pending.name, input: toolInputOf(pending) }];
-    }
-    case 'message': {
-      // A whole message delivered over SSE.
-      return eventsFromMessage(payload);
-    }
-    case 'error': {
-      return [errorEventFrom(payload)];
-    }
-    default:
-      return [];
-  }
-}
-
-/**
- * The input of a tool block: the block's own input when it carried one, else
- * the accumulated partial JSON.
- */
-function toolInputOf(pending: PendingToolBlock): unknown {
-  if (pending.input !== undefined) return pending.input;
-  const trimmed = pending.json.trim();
-  if (trimmed === '') return {};
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return {};
-  }
-}
-
-/**
- * The error event of a wire error payload.
+ * ```
+ * if (options.stream)            -> SSEParser.fromSSEResponse(response, …)
+ * if (response.status === 204)   -> null
+ * if (options.__binaryResponse)  -> the raw response
+ * if (content-type is application/json or *+json):
+ *                                  if (content-length === "0") -> undefined
+ *                                  else -> buildMessage(await response.json(), response)
+ * otherwise                      -> await response.text()
+ * ```
  *
- * **Observed** (audit §2.2 and the plan's Step 8): the retryability is
- * derived from the status.
+ * This implementation's streaming branch returns an **async iterable of this implementation's
+ * `ProviderEvent`s** — the analogue of the target's SSE parser — and the JSON
+ * branch attaches the two **non-enumerable** properties `buildMessage`
+ * attaches: `_request_id` (from the `request-id` header) and `_workspace_id`
+ * (from the `anthropic-workspace-id` header).
  */
-export function errorEventFrom(payload: unknown): ProviderEvent {
-  if (!isRecord(payload)) {
-    return { type: 'error', message: 'unknown provider error', retryable: false };
+export async function parseResponse(
+  response: ProviderResponseLike,
+  options: ParseResponseOptions = {},
+): Promise<unknown> {
+  if (options.stream === true) {
+    const text = await response.text();
+    return sseEventsFromText(text);
   }
-  const error = ownRecord(payload, 'error');
-  const source = error ?? payload;
-  const message = ownString(source, 'message') ?? 'unknown provider error';
-  const explicitStatus = ownNumber(source, 'status');
-  const status = explicitStatus ?? sseErrorTypeStatus(ownString(source, 'type'));
-  const classification = classifyErrorStatus(status ?? 0, payload);
-  return {
-    type: 'error',
-    message,
-    ...(status !== undefined ? { status } : {}),
-    retryable: status !== undefined ? classification.retryable : false,
-  };
-}
-
-/**
- * The status a well-known SSE error type implies.
- */
-export function sseErrorTypeStatus(type: string | undefined): number | undefined {
-  switch (type) {
-    case 'overloaded_error':
-      return 529;
-    case 'api_error':
-      return 500;
-    case 'rate_limit_error':
-      return 429;
-    case 'authentication_error':
-      return 401;
-    case 'permission_error':
-      return 403;
-    case 'not_found_error':
-      return 404;
-    case 'invalid_request_error':
-      return 400;
-    default:
+  if (response.status === 204) {
+    return null;
+  }
+  if (options.binaryResponse === true) {
+    return response;
+  }
+  if (isJsonContentType(response.headers.get('content-type'))) {
+    if (response.headers.get('content-length') === '0') {
       return undefined;
+    }
+    return buildMessage(await response.json(), response);
   }
+  return response.text();
 }
 
 /**
- * The events of a whole Anthropic message.
+ * Whether a content type is a JSON one.
  *
- * Used by the non-streaming parser and by the SSE `message` event.
+ * **Observed** (audit §2.2): "content-type is `application/json` or `*+json`".
+ * The content type's parameters (`charset` and the like) are not part of the
+ * media type, so they are stripped before the test.
  */
-export function eventsFromMessage(body: unknown): ProviderEvent[] {
-  if (!isRecord(body)) {
-    return [{ type: 'error', message: 'the provider returned a body that is not a JSON object', retryable: false }];
-  }
-  if (ownString(body, 'type') === 'error') {
-    return [errorEventFrom(body)];
-  }
-
-  const usage = usageFromWire(body['usage']);
-  const events: ProviderEvent[] = [
-    {
-      type: 'message_start',
-      messageId: ownString(body, 'id') ?? '',
-      model: ownString(body, 'model') ?? '',
-      ...(usage !== undefined ? { usage } : {}),
-    },
-  ];
-
-  const content = ownArray(body, 'content');
-  for (const block of content ?? []) {
-    if (!isRecord(block)) continue;
-    const blockType = ownString(block, 'type');
-    if (blockType === 'text') {
-      const text = ownString(block, 'text');
-      if (text !== undefined) events.push({ type: 'text_delta', text });
-      continue;
-    }
-    if (blockType === 'thinking') {
-      const thinking = ownString(block, 'thinking');
-      if (thinking !== undefined) events.push({ type: 'thinking_delta', text: thinking });
-      continue;
-    }
-    if (blockType === 'tool_use') {
-      events.push({
-        type: 'tool_use',
-        id: ownString(block, 'id') ?? '',
-        name: ownString(block, 'name') ?? '',
-        input: Object.hasOwn(block, 'input') ? block['input'] : {},
-      });
-      continue;
-    }
-  }
-
-  const stopReason = stopReasonFromWire(ownString(body, 'stop_reason'));
-  events.push({ type: 'message_stop', stopReason, ...(usage !== undefined ? { usage } : {}) });
-  return events;
+export function isJsonContentType(contentType: string | null | undefined): boolean {
+  if (typeof contentType !== 'string') return false;
+  const media = contentType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  return media === 'application/json' || media.endsWith('+json');
 }
+
+/**
+ * Attach the response's identifiers to a parsed body.
+ *
+ * **Observed** (audit §2.2): `buildMessage` (the `hn` helper) attaches two
+ * **non-enumerable** properties — `_request_id` from the `request-id` header
+ * and `_workspace_id` from the `anthropic-workspace-id` header. They are
+ * non-enumerable because they are **not** part of the message: a consumer that
+ * serialises the body must not write them onto the wire.
+ */
+export function buildMessage(body: unknown, response: ProviderResponseLike): unknown {
+  if (!isRecord(body)) return body;
+  const requestId = response.headers.get('request-id');
+  const workspaceId = response.headers.get('anthropic-workspace-id');
+  if (typeof requestId === 'string') defineHidden(body, '_request_id', requestId);
+  if (typeof workspaceId === 'string') defineHidden(body, '_workspace_id', workspaceId);
+  return body;
+}
+
+/** Define a **non-enumerable** own member. */
+function defineHidden(target: Record<string, unknown>, key: string, value: string): void {
+  Object.defineProperty(target, key, { value, enumerable: false, configurable: true, writable: true });
+}
+
+/* -------------------------------------------------------------------------- */
+/* The SSE parser and its event mapper                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The SSE parser and the event mapper live in their own module.
+ *
+ * The shared vocabulary holds the **types**, the **builders**, the **error
+ * classifier** and the **timeout policy**; the streaming logic — the frame
+ * parser, the chunk parser and the event mapper — lives in `sse.ts`. The
+ * public surface is re-exported **here**, so that every importer of
+ * `drivers/types.js` keeps working unchanged.
+ */
+export {
+  CORE_SSE_EVENTS,
+  EXTENDED_SSE_EVENTS,
+  isKnownSseEvent,
+  createStreamState,
+  isAnthropicStreamState,
+  splitSseFrames,
+  parseSseFrame,
+  parseSseChunk,
+  sseEventsFromText,
+  eventsFromSseFrame,
+  errorEventFrom,
+  sseErrorTypeStatus,
+  eventsFromMessage,
+} from './sse.js';
+
+export type { AnthropicStreamState, PendingToolBlock, SseFrame } from './sse.js';

@@ -48,5 +48,9 @@ export function createAnthropicAwsDriver(overrides: { baseUrl?: string } = {}): 
     workspaceHeader: true,
     betaDialect: 'anthropicAws',
     anthropicVersion: true,
+    // The SigV4 service name the driver writes into the request's signing
+    // context, so that the transport signs for this route and not for
+    // another one.
+    sigV4Service: ANTHROPIC_AWS_SIGV4_SERVICE,
   });
 }

@@ -52,6 +52,10 @@ export function createMantleDriver(overrides: { baseUrl?: string } = {}): Provid
     credentialKind: 'awsSigV4',
     betaDialect: 'mantle',
     anthropicVersion: true,
+    // The SigV4 service name is the one thing that makes Mantle a driver of
+    // its own rather than a Bedrock configuration, so the driver writes it
+    // into the request's signing context.
+    sigV4Service: MANTLE_SIGV4_SERVICE,
   });
 
   return {

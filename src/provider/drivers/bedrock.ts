@@ -47,18 +47,21 @@
 import {
   ANTHROPIC_BETA_HEADER,
   AWS_REGION_REQUIRED_ERROR,
-  applyAwsSigningContext,
+  anthropicPathFor,
   applyAwsSigningHeaders,
+  applySigV4Service,
   buildAnthropicBody,
   buildAnthropicHeaders,
   calculateNonstreamingTimeoutMs,
   classifyErrorStatus,
   createStreamState,
+  estimateTokenCountForCharacters,
   eventsFromMessage,
   eventsFromSseFrame,
   isAnthropicStreamState,
   isRecord,
   joinUrl,
+  promptCharacterCount,
   resolveCredentialKind,
   resolveRegionTemplate,
   splitCommaList,
@@ -86,12 +89,35 @@ export const BEDROCK_BASE_URL_TEMPLATE = 'https://bedrock-runtime.{region}.amazo
  *
  * **Observed** (audit §2.2a): "The rewritten paths are exactly `/v1/complete`,
  * `/v1/messages`, and `/v1/messages?beta=true`."
+ *
+ * The set is **observable** through `bedrockRewritePath`, which takes an
+ * incoming path and returns the outbound one.
  */
 export const BEDROCK_REWRITTEN_PATHS: readonly string[] = Object.freeze([
   '/v1/complete',
   '/v1/messages',
   '/v1/messages?beta=true',
 ]);
+
+/**
+ * The error this implementation raises for an incoming path the adapter does not
+ * rewrite.
+ *
+ * **Implementation choice** — the audit records the path set but not the message.
+ */
+export const BEDROCK_UNREWRITTEN_PATH_ERROR =
+  'Bedrock rewrites only /v1/complete, /v1/messages and /v1/messages?beta=true';
+
+/**
+ * The message of the Bedrock route's refusal of an HTTP token count.
+ *
+ * **Observed** (audit §2.2): the token-counting call has "a Bedrock-specific
+ * local fallback" — Bedrock exposes no count-tokens endpoint, so the count is
+ * computed locally. This implementation therefore **refuses** the HTTP path explicitly
+ * and offers the local count.
+ */
+export const BEDROCK_COUNT_TOKENS_LOCAL_MESSAGE =
+  'Bedrock has no count-tokens endpoint: the count is computed locally (bedrockCountTokensLocally)';
 
 /**
  * The error the target throws for a request body that is not a JSON object.
@@ -135,15 +161,76 @@ export function rewriteBedrockBody(
  *
  * **Observed** (audit §2.2a): the path is `/model/<model>/invoke`, or
  * `/model/<model>/invoke-with-response-stream` when the body asked to stream.
+ *
+ * The model id is interpolated **unencoded**, as the target does.
  */
 export function bedrockInvokePath(model: string, stream: boolean): string {
   return stream ? `/model/${model}/invoke-with-response-stream` : `/model/${model}/invoke`;
 }
 
 /**
+ * Whether an incoming path is one the Bedrock adapter rewrites.
+ *
+ * **Observed** (audit §2.2a): the rewritten paths are exactly `/v1/complete`,
+ * `/v1/messages` and `/v1/messages?beta=true`. The `beta` marker is the only
+ * difference between the last two, so the test is made on the path **without**
+ * the marker.
+ */
+export function isBedrockRewrittenPath(path: string): boolean {
+  const normalized = stripBetaSearchParam(path);
+  return normalized === '/v1/complete' || normalized === '/v1/messages';
+}
+
+/**
+ * Rewrite an **incoming** Anthropic path into the **outbound** Bedrock path.
+ *
+ * This is the shape the adapter has: it receives the path the client posted to
+ * and answers the path the request goes to. The `beta` search parameter is
+ * deleted on the way out, and the outbound path carries the model id and the
+ * streaming suffix the body's `stream` flag selects.
+ *
+ * **Observed** (audit §2.2a).
+ */
+export function bedrockRewritePath(
+  incomingPath: string,
+  options: { model: string; stream: boolean },
+): string {
+  if (!isBedrockRewrittenPath(incomingPath)) {
+    throw new Error(BEDROCK_UNREWRITTEN_PATH_ERROR);
+  }
+  // The outbound path carries no query at all, so the `beta` search
+  // parameter is deleted on the way out (audit §2.2a).
+  return bedrockInvokePath(options.model, options.stream);
+}
+
+/**
+ * The local token count the Bedrock route uses.
+ *
+ * **Observed** (audit §2.2): the token-counting call has "a Bedrock-specific
+ * local fallback". Bedrock exposes no count-tokens endpoint, so the count is
+ * computed from the prompt's length.
+ */
+export function bedrockCountTokensLocally(req: ProviderRequest): { input_tokens: number } {
+  const characters = promptCharacterCount(req.messages, req.system);
+  return { input_tokens: estimateTokenCountForCharacters(characters) };
+}
+
+/**
+ * The Bedrock driver.
+ *
+ * The extra `rewriteBody` member is the adapter's body rewrite, exposed on the
+ * driver so that the target's "the body is not a JSON object" error is
+ * reachable **through the driver** and names the driver's own path.
+ */
+export interface BedrockDriver extends ProviderDriver {
+  /** Rewrite a body the way the adapter does, naming the request's path. */
+  rewriteBody(body: unknown, req: ProviderRequest): Record<string, unknown>;
+}
+
+/**
  * The Bedrock driver.
  */
-export const bedrockDriver: ProviderDriver = createBedrockDriver();
+export const bedrockDriver: BedrockDriver = createBedrockDriver();
 
 /**
  * Build a Bedrock driver.
@@ -151,19 +238,29 @@ export const bedrockDriver: ProviderDriver = createBedrockDriver();
  * The route's base URL is configurable so that the extension's registry may
  * point a Bedrock connection at another endpoint.
  */
-export function createBedrockDriver(overrides: { baseUrl?: string } = {}): ProviderDriver {
-  const baseTemplate = overrides.baseUrl ?? BEDROCK_BASE_URL_TEMPLATE;
+export function createBedrockDriver(overrides: { baseUrl?: string } = {}): BedrockDriver {  const baseTemplate = overrides.baseUrl ?? BEDROCK_BASE_URL_TEMPLATE;
 
   const headerOptions = {
     credentialKind: 'awsSigV4' as CredentialKind,
     betaDialect: 'bedrock' as ProviderRoute,
   };
 
-  const headersFor = (req: ProviderRequest, cred: string | undefined): Record<string, string> =>
-    buildAnthropicHeaders(req, cred, {
+  const headersFor = (req: ProviderRequest, cred: string | undefined): Record<string, string> => {
+    const kind = resolveCredentialKind(req, 'awsSigV4');
+    if (kind === 'awsSigV4') {
+      // The SigV4 service name reaches the transport through the request's
+      // signing context: a transport cannot learn it from the URL.
+      applySigV4Service(req, BEDROCK_SIGV4_SERVICE);
+    }
+    return buildAnthropicHeaders(req, cred, {
       ...headerOptions,
-      credentialKind: resolveCredentialKind(req, 'awsSigV4'),
+      credentialKind: kind,
     });
+  };
+
+  /** The outbound path of a request — the path the request is posted to. */
+  const outboundPathFor = (req: ProviderRequest): string =>
+    bedrockRewritePath(anthropicPathFor(req), { model: req.model, stream: req.stream });
 
   return {
     route: 'bedrock',
@@ -177,9 +274,12 @@ export function createBedrockDriver(overrides: { baseUrl?: string } = {}): Provi
         // message.
         throw new Error(AWS_REGION_REQUIRED_ERROR);
       }
-      // The `beta` search parameter is deleted on the way out (audit §2.2a).
-      const path = stripBetaSearchParam(bedrockInvokePath(req.model, req.stream));
-      return joinUrl(base, path);
+      if (req.operation === 'count_tokens') {
+        // Bedrock has no count-tokens endpoint: the count is computed locally
+        // (audit §2.2's "Bedrock-specific local fallback").
+        throw new Error(BEDROCK_COUNT_TOKENS_LOCAL_MESSAGE);
+      }
+      return joinUrl(base, outboundPathFor(req));
     },
 
     buildHeaders(req: ProviderRequest, cred: string | undefined): Record<string, string> {
@@ -187,6 +287,9 @@ export function createBedrockDriver(overrides: { baseUrl?: string } = {}): Provi
     },
 
     buildBody(req: ProviderRequest, cred: string | undefined): { body: unknown; headers: Record<string, string> } {
+      if (req.operation === 'count_tokens') {
+        throw new Error(BEDROCK_COUNT_TOKENS_LOCAL_MESSAGE);
+      }
       const headers = headersFor(req, cred);
 
       // The `anthropic-beta` **header** is moved into the body's
@@ -202,9 +305,10 @@ export function createBedrockDriver(overrides: { baseUrl?: string } = {}): Provi
         includeModel: false,
         includeStream: false,
       });
-      // The rewrite owns the body mutation, including the version literal.
+      // The rewrite owns the body mutation, including the version literal. The
+      // error names the path the request is actually posted to.
       const body = rewriteBedrockBody(source, {
-        path: '/v1/messages',
+        path: outboundPathFor(req),
         model: req.model,
         stream: req.stream,
       });
@@ -215,6 +319,14 @@ export function createBedrockDriver(overrides: { baseUrl?: string } = {}): Provi
       }
 
       return { body, headers };
+    },
+
+    rewriteBody(body: unknown, req: ProviderRequest): Record<string, unknown> {
+      return rewriteBedrockBody(body, {
+        path: outboundPathFor(req),
+        model: req.model,
+        stream: req.stream,
+      });
     },
 
     parseStream(chunk: string, state: unknown): { events: ProviderEvent[]; state: unknown } {
@@ -388,20 +500,4 @@ export function eventsFromAnthropicEvent(payload: unknown, state: AnthropicStrea
  */
 export function bedrockSigningHeaders(headers: Record<string, string>, url: string): Record<string, string> {
   return applyAwsSigningHeaders(headers, url);
-}
-
-/**
- * The signing context a Bedrock request needs.
- *
- * Exported so that a caller can see what the driver requires: a region, and —
- * when the transport computed them — the SigV4 date, session token and
- * authorization header.
- */
-export function bedrockSigningContext(
-  headers: Record<string, string>,
-  req: ProviderRequest,
-): Record<string, string> {
-  const result = { ...headers };
-  applyAwsSigningContext(result, req);
-  return result;
 }

@@ -38,5 +38,9 @@ export function createAnthropicGoogleCloudDriver(overrides: { baseUrl?: string }
     workspaceHeader: true,
     betaDialect: 'anthropicGoogleCloud',
     anthropicVersion: true,
+    // The Google OAuth2 scope the bearer token is acquired with. The driver
+    // writes it into the request's token context; the transport reads it when
+    // it acquires the token.
+    tokenScope: ANTHROPIC_GOOGLE_CLOUD_SCOPE,
   });
 }
