@@ -59,6 +59,13 @@ today so the gap is explicit.
   character); Esc closes it.
 - **Session picker list: DONE** — `/sessions` opens a navigable modal over
   every stored session with resume-on-Enter.
+- **Keybinding rebind: DONE** — `/keybind <chord> <target>` maps one chord to
+  another's action (durable under the `tui:keybindings` setting),
+  `/keybind reset` restores the defaults.
+- **Queued-input steering.** Alt+Enter queues a message while a turn runs; the
+  queue is submitted only when the turn ends — it does not redirect the model
+  mid-turn. Esc interrupts today; true mid-turn steering needs the turn loop
+  to accept user items between tool calls.
 
 ## Brownfield
 

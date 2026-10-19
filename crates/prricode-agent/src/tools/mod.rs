@@ -27,7 +27,7 @@ mod send_message;
 mod shell;
 mod skill;
 mod sleep;
-mod stubs;
+pub(crate) mod stubs;
 mod synthetic;
 mod task;
 mod team;

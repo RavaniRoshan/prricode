@@ -4,21 +4,21 @@ Generated from the reference inventory. Status values: `implemented`, `partial`,
 
 ## Current implemented commands (TUI)
 
-- help
+Derived from the `/`-command arms in `crates/prricode-tui/src/app.rs`
+(`submit`). Verified 2026-10-19.
+
+- help (alias `?`)
 - clear
 - compact
-- context
-- cost
-- status
 - model
 - sessions
 - new
 - resume
 - approval
-- permission-mode
+- permission-mode (alias `permission_mode`)
 - provider
 - concept
-- spec
+- spec (alias `specify`)
 - plan
 - build
 - ship
@@ -27,18 +27,20 @@ Generated from the reference inventory. Status values: `implemented`, `partial`,
 - dossier
 - theme
 - vim
-- voice
-- hooks
+- voice (honest unsupported message — no composer capture)
+- hooks (`/hooks`, `/hooks add`)
 - yolo
 - goal
-- compact
 - message
 - research
 - pricing
 - landing
-- quit
-- exit
-- q
+- keybind (`/keybind <chord> <target>`, `/keybind reset`)
+- stats
+- insights
+- ts
+- ps
+- quit (aliases `exit`, `q`)
 
 ## Current implemented tools (agent registry)
 
@@ -71,8 +73,13 @@ Real (behavior implemented, tested):
 - AskUserQuestionTool
 - ToolSearchTool
 
-Honest stubs (report `unsupported`): tool-search fallbacks, mcp_auth, repl —
-see `crates/prricode-agent/src/tools/stubs.rs`. lsp is real now:
+Honest stubs (report `unsupported`): `mcp_auth`, `repl`, `agent`
+("use task instead"), `list_mcp_resources`, `read_mcp_resource` — declared in
+`crates/prricode-agent/src/tools/stubs.rs` and registered in the fallback
+registry by explicit alias in `build_registry`. When an MCP registry is
+attached, `register_dyn` replaces the two resource tools by name with the real
+ones (`tools/mcp.rs`), so an MCP-enabled session always gets the real surface.
+lsp is real now:
 diagnostics/hover/definition via a framed JSON-RPC client over a discovered
 language server (extension map + PATH); honest `unsupported` when none is
 installed (`crates/prricode-agent/src/tools/lsp.rs`).

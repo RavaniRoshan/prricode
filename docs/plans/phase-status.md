@@ -19,9 +19,9 @@ full workspace tests green, one commit per phase item.
 | 2 | session/fork, rewind, compact boundaries | done | server methods + summary boundary in `load_history` |
 | 3 | Auto-memory dir + MEMORY.md | done | `crates/prricode-agent/src/memory.rs` |
 | 3 | Memory retrieval + types + team memory | done | memory.rs (relevant retrieval, typed entries, team memory key) |
-| 3 | Background auto-dream consolidation | degraded | consolidations run at load time, not async background (`unsupported: background task runtime not wired`; honest) |
+| 3 | Background auto-dream consolidation | degraded | the async consolidation pass is not built (`unsupported: no background task runtime`); memory persists as explicit files — MEMORY.md index + typed entries + team key — and loads at turn start (`memory.rs`) |
 | 4 | Streaming tool execution | done | turn loop executes tool calls as they complete; events stream per tool (`ToolUse`/`ToolResult` events) |
-| 4 | Mid-turn steering/redirect | degraded | queued-input steering documented as future work; Esc interrupts work today |
+| 4 | Mid-turn steering/redirect | degraded | Alt+Enter queues input while a turn runs; it is submitted when the turn ends and does not redirect the model mid-turn; Esc interrupts today (`unsupported: queued-input steering`; recorded in the roadmap) |
 | 5 | Tool inventory (~30 tools) | done | real: shell/read/write/edit/glob/grep/webfetch/websearch/computer/goal/task/agent/coordinator/mcp/resource tools/workflow/todo/brief/sleep/config/notebook/plan-mode/worktree/team/message/schedule/remote/ask-user/tool-search |
 | 5 | Parallel independent tool dispatch | done | coordinator tool + hooks `join_all` dispatch |
 | 6 | Permission modes (default/plan/auto/bypass/dontAsk) | done | `PermissionMode` → `ApprovalMode` mapping, `/permission-mode` + `/approval` |
@@ -53,7 +53,7 @@ full workspace tests green, one commit per phase item.
 | 14 | Voice STT/TTS | done | `prricode voice --file` transcription over the OpenAI-compatible `/audio/transcriptions` (or a local `stt_command` binary); NEW `--text` synthesis path writing `--out` speech via `/audio/speech` or a local `tts_command`; honest config-gap prompts pointing at `docs/how-to/voice.md`; TUI `/voice` stays honest-unsupported (no composer capture) — bundled models / streaming ASR / wake word remain documented future work |
 | 15 | Computer use X11 | done | XGetImage/scrot + XTEST |
 | 15 | Wayland input | degraded | `unsupported: no live compositor on build host`; probe code present |
-| 15 | macOS/Windows backends | degraded | platform-N/A; documented in roadmap |
+| 15 | macOS/Windows backends | degraded | `unavailable_reason()` reports the honest reason wherever no capture/input backend exists for the platform (`unsupported: no native capture/input backend for macOS/Windows`; recorded in the roadmap) |
 | 16 | LSP integration | done | `crates/prricode-agent/src/tools/lsp.rs` — two-phase framed JSON-RPC client, server discovery by extension (rust-analyzer/clangd/gopls/pyright/typescript-language-server), diagnostics + hover + definition; honest `unsupported:` when no server binary; 15s timeout; 9 tests incl. fake-server round-trips |
 | 17 | ScheduleCron tool | done | delayed command via sandbox; now persists `ScheduledTaskRecord` (id/command/fire_at/workspace) before spawn |
 | 17 | Cron persistence across restarts | done | `pending_scheduled_tasks` reloaded at server start (overdue fires late with a warning); `mark_scheduled_task_fired` is terminal; `scheduled/fired` notification emitted; persistence tests + tool test |

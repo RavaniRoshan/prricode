@@ -260,7 +260,15 @@ impl AgentRunner {
 
     /// Build the tool registry for a session, including the goal tool when a
     /// goal is active and any extension tools (computer use, MCP).
+    ///
+    /// The MCP/tool fallbacks below are the honest unsupported stubs by
+    /// explicit alias — when an MCP registry is attached, `register_dyn`
+    /// replaces the resource tools with the real registry-backed tools by
+    /// name, and the task tool owns subagent orchestration.
     fn build_registry(&self, goal: bool) -> ToolRegistry {
+        use crate::tools::stubs::AgentTool as StubAgentTool;
+        use crate::tools::stubs::ListMcpResourcesTool as StubListMcpResourcesTool;
+        use crate::tools::stubs::ReadMcpResourceTool as StubReadMcpResourceTool;
         let mut builder = ToolRegistryBuilder::new()
             .with_tool(ShellTool::default())
             .with_tool(ReadFileTool)
@@ -279,7 +287,7 @@ impl AgentRunner {
             .with_tool(ExitWorktreeTool)
             .with_tool(BriefTool)
             .with_tool(SyntheticOutputTool)
-            .with_tool(AgentTool)
+            .with_tool(StubAgentTool)
             .with_tool(AskUserQuestionTool)
             .with_tool(EnterPlanModeTool)
             .with_tool(ExitPlanModeTool)
@@ -293,8 +301,8 @@ impl AgentRunner {
             .with_tool(TeamDeleteTool)
             .with_tool(ToolSearchTool)
             .with_tool(McpAuthTool)
-            .with_tool(ListMcpResourcesTool)
-            .with_tool(ReadMcpResourceTool)
+            .with_tool(StubListMcpResourcesTool)
+            .with_tool(StubReadMcpResourceTool)
             .with_tool(ReplTool);
         if goal {
             builder = builder.with_tool(GoalCompleteTool);
