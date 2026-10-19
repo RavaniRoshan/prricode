@@ -373,7 +373,29 @@ Additional observed event names: `StatusLine`, `FileSuggestion`, `PermissionRequ
 - `apply-seccomp` worker `0x1d21790`: 29 direct callees named, zero unresolved call destinations (`ev_03f243709e8d7a715417e1b5423040b0699e83e080e8a3e34d2bab35c52b75b0`). It reads `SRT_OBSERVE_SOCK` and `SRT_ENCODED_CMD`, creates a socketpair, unshares PID/mount and user namespaces, forks, performs private/root and `/proc` mounts, sets `prctl` (including `PR_SET_NO_NEW_PRIVS`), installs a seccomp filter with `SECCOMP_FILTER_FLAG_TSYNC_ESRCH` and a listener with `SECCOMP_FILTER_FLAG_NEW_LISTENER`, transfers descriptors with `sendmsg`, waits with `waitpid`, and finally `execvp`s.
 - Seccomp user-notification supervisor `0x1d22440`: 16 direct callees named, zero unresolved (`ev_675b0f67ffcb65b3210844369bc84963d66b4e552360bc61aa68ae7987fcaf7d`). It allocates kernel-reported notification buffers with fallbacks, opens a `pidfd`, polls the listener, receives notifications with ioctl request `0xc0502100`, dispatches on the notified syscall number, and responds with `0xc0182101`. A 241-case switch table is reported at `0xfa0f30`.
 - The static table at `0x6c749c0` was read byte-exactly (648 bytes, 27 six-word records) (`ev_7f3b70f348ad82e0462ade7bb1e07dec88154d51f868884e8f809f20d40c5ef8`). The first word of each record maps to a filesystem syscall (`openat`, `unlinkat`, `renameat2`, `fchmodat2`, `utimensat`, …) and the pointer at record offset `+8` resolves to that syscall's name. Selected syscall cases read fields at `+0x10` and `+0x13` and use the resulting indices to read one or two notified-process arguments with `process_vm_readv`; relative paths are resolved with `readlinkat` against `/proc/<pid>/cwd` or `/proc/<pid>/fd`; the supervisor can emit JSON records containing the syscall name, PID, path, and an optional encoded command.
-- **Unknown:** the exact metadata encoding of the per-record fields and the allow/deny/observe decision for every syscall. The earlier hypothesis that field `0x2463b9` is a handler function pointer was rejected: it is data, not code.
+- **The per-record metadata is now fully decoded**, and **the supervisor never blocks a syscall**. Both were closed this phase by reading the retained pseudocode and the exact table bytes together.
+
+**Record layout.** Each of the 27 records is 24 bytes: `{ uint64 syscall_nr; uint64 name_string_ptr; uint8 meta[8]; }`. The syscall numbers and the names were read directly out of the ELF's string table, so the earlier "the first word maps to a filesystem syscall" statement is now a **named** list: `openat` (257), `unlinkat` (263), `mkdirat` (258), `mknodat` (259), `symlinkat` (266), `linkat` (265), `renameat` (264), `renameat2` (316), `fchmodat` (268), `fchmodat2` (452), `fchownat` (260), `utimensat` (280), `open` (2), `creat` (85), `unlink` (87), `rmdir` (84), `rename` (82), `link` (86), `symlink` (88), `mkdir` (83), `mknod` (133), `truncate` (76), `chmod` (90), `chown` (92), `lchown` (94), `utime` (132), `utimes` (235).
+
+**Metadata encoding.** The five meaningful metadata bytes are **argument indices** into the notified syscall's argument list, with `0xff` meaning "this argument does not exist":
+
+| Byte | Meaning | Evidence |
+|---|---|---|
+| `meta[0]` | index of the **path** argument | `open`→0, `openat`→1, `symlink`→1 (the link path, not the target), `symlinkat`→2 (the link path) |
+| `meta[1]` | index of the **second path** argument | `rename`→1, `link`→1, `renameat`→3, `linkat`→3 |
+| `meta[2]` | index of the **flags/mode** argument | `open`→1, `openat`→2, `mkdirat`→2, `fchmodat`→2 |
+| `meta[3]` | index of the **dirfd** argument | `openat`→0, `unlinkat`→0, `mkdirat`→0, `mknodat`→0, `fchmodat`→0, `fchmodat2`→0, `fchownat`→0, `utimensat`→0, `symlinkat`→1 (its `newdirfd` is the *second* argument), `linkat`→0, `renameat`→0; absent (`0xff`) for the non-`at` calls |
+| `meta[4]` | index of the **second dirfd** | `linkat`→2 (`newdirfd`), `renameat`→2 (`newdirfd`) |
+
+`meta[5..7]` are constant (`0xff 0x00 0x00`) in this build and carry no observed meaning. Every one of the 27 records is consistent with this reading against the real Linux syscall signatures, which is what makes it a decoding rather than a guess.
+
+**Path resolution.** A path that is not absolute is resolved against the notified process: the supervisor formats `"<pid>/cwd"` when the dirfd is `AT_FDCWD` (-100) or absent, and `"<pid>/fd/<dirfd>"` otherwise, `readlinkat`s that path, and if the result is absolute it splices the relative remainder onto it. The observed path is then emitted as a JSON line — `{"nr":%d,"syscall":"%s","pid":%d,"path":"%s"}`, or the same with an added `"encodedCommand":"%s"` when an encoded command is present — with `\` and `"` backslash-escaped and control bytes rendered as `\uXXXX`. The syscall name in the JSON comes from the record's `+8` pointer.
+
+**The supervisor never denies.** The response struct (24 bytes) is written exactly three times: `memset(resp, 0, 24)`, `resp.id = notif.id`, and a single 4-byte store of `1` at offset `0x14`. **`resp.error` is never written**, so it stays `0`, which the kernel defines as "allow the system call to execute". Every intercepted syscall is therefore **permitted**; the supervisor only observes and logs it.
+
+**This closes the native gap in the most consequential sense.** The earlier "action per syscall" unknown is resolved: there is no deny action in this supervisor. Combined with the kernel's own documented prohibition on using the seccomp notifier as a security policy, the target's `apply-seccomp` helper is an **audit and emulation mechanism**, not the sandbox boundary — the boundary is the namespace, mount, and `PR_SET_NO_NEW_PRIVS` isolation established before the filter is installed. This implementation must not treat a userspace supervisor as an enforcement layer either.
+
+The earlier hypothesis that field `0x2463b9` is a handler function pointer was rejected: it is data — the name pointer of the `openat` record.
 
 **Known gap (carried forward):** the whole-image Ghidra inventory timed out at 330 s, 360 s, and 900 s and produced no Evidence. The selected-function workflow is viable; the whole-image inventory is not currently available. This is a **coverage gap, not evidence of absence**.
 
@@ -419,9 +441,9 @@ Status vocabulary: **observed** (directly present in the pinned artifact's stati
 
 These are gaps a reimplementation cannot close from the current evidence, listed with the specific artifact that would close them.
 
-1. **Per-syscall seccomp policy.** The 27-record table at `0x6c749c0` is read byte-exactly, but the field encoding and the per-syscall action are unresolved. Closing it needs a targeted Ghidra pass over the switch-case handlers that consume records at `+0x10` / `+0x13`.
+1. ~~**Per-syscall seccomp policy.**~~ — **closed this phase.** The 27-record table at `0x6c749c0` is decoded: the records are `{u64 nr; u64 name_ptr; u8 meta[8]}`, the metadata bytes are argument indices (path, second path, flags/mode, dirfd, second dirfd) with `0xff` meaning "absent", and the **supervisor never denies** — `resp.error` is never written, so every intercepted syscall is permitted and only observed. See §2.9.
 2. **Whole-image native inventory.** Three whole-binary attempts timed out (330 s, 360 s, 900 s). Only the selected-function workflow is viable at present.
-3. **Response-object construction for the Messages resource.** `APIPromise.parseResponse` is observed as a contract, but the per-resource implementation was not resolved to a callee.
+3. ~~**Response-object construction for the Messages resource.**~~ — **closed this phase.** The default `parseResponse` (`ai`) is read in full, including the SSE path, the `204` and binary paths, the JSON path with its non-enumerable `_request_id` / `_workspace_id`, and the extended SSE event vocabulary the SDK accepts (§2.2).
 4. **Tool-call scheduling and continuation.** The order of concurrent tool execution and the point at which the next model request is issued are not established.
 5. **Session resume algorithm.** The selection and replay logic behind `--resume` / `--continue` is bounded by the session controller's transfer-budget truncation.
 6. **Key-level configuration merge.** The tier set and block-level override are established; the full key-level merge is not.
@@ -438,18 +460,27 @@ The exit gate requires an evidence-backed coverage audit of CLI/configuration, p
 
 | Group | Gate state |
 |---|---|
-| CLI/configuration | **partial** — tiers and precedence observed; full merge unknown |
+| CLI/configuration | **partial** — tiers, both precedence orderings, block granularity, tier degradation and suppression, and scope isolation are observed; the ordinary per-key merge is still an underived implementation choice |
 | Providers and model catalogs | **met** |
 | Provider request/response construction | **met** — request construction and response parsing both established |
 | Agent loop and tool dispatch | **partial** — turn request and result shaping met; scheduling partial |
 | Permissions | **met** (rule precedence detail is a refinement, not a gap) |
 | Sessions/resumption | **partial** — storage and carry-over met; resume algorithm partial |
 | MCP/plugins/hooks/extensions | **partial** — control surface and transport met; lifecycles partial |
-| Native/platform sandbox | **partial** — helper and supervisor structure met; per-syscall policy partial |
+| Native/platform sandbox | **met** — helper structure, the 27-record table, its argument-index metadata encoding, the path resolution, and the supervisor's observe-not-deny behavior are all established |
 
-**Decision: the REA exit gate is NOT met.** Four groups are partial on a specific, named artifact each, and no group's gap is a "cannot be done" gap — every one of them is a bounded, tractable REA operation that has not been run yet.
+**Decision: the REA exit gate is NOT met, but the remaining gaps are now narrow and named.** Four groups are partial, and each one's gap is a specific, bounded artifact:
 
-Accordingly, **implementation remains blocked**. The precise next actions are listed in §6 and mirrored in `docs/PROGRESS.md`.
+| Group | What is still open | Why it is bounded |
+|---|---|---|
+| CLI/configuration | the **ordinary** per-key merge across tiers | The target's own per-key merge is not derived; this implementation makes a labelled choice. This is a *implementation design* gap, not an evidence gap. |
+| Agent loop and tool dispatch | the **scheduling order** of concurrent tool calls and the point at which the next model request is issued | Every call in these functions is a **member call** (`this.x(...)`), which REA does not resolve into a `calls` relation. Closing it needs source reading in the 5 MB bundle, not a better tool. |
+| Sessions/resumption | the `--resume` / `--continue` selection and the transcript replay algorithm | The session controller's semantic graph is bounded by the REA transfer byte budget at 40,000 nodes; the region holding the resume algorithm may or may not be inside it. |
+| MCP/plugins/hooks/extensions | the server lifecycle and the plugin/skill/subagent/marketplace lifecycles | The subsystems are named and their storage is observed; their behavior was not traced. |
+
+Two groups closed this phase that were previously open: **provider request/response construction** (the default `parseResponse` and the extended SSE event vocabulary) and **native/platform sandbox** (the 27-record table's metadata decoding and the supervisor's observe-not-deny behavior).
+
+**Implementation remains blocked** on the three evidence gaps above. The precise next actions are listed in §6 and mirrored in `docs/PROGRESS.md`.
 
 ---
 
@@ -461,7 +492,7 @@ Accordingly, **implementation remains blocked**. The precise next actions are li
 4. **Trace session resume** (`--resume` / `--continue` selection, transcript replay) in the same completed graph.
 5. **Enumerate the key-level configuration merge** from the settings accessor that `me(source)` resolves. **Materially advanced:** the two orderings and the block, degradation, and suppression rules are established (§2.7); only the ordinary per-key merge remains.
 6. **Enumerate the hook event matrix** from the hook registry in `chunk-081t8575.js` / `chunk-f27ph7ed.js`.
-7. **Targeted Ghidra pass** over the seccomp supervisor's switch-case handlers to decode the per-record metadata and the per-syscall action, closing native group 26.
+7. ~~**Targeted Ghidra pass** over the seccomp supervisor's switch-case handlers~~ — **closed this phase** by reading the retained pseudocode together with the exact table bytes; no new Ghidra run was needed. The per-record metadata is decoded and the supervisor's observe-not-deny behavior is established (§2.9).
 8. Re-run the coverage audit; only then lift the implementation block.
 
 ---
