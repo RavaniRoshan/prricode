@@ -34,10 +34,10 @@
  */
 
 import {
-  KEY_SCOPE_RESTRICTIONS,
   PROJECT_SIDE_SOURCES,
   TIER_PRECEDENCE,
   documentOf,
+  isSourceAllowedForKey,
   type SettingsSource,
   type SettingsTier,
   type SettingsTierMap,
@@ -70,9 +70,13 @@ export const SCOPE_BY_SOURCE: Readonly<
 /**
  * The scope of a source, ignoring the restriction. Policy and flag settings have no
  * personal scope and therefore report `null`.
+ *
+ * The lookup is an **own-property** check: a source that is not in the map has no
+ * scope, rather than resolving to an inherited `Object.prototype` member.
  */
 export function scopeFor(source: SettingsSource): SettingsScope | null {
   if (source === 'policySettings' || source === 'flagSettings') return null;
+  if (!Object.hasOwn(SCOPE_BY_SOURCE, source)) return null;
   return SCOPE_BY_SOURCE[source];
 }
 
@@ -120,10 +124,9 @@ export function readUserOnly(tiers: SettingsTierMap, key: string): SettingsTier 
  * restriction allows, so this agrees with `resolveBlock`.
  */
 export function readPerTier(tiers: SettingsTierMap, key: string): SettingsTier[] {
-  const allowed = KEY_SCOPE_RESTRICTIONS[key];
   const found: SettingsTier[] = [];
   for (const source of TIER_PRECEDENCE) {
-    if (allowed && !allowed.includes(source)) continue;
+    if (!isSourceAllowedForKey(key, source)) continue;
     const tier = lookupKey(tiers, source, key);
     if (tier) found.push(tier);
   }
@@ -172,6 +175,21 @@ export const BOOLEAN_FLAG_SOURCE_SETS: Readonly<Record<string, readonly Settings
 };
 
 /**
+ * The source union registered for a boolean flag, or `undefined` when the flag has
+ * none.
+ *
+ * The lookup is an **own-property** check: a flag whose name is an
+ * `Object.prototype` member (`constructor`, `toString`, `hasOwnProperty`,
+ * `valueOf`, `__proto__`) has no registered union, so the caller gets the clear
+ * "no explicit source union" error instead of a crash on the inherited member.
+ */
+function booleanFlagSourceSet(key: string): readonly SettingsSource[] | undefined {
+  if (!Object.hasOwn(BOOLEAN_FLAG_SOURCE_SETS, key)) return undefined;
+  const union = BOOLEAN_FLAG_SOURCE_SETS[key];
+  return Array.isArray(union) ? union : undefined;
+}
+
+/**
  * Read a boolean flag from its explicit source union and report the tier that
  * supplied the value.
  *
@@ -185,7 +203,7 @@ export function readBooleanFlag(
   key: string,
   sources?: readonly SettingsSource[],
 ): SettingsTier | undefined {
-  const union = sources ?? BOOLEAN_FLAG_SOURCE_SETS[key];
+  const union = sources ?? booleanFlagSourceSet(key);
   if (!union) {
     throw new Error(
       `no explicit source union for the boolean flag "${key}"; pass one or register it in BOOLEAN_FLAG_SOURCE_SETS`,
