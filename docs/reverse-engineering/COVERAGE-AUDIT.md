@@ -425,7 +425,7 @@ Status vocabulary: **observed** (directly present in the pinned artifact's stati
 | 16 | Permission transport (remote) | observed | `ev_9b2fbff46f81bf00e4937bf22c035b7f51aebb8ce323369480e28854298c3d80` | `TransportPermissionDispatcher`; dedup; malformed → deny. |
 | 17 | Hooks | observed (event matrix) | `ev_da3ebe58a838f10c641ef6ce892283c7db5ee8d8444b7f27159efaeada6531d3` | 30+ events, per-event classification, decision shapes, matchers, MCP-tool hooks. |
 | 18 | Session storage layout | observed | `chunk-4jsg44k7.js` | 55 `~/.claude` subdirectories; JSONL transcripts under `projects`. |
-| 19 | Session resumption | partial | `ev_9b2fbff46f81bf00e4937bf22c035b7f51aebb8ce323369480e28854298c3d80` | `resumeAdoptedAgents` / `resumeOrphanedAgents` exist; algorithms bounded by truncation. |
+| 19 | Session resumption | partial | `ev_9b2fbff46f81bf00e4937bf22c035b7f51aebb8ce323369480e28854298c3d80` | The tool-call pairing rule (a `tool_use` is answered by the `tool_result` with the same id, and the pending id is removed when it arrives), the interrupted-turn rule (walk backward; an unanswered `tool_use` means the turn was cut off), and the resume point (the last assistant message containing a `tool_use`, else the last message) are established. The session *selection* algorithm and the replay path are not. |
 | 20 | Cross-restart prompt carry-over | observed | `chunk-6bp7hdav.js` | Outcome vocabulary and age/binding policy observed. |
 | 21 | MCP control surface | observed | `ev_592745079e22b1a97e0aaad8b97eabf04fe71d9d71f275007cf6e77f7528e5b7` | 23 subtypes enumerated; MCP callbacks and their absence error. |
 | 22 | MCP transport | observed | `chunk-6s9yz1tm.js` | stdio spawn semantics; batching 3/20; `tools/list`, `tools/call`. |
