@@ -12,6 +12,7 @@ prricode-sandbox = { path = "../prricode-sandbox" }
 prricode-computer-use = { path = "../prricode-computer-use" }
 prricode-workflow = { path = "../prricode-workflow" }
 prricode-mcp = { path = "../prricode-mcp" }
+prricode-skills = { path = "../prricode-skills" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

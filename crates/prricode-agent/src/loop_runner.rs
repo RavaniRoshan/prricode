@@ -7,10 +7,10 @@ use crate::tools::{
     EditFileTool, EnterPlanModeTool, EnterWorktreeTool, ExitPlanModeTool, ExitWorktreeTool,
     GlobTool, GrepTool, ListDirTool, ListMcpResourcesTool, LspTool, McpAuthTool, McpTool,
     NotebookEditTool, ReadFileTool, ReadMcpResourceTool, RemoteTriggerTool, ReplTool, Risk,
-    ScheduleCronTool, SendMessageTool, SharedEngine, ShellTool, SleepTool, SyntheticOutputTool,
-    TaskTool, TeamCreateTool, TeamDeleteTool, TodoWriteTool, Tool, ToolContext, ToolError,
-    ToolOutput, ToolRegistry, ToolRegistryBuilder, ToolSearchTool, WebFetchTool, WebSearchTool,
-    WorkflowTool, WriteFileTool,
+    ScheduleCronTool, SendMessageTool, SharedEngine, ShellTool, SkillTool, SleepTool,
+    SyntheticOutputTool, TaskTool, TeamCreateTool, TeamDeleteTool, TodoWriteTool, Tool,
+    ToolContext, ToolError, ToolOutput, ToolRegistry, ToolRegistryBuilder, ToolSearchTool,
+    WebFetchTool, WebSearchTool, WorkflowTool, WriteFileTool,
 };
 use crate::{build_system_prompt, load_project_instructions, AgentEvent, ProjectInstructionsMode};
 use prricode_core::ApprovalMode;
@@ -245,6 +245,7 @@ impl AgentRunner {
             .with_tool(ConfigTool)
             .with_tool(TodoWriteTool)
             .with_tool(SleepTool)
+            .with_tool(SkillTool::default())
             .with_tool(EnterWorktreeTool)
             .with_tool(ExitWorktreeTool)
             .with_tool(BriefTool)

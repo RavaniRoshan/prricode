@@ -42,7 +42,7 @@ full workspace tests green, one commit per phase item.
 | 11 | Marketplace install | degraded | proxied sources not planned; `plugin/install` honest |
 | 12 | Skill frontmatter (model/allowed-tools/context) | done | parse tests |
 | 12 | Activation → turn prompts + registry narrowing | done | `skill/setActivation` flows; intersections; tests |
-| 12 | SkillTool in registry | pending | … |
+| 12 | SkillTool in registry | done | `crates/prricode-agent/src/tools/skill.rs` — by-name load, honest listing, not-found errors; registered in build_registry; 4 tests |
 | 13 | `?` empty-composer help binding | done | test `question_mark_on_empty_composer_opens_help` |
 | 13 | Session picker | done | `/sessions` modal; test |
 | 13 | `/message` `/ts` `/ps` real surfaces | done | queue + local state views |
