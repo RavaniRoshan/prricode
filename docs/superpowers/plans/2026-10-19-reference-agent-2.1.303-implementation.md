@@ -248,23 +248,23 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Design note (this is the extension, not target behavior).** The target has **no** user-managed connection registry: route selection yields exactly one active route from environment flags, and the model catalog is built in. The registry above is the deliberate product extension. External precedent (Kimi Code, Roo Code, OpenCode, Goose, Hermes) agrees on three points that this design adopts: a connection is keyed by a **free-form name** rather than a provider type, so several connections may exist for the same protocol; the model catalog is a **separate table** from the connection table, so a catalog refresh cannot rewrite a connection's identity; and the **secret store and the config record are two different layers**, so a catalog refresh never touches a credential. Kimi Code's `api_key` / `api_key_env` are mutually exclusive with **no automatic shell-environment fallback**; this implementation keeps a single explicit `env` reference kind instead, because a reference has no secret in it.
 
-- [ ] **Step 1: Write the failing route test** — `selectRoute` returns `gateway` when the gateway flag is set, otherwise the first matching provider flag in the order `bedrock`, `foundry`, `anthropicAws`, `anthropicGoogleCloud`, `mantle`, `vertex`, otherwise `firstParty`.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
-- [ ] **Step 3: Implement `src/provider/routes.ts`** with `ROUTE_ORDER` and `selectRoute`, mirroring the target's dispatch order exactly.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing registry test** — two enabled connections with different routes; `active()` throws when more than one is enabled; `add` rejects a duplicate `id`; `remove` of an unknown `id` returns `false`.
-- [ ] **Step 6: Implement `src/provider/registry.ts`** — an in-memory registry with an `enabled` flag and a single-active invariant. This is the **extension**: the target has exactly one active route and no registry.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing credential test** — `credentialStatus` for an `env` ref reports `configured` when the variable is set and `missing` when it is not, **without** returning the value; `resolveCredential` is the only function that returns a value; the registry's `list()` output contains no secret material.
-- [ ] **Step 9: Implement `src/provider/credentials.ts`** — `credentialStatus` inspects presence only; `resolveCredential` is the single resolution point and is never called by listing or catalog code. The keychain backend shells out to the platform CLI (macOS: `security find-generic-password -w -s <service> -a <account>`) with a layered fallback, because `keytar` was archived in 2022 and a native binding is a hard conflict with a self-contained executable.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Add a security test** asserting that `JSON.stringify(registry.list())` contains no value from a populated credential env var, and that `credentialStatus` on a keychain reference does **not** read the keychain (it reports the reference's presence only, so a listing never triggers an OS prompt).
-- [ ] **Step 12: Write the failing endpoint-policy test** — `resolveBaseUrl('bedrock', env)` picks up `ANTHROPIC_BEDROCK_BASE_URL` and reports `isVendorHost: false` for a host that is not a `bedrock` regional host; `resolveBaseUrl('vertex', env)` picks up `ANTHROPIC_VERTEX_BASE_URL`; a provider with no base-URL variable reports the vendor's own default host with `isVendorHost: true`.
-- [ ] **Step 13: Implement `ENDPOINT_POLICIES`** with the exact variable list and host patterns the target declares, and implement `resolveBaseUrl` so it distinguishes a vendor host from a user-supplied endpoint.
-- [ ] **Step 14: Write the failing untrusted-endpoint test** — a connection whose base URL is user-supplied does not receive the credential unless the connection explicitly opts in, and the refusal names the host.
-- [ ] **Step 15: Implement the untrusted-endpoint guard** in `src/provider/registry.ts`.
-- [ ] **Step 16: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 17: Commit.**
+- [x] **Step 1: Write the failing route test** — `selectRoute` returns `gateway` when the gateway flag is set, otherwise the first matching provider flag in the order `bedrock`, `foundry`, `anthropicAws`, `anthropicGoogleCloud`, `mantle`, `vertex`, otherwise `firstParty`.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
+- [x] **Step 3: Implement `src/provider/routes.ts`** with `ROUTE_ORDER` and `selectRoute`, mirroring the target's dispatch order exactly.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing registry test** — two enabled connections with different routes; `active()` throws when more than one is enabled; `add` rejects a duplicate `id`; `remove` of an unknown `id` returns `false`.
+- [x] **Step 6: Implement `src/provider/registry.ts`** — an in-memory registry with an `enabled` flag and a single-active invariant. This is the **extension**: the target has exactly one active route and no registry.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing credential test** — `credentialStatus` for an `env` ref reports `configured` when the variable is set and `missing` when it is not, **without** returning the value; `resolveCredential` is the only function that returns a value; the registry's `list()` output contains no secret material.
+- [x] **Step 9: Implement `src/provider/credentials.ts`** — `credentialStatus` inspects presence only; `resolveCredential` is the single resolution point and is never called by listing or catalog code. The keychain backend shells out to the platform CLI (macOS: `security find-generic-password -w -s <service> -a <account>`) with a layered fallback, because `keytar` was archived in 2022 and a native binding is a hard conflict with a self-contained executable.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Add a security test** asserting that `JSON.stringify(registry.list())` contains no value from a populated credential env var, and that `credentialStatus` on a keychain reference does **not** read the keychain (it reports the reference's presence only, so a listing never triggers an OS prompt).
+- [x] **Step 12: Write the failing endpoint-policy test** — `resolveBaseUrl('bedrock', env)` picks up `ANTHROPIC_BEDROCK_BASE_URL` and reports `isVendorHost: false` for a host that is not a `bedrock` regional host; `resolveBaseUrl('vertex', env)` picks up `ANTHROPIC_VERTEX_BASE_URL`; a provider with no base-URL variable reports the vendor's own default host with `isVendorHost: true`.
+- [x] **Step 13: Implement `ENDPOINT_POLICIES`** with the exact variable list and host patterns the target declares, and implement `resolveBaseUrl` so it distinguishes a vendor host from a user-supplied endpoint.
+- [x] **Step 14: Write the failing untrusted-endpoint test** — a connection whose base URL is user-supplied does not receive the credential unless the connection explicitly opts in, and the refusal names the host.
+- [x] **Step 15: Implement the untrusted-endpoint guard** in `src/provider/registry.ts`.
+- [x] **Step 16: Run it to verify it passes** — expected: PASS.
+- [x] **Step 17: Commit.**
   ```bash
   git add src/provider tests/contracts/provider-registry.test.ts tests/security/provider-credentials.test.ts
   git commit -m "feat(provider): connection registry, credential references, route selection"
