@@ -110,7 +110,12 @@ The target changed this behavior in a later release without a deprecation warnin
 | A `PreToolUse` rewrite is re-checked with the **whole** permission check against the **effective** input, and a rewritten input the tool's validator rejects **denies** the call | **implementation choice** for the re-check; "the rewrite is what the tool receives" is REA observed |
 | The re-check keeps the hook's **approval** and its **denial** and drops only its **rewrite**; a deny rule, an ask rule or a mode refusal covering the effective input still wins | **implementation choice** |
 | A rewrite is never lost: the decision that leaves the check records the effective input, and the user's answer to the prompt carries it | **implementation choice** |
-| The safety check and the tool's validator run **once each**, on the effective input | **implementation choice** |
+| The safety check runs **once** for an unrewritten call and **twice** for a rewritten one — once in the tool's own check, once in the tool layer's re-check | **implementation choice** |
+| A `PreToolUse` `defer` drops the hook's rewrite with it — a deferral is no opinion, so nothing is carried and the call acts on the input the model made | **implementation choice** |
+| The rewrite rides along on an `ask` — the question is about the rewritten call, so `decision.updatedInput` is the rewritten input | **implementation choice** |
+| The tool layer's re-check keeps **only a denial**, so an approving-and-rewriting hook cannot approve a call no rule covers: the re-check leaves the generic `noRuleMatch` ask, the call escalates to the prompt, and with no prompt it is **refused** (`permission_unresolved`) — even though the permission layer allowed it and the hook approved it. A call a rule *does* cover is unaffected | **implementation choice** |
+| Both layers consult the `PreToolUse` seam **first**, so when both seams deny the refusal names the `PreToolUse` denial in both layers | **implementation choice** |
+| The `PreToolUse` seam is consulted **three** times for a rewritten call (the original input in the check, the effective input in the permission layer's re-check, the effective input in the tool layer's re-check) and **once** for a call that is not rewritten | **implementation choice** |
 | A hook that throws **denies** the call | **implementation choice** |
 
 The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny: 3`); the hooks module's four-value **type** is imported **type-only** (erased at compile time), so only the table is the permission layer's own.
