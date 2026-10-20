@@ -761,6 +761,29 @@ export interface PreToolUseHookApproval {
   git commit -m "feat(tools): route the Bash tool through the sandbox"
   ```
 
+**Result:** the `Bash` tool runs through the sandbox. A sandboxed command runs through
+`launchSandbox`; an exempt one runs unconfined **with the reason recorded**; a missing
+backend obeys `failIfUnavailable`; the availability is probed **once**, so the policy and
+the launcher cannot disagree; `SettingsLoadResult` carries a **required** `sandboxPolicy`;
+and **neither** the sandboxed **nor** the unconfined path sees the agent's credentials.
+
+Two rounds of review and a third verification found, and closed:
+
+- the launcher's live output accessor leaking the **readiness token** as command output on every timed-out run;
+- the CLI→policy wiring pinned only by a **source grep**, replaced with a real guard that builds a session and checks the policy reached the model;
+- a sandboxed command that ran past its timeout **reported as stopped but left running** — the timeout path skipped the kill. The kill is now fired without blocking the report, and the test watches the host's process table;
+- the **same defect class on the unconfined path** — it killed only the shell, so the command's own process was orphaned and survived. The command now leads its **own process group** and the whole group is stopped.
+
+**Verified** by mutation in the final pass: removing the sandboxed timeout's kill turns
+three tests red, making the unconfined path kill only the shell turns one red, and
+reverting the unconfined path's notice reservation turns two red. The security suite is
+green at **241 tests**.
+
+**One residual:** the unconfined path runs the command itself rather than through the
+launcher's own unconfined path, so no `SandboxStatus` is produced for an unconfined run.
+The tool's own report carries the reason, the scope and the availability, and the
+difference is now stated in `docs/compatibility/tool-surface.md`.
+
 ### CC-009b — The projected tool-result content must be a string
 
 **Why this task exists.** The `CC-010` re-review found that a **failed** tool (an execution error or a validation error) leaves the transcript with an envelope whose content is an **object** — `{"type":"error","message":"the tool exploded","errorCode":12}`. The live path serialises it, so the same turn is fine, but the **cross-turn projection** in `src/session/resume.ts` passes `block.content` raw, so the **next** request carries a `tool_result` block whose content is an object. The Messages API's observed shape is `{tool_use_id, type:"tool_result", content:<string>}` — so the request after a failed tool is invalid. The `CC-010` fix round's "the next request is well-formed" claim holds for the refusal and interruption paths, but not for this one.
