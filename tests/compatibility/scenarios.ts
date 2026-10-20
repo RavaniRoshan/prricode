@@ -138,6 +138,7 @@ import {
   checkPermission,
   isPersonalConfigRestricted,
   resolveStartMode,
+  sandboxOverrideDecision,
   type PermissionDecision,
   type RuleSet,
 } from '../../src/permissions/decision.js';
@@ -3023,9 +3024,17 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(refused).toMatchObject({ decision: 'deny' });
       const reasons = observe('the sandbox reasons', SANDBOX_REASONS);
       expect(reasons.disabled).toBe('sandbox.enabled is false');
+      // The target's **override** is an *ask* carrying the `sandboxOverride`
+      // kind and the target's own message — not a silent skip.
+      const override = observe('the override decision', sandboxOverrideDecision());
+      expect(override).toMatchObject({
+        behavior: 'ask',
+        reasonKind: 'sandboxOverride',
+        reason: 'Run outside of the sandbox',
+      });
       return measured(
-        'unknown',
-        "The target's routing is unobserved: the audit records the sandboxOverride reason kind, and this implementation's routing is its own. The dangerouslyDisableSandbox flag is this implementation's, not the audit's.",
+        'match',
+        "The target's routing is reproduced: a call that asks for an unsandboxed run is an **ask** carrying the sandboxOverride kind and the target's own reason, an excluded platform and a switched-off sandbox run unconfined with the target's reason strings, and a missing backend is refused only when the policy requires it. The **defaults** differ, and the difference is recorded in the conformance document.",
       );
     },
   },

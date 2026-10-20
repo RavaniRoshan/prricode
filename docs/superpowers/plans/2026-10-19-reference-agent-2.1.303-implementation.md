@@ -1740,23 +1740,42 @@ required"* even with the referenced environment variable set.
 **Files:** Modify `src/cli/command.ts`; Modify `src/provider/registry.ts`; Modify
 `tests/contracts/cli-surface.test.ts`; Modify `tests/contracts/provider-command.test.ts`.
 
+**Result:** a run uses the active connection. The run resolves the **active** connection —
+its route, its base URL and its credential — and the credential comes from
+`resolveConnectionCredential`, the **only** path to a secret, so the untrusted-endpoint guard
+runs first.
+
+- With **no** connection, the run is exactly as it was.
+- A connection that **cannot be resolved** is **refused**: the refusal names the connection
+  and the reference, and **no request is sent**.
+- **Two** enabled connections are refused, by name.
+- The active connection wins over the programmatic `CommandOptions.credential` seam — the
+  table is the user's own configuration, and the seam is what a caller uses when there is
+  no connection.
+
+**Verified by running the built artifact.** Before: `--provider use` succeeded, `--provider
+list` reported the credential *resolved and usable*, and `--print` still answered *"x-api-key
+header is required"*. After: the endpoint **received the key** and refused the dummy. The
+defect was invisible in the code and obvious in the artifact.
+
+
 **Interfaces:**
 - Consumes: `src/provider/registry.ts` (`resolveConnectionCredential`, the registry's
   `active()`), `src/cli/commands/provider.ts` (`loadManagerState`).
 - Produces: the run path's credential and base URL, taken from the **active** connection
   when there is one.
 
-- [ ] **Step 1: Write the failing test** — with a connection registered, made active, and
+- [x] **Step 1: Write the failing test** — with a connection registered, made active, and
   its referenced environment variable set, a run sends the connection's credential and
   reaches the connection's base URL; with **no** connection, the run is exactly as it is
   today.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement it** — the run resolves the active connection's credential
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement it** — the run resolves the active connection's credential
   through `resolveConnectionCredential` — the **only** path to a secret — and uses the
   connection's route and base URL. A connection that cannot be resolved is **reported**,
   not silently ignored.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Commit.**
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Commit.**
   ```bash
   git add src/cli/command.ts src/provider/registry.ts tests/contracts
   git commit -m "feat(cli): a run uses the active connection"
@@ -1877,14 +1896,37 @@ audit records the `sandboxOverride` reason kind; the routing rule itself was nev
 **Files:** Modify `src/tools/builtins/bash.ts`; Modify `src/permissions/decision.ts`;
 Modify `tests/security/bash-sandbox.test.ts`; Modify `docs/compatibility/sandbox-surface.md`.
 
-- [ ] **Step 1: Read the target's routing from the source** — how the target decides to
+**Result:** the target's routing is read from its own bundle and reproduced. The override
+is an **ask** carrying the `sandboxOverride` kind and the target's own message; an
+excluded platform and a switched-off sandbox run unconfined with the target's reason
+strings; and a missing backend is refused only when the policy requires it.
+
+**A correction to this milestone's own premise.** `dangerouslyDisableSandbox` is the
+**target's** flag — its `Bash` input schema declares it — and not this implementation's.
+The milestone and the ledger had it backwards, and the label now goes the other way.
+
+**What differs is the defaults, and they are a posture question.** Read from the source:
+
+| the key | the target when it is **absent** | this implementation |
+|---|---|---|
+| `sandbox.enabled` | **off** — the command runs unconfined | **on** |
+| `sandbox.failIfUnavailable` | **off** — a missing backend runs the shell unconfined | **on** |
+| `sandbox.allowUnsandboxedCommands` | the flag is **live** | the flag is **inert** |
+| `sandbox.enabledPlatforms` | every platform allowed | `['linux']` |
+
+This implementation is **stricter** on all three. That difference is recorded in
+`docs/compatibility/sandbox-surface.md`, and closing it is the owner's decision — the
+second layer is where a deliberate posture belongs.
+
+
+- [x] **Step 1: Read the target's routing from the source** — how the target decides to
   run a command outside the sandbox, and what it reports. Record it.
-- [ ] **Step 2: Write the failing test** — the target's routing is reproduced, and the
+- [x] **Step 2: Write the failing test** — the target's routing is reproduced, and the
   flag that is **this implementation's own** is labelled as such.
-- [ ] **Step 3: Implement** what the reading established.
-- [ ] **Step 4: Update the conformance document** — `F-37` moves from `unknown` to
+- [x] **Step 3: Implement** what the reading established.
+- [x] **Step 4: Update the conformance document** — `F-37` moves from `unknown` to
   `match` or `partial`.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
   ```bash
   git add src/tools src/permissions tests/security docs/compatibility/sandbox-surface.md
   git commit -m "fix(tools): the sandbox routing is the target's"
@@ -2550,7 +2592,7 @@ that reason.
 ---
 
 
-**Result (fix round 2, and the source readings):** The measured totals are **26 `match`**, **11 `partial`**, **2 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. Two rows were **false divergences**, and both were artefacts of the audit rather than of the implementation: `F-38` came from a §2.10 sentence that described the target's **optional-value** flag set while calling it the boolean set, and the audit has been corrected against the target's own parser. Seven of the eight measured divergences are now closed. The two that remain are the **mechanism** — the target's sandbox helper and supervisor are native ELF programs and this implementation's are in-process — and they are named rather than hidden.
+**Result (fix round 2, and the source readings):** The measured totals are **27 `match`**, **11 `partial`**, **2 `mismatch`**, **0 `not-tested`** and **2 `unknown`** over the 42 matrix rows. Two rows were **false divergences**, and both were artefacts of the audit rather than of the implementation: `F-38` came from a §2.10 sentence that described the target's **optional-value** flag set while calling it the boolean set, and the audit has been corrected against the target's own parser. Seven of the eight measured divergences are now closed, and the target's **sandbox routing** is established and reproduced. The two that remain are the **mechanism** — the target's helper and supervisor are native ELF programs and this implementation's are in-process — and they are named rather than hidden. The two that remain **unknown** are the ones the evidence never reached: the target's compaction behaviour and the whole-image native inventory.
 
 **One rule, applied to every row:** a **difference of any kind** from the target's *observed* behavior — including a member the target has and this implementation does not — is a `mismatch`. Every "What was measured" cell is the harness's own `detail` string and the results test compares the two. A probe that observes nothing this implementation produced, that compares a value with itself, or that asserts a constant, fails the suite, and a stale total fails it too.
 
