@@ -2072,18 +2072,64 @@ documents.
 
 **Files:** Modify `src/config/schema.ts`; Modify `src/config/tiers.ts`; Modify `tests/contracts/settings-precedence.test.ts`; Modify `docs/compatibility/settings-precedence.md`.
 
-- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+- [x] **Step 1: Read the surface from the source** and record it — the names, the shape,
   the behaviour, the file and the offset for every claim.
-- [ ] **Step 2: Write the failing test** for what the reading established.
-- [ ] **Step 3: Implement** it, and the rules that govern it.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+- [x] **Step 2: Write the failing test** for what the reading established.
+- [x] **Step 3: Implement** it, and the rules that govern it.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Update the conformance documents and the report** — the surface is named,
   and the report says what was compared.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
   ```bash
   git add src tests/contracts docs/compatibility
   git commit -m "feat: the settings document: 183 keys and two sibling config systems"
   ```
+
+
+**Result:** the settings **document** is here — the target's shape, not just its merge.
+
+| the group | the target | what this implementation does |
+|---|---|---|
+| the settings document | **183** keys, each with the target's own prose | the same names, types and defaults; the target's prose is the key's description; one **loose** object, because the target preserves unknown keys |
+| the gated blocks | **7** keys outside the 183, and one more inside `permissions` | the same 7, and the gated `disableAutoMode` |
+| `permissions` | **7** keys | the same; `defaultMode` accepts `manual` as an alias for `default` and normalises it |
+| `sandbox` | **16** keys | the same |
+| the workspace config | **28** keys | a **separate** document, with its own schema, its own runtime defaults and its own fail-closed stand-ins |
+| the flat managed config | **22** keys, in the flat dot-path form | a **separate** document, with the two discriminators and a materialiser into the nested shape |
+| the defaults | the schema carries none — a default lives in the code that reads the key, and in the key's own prose | `SETTINGS_DEFAULTS` keyed by dotted path, with a key that has **no** default reading as `undefined` and never as `false` |
+
+**Two of the record's counts were one too high, and the source settles both:** the workspace
+config has **28** keys, not 29, and the target's `sandbox` **schema** names 15 — 16 is
+the number of keys the *block* carries.
+
+**A correction to the task itself.** The brief pointed the defaults at `runtimeDefault`
+and `fieldMeta` in `chunk-z6a1zj5w.js`; that registry belongs to the **managed config**,
+not the settings document. The settings document's defaults live in the target's own
+prose, which is what was read.
+
+**What is not established, and is named as such.** The per-tool permission-rule
+validators; the interiors of several sub-schemas (the MCP server entries, the marketplace
+entries, the policy-helper entries, the hook commands, the credential entries,
+`allowedFolders`, `allowedEgressHosts`) — the right *kind* is enforced, a wrong member
+*shape* inside them is not; the flat managed config's leaf registry; the
+`inferenceProvider` enum; and the plan-dependent defaults, where the target's default is
+not one value.
+
+**One scope rule left alone, deliberately.** The scope table's `spellcheck` entry says
+*user only*, while the target's own prose says *user, flag and managed*. The existing
+contract pins the narrower rule, so it was not weakened — the target's per-key scoping is
+recorded as **data** in the conformance document instead.
+
+**The naming rule, applied throughout.** A settings file is an **interface**, so the
+**key names** keep the target's brand (`claudeMd`, `syncClaudeAiSkills`,
+`disableClaudeAiConnectors`) — a clone that renamed a key would reject a file the target
+accepts. The **prose** has the product name replaced by PRRICODE, and the only
+occurrence of the target's product name anywhere in `src/` or `tests/` is the assertion
+that it is absent.
+
+**Verified.** Twenty-five new tests in seven new describes; reverting only
+`src/config/*` to `HEAD` makes **23 of the 25** fail while the 67 pre-existing tests
+still pass, so the new tests are guards and the old ones are not weakened.
 
 ### CC-030 — The slash-command registry: 92 commands
 
