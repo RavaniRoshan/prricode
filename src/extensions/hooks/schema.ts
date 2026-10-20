@@ -35,7 +35,10 @@
  *     that a hook reads.
  *   - **The `permission_mode` in the payload is the normalized six.** The
  *     `manual` alias of `default` is normalized to `default`, so the payload
- *     never carries an alias that is not one of the six modes.
+ *     never carries an alias that is not one of the six modes. A value that
+ *     names none of the six — the caller's input is untrusted data — is
+ *     **refused**: the payload does not carry a mode at all rather than
+ *     carrying one that is not a mode.
  *   - **The blockable events are the eleven decision-capable events plus
  *     `PermissionRequest`** — twelve in all. The audit records
  *     `PermissionRequest` as carrying a decision of its own, so this implementation
@@ -131,6 +134,26 @@ export {
  */
 export type HookPermissionMode = Exclude<PermissionMode, 'manual'>;
 
+/** The six modes the payload carries. */
+const HOOK_PERMISSION_MODES: ReadonlySet<string> = new Set<string>([
+  'default',
+  'plan',
+  'acceptEdits',
+  'auto',
+  'dontAsk',
+  'bypassPermissions',
+]);
+
+/**
+ * Whether a value names one of the six modes.
+ *
+ * The `manual` alias is **not** one of the six: it is the UI label of
+ * `default`, and it is normalized away before the payload carries it.
+ */
+export function isHookPermissionMode(value: unknown): value is HookPermissionMode {
+  return typeof value === 'string' && HOOK_PERMISSION_MODES.has(value);
+}
+
 /**
  * The context a hook payload is built from.
  *
@@ -220,7 +243,7 @@ export function readField(record: Record<string, unknown>, field: string): unkno
  * live there — and the context wins for the common fields. The event name is
  * always the payload's `hook_event_name`, and the permission mode is
  * **normalized**: the payload carries one of the six modes, never the
- * `manual` alias.
+ * `manual` alias and never a value that names no mode at all.
  */
 export function buildHookPayload(
   event: HookEvent,
@@ -252,6 +275,14 @@ export function buildHookPayload(
   const mode = payload['permission_mode'];
   if (typeof mode === 'string') {
     payload['permission_mode'] = normalizePermissionMode(mode as PermissionMode);
+  }
+
+  // The payload carries **one of the six** modes, and only one of them. The
+  // caller's input is untrusted data, so the guarantee cannot be a type
+  // claim alone: a value that names none of the six is **refused**, and the
+  // payload does not carry a mode at all.
+  if (!isHookPermissionMode(payload['permission_mode'])) {
+    delete payload['permission_mode'];
   }
 
   payload['hook_event_name'] = event;

@@ -249,6 +249,11 @@ describe('the hook registry', () => {
     expect(() =>
       registry.register({ event: 'PreToolUse', matcher: 'mcp__memory__.*', command: 'echo pre' }),
     ).not.toThrow();
+    // The empty character class is a pattern JavaScript accepts, so the
+    // registry accepts it too.
+    expect(() =>
+      registry.register({ event: 'PreToolUse', matcher: '[]', command: 'echo pre' }),
+    ).not.toThrow();
   });
 
   it('carries the handler kind in one field', () => {
@@ -360,6 +365,83 @@ describe('the hook registry', () => {
 
 // --- the matcher -----------------------------------------------------------------
 
+/**
+ * The patterns the bounded fuzz compares against JavaScript.
+ *
+ * They are generated from the **supported subset** — literals, the character
+ * classes, the groups, the alternation and the quantifiers — so every one of
+ * them is a pattern both engines accept. The generator is deterministic, so a
+ * failure is reproducible.
+ */
+function fuzzPatterns(count: number): string[] {
+  let state = 20261020;
+  const random = (): number => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+  const pick = <T>(list: readonly T[]): T => {
+    const chosen = list[Math.floor(random() * list.length)];
+    if (chosen === undefined) throw new Error('the list is empty');
+    return chosen;
+  };
+
+  const literals = ['a', 'b', 'c', 'x', '1', '_', '-', ' ', 'z'];
+  const escapes = [
+    '\\d', '\\D', '\\w', '\\W', '\\s', '\\S', '\\n', '\\t', '\\r', '\\x41', '\\u0041',
+    '\\u{1F600}', '\\cA', '\\0', '\\.', '\\\\',
+  ];
+  const classes = [
+    '[abc]', '[^abc]', '[a-c]', '[abc-]', '[-abc]', '[\\d]', '[^\\w]', '[]', '[^]',
+    '[\\]]', '[^\\]]', '[\\x41-\\x5a]',
+  ];
+  const quantifiers = [
+    '',
+    '',
+    '',
+    '*',
+    '+',
+    '?',
+    '{2}',
+    '{0,2}',
+    '{1,2}',
+    '{2,3}',
+    '{0,1}',
+    '{1,}',
+    '{0,}',
+    '{3}',
+    '{0,0}',
+    '{2,4}',
+  ];
+
+  const atom = (): string => {
+    const roll = random();
+    if (roll < 0.3) return pick(literals);
+    if (roll < 0.5) return pick(escapes);
+    if (roll < 0.72) return pick(classes);
+    if (roll < 0.86) return `(${pick(literals)}${pick(literals)})`;
+    if (roll < 0.94) return `(?:${pick(literals)}${pick(literals)})`;
+    return `(${pick(literals)}|${pick(literals)})`;
+  };
+
+  const patterns: string[] = [];
+  const seen = new Set<string>();
+  while (patterns.length < count) {
+    const terms = 1 + Math.floor(random() * 4);
+    let body = '';
+    for (let index = 0; index < terms; index += 1) {
+      body += random() < 0.08 ? atom() : `${atom()}${pick(quantifiers)}`;
+    }
+    if (random() < 0.15) body = `(?:${body})`;
+    if (random() < 0.12) body = `${body}|${atom()}`;
+    if (random() < 0.3) body = `^${body}`;
+    if (random() < 0.3) body = `${body}$`;
+    if (seen.has(body)) continue;
+    seen.add(body);
+    patterns.push(body);
+  }
+  return patterns;
+}
+
 describe('the tool-name matcher', () => {
   it('matches an exact string', () => {
     expect(matchToolName('Edit', 'Edit')).toBe(true);
@@ -452,6 +534,24 @@ describe('the tool-name matcher', () => {
     expect(Date.now() - started).toBeLessThan(1000);
   }, 2000);
 
+  it('refuses a matcher whose bounded quantifiers expand exponentially too', () => {
+    // The same blow-up through the **optional** path: `{0,64}` compiles the
+    // body once and offers it at most once, and the nested repetitions still
+    // multiply. The budget is on the whole program, so the matcher is refused
+    // — the quantifier's bound does not reopen the blow-up.
+    const pattern = '(((a{0,64}){0,64}){0,64}){0,64}';
+    const started = Date.now();
+    const compiled = compileMatcher(pattern);
+
+    expect(compiled.ok).toBe(false);
+    if (!compiled.ok) {
+      expect(compiled.reason).toContain(String(MAX_MATCH_NODES));
+      expect(compiled.reason).toContain('nodes');
+    }
+    expect(matchToolName(pattern, 'x')).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1000);
+  }, 2000);
+
   it('refuses a matcher that is longer than the pattern bound', () => {
     const compiled = compileMatcher('x'.repeat(MAX_MATCH_PATTERN_LENGTH + 1));
 
@@ -490,6 +590,172 @@ describe('the tool-name matcher', () => {
     expect(new RegExp('[^]').test('\n')).toBe(true);
   });
 
+  it('accepts the empty character class, which matches nothing', () => {
+    // `[]` is a **valid** class in JavaScript: it matches nothing at all.
+    // This implementation accepts it too, and it matches nothing there as well — so the
+    // registry does not turn a pattern JavaScript accepts into a configuration
+    // error.
+    const compiled = compileMatcher('[]');
+
+    expect(compiled.ok).toBe(true);
+    if (compiled.ok) {
+      expect(compiled.matcher.kind).toBe('regex');
+      expect(compiled.matcher.test('')).toBe(false);
+      expect(compiled.matcher.test('a')).toBe(false);
+      expect(compiled.matcher.test(']')).toBe(false);
+    }
+    expect(new RegExp('[]').test('a')).toBe(false);
+
+    // The class ends at its first `]`, so the `]` after it is a literal of
+    // its own — the way JavaScript reads it.
+    expect(matchToolName('[]', 'a')).toBe(false);
+    expect(matchToolName('[]]', ']')).toBe(false);
+    expect(new RegExp('[]]').test(']')).toBe(false);
+    expect(matchToolName('[^]]', 'a]')).toBe(true);
+    expect(new RegExp('[^]]').test('a]')).toBe(true);
+
+    // A class with members is unaffected.
+    expect(matchToolName('[abc]', 'b')).toBe(true);
+    expect(matchToolName('[^abc]', 'b')).toBe(false);
+  });
+
+  it('refuses a character class that is never closed', () => {
+    // The reason names what is actually wrong: the class is unterminated.
+    const compiled = compileMatcher('[abc');
+
+    expect(compiled.ok).toBe(false);
+    if (!compiled.ok) {
+      expect(compiled.reason).toContain('unterminated character class');
+    }
+  });
+
+  it('refuses a quantifier whose bounds are out of order', () => {
+    // JavaScript refuses `a{2,1}` — the bounds are out of order — and the
+    // implementation refuses it too, rather than reading it as `a{2}` and matching a
+    // text the pattern does not name.
+    const compiled = compileMatcher('a{2,1}');
+
+    expect(compiled.ok).toBe(false);
+    if (!compiled.ok) {
+      expect(compiled.reason).toContain('out of order');
+    }
+    expect(matchToolName('a{2,1}', 'aa')).toBe(false);
+    expect(() => new RegExp('a{2,1}')).toThrow();
+  });
+
+  it('does not match a line terminator with a dot', () => {
+    // JavaScript's `.` matches every character **except** the four line
+    // terminators: the line feed, the carriage return, the line separator and
+    // the paragraph separator.
+    for (const terminator of ['\n', '\r', '\u2028', '\u2029']) {
+      expect(matchToolName('.', terminator)).toBe(false);
+      expect(new RegExp('.').test(terminator)).toBe(false);
+    }
+    expect(matchToolName('.', 'a')).toBe(true);
+    expect(matchToolName('a.c', 'a\nc')).toBe(false);
+  });
+
+  it('bounds the quantifiers the way JavaScript does', () => {
+    // `x?` is "at most one x" and `x{n,m}` is "between n and m of them" —
+    // not "any number of them". This implementation's engine is a non-backtracking
+    // program, and the bound is part of the program it compiles.
+    const cases: ReadonlyArray<readonly [string, string, boolean]> = [
+      ['^a{2,3}$', 'aa', true],
+      ['^a{2,3}$', 'aaa', true],
+      ['^a{2,3}$', 'aaaa', false],
+      ['^a{1,2}$', 'a', true],
+      ['^a{1,2}$', 'aa', true],
+      ['^a{1,2}$', 'aaa', false],
+      ['^a{0,2}$', '', true],
+      ['^a{0,2}$', 'aa', true],
+      ['^a{0,2}$', 'aaa', false],
+      ['^a{0,1}$', '', true],
+      ['^a{0,1}$', 'a', true],
+      ['^a{0,1}$', 'aa', false],
+      ['^colou?r$', 'colour', true],
+      ['^colou?r$', 'colouur', false],
+      ['^ab?c$', 'ac', true],
+      ['^ab?c$', 'abc', true],
+      ['^ab?c$', 'abbc', false],
+      ['^a?$', '', true],
+      ['^a?$', 'a', true],
+      ['^a?$', 'aa', false],
+      ['^(a|b){1,2}$', 'a', true],
+      ['^(a|b){1,2}$', 'ab', true],
+      ['^(a|b){1,2}$', 'aba', false],
+      ['^(a|b){1,2}$', 'abab', false],
+      ['^x{2,}$', 'xx', true],
+      ['^x{2,}$', 'xxxxx', true],
+      ['^x{2,}$', 'x', false],
+    ];
+
+    for (const [pattern, name, expected] of cases) {
+      expect({ pattern, name, matched: matchToolName(pattern, name) }).toEqual({
+        pattern,
+        name,
+        matched: expected,
+      });
+      // And the expectation is JavaScript's, not this implementation's.
+      expect(expected).toBe(new RegExp(pattern).test(name));
+    }
+  });
+
+  it('reads the escapes the way JavaScript reads them', () => {
+    // `\xHH` and `\uHHHH` are the code units they name.
+    expect(matchToolName('\\x41', 'A')).toBe(true);
+    expect(matchToolName('\\u0041', 'A')).toBe(true);
+    expect(matchToolName('\\u0041', 'u0041')).toBe(false);
+    // `\cA` is the control character U+0001, the way JavaScript reads it.
+    expect(matchToolName('\\cA', '\u0001')).toBe(true);
+    expect(matchToolName('\\cA', 'cA')).toBe(false);
+    expect(matchToolName('\\cz', '\u001a')).toBe(true);
+    // `\u{...}` is a code-point escape only with JavaScript's `u` flag, and a
+    // matcher carries no flags: JavaScript reads `\u` as the letter `u` and
+    // the braces as ordinary text.
+    expect(matchToolName('\\u{1F600}', 'u{1F600}')).toBe(true);
+    expect(matchToolName('\\u{1F600}', '\u{1F600}')).toBe(false);
+    expect(matchToolName('\\u{2}', 'uu')).toBe(true);
+    // `\0` is the NUL character.
+    expect(matchToolName('\\0', '\u0000')).toBe(true);
+
+    // And every one of them agrees with JavaScript.
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['\\x41', 'A'],
+      ['\\x41', 'u0041'],
+      ['\\u0041', 'A'],
+      ['\\cA', '\u0001'],
+      ['\\cA', 'cA'],
+      ['\\cz', '\u001a'],
+      ['\\u{1F600}', 'u{1F600}'],
+      ['\\u{1F600}', '\u{1F600}'],
+      ['\\u{2}', 'uu'],
+      ['\\0', '\u0000'],
+      ['\\n', '\n'],
+      ['\\t', '\t'],
+      ['\\.', '.'],
+      ['\\\\', '\\'],
+    ];
+    for (const [pattern, name] of cases) {
+      expect({ pattern, name, matched: matchToolName(pattern, name) }).toEqual({
+        pattern,
+        name,
+        matched: new RegExp(pattern).test(name),
+      });
+    }
+  });
+
+  it('refuses the escapes and the quantifiers it cannot read', () => {
+    // The legacy octal escapes, the backreferences, a control escape without
+    // a letter, and a quantifier on an assertion: this implementation refuses them
+    // loudly rather than reading them as something else.
+    for (const pattern of ['\\01', '\\1', '\\c1', '^*', '\\b*', '$*']) {
+      const compiled = compileMatcher(pattern);
+
+      expect(compiled.ok).toBe(false);
+      expect(matchToolName(pattern, 'a')).toBe(false);
+    }
+  });
+
   it('agrees with the JavaScript regular expression it accepts', () => {
     const patterns = [
       'mcp__memory__.*',
@@ -502,19 +768,29 @@ describe('the tool-name matcher', () => {
       '[A-Z]\\w+',
       'tool.*\\.(ts|js)',
       'x?y*z+',
+      // The bounded quantifiers: they are bounded, the way JavaScript's are.
+      'a{1,2}',
+      'a{0,2}',
+      'a{0,1}',
+      'a?',
+      'ab?c',
+      '(a|b){1,2}',
+      'a{2,}',
+      'a{0}',
       // The patterns that match the empty string: they match every text, the
       // way JavaScript's do.
-      'a{0}',
       'x{0,0}',
       '()',
       '(?:)',
-      'a|',
-      '|a',
-      'x{0,2}',
       '(?:a|)',
       // The whitespace classes, which are JavaScript's and not the ASCII six.
       '\\s',
       '\\S',
+      // The classes, including the empty one and the negated empty one.
+      '[]',
+      '[^]',
+      '[a-c]',
+      '[^a-c]',
     ];
     const names = [
       'Bash',
@@ -527,9 +803,28 @@ describe('the tool-name matcher', () => {
       'xyz',
       '\u00a0',
       '\u2028',
+      // The repeated characters: a corpus without them cannot tell a bounded
+      // quantifier from an unbounded one.
+      'aa',
+      'aaa',
+      'aaaa',
+      'colouur',
+      'abbc',
+      'a',
+      'b',
+      'ab',
     ];
 
     for (const pattern of patterns) {
+      // The premise of the comparison: this implementation compiles this pattern as a
+      // **regular expression**. A pattern in the simple syntax is an
+      // exact-string match, and it is compared against the simple rule in the
+      // test below — never against a regular expression.
+      const compiled = compileMatcher(pattern);
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) continue;
+      expect(compiled.matcher.kind).toBe('regex');
+
       const reference = new RegExp(pattern);
       for (const name of names) {
         expect({ pattern, name, matched: matchToolName(pattern, name) }).toEqual({
@@ -539,6 +834,112 @@ describe('the tool-name matcher', () => {
         });
       }
     }
+  });
+
+  it('compares the simple syntax against the simple rule, not against a regular expression', () => {
+    // `a|` and `|a` are in the **simple** syntax: this implementation matches them as
+    // an exact string with an empty alternative, and an empty alternative
+    // matches every tool — the way the equivalent regular expression does.
+    // The comparison with `new RegExp` would hold by luck and would not
+    // exercise the empty node, so the simple rule is compared directly.
+    for (const pattern of ['a|', '|a']) {
+      const compiled = compileMatcher(pattern);
+
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) continue;
+      expect(compiled.matcher.kind).toBe('exact');
+      expect(compiled.matcher.test('a')).toBe(true);
+      expect(compiled.matcher.test('anything else')).toBe(true);
+      expect(compiled.matcher.test('')).toBe(true);
+    }
+
+    // A simple matcher without an empty alternative matches its names only,
+    // and it never matches a text that merely contains one.
+    const exact = compileMatcher('Edit|Write');
+
+    expect(exact.ok).toBe(true);
+    if (exact.ok) {
+      expect(exact.matcher.kind).toBe('exact');
+      expect(exact.matcher.test('Edit')).toBe(true);
+      expect(exact.matcher.test('Write')).toBe(true);
+      expect(exact.matcher.test('MultiEdit')).toBe(false);
+    }
+  });
+
+  it('agrees with JavaScript over a bounded fuzz of the supported subset', () => {
+    // The property the whole module rests on: for every pattern this implementation
+    // accepts **and** JavaScript accepts, the two agree on every input. The
+    // fuzz generates patterns from the supported subset and compares the two
+    // engines over a corpus that carries repeated characters — without them a
+    // bounded quantifier and an unbounded one look the same.
+    const patterns = fuzzPatterns(300);
+    const names = [
+      '',
+      'a',
+      'b',
+      'c',
+      'ab',
+      'ba',
+      'aa',
+      'aaa',
+      'aaaa',
+      'aaaaa',
+      'abab',
+      'abbc',
+      'colouur',
+      'colour',
+      'abc',
+      'aab',
+      'x',
+      'xyz',
+      'a1',
+      'A_',
+      'a b',
+      'a.b',
+      '\n',
+      '\r',
+      '\u2028',
+      '\u2029',
+      '\t',
+    ];
+
+    let compared = 0;
+    let regexPatterns = 0;
+    const divergences: string[] = [];
+
+    for (const pattern of patterns) {
+      const compiled = compileMatcher(pattern);
+      if (!compiled.ok) continue;
+      // The simple syntax is an exact-string match: it is not compared with
+      // a regular expression.
+      if (compiled.matcher.kind !== 'regex') continue;
+      regexPatterns += 1;
+
+      const reference = ((): RegExp | undefined => {
+        try {
+          return new RegExp(pattern);
+        } catch {
+          // JavaScript refuses the pattern. This implementation's `*` wildcard is the
+          // one construct it accepts that JavaScript does not, so a pattern
+          // JavaScript refuses is not compared here.
+          return undefined;
+        }
+      })();
+      if (reference === undefined) continue;
+      for (const name of names) {
+        compared += 1;
+        const mine = compiled.matcher.test(name);
+        const theirs = reference.test(name);
+        if (mine !== theirs) {
+          divergences.push(`${pattern} vs ${JSON.stringify(name)}: implementation=${mine} js=${theirs}`);
+        }
+      }
+    }
+
+    // The fuzz really ran.
+    expect(regexPatterns).toBeGreaterThan(100);
+    expect(compared).toBeGreaterThan(1000);
+    expect(divergences).toEqual([]);
   });
 
   it('matches JavaScript’s whitespace set, not the ASCII six', () => {
@@ -590,6 +991,47 @@ describe('the hook payload', () => {
     });
 
     expect(payload.permission_mode).toBe('default');
+  });
+
+  it('refuses a permission mode that is not one of the six', () => {
+    // The payload is built from the caller's input, which is untrusted data,
+    // so the "one of the six" guarantee cannot be a type claim alone: a value
+    // that names none of the six is **not carried** by the payload.
+    const payload = buildHookPayload('PreToolUse', {
+      tool_name: 'Read',
+      permission_mode: 'nonsense',
+    });
+
+    expect(payload.permission_mode).toBeUndefined();
+    expect(payload['permission_mode']).toBeUndefined();
+
+    // A value that is not even a string is refused the same way.
+    const numbered = buildHookPayload('PreToolUse', {
+      tool_name: 'Read',
+      permission_mode: 42,
+    });
+
+    expect(numbered.permission_mode).toBeUndefined();
+  });
+
+  it('refuses a permission mode that is not one of the six in the context too', () => {
+    const payload = buildHookPayload(
+      'PreToolUse',
+      { tool_name: 'Read' },
+      { permission_mode: 'nonsense' as unknown as 'default' },
+    );
+
+    expect(payload.permission_mode).toBeUndefined();
+  });
+
+  it('carries the six modes and only the six', () => {
+    const modes = ['default', 'plan', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions'] as const;
+
+    for (const mode of modes) {
+      const payload = buildHookPayload('PreToolUse', { tool_name: 'Read' }, { permission_mode: mode });
+      expect(payload.permission_mode).toBe(mode);
+      expect(modes).toContain(payload.permission_mode as (typeof modes)[number]);
+    }
   });
 });
 
@@ -1432,6 +1874,16 @@ describe('the documented shape of the hook surface', () => {
     expect(matcher).toMatch(/subset/);
     expect(matcher).toMatch(/matches nothing/);
     expect(matcher).toMatch(/MAX_MATCH_NODES/);
+    // The agreement claim: the engine is not an approximation of JavaScript's
+    // regular expressions, it is the same language over the same patterns.
+    expect(matcher).toMatch(/agrees with JavaScript on every\s+pattern they both accept/);
+    expect(matcher).toMatch(/`\*` with nothing in front of[\s\S]*wildcard/);
+
+    // The payload's guarantee about the permission mode is documented where
+    // the payload is built.
+    const schema = moduleHeader('schema');
+    expect(schema).toMatch(/permission_mode` in the payload is the normalized six/);
+    expect(schema).toMatch(/refused/);
 
     // The blockable-event set is a implementation choice, and it is labelled in both
     // modules that carry it.

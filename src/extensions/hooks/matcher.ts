@@ -38,15 +38,54 @@
  *
  *   - literals, `.`, `^`, `$`;
  *   - the character classes `\d \D \w \W \s \S` and `\b \B`;
- *   - character classes `[...]` with ranges and negation;
+ *   - character classes `[...]` with ranges and negation, and the empty
+ *     class `[]` (which matches nothing);
  *   - groups `(...)` and `(?:...)`;
  *   - alternation `|`;
  *   - the quantifiers `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`;
- *   - the escapes `\n \r \t \f \v \0`, `\xHH`, `\uHHHH`, `\u{...}`, and an
- *     escaped metacharacter.
+ *   - the escapes `\n \r \t \f \v \0`, `\xHH`, `\uHHHH` and `\cX` (the
+ *     control character), and an escaped metacharacter. Every other escaped
+ *     character is the character itself, the way JavaScript reads it without
+ *     its `u` flag.
  *
  * Lookaround, named groups and backreferences are **rejected**: they are not
  * regular, and a matcher that needs them is refused rather than run.
+ *
+ * ## The engine and JavaScript agree
+ *
+ * The subset is not an approximation. For **every pattern both accept**, the
+ * implementation's engine and `new RegExp` accept the same texts, and the property is
+ * pinned by a bounded fuzz in the contract test. The details that make it
+ * hold:
+ *
+ *   - the bounded quantifiers are **bounded**: `x?` is "at most one `x`" and
+ *     `x{n,m}` is "between `n` and `m` of them", not "any number of them";
+ *   - the dot excludes **all four** line terminators (`\n`, `\r`, `\u2028`
+ *     and `\u2029`), the way JavaScript's does;
+ *   - the empty character class `[]` matches **nothing**, and the negated
+ *     empty class `[^]` matches **every** character;
+ *   - a quantifier whose bounds are out of order (`a{2,1}`) is **refused**,
+ *     the way JavaScript refuses it, and a quantifier cannot follow an
+ *     assertion (`^*` and `\b*` are not regular expressions);
+ *   - `\uHHHH` is the code unit it names, and `\u{...}` is read the way
+ *     JavaScript reads it **without** its `u` flag: the letter `u` followed
+ *     by the braces as ordinary text. A matcher carries no flags, so the
+ *     implementation reads it the way `new RegExp(matcher)` reads it.
+ *
+ * There is one place where this implementation is deliberately **wider** than
+ * JavaScript, and it is the target's own syntax: **a `*` with nothing in front
+ * of it is the wildcard**, not a quantifier, and it matches any sequence of
+ * characters. JavaScript rejects a pattern with a `*` that has nothing to
+ * repeat; this implementation accepts it because the audit's matcher syntax has `*`
+ * wildcards.
+ *
+ * This implementation is deliberately **narrower** in four places, and it refuses loudly
+ * in each of them rather than guessing: the repetition count is bounded, the
+ * whole program is bounded by the node budget, the lookaround and the
+ * backreferences are not regular, and the **legacy octal escapes** (`\01` and
+ * a `\0` followed by a digit) and the **control escape without a letter**
+ * (`\c1`) belong to Annex B rather than to the language a matcher is written
+ * in.
  *
  * ## The compiler is bounded, and the bound is on the **whole** program
  *
@@ -67,7 +106,8 @@
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
  *   - **The matcher engine supports the subset of JavaScript's regular
- *     expressions listed above.** A pattern outside the subset is refused
+ *     expressions listed above, and it agrees with JavaScript on every
+ *     pattern they both accept.** A pattern outside the subset is refused
  *     rather than run with a risk of hanging.
  *   - **A matcher that cannot be compiled matches nothing.** A malformed
  *     matcher is a configuration error, and it is reported loudly at the
@@ -76,6 +116,10 @@
  *   - **The repetition count is bounded at 64 and the whole program at
  *     `MAX_MATCH_NODES` nodes.** A matcher that exceeds either bound is
  *     refused with a reason naming the bound.
+ *   - **A `*` with nothing in front of it is the target's wildcard**, not a
+ *     quantifier: it matches any sequence of characters. This is the one
+ *     place where this implementation's syntax is wider than JavaScript's, and it comes
+ *     from the audit's matcher syntax.
  *   - **An empty alternative in a simple matcher matches every tool**, the
  *     way the equivalent regular expression (`a|`) does. A matcher that
  *     names no tool at all is refused.
@@ -258,8 +302,20 @@ function literal(char: string): CharPredicate {
   return (candidate: string): boolean => candidate === char;
 }
 
+/**
+ * Whether a character is matched by a dot.
+ *
+ * JavaScript's `.` matches every character **except** the four line
+ * terminators: the line feed, the carriage return, the line separator and the
+ * paragraph separator.
+ */
 function anyChar(candidate: string): boolean {
-  return candidate !== '\n';
+  return (
+    candidate !== '\n' &&
+    candidate !== '\r' &&
+    candidate !== '\u2028' &&
+    candidate !== '\u2029'
+  );
 }
 
 function isDigit(char: string): boolean {
@@ -382,9 +438,16 @@ class PatternParser {
   }
 
   private parseRepeat(): PatternAst {
+    const start = this.index;
     const atom = this.parseAtom();
     const quantifier = this.parseQuantifier();
     if (!quantifier) return atom;
+
+    // A quantifier cannot follow an **assertion**: `^*` and `\b*` are not
+    // regular expressions, and JavaScript refuses them.
+    if (atom.kind === 'assert') {
+      throw new MatcherError(`a quantifier cannot follow an assertion at position ${start}`);
+    }
 
     // A lazy quantifier matches the same language, so the program does not
     // need to know about it.
@@ -437,7 +500,14 @@ class PatternParser {
       const more = this.readDigits();
       if (this.peek() === '}') {
         this.index += 1;
-        return { min, max: more === undefined || more.length === 0 ? null : Number.parseInt(more, 10) };
+        if (more === undefined || more.length === 0) return { min, max: null };
+        const max = Number.parseInt(more, 10);
+        // JavaScript refuses a quantifier whose bounds are out of order, so
+        // this implementation refuses it too: `a{2,1}` is not `a{2}`.
+        if (max < min) {
+          throw new MatcherError(`the repetition count is out of order at position ${start}`);
+        }
+        return { min, max };
       }
     }
     this.index = start;
@@ -519,17 +589,17 @@ class PatternParser {
     }
 
     const members: ClassMember[] = [];
-    let first = true;
     for (;;) {
       if (this.eof()) {
         throw new MatcherError(`unterminated character class at position ${start}`);
       }
       const char = this.peek();
-      if (char === ']' && !first) {
+      // The class ends at its **first** `]`, even when it has no members at
+      // all: `[]` is JavaScript's empty class, and it matches nothing.
+      if (char === ']') {
         this.index += 1;
         break;
       }
-      first = false;
 
       const lower = this.readClassMember();
       if (lower === undefined) {
@@ -551,6 +621,12 @@ class PatternParser {
         continue;
       }
       members.push(lower);
+    }
+
+    if (members.length === 0) {
+      // `[]` is the **empty** class: it matches nothing, the way JavaScript's
+      // does. (The negated empty class `[^]` is handled above.)
+      return { kind: 'char', test: () => false };
     }
 
     const test = (candidate: string): boolean => {
@@ -637,11 +713,40 @@ class PatternParser {
       case 'v':
         return { kind: 'char', value: '\v' };
       case '0':
+        // `\0` is the NUL character. A `\0` followed by a digit is
+        // JavaScript's **legacy octal** escape, which belongs to Annex B
+        // rather than to the regular expression language itself, so this implementation
+        // refuses it instead of reading it as something else.
+        if (this.peek() >= '0' && this.peek() <= '9') {
+          throw new MatcherError('a legacy octal escape is not supported');
+        }
         return { kind: 'char', value: '\0' };
+      case 'c': {
+        // `\cA` is the control character U+0001, the way JavaScript reads it:
+        // the code unit of the control letter, modulo 32. A control escape
+        // whose letter is not a letter is refused: JavaScript reads it as an
+        // atom that can never match, and this implementation refuses the matcher
+        // rather than guessing what it means.
+        const letter = this.peek();
+        if (letter >= 'a' && letter <= 'z') {
+          this.index += 1;
+          return { kind: 'char', value: String.fromCharCode(letter.charCodeAt(0) % 32) };
+        }
+        if (letter >= 'A' && letter <= 'Z') {
+          this.index += 1;
+          return { kind: 'char', value: String.fromCharCode(letter.charCodeAt(0) % 32) };
+        }
+        throw new MatcherError('a control escape is not supported');
+      }
       case 'x':
         return this.readHexEscape(2);
       case 'u':
-        return this.readUnicodeEscape();
+        // `\u{...}` is a code-point escape only with JavaScript's `u` flag.
+        // A matcher is a plain JavaScript regular expression — it carries no
+        // flags — so JavaScript reads `\u` there as the letter `u` and the
+        // braces as ordinary text, and this implementation reads it the same way.
+        if (this.peek() === '{') return { kind: 'char', value: 'u' };
+        return this.readHexEscape(4);
       default:
         if (char >= '1' && char <= '9') {
           throw new MatcherError('a backreference is not supported');
@@ -661,31 +766,6 @@ class PatternParser {
       this.index += 1;
     }
     return { kind: 'char', value: String.fromCharCode(Number.parseInt(hex, 16)) };
-  }
-
-  private readUnicodeEscape(): EscapeMember {
-    if (this.peek() === '{') {
-      this.index += 1;
-      let hex = '';
-      while (!this.eof() && this.peek() !== '}') {
-        const char = this.peek();
-        if (!/[0-9a-fA-F]/.test(char)) {
-          throw new MatcherError('a unicode escape is malformed');
-        }
-        hex += char;
-        this.index += 1;
-      }
-      if (this.peek() !== '}') {
-        throw new MatcherError('a unicode escape is malformed');
-      }
-      this.index += 1;
-      const code = Number.parseInt(hex, 16);
-      if (!Number.isFinite(code) || code > 0x10ffff) {
-        throw new MatcherError('a unicode escape is out of range');
-      }
-      return { kind: 'char', value: String.fromCodePoint(code) };
-    }
-    return this.readHexEscape(4);
   }
 }
 
@@ -835,8 +915,11 @@ class NfaBuilder {
   private optional(body: PatternAst): Fragment {
     const bodyFragment = this.compile(body);
     const splitId = this.emit({ kind: 'split', a: bodyFragment.start, b: -1 });
-    this.patch(bodyFragment.outs, splitId);
-    return { start: splitId, outs: [splitId] };
+    // The body is taken **at most once**: its continuation goes on to the
+    // fragment's own continuation, and not back to the split. A loop back to
+    // the split would make `x?` mean `x*` and `x{n,m}` mean `x{n,}`, which is
+    // a wider language than JavaScript's.
+    return { start: splitId, outs: [splitId, ...bodyFragment.outs] };
   }
 }
 
