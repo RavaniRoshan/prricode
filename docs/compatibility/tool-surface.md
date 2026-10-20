@@ -129,7 +129,7 @@ implemented honestly is omitted and named — never faked.
 | tool | the capability it needs | why it is not here |
 |---|---|---|
 | `AppifactRepl` | the account's artifact SDK | The artifact surface is the account's own; this implementation has no account and no artifact runtime. |
-| `ClaudeDesign` | the account's design projects | The design surface lives in the account; there is nothing here to work with. |
+| `ClaudeDesign` | the account's design projects | The design surface lives in the account; there is nothing here to work with. The **name** is the target's own, because a tool's name is the interface the model calls. |
 | `CronCreate` | a scheduler | A schedule is a long-lived timer the session owns; the CLI has no scheduler, and a cron entry that never fires would be worse than none. |
 | `CronDelete` | a scheduler | The same. |
 | `CronList` | a scheduler | The same. |
@@ -277,7 +277,7 @@ the three places it appears:
 
 | where | the target says | PRRICODE says |
 |---|---|---|
-| the approval dialog's third option | `No, and tell Claude what to do differently (esc)` | `No, and tell PRRICODE what to do differently (esc)` |
+| the approval dialog's third option | the target's own product name in place of the agent's | `No, and tell PRRICODE what to do differently (esc)` |
 | the assistant's screen-reader gutter | `claude:` | `prricode:` |
 | the theme's role names | `claude`, `claudeShimmer`, … | `prricode`, `prricodeShimmer`, … |
 

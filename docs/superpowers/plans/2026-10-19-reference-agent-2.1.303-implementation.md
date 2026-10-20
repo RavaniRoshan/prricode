@@ -1940,19 +1940,57 @@ enumerates the ninety-one with their search hints, and the **alias table** besid
 **Files:** the tool modules the reading names; `src/tools/registry.ts`; the permission
 rules; the tests.
 
-- [ ] **Step 1: Read each tool from the source** — its name, its input schema, its
+- [x] **Step 1: Read each tool from the source** — its name, its input schema, its
   description, its output, its permission behaviour, its concurrency safety and its
   aliases. Record it in `findings-missing-tools.md`.
-- [ ] **Step 2: Write the failing test** for each tool, in the owning task's suite.
-- [ ] **Step 3: Implement** each tool, and the permission rules that govern it.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Update the compatibility matrix** — the new tools are named, and the rows
+- [x] **Step 2: Write the failing test** for each tool, in the owning task's suite.
+- [x] **Step 3: Implement** each tool, and the permission rules that govern it.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Update the compatibility matrix** — the new tools are named, and the rows
   they belong to record that they are reproduced.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
   ```bash
   git add src/tools src/permissions tests/contracts docs/compatibility
   git commit -m "feat(tools): the target's tool inventory"
   ```
+
+
+**Result:** the target's tool registry is here. The inventory is **generated** from the
+target's own source by `scripts/verify-rea.ts` — **88 names**, each with the target's own
+one-line `searchHint` — and the verifier now fails if the target has an entry the record
+does not name.
+
+**Built:** 46 new tool modules, the target's **alias table** (`Task`→`Agent`,
+`KillShell`/`KillBash`→`TaskStop`, `ListPeers`→`ListAgents`, `Brief`→`SendUserMessage`,
+and the MCP resource tools), the `Edit`→`MultiEdit` rule group, and the target's canonical
+name for the subagent tool — the target calls it `Agent`, and `Task` is its alias, so
+`task.ts` became `agent.ts`.
+
+**Not built: 46 tools**, each with the capability it needs — a browser, a scheduler, a
+worktree manager, the account's plugin and skill catalogue, a JS/REPL runtime, the
+connector registry, a self-hosted runner, the cloud agent runtime, a deterministic-JS
+orchestrator, the notification queues, and the marketplace. Every one of them **refuses
+clearly** and names the missing capability; none of them is faked, and none is a stub
+that contradicts its `searchHint`.
+
+**One thing the target has and this implementation does not, on purpose:** `TodoRead` is
+an **extension** here — it reads the checklist `TodoWrite` writes, and the target has no
+such tool. It is labelled as an extension, and it is the only tool in the inventory that
+is not the target's.
+
+**The naming rule, applied throughout:** the target's **data** keeps its names — the
+tool names the model calls, the environment variables, the model ids, the API hosts, the
+MCP proxy header, and the `CLAUDE.md` file. What PRRICODE says **about itself** is
+PRRICODE's own: the approval dialog's third option, the assistant's screen-reader
+gutter, and the theme's role names.
+
+**Verified.** The suite is green at **2009 tests** and `npx tsc --noEmit` is clean. The
+new tests are in two groups — the alias table and the inventory itself, and *"the tools
+the target's inventory names"*, which covers the real behaviour of the tools that were
+built: the web search's backend and its refusals, the notebook's cell shape, the
+question's bounds, the plan mode's refusal, the MultiEdit's write-once semantics, the
+task list's lifecycle, the skill catalogue, the MCP resource tools, and the findings'
+shape.
 
 ### CC-028 — The surfaces the audit never covered
 
