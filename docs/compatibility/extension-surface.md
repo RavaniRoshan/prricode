@@ -108,6 +108,16 @@ When two hook results are combined:
 - an `allow` decision carrying `updatedPermissions` maps each permission, and a `setMode` permission's mode is **normalized** before it is applied;
 - when a hook result is merged into a permission-request result, the result carries `permissionBehavior`, `hookPermissionDecisionReason`, `permissionRequestResult`, and the `updatedInput` **only when the behavior is `allow`**.
 
+### The `PreToolUse` decision — this implementation's pick
+
+The target changed this behaviour in a later release without a deprecation warning, so the target's own behavior at `2.1.303` is ambiguous from the outside. This implementation picks the **stricter** of the two:
+
+- a `PreToolUse` hook returning `allow` does **not** override a deny rule and does **not** override an ask rule;
+- a `PreToolUse` hook returning `deny` holds in **every** mode, `bypassPermissions` included;
+- a rewritten input is re-checked with the **whole** permission check against the **effective** input, and a rewritten input the tool's validator rejects **denies** the call.
+
+**Evidence class:** REA observed (the mechanism — a `PreToolUse` hook can return `permissionDecision` of `allow | deny | ask | defer` and an `updatedInput`) + **implementation choice** (which of the target's two behaviors this implementation takes, and the exact precedence between the `PreToolUse` seam and the `PermissionRequest` seam).
+
 ### The matcher semantics
 
 A matcher containing only letters, digits, `_`, `-`, space, `,` and `|` is an **exact-string** (or `|`-separated) match; anything else is an **unanchored** JavaScript regular expression. A bare `mcp__memory` matches nothing, while `mcp__memory__.*` matches all of a server's tools.
@@ -229,6 +239,10 @@ The result of `installPluginFromMarketplace` carries `{ success, message, depNot
 | The handler types are `command`, `http`, `mcp_tool`, `prompt`, `agent`; only `command` and `mcp_tool` are dispatched | REA observed (the vocabulary) + **implementation choice** (the non-dispatch) | same file |
 | The hook payload carries `session_id`, `prompt_id`, `transcript_path`, `cwd`, `scratchpad_dir`, `permission_mode`, `effort.level`, `hook_event_name`, and `agent_id`/`agent_type` for subagents | REA observed | same file |
 | A caller-supplied event, server name, hook id or matcher never resolves to an inherited member | implementation choice | same file |
+| A `PreToolUse` `allow` never overrides a deny or an ask rule, and a `PreToolUse` `deny` holds in every mode | REA observed (the mechanism) + **implementation choice** (the pick) | `tests/contracts/permission-hook.test.ts` (the `CC-007b` task) |
+| The two hook seams (`PreToolUse` and `PermissionRequest`) cannot cancel each other — the stricter wins | **implementation choice** | same file |
+| A matcher this implementation cannot compile is **refused at registration**, not silently ignored | **implementation choice** | same file |
+| The matcher engine's compiled program is bounded by a node budget, and an over-large matcher is refused with a reason | **implementation choice** | same file |
 | A command hook runs through `/bin/sh -c` with the payload on stdin and a 60 s timeout | **implementation choice** | same file |
 | A malformed matcher matches nothing rather than being treated as a literal | **implementation choice** | same file |
 | `updatedPermissions` accepts both a map and a list of typed updates | **implementation choice** | same file |
