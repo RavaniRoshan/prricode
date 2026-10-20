@@ -48,6 +48,12 @@
  *   - **The content replacement** is applied on resume, so the payload of an
  *     oversized tool result does not come back into the context. The
  *     transcript keeps the payload; only the context is stubbed.
+ *   - **The tool-result content** is serialised into a **string** on the way
+ *     out, because the observed shape of a `tool_result` block is
+ *     `{tool_use_id, type:"tool_result", content:<string>}` (audit §2.4) and an
+ *     envelope's content is not always a string — a failed tool leaves an
+ *     **object** behind. The serialisation is **shared** with the live path
+ *     (`src/agent/context.ts`), so the two cannot drift.
  *
  * ## Resuming a *session*, not only a transcript
  *
@@ -917,6 +923,47 @@ export function resumeEvents(
   return result;
 }
 
+/* -------------------------------------------------------------------------- */
+/* The tool-result content                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The wire form of a tool result's content.
+ *
+ * **Observed** (audit §2.4): "the block is `{ tool_use_id, type: "tool_result",
+ * content: <string> }` with `is_error: true` added for a failure". The content
+ * is therefore **always a string**. A string is carried as it is, and anything
+ * else is carried as its JSON serialization, because the wire shape accepts a
+ * string or a list of content blocks and not an arbitrary value.
+ *
+ * The value that reaches this function is the envelope's own content, and an
+ * envelope's content is not always a string: a **failed** tool leaves
+ * `{type:"error", message, errorCode}` behind, and a **replaced** tool result
+ * leaves the stub behind. Both are objects, and both have to reach the model
+ * as a string.
+ *
+ * **This is the one serialisation.** The live path — the request a turn builds
+ * while it runs, in `src/agent/context.ts` — and the cross-turn projection —
+ * the request a resumed session builds, here — both call it, so the two paths
+ * cannot drift. The serialisation lives in the **session** module because the
+ * session module is the lower layer: the agent module imports it.
+ *
+ * The empty string stands for an absent content: the envelope of a call that
+ * produced nothing carries `undefined`, and the wire shape wants a string.
+ */
+export function toolResultContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (content === undefined) return '';
+  try {
+    const serialized = JSON.stringify(content);
+    return serialized === undefined ? String(content) : serialized;
+  } catch {
+    // A value `JSON.stringify` refuses — a circular structure, a `BigInt` —
+    // still has to reach the model as a string.
+    return String(content);
+  }
+}
+
 /**
  * Turn a context into the messages of a provider request.
  *
@@ -924,6 +971,10 @@ export function resumeEvents(
  * has to reach the model, and the user turn is where it belongs. A
  * `permission_request` item is **not** sent: the decision reaches the model
  * through the tool result.
+ *
+ * A `tool_result` block's content is serialised by `toolResultContent`, so the
+ * request that follows a failed tool is well formed: its content is a string,
+ * never the error envelope's object.
  */
 export function contextToProviderMessages(context: ContextItem[]): ProviderMessage[] {
   const messages: ProviderMessage[] = [];
@@ -944,7 +995,7 @@ export function contextToProviderMessages(context: ContextItem[]): ProviderMessa
           return {
             type: 'tool_result',
             tool_use_id: block.toolUseId,
-            content: block.content,
+            content: toolResultContent(block.content),
             is_error: block.isError,
           };
         default:

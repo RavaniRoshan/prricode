@@ -61,7 +61,10 @@
  *   - The way a tool result's **content** is carried into the request: a string
  *     is carried as it is, and anything else is carried as its JSON
  *     serialization, because the wire shape accepts a string or a list of
- *     content blocks and not an arbitrary value.
+ *     content blocks and not an arbitrary value. The serialization is **not**
+ *     written here: it is the session module's `toolResultContent`, and this
+ *     module and the cross-turn projection both call it, so the request a turn
+ *     builds and the request a resumed session builds cannot drift apart.
  */
 
 import type { ToolContext } from '../permissions/decision.js';
@@ -73,7 +76,12 @@ import type {
   ProviderRequest,
   ProviderTool,
 } from '../provider/drivers/types.js';
-import { contextToProviderMessages, projectContext, type ContextItem } from '../session/resume.js';
+import {
+  contextToProviderMessages,
+  projectContext,
+  toolResultContent,
+  type ContextItem,
+} from '../session/resume.js';
 import type { SessionEvent } from '../session/event.js';
 import type { ToolRegistry } from '../tools/registry.js';
 
@@ -329,6 +337,11 @@ export function pushToolResults(messages: ProviderMessage[], blocks: ProviderCon
  * The content is carried as a string when it is one, and as its JSON
  * serialization otherwise: the wire shape accepts a string or a list of content
  * blocks, and not an arbitrary value.
+ *
+ * The serialization is the **session module's** (`toolResultContent`), and the
+ * cross-turn projection calls the same function, so the request a turn builds
+ * and the request a resumed session builds carry the same content for the same
+ * transcript.
  */
 export function toolResultBlock(
   toolUseId: string,
@@ -338,21 +351,9 @@ export function toolResultBlock(
   return {
     type: 'tool_result',
     tool_use_id: toolUseId,
-    content: contentForWire(content),
+    content: toolResultContent(content),
     is_error: isError,
   };
-}
-
-/** The wire form of a tool result's content. */
-function contentForWire(content: unknown): unknown {
-  if (typeof content === 'string') return content;
-  if (content === undefined) return '';
-  try {
-    const serialized = JSON.stringify(content);
-    return serialized === undefined ? String(content) : serialized;
-  } catch {
-    return String(content);
-  }
 }
 
 /* -------------------------------------------------------------------------- */
