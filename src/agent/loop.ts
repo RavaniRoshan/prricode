@@ -345,6 +345,25 @@ export interface AgentRuntimeDeps {
    * run. The CLI task supplies the session's real rules and mode.
    */
   permissionOptions?: CheckPermissionOptions;
+
+  /**
+   * The `PreToolUse` seam the runtime's own permission service consults.
+   *
+   * The runtime's service is called with `permissionOptions()`, and the options
+   * a caller does not supply carry **no** seam — so a turn that goes through the
+   * runtime's own check is not gated by the `PreToolUse` hooks unless the caller
+   * supplies the seam. The CLI supplies it; this dependency lets a caller that
+   * does not supply `permissionOptions` supply the seam instead.
+   */
+  preToolUseHook?: (
+    ctx: ToolContext,
+  ) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
+  /**
+   * The `PermissionRequest` seam, for the same reason.
+   */
+  hook?: (
+    ctx: ToolContext,
+  ) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
   /**
    * The prompt.
    *
@@ -444,7 +463,13 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
   /** The options the permission service is called with. */
   function permissionOptions(): CheckPermissionOptions {
     if (deps.permissionOptions !== undefined) return deps.permissionOptions;
-    return { rules: { allow: [], deny: [], ask: [], cwd }, mode: 'default' };
+    const options: CheckPermissionOptions = {
+      rules: { allow: [], deny: [], ask: [], cwd },
+      mode: 'default',
+    };
+    if (deps.preToolUseHook !== undefined) options.preToolUseHook = deps.preToolUseHook;
+    if (deps.hook !== undefined) options.hook = deps.hook;
+    return options;
   }
 
   async function runTurn(input: TurnInput, signal?: AbortSignal): Promise<TurnResult> {
