@@ -987,6 +987,26 @@ export interface PreToolUseHookApproval {
   git commit -m "feat(ui): interactive renderer over the shared runtime"
   ```
 
+### CC-015b — The UI's strip-per-path sensitivity
+
+**Why this task exists.** The `CC-015` re-review confirmed the control-sequence stripping is **correct and present on every path**, and that each of the seven claimed paths has a **distinct** named test that fails when that path's strip is removed. It found two gaps in the **test's sensitivity**, not in the shipped behavior:
+
+1. substituting a **weaker** scanner — a CSI-only regex — at two of the block renderer's three strip sites leaves the suite green, because the hostile inputs at those two sites are CSI-only;
+2. **five** further strip sites' removal is **masked** by the layer next door.
+
+**Files:** Modify `src/ui/render/messages.ts`; Modify `src/ui/render/prompts.ts`; Modify `tests/contracts/ui-render.test.ts`.
+
+- [ ] **Step 1: Write the failing test** — a hostile input that carries an **OSC** sequence (not only a CSI one) reaches each of the strip sites, and a **weaker** scanner substituted at any one of them is caught.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL for the two sites the review named.
+- [ ] **Step 3: Widen the hostile inputs** at every strip site so the OSC form is covered, and give each of the five masked sites its **own** named test.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Verify the shared scanner is still the only one** — a second, weaker scanner anywhere in the renderers must fail a test.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src/ui tests/contracts/ui-render.test.ts
+  git commit -m "test(ui): every strip site carries a hostile input of its own"
+  ```
+
 ### CC-016 — Provider manager surfaces (`/provider`, catalog browsing)
 
 **Files:** Create `src/cli/commands/provider.ts`, `src/cli/commands/catalog.ts`, `src/ui/modals/providerPicker.ts`; Create `tests/contracts/provider-command.test.ts`.
