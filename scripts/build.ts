@@ -79,7 +79,7 @@ export interface BuildOptions {
 }
 
 /** The default name of the executable. */
-const DEFAULT_NAME = 'agent';
+const DEFAULT_NAME = 'prricode';
 
 /** The default output directory, relative to the caller's directory. */
 const DEFAULT_OUT_DIR = 'dist';

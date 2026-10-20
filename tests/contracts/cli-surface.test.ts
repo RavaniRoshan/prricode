@@ -1097,7 +1097,7 @@ describe('the command', () => {
 
     expect(code).toBe(EXIT_FAILURE);
     expect(stderr.text).toContain(
-      'Error: --resume requires a valid session ID or session title when used with --print. Usage: agent -p --resume <session-id|title>',
+      'Error: --resume requires a valid session ID or session title when used with --print. Usage: prricode -p --resume <session-id|title>',
     );
   });
 

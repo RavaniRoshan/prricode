@@ -76,5 +76,5 @@ jobs:
         run: bun run build
       - name: The executable starts and prints its version
         run: |
-          ./dist/agent --version
-          test -x ./dist/agent
+          ./dist/prricode --version
+          test -x ./dist/prricode

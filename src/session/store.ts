@@ -651,7 +651,7 @@ async function summarizeFile(sessionId: string, filePath: string): Promise<Sessi
  * title when used with `--print`. Usage: `agent -p --resume <session-id|title>`".
  */
 export const RESUME_REQUIRES_TARGET_MESSAGE =
-  'Error: --resume requires a valid session ID or session title when used with --print. Usage: agent -p --resume <session-id|title>';
+  'Error: --resume requires a valid session ID or session title when used with --print. Usage: prricode -p --resume <session-id|title>';
 
 /** The shape of a session id the target uses. */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

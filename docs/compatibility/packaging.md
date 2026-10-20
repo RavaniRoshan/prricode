@@ -12,7 +12,7 @@
 
 | Artifact | What it is | Evidence class |
 |---|---|---|
-| `dist/agent` | **one** executable: the bundled CLI **and** the runtime it needs | project requirement |
+| `dist/prricode` | **one** executable: the bundled CLI **and** the runtime it needs | project requirement |
 | `<configDir>/` | the configuration directory: settings, session transcripts, the multi-provider manager's state | `REA observed` (the storage root is `~/.claude`, audit §2.6) |
 
 The executable carries its **own runtime**, so it needs **neither** the host's Node **nor** the host's `node_modules`. The build emits **one file** — the executable — and the test asserts both halves of the claim:
@@ -23,8 +23,8 @@ The executable carries its **own runtime**, so it needs **neither** the host's N
 ## The build
 
 ```bash
-bun run scripts/build.ts                   # → ./dist/agent
-bun run scripts/build.ts --outdir /tmp/x   # → /tmp/x/agent
+bun run scripts/build.ts                   # → ./dist/prricode
+bun run scripts/build.ts --outdir /tmp/x   # → /tmp/x/prricode
 bun run scripts/build.ts --name other      # → ./dist/other
 bun run scripts/build.ts --target bun-linux-arm64
 ```
@@ -34,13 +34,13 @@ bun run scripts/build.ts --target bun-linux-arm64
 **The output directory is not cleared.** A file that was already there is not this build's doing, and a second build under another `--name` must not fail on the first build's artifact. The documented usage therefore works:
 
 ```bash
-bun run scripts/build.ts --outdir /tmp/x --name agent   # → /tmp/x/agent
+bun run scripts/build.ts --outdir /tmp/x --name prricode   # → /tmp/x/prricode
 bun run scripts/build.ts --outdir /tmp/x --name other    # → /tmp/x/other
 ```
 
 The previous artifact **with the same name** is removed **before** the build, so a failed build never leaves a stale executable behind for a test to run and believe.
 
-**A relative `--outdir` is resolved against the caller's directory**, and not against the repository's root: `bun run scripts/build.ts --outdir out` writes `./out/agent` under the directory the command runs in.
+**A relative `--outdir` is resolved against the caller's directory**, and not against the repository's root: `bun run scripts/build.ts --outdir out` writes `./out/prricode` under the directory the command runs in.
 
 **Why Bun's `--compile` and not Node's SEA.** The plan fixes the path, and the two differ in ways that decide it:
 
@@ -85,7 +85,7 @@ The report goes to the **standard error** so that it never mixes with the answer
 | Platform | Linux x86-64, Ubuntu 24.04.4 LTS (WSL2 guest) |
 | Build runtime | Bun `1.4.3` |
 | Test runtime | Node `24.21.0` |
-| The artifact | `dist/agent`, 87.2 MiB (91 473 888 bytes), 161 modules bundled |
+| The artifact | `dist/prricode`, 87.2 MiB (91 473 888 bytes), 161 modules bundled |
 | The build | ~0.5 s (29 ms bundle + 426 ms compile) |
 | The suite | ~2.8 s for the build **and** all twenty-five assertions |
 

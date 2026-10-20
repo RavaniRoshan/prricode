@@ -86,7 +86,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const buildScript = path.join(repoRoot, 'scripts', 'build.ts');
 
 /** The name the build gives the executable. */
-const binaryName = 'agent';
+const binaryName = 'prricode';
 
 /* -------------------------------------------------------------------------- */
 /* The build                                                                   */
@@ -508,13 +508,13 @@ describe('the build script', () => {
     const parsed = parseOptions(['--outdir', 'out'], path.join('/tmp', 'caller'));
     expect(parsed).toEqual({
       kind: 'options',
-      options: { outDir: path.join('/tmp', 'caller', 'out'), name: 'agent' },
+      options: { outDir: path.join('/tmp', 'caller', 'out'), name: 'prricode' },
     });
 
     const defaulted = parseOptions([], path.join('/tmp', 'caller'));
     expect(defaulted).toEqual({
       kind: 'options',
-      options: { outDir: path.join('/tmp', 'caller', 'dist'), name: 'agent' },
+      options: { outDir: path.join('/tmp', 'caller', 'dist'), name: 'prricode' },
     });
   });
 

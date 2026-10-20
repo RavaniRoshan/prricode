@@ -1244,10 +1244,10 @@ describe('the --continue selection', () => {
     // The failure happened **before** the restore, so it is reported with the
     // target's "could not continue" message.
     expect(result.failure?.message).toContain(
-      'The agent exited: could not continue the previous session (',
+      'PRRICODE exited: could not continue the previous session (',
     );
     expect(result.failure?.message).toContain(
-      '). Run agent --resume to pick a session, or start a new one.',
+      '). Run prricode --resume to pick a session, or start a new one.',
     );
   });
 
@@ -1271,7 +1271,7 @@ describe('the --continue selection', () => {
     // The failure happened **after** the restore, so it is reported with the
     // target's other message.
     expect(result.failure?.message).toBe(
-      'The agent exited: startup failed after restoring the previous session (the model refused).',
+      'PRRICODE exited: startup failed after restoring the previous session (the model refused).',
     );
   });
 
@@ -1295,7 +1295,7 @@ describe('the --continue selection', () => {
     expect(result.failure?.reason).toBe('worker_state_unread');
     expect(result.failure?.afterRestore).toBe(false);
     expect(result.failure?.message).toContain(
-      'The agent exited: could not continue the previous session (the state is unreadable).',
+      'PRRICODE exited: could not continue the previous session (the state is unreadable).',
     );
   });
 

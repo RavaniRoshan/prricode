@@ -1,9 +1,18 @@
-# An independently implemented coding-agent CLI
+# PRRICODE
 
-A coding-agent CLI written from scratch against the **static** structure of a
-pinned reference build (`2.1.303`, Linux x86-64, SHA-256
+**PRRICODE** is an independently implemented coding-agent CLI: a coding agent
+written from scratch against the **static** structure of a pinned reference build
+(`2.1.303`, Linux x86-64, SHA-256
 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`), plus a
 **multi-provider manager** the reference build does not have.
+
+It is built in two layers. The **first** is the parity layer: the same
+architecture, the same observable behaviour, the same performance envelope, and
+every claim traced to a named artifact in the evidence. The **second** is the
+divergence layer: the identity, the surfaces and the capabilities that make
+PRRICODE a product of its own rather than a reimplementation of somebody
+else's. The second layer is specified separately; the first is what this
+repository documents today.
 
 > **What "observably compatible" means here.** No vendor source, credential or
 > private API was used. The reference binary was read **statically** — its
@@ -20,15 +29,15 @@ pinned reference build (`2.1.303`, Linux x86-64, SHA-256
 bun install                 # the build never consults bun.lock; the tests do
 bun run test                 # the whole suite
 bun run typecheck            # tsc --noEmit
-bun run build                # → dist/agent, one self-contained executable
+bun run build                # → dist/prricode, one self-contained executable
 ```
 
 The built executable needs **neither** the host's Node **nor** the host's
 `node_modules`:
 
 ```bash
-./dist/agent --version
-./dist/agent --print 'hello' --output-format json
+./dist/prricode --version
+./dist/prricode --print 'hello' --output-format json
 ```
 
 `CLAUDE_CONFIG_DIR` relocates the configuration root; the first run creates it

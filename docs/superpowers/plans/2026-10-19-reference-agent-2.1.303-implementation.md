@@ -1301,6 +1301,47 @@ orchestrator owns those and will update the totals when the harness reports.
   git commit -m "build: self-contained executable and install path"
   ```
 
+### CC-020 — The divergence layer: PRRICODE as a product of its own
+
+**Why this task exists.** PRRICODE is built in two layers. The **first** is the parity
+layer — the same architecture, the same observable behaviour, the same performance
+envelope, with every claim traced to a named artifact in the evidence. That layer is
+this plan. The **second** layer is the divergence: the identity, the surfaces and the
+capabilities that make PRRICODE a product of its own rather than a reimplementation of
+somebody else's.
+
+**This milestone is the second layer, and its specification is not yet supplied.** The
+owner of the project will provide the identity requirements; until they are, the
+milestone cannot be implemented, and nothing in it may be invented. This entry exists
+so the plan is **whole**: the work is queued, named and accounted for, rather than
+implicit.
+
+**Files:** the ones the divergence specification names. Nothing is decided here.
+
+**Interfaces:** the ones the divergence specification names.
+
+- [ ] **Step 1: Receive the divergence specification** — the identity, the surfaces and
+  the capabilities that differ from the reference build. Until this step is done, every
+  other step is blocked and **nothing may be guessed**.
+- [ ] **Step 2: Write the failing test** — for each divergence, the test that shows the
+  clone does **not** yet behave that way.
+- [ ] **Step 3: Run it to verify it fails** — expected: FAIL.
+- [ ] **Step 4: Implement the divergence** — the behaviour the specification names.
+- [ ] **Step 5: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 6: Update the conformance documents** — a divergence is **not** a
+  compatibility claim, so it is recorded in its own document and **not** as a row of the
+  compatibility matrix. The matrix stays a statement about the parity layer.
+- [ ] **Step 7: Commit.**
+  ```bash
+  git add <the paths the specification names>
+  git commit -m "feat: the divergence layer"
+  ```
+
+**The rule this milestone obeys.** The compatibility matrix measures the **parity**
+layer. A divergence must not be recorded as a compatibility row, and a compatibility row
+must not be weakened to make room for one. The two are separate documents for exactly
+that reason.
+
 ### CC-019 — Compatibility measurement and reporting
 
 **Files:** Create `tests/compatibility/` scenarios; Create `docs/compatibility/results.md` (populate), `docs/compatibility/command-surface.md`, `docs/compatibility/provider-catalog.md`, `docs/compatibility/session-format.md`, `docs/compatibility/permission-matrix.md`, `docs/compatibility/extension-surface.md`.

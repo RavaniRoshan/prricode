@@ -1592,7 +1592,7 @@ export const CONTINUE_NOT_FOUND_MESSAGE = 'No conversation found to continue';
  * running, and the way to pick a session is `--resume`.
  */
 export const CONTINUE_BACKGROUND_RUNNING_MESSAGE =
-  'The previous session is already running in the background. Run agent --resume to pick a session, or start a new one.';
+  'The previous session is already running in the background. Run prricode --resume to pick a session, or start a new one.';
 
 /**
  * The message the target prints when the failure happened **after** the
@@ -1605,7 +1605,7 @@ export const CONTINUE_BACKGROUND_RUNNING_MESSAGE =
  * `docs/compatibility/session-format.md`.
  */
 export const CONTINUE_FAILED_AFTER_RESTORE_MESSAGE =
-  'The agent exited: startup failed after restoring the previous session ({reason}).';
+  'PRRICODE exited: startup failed after restoring the previous session ({reason}).';
 
 /**
  * The message the target prints when the failure happened **before** the
@@ -1617,7 +1617,7 @@ export const CONTINUE_FAILED_AFTER_RESTORE_MESSAGE =
  * target's.
  */
 export const CONTINUE_FAILED_BEFORE_RESTORE_MESSAGE =
-  'The agent exited: could not continue the previous session ({reason}). Run agent --resume to pick a session, or start a new one.';
+  'PRRICODE exited: could not continue the previous session ({reason}). Run prricode --resume to pick a session, or start a new one.';
 
 /**
  * The message a `--continue` failure is reported with.
@@ -1783,10 +1783,10 @@ export interface SessionContinueResult {
  * session is reported rather than silently continued. If nothing is found the
  * message is `No conversation found to continue`; if a background session was
  * found, a different, more specific message is used. The failure path
- * distinguishes two cases with distinct text: `The agent exited: startup
+ * distinguishes two cases with distinct text: `PRRICODE exited: startup
  * failed after restoring the previous session (<reason>).` when the failure
- * happened **after** the restore, and `The agent exited: could not continue
- * the previous session (<reason>). Run agent --resume to pick a session, or
+ * happened **after** the restore, and `PRRICODE exited: could not continue
+ * the previous session (<reason>). Run prricode --resume to pick a session, or
  * start a new one.` when it happened **before**."
  *
  * **Implementation choice.** The audit does not record the *ordering* rule inside the

@@ -172,7 +172,7 @@ export { DEFAULT_MODEL };
  * **Implementation choice.** The audit records the flag names it observed and no help
  * text, so the text below is this implementation's own.
  */
-export const HELP_TEXT = `Usage: agent [options] [prompt]
+export const HELP_TEXT = `Usage: prricode [options] [prompt]
 
 Options:
   -p, --print                 run in print mode and write the answer to stdout
