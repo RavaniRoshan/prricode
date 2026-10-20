@@ -83,11 +83,13 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { join } from 'node:path';
 
 import type { AgentRuntime } from '../agent/loop.js';
 import { createAgentRuntime } from '../agent/loop.js';
 import type { ProviderTurnSource } from '../agent/context.js';
 import { streamingSourceOf } from '../agent/context.js';
+import { loadManagerState, providerManagerCommand } from './commands/manager.js';
 import { loadSettings } from '../config/loader.js';
 import { parseSettingsDocument } from '../config/schema.js';
 import type { SettingsSource, SettingsTier } from '../config/tiers.js';
@@ -124,7 +126,7 @@ import { createBuiltinTools, registerBuiltinTools } from '../tools/builtins/inde
 import type { BuiltinToolDeps } from '../tools/builtins/shared.js';
 import { createToolRegistry } from '../tools/registry.js';
 
-import type { ParsedArgs, ParsedCommandArgs, ParsedRunArgs } from './args.js';
+import type { ParsedArgs, ParsedCommandArgs, ParsedManagerArgs, ParsedRunArgs } from './args.js';
 import type { CloudTarget } from './args.js';
 import { findSessionIdInPath, isSessionId } from './args.js';
 import { readStreamJsonInput, runHeadless } from './headless.js';
@@ -404,6 +406,8 @@ export async function runCommand(parsed: ParsedArgs, options: CommandOptions = {
     case 'routine':
       stderr.write("The '--routine' command is not implemented here yet.\n");
       return EXIT_FAILURE;
+    case 'manager':
+      return runManagerCommand(parsed, { ...options, stdout, stderr });
     case 'command':
       // The resolved sinks come **last**: an own `stdout: undefined` in the
       // options must not clobber the default.
@@ -413,6 +417,32 @@ export async function runCommand(parsed: ParsedArgs, options: CommandOptions = {
     default:
       return EXIT_USAGE;
   }
+}
+
+/**
+ * Run the multi-provider manager.
+ *
+ * **Project extension.** The target has no provider manager. The manager's own
+ * state — the connections and the catalogs — lives in one file under the
+ * configuration directory, so a `provider add` in one invocation is visible to
+ * the next one.
+ */
+async function runManagerCommand(
+  parsed: ParsedManagerArgs,
+  options: CommandOptions & { stdout: OutputSink; stderr: OutputSink },
+): Promise<number> {
+  const { stdout, stderr } = options;
+  const configDir = options.configDir ?? defaultConfigDir();
+  const statePath = join(configDir, 'providers.json');
+  const { registry, catalogs } = await loadManagerState(statePath);
+  const result = await providerManagerCommand(parsed.args, registry, {
+    catalogs,
+    statePath,
+    env: options.env ?? process.env,
+  });
+  if (result.stdout.length > 0) stdout.write(result.stdout.endsWith('\n') ? result.stdout : `${result.stdout}\n`);
+  if (result.stderr.length > 0) stderr.write(result.stderr.endsWith('\n') ? result.stderr : `${result.stderr}\n`);
+  return result.exitCode;
 }
 
 /* -------------------------------------------------------------------------- */

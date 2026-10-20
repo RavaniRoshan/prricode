@@ -114,6 +114,24 @@ export const EXIT_FAILURE = 1;
 /** The arguments were wrong. */
 export const EXIT_USAGE = 2;
 
+/**
+ * The result a command returns.
+ *
+ * One definition, shared by every command in the CLI: the headless writer, the
+ * provider manager, the catalog browser and the picker all return this record,
+ * so a caller reads one shape whatever produced it.
+ */
+export interface CommandResult {
+  /** The exit code: `0` success, `1` failure, `2` a usage error. */
+  exitCode: number;
+  /** The text written to stdout. */
+  stdout: string;
+  /** The text written to stderr. */
+  stderr: string;
+  /** The machine-readable payload, when the command produced one. */
+  data?: unknown;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The events                                                                  */
 /* -------------------------------------------------------------------------- */

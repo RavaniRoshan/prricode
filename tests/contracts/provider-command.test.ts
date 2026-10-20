@@ -1442,12 +1442,16 @@ describe('the shared pieces of the manager commands', () => {
     const provider = await sourceOf('provider');
     const catalog = await sourceOf('catalog');
     const shared = await sourceOf('shared');
+    const output = await readFile(new URL('../../src/cli/output.ts', import.meta.url), 'utf8');
 
-    const declarations = [provider, catalog, shared].filter((source) =>
+    // The declaration lives in the CLI's own vocabulary module; the command
+    // modules **re-export** it rather than declaring a second one.
+    const declarations = [provider, catalog, shared, output].filter((source) =>
       /interface CommandResult\b/.test(source),
     );
     expect(declarations).toHaveLength(1);
-    expect(shared).toMatch(/interface CommandResult\b/);
+    expect(output).toMatch(/interface CommandResult\b/);
+    expect(shared).toMatch(/export type \{ CommandResult \}/);
   });
 
   it('gives the shared helpers exactly one home', async () => {

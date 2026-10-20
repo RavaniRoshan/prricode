@@ -68,21 +68,13 @@ import type { ProviderRoute } from '../../provider/routes.js';
  *
  * **One home.** The type used to live in `src/cli/commands/provider.ts` and be
  * re-exported by `src/cli/commands/catalog.ts`, which is how two commands end
- * up with two definitions of the same record. It lives here now, next to the
- * exit codes it is written with. The CLI's own vocabulary belongs in
- * `src/cli/output.ts`; that module is not this milestone's to change, so the
- * move is reported rather than made.
+ * up with two definitions of the same record. It is now **re-exported** from
+ * `src/cli/output.ts`, next to the exit codes it is written with, so the CLI
+ * has exactly one definition of the record.
  */
-export interface CommandResult {
-  /** The exit code: `0` success, `1` failure, `2` a usage error. */
-  exitCode: number;
-  /** The text written to stdout. */
-  stdout: string;
-  /** The text written to stderr. */
-  stderr: string;
-  /** The machine-readable payload, when the command produced one. */
-  data?: unknown;
-}
+import type { CommandResult } from '../output.js';
+
+export type { CommandResult };
 
 /* -------------------------------------------------------------------------- */
 /* The extension label                                                          */

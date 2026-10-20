@@ -545,12 +545,33 @@ export type PermissionModeName = (typeof PERMISSION_MODE_NAMES)[number];
  * The union is **discriminated** by its `kind`, so a caller narrows it with one
  * check and every member carries only what that case needs.
  */
+/**
+ * The multi-provider manager.
+ *
+ * **Project extension.** The target has no provider manager; the surface is the
+ * implementation's, and the plan's Step 8 requires the same operations to be available
+ * as `--provider list`-style non-interactive flags with machine-readable output.
+ *
+ * The manager's own arguments are handed over **unparsed**: the manager
+ * commands have their own verbs, their own flags and their own output, and
+ * re-parsing them here would give the CLI two parsers for one surface.
+ */
+export interface ParsedManagerArgs {
+  /** The discriminant. */
+  kind: 'manager';
+  /** Which manager surface the arguments name. */
+  command: 'provider' | 'catalog';
+  /** The arguments the manager parses itself. */
+  args: string[];
+}
+
 export type ParsedArgs =
   | ParsedRunArgs
   | ParsedCommandArgs
   | ParsedRoutineArgs
   | ParsedHelpArgs
   | ParsedVersionArgs
+  | ParsedManagerArgs
   | ParsedErrorArgs;
 
 /* -------------------------------------------------------------------------- */
@@ -611,6 +632,26 @@ export function parseArgs(argv: string[], options: ParseOptions = {}): ParsedArg
     const token = queue[cursor];
     cursor += 1;
     if (token === undefined) continue;
+
+    // **The multi-provider manager** (a project extension). The flag form wins
+    // over the word form, because `--catalog list` is unambiguous while a
+    // prompt that merely mentions "catalog" is not. Everything from the token
+    // on is the manager's own.
+    if (token === '--provider' || token === '--catalog') {
+      return {
+        kind: 'manager',
+        command: token === '--catalog' ? 'catalog' : 'provider',
+        args: queue.slice(cursor),
+      };
+    }
+    if (
+      positionals.length === 0 &&
+      command === undefined &&
+      mode === undefined &&
+      (token === 'provider' || token === 'catalog')
+    ) {
+      return { kind: 'manager', command: token, args: queue.slice(cursor) };
+    }
 
     // `--` ends the flag parsing: everything after it is a positional.
     if (token === '--') {

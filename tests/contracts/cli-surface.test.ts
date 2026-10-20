@@ -909,6 +909,38 @@ describe('the command', () => {
     expect(stderr.text).toBe('');
   });
 
+  it('runs the multi-provider manager and returns its exit code', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+    const configDir = makeDirectory();
+
+    const code = await runCommand(parseArgs(['--provider', 'list']), {
+      stdout,
+      stderr,
+      configDir,
+    });
+
+    // An empty manager lists nothing and succeeds; the point is that the
+    // surface is **reachable** from the command line at all.
+    expect(code).toBe(EXIT_SUCCESS);
+    expect(stdout.text.length).toBeGreaterThan(0);
+    expect(stderr.text).toBe('');
+  });
+
+  it('refuses an unknown manager verb with a usage error', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+
+    const code = await runCommand(parseArgs(['--provider', 'not-a-verb']), {
+      stdout,
+      stderr,
+      configDir: makeDirectory(),
+    });
+
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr.text).toContain('not-a-verb');
+  });
+
   it('writes the version and returns 0', async () => {
     const stdout = new CollectingSink();
     const stderr = new CollectingSink();
