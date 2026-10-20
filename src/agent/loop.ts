@@ -462,11 +462,12 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 
   /** The options the permission service is called with. */
   function permissionOptions(): CheckPermissionOptions {
-    if (deps.permissionOptions !== undefined) return deps.permissionOptions;
-    const options: CheckPermissionOptions = {
-      rules: { allow: [], deny: [], ask: [], cwd },
-      mode: 'default',
-    };
+    const options: CheckPermissionOptions =
+      deps.permissionOptions ?? { rules: { allow: [], deny: [], ask: [], cwd }, mode: 'default' };
+    // The seams are applied on **every** path, not only on the default one: a
+    // caller that supplies `permissionOptions` without them still gets them
+    // from the dependencies, and a caller that supplies them in `permissionOptions`
+    // keeps them, because the guard only fills in what is absent.
     if (deps.preToolUseHook !== undefined) options.preToolUseHook = deps.preToolUseHook;
     if (deps.hook !== undefined) options.hook = deps.hook;
     return options;

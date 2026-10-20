@@ -891,6 +891,15 @@ export async function createCommandSession(context: SessionContext): Promise<Com
     mode,
     cwd,
     ...(rules.additionalDirs === undefined ? {} : { additionalDirs: rules.additionalDirs }),
+    // **The sandbox policy.** The settings document the loader merged carries
+    // it, and the `Bash` tool routes its command through the sandbox with it.
+    // Without this line every command runs unconfined on the host.
+    //
+    // The policy is **required** on the loader's result, so a configured
+    // session always has one. A platform the sandbox does not support, or a
+    // sandbox the user switched off, runs the command **unconfined** and says
+    // so; only a missing backend with `failIfUnavailable` refuses it.
+    sandboxPolicy: settings.sandboxPolicy,
     // **The two seams.** A `PreToolUse` hook's denial holds in every mode, and a
     // `PermissionRequest` hook's denial is a denial.
     hook: seams.permissionRequest,
