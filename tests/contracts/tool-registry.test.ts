@@ -1908,20 +1908,24 @@ describe('the Bash tool', () => {
     expect(resolveBashTimeout(10_000_000)).toBe(MAX_BASH_TIMEOUT_MS);
   });
 
-  it('runs the command in the environment of the session', async () => {
+  it('runs the command in the filtered environment of the session', async () => {
     const root = makeDirectory();
     const tool = createBashTool(
       builtinDeps({
         rules: ruleSet({ allow: ['Bash'], cwd: root }),
         cwd: root,
-        env: { ...process.env, PRRICHECK_ENV: 'from the session' },
+        env: { ...process.env, PATH: '/usr/bin:/bin', PRRICHECK_ENV: 'from the session' },
       }),
     );
-    const input = { command: 'printf %s "$PRRICHECK_ENV"' };
+    const input = { command: 'printf "%s|%s" "$PATH" "$PRRICHECK_ENV"' };
 
     const output = await tool.execute(input, toolContext('Bash', input));
 
-    expect(output.stdout).toBe('from the session');
+    // The session's environment is used **as far as the sandbox's allowlist
+    // allows**: `PATH` is on the list and comes from the session, and a variable
+    // that is not on it never reaches the command — the agent's credentials live
+    // in exactly such a variable.
+    expect(output.stdout).toBe('/usr/bin:/bin|');
   });
 
   it('does not let the sandbox flag past a deny rule', async () => {

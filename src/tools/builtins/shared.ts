@@ -95,7 +95,7 @@
  *   - The **sandbox policy** is a dependency as well: the policy is session
  *     state — it is built out of the settings document the loader merged — and
  *     the `Bash` tool hands it to the launcher, which applies it. A session that
- *     supplies none has no sandbox, and the tool says so in its result.
+ *     supplies none has no sandbox at all, and the tool says so in its result.
  *   - The file tools keep their path snapshot **per tool instance**, keyed by the
  *     tool-use id, exactly as the audit describes the file-write tool ("stash the
  *     permission decision keyed by `toolUseId`"). The snapshot is of the path the
@@ -155,9 +155,12 @@ export interface BuiltinToolDeps {
    * the launcher, which applies it.
    *
    * **`undefined` means the session has no sandbox at all.** The `Bash` tool then
-   * runs the command the way it has always run it. A configured session always
-   * supplies one: the settings loader builds a policy out of every settings
-   * document, and the default policy is this implementation's own.
+   * runs the command on the host, with the **filtered** environment — the same
+   * filter the sandbox uses, so the agent's credentials never reach the command.
+   * This is the **one** meaning of an absent policy in this implementation: the settings
+   * loader always produces one (`SettingsLoadResult.sandboxPolicy` is not
+   * optional), so an absent policy is only ever a session whose dependencies were
+   * built by hand.
    */
   sandboxPolicy?: SandboxPolicy;
   /**

@@ -57,6 +57,7 @@ import {
 } from '../../src/permissions/decision.js';
 import type { SettingsLoadResult } from '../../src/config/loader.js';
 import type { SettingsSource, SettingsTier } from '../../src/config/tiers.js';
+import { DEFAULT_SANDBOX_POLICY } from '../../src/platform/sandbox/policy.js';
 import {
   commandGlobMatch,
   reResolvePath,
@@ -744,6 +745,7 @@ describe('the host-level gates', () => {
       ],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
   }
 

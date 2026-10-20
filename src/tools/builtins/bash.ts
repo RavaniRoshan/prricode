@@ -22,6 +22,27 @@
  * rule: the permission check runs on the command whether the flag is set or not.
  * The flag skips the **sandbox** and nothing else.
  *
+ * **The flag never overrides a policy error.** The flag is a **tool input field**
+ * — the model supplies it — while `sandbox.enabled: false` and
+ * `sandbox.enabledPlatforms` are the **user's settings file**. A model that could
+ * opt itself out of a user-configured control would make the control advisory,
+ * and the plan's global constraint says that the shell execution is enforced by
+ * implementation-owned code, independent of the model instructions. So the flag overrides
+ * the **routing** of a command the policy would otherwise run inside the sandbox,
+ * and it overrides **nothing else**:
+ *
+ *   - a **denial** is a denial: `sandbox.enabled is false`,
+ *     `sandbox.enabledPlatforms excludes <platform>` and the refusal a missing
+ *     backend earns under `failIfUnavailable: true` are refusals whether the flag
+ *     is set or not — the flag turns none of them into a run;
+ *   - an **allow** is routed outside the sandbox when the flag is set;
+ *   - an **unconfined** decision is unconfined either way, and the policy's own
+ *     reason is the one reported.
+ *
+ * The flag is read as an **own** field of the input, exactly as the validator
+ * reads it: an input that inherits `dangerouslyDisableSandbox` from its prototype
+ * has no such field, and the validator and the runner must agree about that.
+ *
  * **The command runs through the sandbox.** The tool resolves the session's
  * sandbox policy, asks the policy what to do with the command, and routes the
  * command accordingly:
@@ -43,52 +64,81 @@
  * whether it can run on this host, and it hands the answer to `evaluateSandbox` as
  * its fourth argument. A host with no backend is never reported as available by
  * default, so the policy's `failIfUnavailable` decides between a refusal and an
- * unconfined run.
+ * unconfined run. The probe is **one** probe per call: the same answer goes to
+ * `evaluateSandbox` and to the launcher, so the two provably cannot disagree. The
+ * reason and the warning the probe reported are carried into the result instead
+ * of being thrown away.
  *
  * **Neither path sees the agent's credentials.** The sandbox filters the
  * environment against an allowlist (`PATH`, `HOME`, `LANG`, `TERM` and the
- * proxy-socket variable), and the tool applies **the same filter** to a command
- * that runs outside the sandbox: an exempt command is still the agent's command.
+ * proxy-socket variable), and the tool applies **the same filter** to every
+ * command that runs outside the sandbox: a command the policy exempts, a command
+ * the flag asked for, and a command of a session that has no sandbox policy at all
+ * are all the agent's commands, and the agent's API key is in the session's
+ * environment.
+ *
+ * **The sandbox is not in the production path yet.** The CLI builds the tools'
+ * dependencies from `loadSettings(...)` and does **not** pass the loaded sandbox
+ * policy, so `deps.sandboxPolicy` is `undefined` in a real session and every
+ * command takes the no-policy branch: it runs on the host, unconfined, with the
+ * filtered environment. The wiring is **owed** in `src/cli/command.ts`: the
+ * `BuiltinToolDeps` the session assembly builds must carry
+ * `sandboxPolicy: settings.sandboxPolicy`. Until that line exists, the sandbox
+ * protects nothing, and the no-policy branch is the one that has to be safe.
  *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
  *   - The command runs through `/bin/sh -c`, with the session's working directory
  *     as its directory and the **session's environment** — the `env` the session
- *     supplies, and the process environment when it supplies none. The target
- *     documents a **persistent** shell session; this implementation runs a shell per call,
- *     which is a labelled implementation choice and not a claim of equivalence.
+ *     supplies, and the process environment when it supplies none — filtered
+ *     against the sandbox's allowlist. The target documents a **persistent**
+ *     shell session; this implementation runs a shell per call, which is a labelled implementation
+ *     choice and not a claim of equivalence.
  *   - The default timeout is `120000` ms and the maximum is `600000` ms. The audit
  *     does not pin the shell timeout. A timeout of `0` is refused: it would stop
  *     the command before it began.
  *   - The output is capped, so a command that prints without bound does not fill
  *     the context window. On the **sandboxed** path the cap is applied to the
  *     output the launcher collected, so the launcher itself buffers the whole
- *     output before the cap bites; the cap the tool reports is unchanged.
- *   - A command that runs **past its timeout** on the sandboxed path is reported
- *     with the same exit code (`124`), the same message and the same
- *     `truncated` flag as the direct path, but the output it had produced so far
- *     is not reported: the launcher hands the output over when the process ends,
- *     and a command that was stopped never ends on its own.
+ *     output before the cap bites: the launcher must cap **at its collection
+ *     point** for the cap to bound the memory the process holds. The cap the tool
+ *     reports is unchanged.
+ *   - A command that runs **past its timeout** is reported with the exit code
+ *     `124`, the same message and the same `truncated` flag on both paths. On the
+ *     sandboxed path the output is the **partial** output the command had
+ *     produced when it was stopped — the launcher hands the output over when the
+ *     process ends, so the tool takes it from the launcher after the stop, with a
+ *     bounded grace period. The result says so itself: `timedOut` is `true`.
  *   - The **output shape** — `{ type: 'text', text, stdout, stderr, exitCode,
- *     truncated, sandboxed, sandboxReason, sandboxExemptions }` — is a reimplementation
- *     choice: the audit pins the tool-result *metadata*, not the content a tool
- *     returns. The three sandbox members report **what the sandbox did**: whether
- *     the command ran inside it, the reason it did not (when it did not), and the
- *     `excludedCommands` exemptions that applied.
+ *     truncated, sandboxed, sandboxReason, sandboxEstablishmentReason,
+ *     sandboxExemptions, sandboxExemptionScope, sandboxAvailability, timedOut }` —
+ *     is a implementation choice: the audit pins the tool-result *metadata*, not the
+ *     content a tool returns. The sandbox members report **what the sandbox
+ *     did**: whether the command ran inside it, why it ran outside it (when it
+ *     did), why the sandbox never came up (when it did not), the
+ *     `excludedCommands` exemptions that applied, the **scope** of the exclusion
+ *     list, and what the backend's availability probe reported.
  *   - A session that supplies **no** sandbox policy has no sandbox at all: the
- *     command runs the way the tool has always run it, in the session's own
- *     environment. The settings loader always supplies one
+ *     command runs on the host, with the filtered environment and the reason
+ *     `no sandbox policy is configured for this session, so the command runs
+ *     outside the sandbox`. The settings loader always supplies one
  *     (`SettingsLoadResult.sandboxPolicy`), so a configured session always has
  *     the sandbox in front of it.
- *   - The `dangerouslyDisableSandbox` flag asks for an **unconfined** run, and it
- *     does so whatever the policy says about the sandbox — a refusal to sandbox a
- *     command is not a refusal to run it. It never touches the permission layer.
+ *   - The `dangerouslyDisableSandbox` flag asks for an **unconfined** run of a
+ *     command the policy would otherwise sandbox, and it does so whatever the
+ *     policy says about the sandbox — but never over a **denial**, as the header
+ *     above says. It never touches the permission layer either.
+ *   - The availability probe costs a **fork and an exec per call**, and the probe
+ *     is **not** cached: a cached probe would answer for a host that changed
+ *     under the session, and the "one probe, one answer" property is what makes
+ *     the policy's decision and the launcher's decision provably the same. The
+ *     cost is paid on every `Bash` call.
  */
 
 import { spawn } from 'node:child_process';
 
 import { ToolExecutionError, TOOL_ERROR_CODES, type ToolDefinition } from '../registry.js';
-import type { ToolContext } from '../../permissions/decision.js';
+import type { PermissionDecision, ToolContext } from '../../permissions/decision.js';
 import {
   SandboxRefusedError,
   bubblewrapBackend,
@@ -101,7 +151,9 @@ import {
 } from '../../platform/sandbox/launcher.js';
 import {
   evaluateSandbox,
+  exemptionScope,
   type SandboxAvailability,
+  type SandboxExemptionScope,
 } from '../../platform/sandbox/policy.js';
 
 import {
@@ -122,8 +174,22 @@ export interface BashInput {
   description?: string;
   /** The timeout in milliseconds. */
   timeout?: number;
-  /** Whether the sandbox is skipped. It never skips a permission rule. */
+  /**
+   * Whether the sandbox is skipped. It never skips a permission rule, and it
+   * never overrides a policy **error**: it only routes a command the policy
+   * would have sandboxed.
+   */
   dangerouslyDisableSandbox?: boolean;
+}
+
+/** What the backend's availability probe reported. */
+export interface SandboxAvailabilityReport {
+  /** Whether the backend can run on this host. */
+  available: boolean;
+  /** Why it cannot, when it cannot. */
+  reason?: string;
+  /** What the probe could not establish. */
+  warning?: string;
 }
 
 /** The output of the `Bash` tool. */
@@ -146,10 +212,36 @@ export interface BashOutput {
    * `false`, whatever the policy decided.
    */
   sandboxed: boolean;
-  /** The reason the command ran outside the sandbox, when it did. */
+  /**
+   * Why the command ran **outside** the sandbox, when it did.
+   *
+   * It is the reason the policy gave, or the reason the call asked for an
+   * unsandboxed run. It says nothing about a sandbox that never came up: that
+   * is `sandboxEstablishmentReason`.
+   */
   sandboxReason?: string;
+  /** Why the sandbox **never came up**, when it did not. */
+  sandboxEstablishmentReason?: string;
   /** The `excludedCommands` exemptions that applied to the command. */
   sandboxExemptions?: readonly string[];
+  /**
+   * The scope the `excludedCommands` list covers.
+   *
+   * `all` means the list carries an entry that matches **every** command: with
+   * `allowUnsandboxedCommands` set, the sandbox is then switched off for the
+   * whole command space. The semantics are the target's; this implementation reports the
+   * reach of the list, so the hazard is visible.
+   */
+  sandboxExemptionScope?: SandboxExemptionScope;
+  /** What the backend's availability probe reported. */
+  sandboxAvailability?: SandboxAvailabilityReport;
+  /**
+   * Whether the command was stopped for running past its timeout.
+   *
+   * The output that comes with it is the output the command had produced when
+   * it was stopped.
+   */
+  timedOut?: boolean;
 }
 
 /** The input schema of the `Bash` tool. */
@@ -172,7 +264,7 @@ export const BASH_INPUT_SCHEMA = {
     dangerouslyDisableSandbox: {
       type: 'boolean',
       description:
-        'Whether the sandbox is skipped. It never skips a permission rule; a matching deny rule still blocks the call.',
+        'Whether the sandbox is skipped. It never skips a permission rule, and it never overrides a sandbox policy error: a matching deny rule still blocks the call, and a policy that refuses to sandbox the command still refuses it.',
     },
   },
   required: ['command'],
@@ -207,6 +299,27 @@ export const SANDBOX_SKIPPED_BY_CALL_REASON =
   'the call asked for the sandbox to be skipped (dangerouslyDisableSandbox)';
 
 /**
+ * The reason a permission decision carries when the call asked for an
+ * unsandboxed run.
+ *
+ * The wording is the target's: the audit records the reason kind
+ * `sandboxOverride` as "Run outside of the sandbox".
+ */
+export const SANDBOX_OVERRIDE_REASON = 'Run outside of the sandbox';
+
+/**
+ * The grace period the tool gives the launcher to hand over the output of a
+ * command it stopped.
+ *
+ * The launcher collects the output of a sandboxed command and hands it over when
+ * the process ends; a command that was stopped never ends on its own, so the
+ * tool asks the launcher for the output after the stop and waits at most this
+ * long for it. The tool never waits longer than this for a process that does not
+ * die.
+ */
+export const SANDBOX_OUTPUT_GRACE_MS = 250;
+
+/**
  * The timeout a command runs with.
  *
  * A call that asks for no timeout gets the default, and a call that asks for more
@@ -219,15 +332,44 @@ export function resolveBashTimeout(timeout: number | undefined): number {
   return Math.min(timeout, MAX_BASH_TIMEOUT_MS);
 }
 
+/** The message of a thrown value. */
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A promise that resolves after the given delay. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/** What a command produced. */
+interface CommandResult {
+  /** The standard output. */
+  stdout: string;
+  /** The standard error. */
+  stderr: string;
+  /** The exit code of the command. */
+  exitCode: number;
+  /** Whether the output was capped. */
+  truncated: boolean;
+  /** Whether the command was stopped for running past its timeout. */
+  timedOut: boolean;
+}
+
 /**
  * Run a command through the shell and collect its output.
+ *
+ * The environment is the one the caller filtered: the command never sees the
+ * agent's credentials, whichever path it runs on.
  */
 function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
   env: NodeJS.ProcessEnv,
-): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean }> {
+): Promise<CommandResult> {
   return new Promise((resolve) => {
     const child = spawn('/bin/sh', ['-c', command], {
       cwd,
@@ -238,17 +380,19 @@ function runCommand(
     let stdout = '';
     let stderr = '';
     let truncated = false;
+    let timedOut = false;
     let settled = false;
 
     const finish = (exitCode: number): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode, truncated });
+      resolve({ stdout, stderr, exitCode, truncated, timedOut });
     };
 
     const timer = setTimeout(() => {
       truncated = true;
+      timedOut = true;
       child.kill('SIGKILL');
       stderr += '\nThe command was stopped because it ran past its timeout.';
       finish(124);
@@ -290,29 +434,44 @@ function runCommand(
  *
  * It is the **sandbox's** filter, not a second one: an allowlist, so the agent's
  * credentials never reach the command — not even a command the policy exempts
- * from the sandbox. The home directory is the caller's own, because the unconfined
- * path runs on the host, where `/tmp` is shared and world-writable.
+ * from the sandbox, not even a command the call asked to run unconfined, and not
+ * even a command of a session that has no sandbox policy at all. The home
+ * directory is the caller's own, because the unconfined path runs on the host,
+ * where `/tmp` is shared and world-writable.
  */
-function unconfinedEnvironment(
-  command: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-): Record<string, string> {
-  return sandboxEnvironment({ command, cwd, env }, 'unconfined');
+function unconfinedEnvironment(spec: SandboxSpec): Record<string, string> {
+  return sandboxEnvironment(spec, 'unconfined');
 }
 
 /**
- * Whether the backend can run on this host.
+ * Whether the backend can run on this host, and what the probe reported.
  *
  * The probe is the backend's own, and a probe that **fails** is an unavailable
- * backend: a host with no backend must never be reported as available.
+ * backend: a host with no backend must never be reported as available. The
+ * reason and the warning the probe reported are carried along, so they reach the
+ * result instead of being thrown away.
  */
-async function backendAvailability(backend: SandboxBackend): Promise<SandboxAvailability> {
+async function backendAvailability(
+  backend: SandboxBackend,
+): Promise<{ availability: SandboxAvailability; report: SandboxAvailabilityReport }> {
   try {
     const probe = await backend.isAvailable();
-    return probe.available ? 'available' : 'unavailable';
-  } catch {
-    return 'unavailable';
+    return {
+      availability: probe.available ? 'available' : 'unavailable',
+      report: {
+        available: probe.available,
+        ...(probe.reason === undefined ? {} : { reason: probe.reason }),
+        ...(probe.warning === undefined ? {} : { warning: probe.warning }),
+      },
+    };
+  } catch (error) {
+    return {
+      availability: 'unavailable',
+      report: {
+        available: false,
+        reason: `the availability probe failed: ${messageOf(error)}`,
+      },
+    };
   }
 }
 
@@ -325,6 +484,18 @@ function refusalMessage(reason: string | undefined): string {
   return `the sandbox refused to run the command: ${reason ?? 'the sandbox policy refused the command'}`;
 }
 
+/** What an unconfined run reports besides the command's own output. */
+interface UnconfinedReport {
+  /** Why the command ran outside the sandbox. */
+  reason: string;
+  /** The `excludedCommands` exemptions that applied. */
+  exemptions?: readonly string[];
+  /** The scope the `excludedCommands` list covers. */
+  scope?: SandboxExemptionScope;
+  /** What the backend's availability probe reported. */
+  availability?: SandboxAvailabilityReport;
+}
+
 /**
  * Run a command **outside** the sandbox, with the reason recorded.
  *
@@ -332,18 +503,15 @@ function refusalMessage(reason: string | undefined): string {
  * command, and it must not see the agent's credentials.
  */
 async function runUnconfined(
-  command: string,
-  cwd: string,
+  spec: SandboxSpec,
   timeoutMs: number,
-  env: NodeJS.ProcessEnv,
-  reason: string,
-  exemptions?: readonly string[],
+  report: UnconfinedReport,
 ): Promise<BashOutput> {
   const result = await runCommand(
-    command,
-    cwd,
+    spec.command,
+    spec.cwd,
     timeoutMs,
-    unconfinedEnvironment(command, cwd, env),
+    unconfinedEnvironment(spec),
   );
   return {
     type: 'text',
@@ -352,10 +520,80 @@ async function runUnconfined(
     stderr: result.stderr,
     exitCode: result.exitCode,
     truncated: result.truncated,
+    ...(result.timedOut ? { timedOut: true } : {}),
     sandboxed: false,
-    sandboxReason: reason,
-    ...(exemptions === undefined ? {} : { sandboxExemptions: exemptions }),
+    sandboxReason: report.reason,
+    ...(report.exemptions === undefined ? {} : { sandboxExemptions: report.exemptions }),
+    ...(report.scope === undefined ? {} : { sandboxExemptionScope: report.scope }),
+    ...(report.availability === undefined ? {} : { sandboxAvailability: report.availability }),
   };
+}
+
+/** What a sandboxed run produced. */
+type SandboxOutcome =
+  | { kind: 'completed'; result: SandboxRunResult }
+  | { kind: 'timeout'; stdout: string; stderr: string }
+  | { kind: 'failed'; message: string };
+
+/**
+ * The output a stopped command had produced.
+ *
+ * The launcher hands the output over when the process ends, and a command that
+ * was stopped never ends on its own — so the tool stops it and then asks the
+ * launcher for what it collected, with a **bounded** grace period: the timeout is
+ * reported at once, and a process that does not die is never waited for.
+ */
+async function partialOutputOf(
+  launched: LaunchedSandbox,
+): Promise<{ stdout: string; stderr: string }> {
+  const outcome = await Promise.race([
+    (async () => {
+      await launched.cleanup();
+      return launched.wait();
+    })(),
+    delay(SANDBOX_OUTPUT_GRACE_MS).then(() => undefined),
+  ]).catch(() => undefined);
+  return { stdout: outcome?.stdout ?? '', stderr: outcome?.stderr ?? '' };
+}
+
+/**
+ * Wait for the sandboxed command, or stop it when it runs past its timeout.
+ *
+ * A command that **fails** to report its result is not a command that succeeded:
+ * it is reported as a failure with the exit code `127` the direct path reports
+ * for a command that could not be started.
+ */
+function waitForSandbox(launched: LaunchedSandbox, timeoutMs: number): Promise<SandboxOutcome> {
+  return new Promise<SandboxOutcome>((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (outcome: SandboxOutcome): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(outcome);
+    };
+    timer = setTimeout(() => {
+      // The flag is set **before** the command is stopped: a command that ends
+      // because the timeout stopped it is a timeout, not a command that ran.
+      timedOut = true;
+      void (async () => {
+        const partial = await partialOutputOf(launched);
+        finish({ kind: 'timeout', stdout: partial.stdout, stderr: partial.stderr });
+      })();
+    }, timeoutMs);
+    void launched.wait().then(
+      (result) => {
+        if (timedOut) return;
+        finish({ kind: 'completed', result });
+      },
+      (error: unknown) => {
+        if (timedOut) return;
+        finish({ kind: 'failed', message: messageOf(error) });
+      },
+    );
+  });
 }
 
 /**
@@ -366,7 +604,11 @@ async function runUnconfined(
  * raises a refusal, and the refusal is reported as a refusal — never as a command
  * that ran and failed.
  */
-async function runSandboxed(spec: SandboxSpec, timeoutMs: number): Promise<BashOutput> {
+async function runSandboxed(
+  spec: SandboxSpec,
+  timeoutMs: number,
+  availability?: SandboxAvailabilityReport,
+): Promise<BashOutput> {
   let launched: LaunchedSandbox;
   try {
     launched = await launchSandbox(spec);
@@ -377,51 +619,66 @@ async function runSandboxed(spec: SandboxSpec, timeoutMs: number): Promise<BashO
     throw error;
   }
 
-  let timedOut = false;
-  let timer: NodeJS.Timeout | undefined;
-  const result = await new Promise<SandboxRunResult>((resolve) => {
-    let settled = false;
-    const finish = (value: SandboxRunResult): void => {
-      if (settled) return;
-      settled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      resolve(value);
+  const outcome = await waitForSandbox(launched, timeoutMs);
+  if (outcome.kind !== 'timeout') await launched.cleanup();
+
+  const status = {
+    sandboxed: launched.status.sandboxed,
+    ...(launched.status.reason === undefined
+      ? {}
+      : { sandboxEstablishmentReason: launched.status.reason }),
+    ...(launched.status.exemptions === undefined
+      ? {}
+      : { sandboxExemptions: launched.status.exemptions }),
+    sandboxExemptionScope: launched.status.exemptionScope,
+    ...(availability === undefined ? {} : { sandboxAvailability: availability }),
+  };
+
+  if (outcome.kind === 'failed') {
+    // A run that could not report its result is not a command that succeeded and
+    // printed nothing: the direct path reports `127` for a command that could
+    // not be started, and this is the same failure.
+    const stderr = capOutput(`\n${outcome.message}`);
+    return {
+      type: 'text',
+      text: '',
+      stdout: '',
+      stderr: stderr.text,
+      exitCode: 127,
+      truncated: stderr.truncated,
+      ...status,
     };
-    timer = setTimeout(() => {
-      timedOut = true;
-      // The command is stopped **at once**: the result is reported without
-      // waiting for the process to die, exactly as the direct path reports it.
-      void launched.cleanup();
-      finish({ exitCode: null, signal: 'SIGKILL', stdout: '', stderr: '' });
-    }, timeoutMs);
-    void launched.wait().then(finish, () =>
-      finish({ exitCode: null, signal: null, stdout: '', stderr: '' }),
-    );
-  });
-
-  if (!timedOut) await launched.cleanup();
-
-  const stdout = capOutput(result.stdout);
-  const stderr = capOutput(result.stderr);
-  let errorText = stderr.text;
-  let exitCode = result.exitCode ?? 0;
-  if (timedOut) {
-    exitCode = 124;
-    errorText += '\nThe command was stopped because it ran past its timeout.';
   }
 
+  if (outcome.kind === 'timeout') {
+    // The cap bites **after** the timeout message is appended, so the reported
+    // standard error never exceeds the cap.
+    const stdout = capOutput(outcome.stdout);
+    const stderr = capOutput(
+      `${outcome.stderr}\nThe command was stopped because it ran past its timeout.`,
+    );
+    return {
+      type: 'text',
+      text: stdout.text,
+      stdout: stdout.text,
+      stderr: stderr.text,
+      exitCode: 124,
+      truncated: true,
+      timedOut: true,
+      ...status,
+    };
+  }
+
+  const stdout = capOutput(outcome.result.stdout);
+  const stderr = capOutput(outcome.result.stderr);
   return {
     type: 'text',
     text: stdout.text,
     stdout: stdout.text,
-    stderr: errorText,
-    exitCode,
-    truncated: stdout.truncated || stderr.truncated || timedOut,
-    sandboxed: launched.status.sandboxed,
-    ...(launched.status.reason === undefined ? {} : { sandboxReason: launched.status.reason }),
-    ...(launched.status.exemptions === undefined
-      ? {}
-      : { sandboxExemptions: launched.status.exemptions }),
+    stderr: stderr.text,
+    exitCode: outcome.result.exitCode ?? 0,
+    truncated: stdout.truncated || stderr.truncated,
+    ...status,
   };
 }
 
@@ -437,6 +694,24 @@ function capOutput(text: string): { text: string; truncated: boolean } {
 }
 
 /**
+ * Attach the `sandboxOverride` reason kind to a decision about a call that asked
+ * to run outside the sandbox.
+ *
+ * The kind is the audit's: "Run outside of the sandbox" is what the user is told
+ * when the call asks for an unsandboxed run. A **denial** keeps its own reason:
+ * the flag never turns a refusal into an approval, so the refusal has to say why
+ * it is a refusal.
+ */
+function withSandboxOverride(
+  decision: PermissionDecision,
+  input: unknown,
+): PermissionDecision {
+  if (decision.behavior === 'deny') return decision;
+  if (readInputField(input, 'dangerouslyDisableSandbox') !== true) return decision;
+  return { ...decision, reasonKind: 'sandboxOverride', reason: SANDBOX_OVERRIDE_REASON };
+}
+
+/**
  * Create the `Bash` tool.
  */
 export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput, BashOutput> {
@@ -446,15 +721,21 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
     inputSchema: BASH_INPUT_SCHEMA,
     mutatesFiles: false,
 
-    async checkPermissions(_input, ctx: ToolContext) {
-      return checkToolPermissions(ctx, deps);
+    async checkPermissions(input, ctx: ToolContext) {
+      const decision = await checkToolPermissions(ctx, deps);
+      return withSandboxOverride(decision, input);
     },
 
-    async recheckPermission(_input, ctx: ToolContext) {
+    async recheckPermission(input, ctx: ToolContext) {
       // A hook may have rewritten the input: the **whole** check runs again on the
       // rewritten input, so the rewrite cannot escape the ask list, the allow
       // scope or the mode.
-      return recheckToolPermissions(ctx, deps);
+      const recheck = await recheckToolPermissions(ctx, deps);
+      const decision = recheck.decision;
+      return {
+        ...recheck,
+        decision: decision === undefined ? undefined : withSandboxOverride(decision, input),
+      };
     },
 
     async validateInput(input) {
@@ -495,67 +776,62 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
       const cwd = deps.cwd ?? process.cwd();
       const env = deps.env ?? process.env;
       const command = input.command;
+      const skipSandbox = readInputField(input, 'dangerouslyDisableSandbox') === true;
 
       const policy = deps.sandboxPolicy;
       if (policy === undefined) {
-        // No sandbox is configured for this session: the command runs the way the
-        // tool has always run it, in the session's own environment.
-        const result = await runCommand(command, cwd, timeout, env);
-        return {
-          type: 'text' as const,
-          text: result.stdout,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode,
-          truncated: result.truncated,
-          sandboxed: false,
-          sandboxReason: SANDBOX_NOT_CONFIGURED_REASON,
-        };
-      }
-
-      if (input.dangerouslyDisableSandbox === true) {
-        // The flag skips the **sandbox**; it never skips a permission rule — the
-        // permission check has already run on this command.
-        return runUnconfined(command, cwd, timeout, env, SANDBOX_SKIPPED_BY_CALL_REASON);
+        // **No sandbox at all.** The command runs on the host, the way the tool
+        // has always run it — but with the **filtered** environment: the
+        // session's own environment carries the agent's credentials, and a
+        // command that runs outside the sandbox must not see them.
+        return runUnconfined({ command, cwd, env }, timeout, {
+          reason: SANDBOX_NOT_CONFIGURED_REASON,
+        });
       }
 
       const backend = deps.sandboxBackend ?? bubblewrapBackend();
       const platform = deps.sandboxPlatform ?? process.platform;
-      const availability = await backendAvailability(backend);
+      const { availability, report } = await backendAvailability(backend);
       const evaluation = evaluateSandbox(policy, platform, command, availability);
 
       if (evaluation.decision === 'deny') {
         // A refusal is a refusal: it names the reason, and it is never reported
-        // as a command that ran and exited with a non-zero status.
+        // as a command that ran and exited with a non-zero status. The flag
+        // never reaches this point: it overrides the **routing** of a command,
+        // never a policy error.
         throw new ToolExecutionError(
           refusalMessage(evaluation.reason),
           TOOL_ERROR_CODES.executionFailed,
         );
       }
 
+      const spec: SandboxSpec = { command, cwd, env, policy, platform, availability, backend };
+      const scope = exemptionScope(policy);
+
       if (evaluation.decision === 'unconfined') {
-        return runUnconfined(
-          command,
-          cwd,
-          timeout,
-          env,
-          evaluation.reason ?? 'the sandbox policy does not sandbox the command',
-          evaluation.exemptions,
-        );
+        // The policy itself runs the command outside the sandbox, and its reason
+        // is the one reported — the flag is not what made it unconfined.
+        return runUnconfined(spec, timeout, {
+          reason: evaluation.reason ?? 'the sandbox policy does not sandbox the command',
+          ...(evaluation.exemptions === undefined ? {} : { exemptions: evaluation.exemptions }),
+          scope,
+          availability: report,
+        });
       }
 
-      return runSandboxed(
-        {
-          command,
-          cwd,
-          env,
-          policy,
-          platform,
-          availability,
-          backend,
-        },
-        timeout,
-      );
+      if (skipSandbox) {
+        // The flag asks for an unconfined run of a command the policy would
+        // have sandboxed. It never skips a permission rule — the permission check
+        // has already run on this command — and it never overrides the denial
+        // above.
+        return runUnconfined(spec, timeout, {
+          reason: SANDBOX_SKIPPED_BY_CALL_REASON,
+          scope,
+          availability: report,
+        });
+      }
+
+      return runSandboxed(spec, timeout, report);
     },
   };
 }

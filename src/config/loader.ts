@@ -43,9 +43,9 @@
  *
  * The sandbox configuration *writer* lives in `schema.ts` (the settings-document
  * module), not here: this file has one responsibility, reading the tiers. The
- * sandbox **policy** is read here, though: the tiers are folded at block
- * granularity into the merged document, and the `sandbox` block of the tier that
- * wins it is the policy the `Bash` tool applies.
+ * sandbox **policy** is read here, though: the tier that wins the `sandbox`
+ * block decides the policy, and the rule that picks the tier is the one the
+ * tiers module owns (`resolveBlock`), so there is only one copy of it.
  */
 
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
@@ -58,16 +58,12 @@ import {
   SETTINGS_SOURCES,
   TIER_PRECEDENCE,
   SettingsTierEntry,
-  documentOf,
   mergeBlockwise,
+  resolveBlock,
   type SettingsSource,
   type SettingsTier,
 } from './tiers.js';
-import {
-  DEFAULT_SANDBOX_POLICY,
-  readSandboxPolicy,
-  type SandboxPolicy,
-} from '../platform/sandbox/policy.js';
+import { parseSandboxPolicy, type SandboxPolicy } from '../platform/sandbox/policy.js';
 
 /** How a source's settings file was read. */
 export type SettingsReadMode = 'none' | 'as_read' | 'machine_admin';
@@ -109,22 +105,13 @@ export interface SettingsLoadResult {
    * lower one, exactly as the audit states for a higher tier's block. A document
    * that says nothing about the sandbox yields the default policy.
    *
-   * The member is **optional** so that a hand-built result — the test doubles
-   * the permission layer carries — still type-checks; `loadSettings` always sets
-   * it. `sandboxPolicyOf` is the one place a caller should read it through.
+   * The member is **not** optional: a session always has a sandbox policy, and
+   * there is therefore **one** meaning for "no policy" in the whole implementation — the
+   * one the `Bash` tool gives it: a session whose *dependencies* carry no policy
+   * has no sandbox at all. A caller never has to decide what an absent policy
+   * means, because the loader never produces one.
    */
-  readonly sandboxPolicy?: SandboxPolicy;
-}
-
-/**
- * The sandbox policy of a loaded settings document.
- *
- * The default policy is the fallback, so a caller never has to decide what an
- * absent policy means: a session without one has this implementation's default policy,
- * which fails closed.
- */
-export function sandboxPolicyOf(result: SettingsLoadResult): SandboxPolicy {
-  return result.sandboxPolicy ?? DEFAULT_SANDBOX_POLICY;
+  readonly sandboxPolicy: SandboxPolicy;
 }
 
 type ReadStatus = 'missing' | 'ok' | 'invalid';
@@ -271,28 +258,18 @@ export function classifyProjectSettingsPath(
 }
 
 /**
- * The merged settings document.
+ * The sandbox policy of the loaded tiers.
  *
- * The tiers are folded from the **lowest** precedence to the highest, at **block**
- * granularity, so the highest tier that defines a block wins **as a whole** — the
- * rule the audit states for a higher tier's block ("a higher tier's block applies
- * as a whole over any lower tier and is never merged key by key"). The `sandbox`
- * block is one of those blocks: the project tier's block replaces the user tier's
- * block, and the two are never merged key by key.
+ * The rule is the one the **tiers module owns**: the highest tier that defines a
+ * `sandbox` block wins **as a whole**, and the block is never merged key by key
+ * with a lower tier. The module that owns the precedence is asked, so there is
+ * only one copy of the rule — and the scope-restriction machinery comes with it.
  *
- * The fold uses this implementation's own `TIER_PRECEDENCE` composition, which the settings
- * conformance table labels a implementation choice rather than an observed literal.
+ * A tier that says nothing about the sandbox yields this implementation's default policy.
  */
-function mergedDocument(tiers: ReadonlyMap<SettingsSource, SettingsTier>): Record<string, unknown> {
-  let merged: Record<string, unknown> = {};
-  for (const source of [...TIER_PRECEDENCE].reverse()) {
-    const tier = tiers.get(source);
-    if (tier === undefined) continue;
-    const document = documentOf(tier);
-    if (!isPlainObject(document)) continue;
-    merged = mergeBlockwise(merged, document);
-  }
-  return merged;
+function sandboxPolicyOfTiers(tiers: Map<SettingsSource, SettingsTier>): SandboxPolicy {
+  const block = resolveBlock(tiers, 'sandbox');
+  return parseSandboxPolicy(block?.value);
 }
 
 /**
@@ -397,9 +374,9 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
     if (tier) tiers.set(source, tier);
   }
 
-  // The sandbox policy is read out of the **merged** document, so the tier that
-  // wins the `sandbox` block decides the policy — as a whole.
-  const sandboxPolicy = readSandboxPolicy(mergedDocument(tiers));
+  // The sandbox policy is read out of the tier that **wins** the `sandbox`
+  // block, so the block applies as a whole.
+  const sandboxPolicy = sandboxPolicyOfTiers(tiers);
 
   return { tiers, errors, readMode, linkedAway, sandboxPolicy };
 }

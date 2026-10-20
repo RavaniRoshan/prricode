@@ -36,20 +36,26 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadSettings } from '../../src/config/loader.js';
-import type { ToolContext } from '../../src/permissions/decision.js';
+import { describeReason, type PermissionDecision, type ToolContext } from '../../src/permissions/decision.js';
 import type { RuleSet } from '../../src/permissions/rules.js';
 import {
   sandboxEnvironment,
   type SandboxBackend,
   type SandboxPlan,
   type SandboxProcess,
+  type SandboxSpec,
 } from '../../src/platform/sandbox/launcher.js';
 import {
   DEFAULT_SANDBOX_POLICY,
   SANDBOX_REASONS,
   type SandboxPolicy,
 } from '../../src/platform/sandbox/policy.js';
-import { createBashTool } from '../../src/tools/builtins/bash.js';
+import {
+  createBashTool,
+  MAX_BASH_OUTPUT_CHARS,
+  SANDBOX_NOT_CONFIGURED_REASON,
+  SANDBOX_OVERRIDE_REASON,
+} from '../../src/tools/builtins/bash.js';
 import type { BuiltinToolDeps } from '../../src/tools/builtins/shared.js';
 import { createToolRegistry } from '../../src/tools/registry.js';
 import { runTool } from '../../src/tools/runner.js';
@@ -109,8 +115,12 @@ const DOUBLE_LAYERS = {
 interface RecordingBackend extends SandboxBackend {
   /** The number of times the backend was asked to start a command. */
   started: number;
+  /** The number of times the backend was asked whether it is available. */
+  probes: number;
   /** The plan of the last command the backend was asked to start. */
   lastPlan?: SandboxPlan;
+  /** The spec of the last command the backend was asked to start. */
+  lastSpec?: SandboxSpec;
 }
 
 /**
@@ -119,16 +129,31 @@ interface RecordingBackend extends SandboxBackend {
  * It applies the **filtered** environment the way the real backend does, so the
  * environment rule is exercised rather than assumed.
  */
-function recordingBackend(options: { available?: boolean; established?: boolean } = {}): RecordingBackend {
+function recordingBackend(
+  options: {
+    available?: boolean;
+    established?: boolean;
+    reason?: string;
+    warning?: string;
+    failWait?: boolean;
+  } = {},
+): RecordingBackend {
   const backend: RecordingBackend = {
     name: 'test-double',
     started: 0,
+    probes: 0,
     async isAvailable() {
-      return { available: options.available ?? true };
+      backend.probes += 1;
+      return {
+        available: options.available ?? true,
+        ...(options.reason === undefined ? {} : { reason: options.reason }),
+        ...(options.warning === undefined ? {} : { warning: options.warning }),
+      };
     },
     async start(plan, spec): Promise<SandboxProcess> {
       backend.started += 1;
       backend.lastPlan = plan;
+      backend.lastSpec = spec;
       const child = spawn('/bin/sh', ['-c', spec.command], {
         cwd: spec.cwd,
         env: sandboxEnvironment(spec),
@@ -164,6 +189,9 @@ function recordingBackend(options: { available?: boolean; established?: boolean 
             : {}),
         }),
         async wait() {
+          if (options.failWait === true) {
+            throw new Error('the sandboxed run could not report its result');
+          }
           const { exitCode, signal } = await exited;
           return { exitCode, signal, stdout, stderr };
         },
@@ -187,6 +215,17 @@ const unavailableBackend: SandboxBackend = {
   name: 'test-unavailable',
   async isAvailable() {
     return { available: false, reason: 'the test backend is not available' };
+  },
+  async start(): Promise<SandboxProcess> {
+    throw new Error('the test backend must not start');
+  },
+};
+
+/** A backend whose availability probe throws. */
+const throwingProbeBackend: SandboxBackend = {
+  name: 'test-throwing-probe',
+  async isAvailable(): Promise<{ available: boolean }> {
+    throw new Error('the availability probe exploded');
   },
   async start(): Promise<SandboxProcess> {
     throw new Error('the test backend must not start');
@@ -262,7 +301,7 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
     const input = { command: 'printf hello' };
 
     await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
-      /sandbox\.failIfUnavailable|sandbox backend is unavailable/,
+      'the sandbox refused to run the command: sandbox backend is unavailable and sandbox.failIfUnavailable is true',
     );
   });
 
@@ -289,20 +328,36 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
 
   it('never lets dangerouslyDisableSandbox skip a permission rule', async () => {
     const root = temporaryDirectory();
+    const backend = recordingBackend();
     const tool = createBashTool(
       builtinDeps({
         rules: ruleSet({ deny: ['Bash(curl *)'], allow: ['Bash'], cwd: root }),
         cwd: root,
         sandboxPolicy: DEFAULT_SANDBOX_POLICY,
-        sandboxBackend: recordingBackend(),
+        sandboxBackend: backend,
       }),
     );
+    const registry = createToolRegistry();
+    registry.register(tool);
     const input = { command: 'curl https://example.com', dangerouslyDisableSandbox: true };
 
-    const decision = await tool.checkPermissions(input, toolContext('Bash', input));
+    // The call goes through the **runner**, so the runner's own order — check,
+    // then validate, then execute — is what is exercised: a check that is not
+    // consulted before the execution would run the command.
+    const envelope = await runTool(
+      registry,
+      'Bash',
+      input,
+      toolContext('Bash', input),
+      { cwd: root },
+    );
 
-    expect(decision?.behavior).toBe('deny');
-    expect(decision?.reasonType).toBe('rule');
+    expect(envelope.isError).toBe(true);
+    const content = envelope.content as { type: string; message: string; errorCode: number };
+    expect(content.type).toBe('error');
+    expect(content.message).toContain("Permission rule 'Bash(curl *)'");
+    // The command never ran: neither in the sandbox nor on the host.
+    expect(backend.started).toBe(0);
   });
 
   it('lets dangerouslyDisableSandbox skip the sandbox, and only the sandbox', async () => {
@@ -312,16 +367,23 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
       builtinDeps({
         rules: ruleSet({ allow: ['Bash'], cwd: root }),
         cwd: root,
+        env: { PATH: '/usr/bin:/bin', ANTHROPIC_API_KEY: 'sk-s3cret' },
         sandboxPolicy: DEFAULT_SANDBOX_POLICY,
         sandboxBackend: backend,
       }),
     );
-    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+    const input = {
+      command: 'echo "key=[$ANTHROPIC_API_KEY]"',
+      dangerouslyDisableSandbox: true,
+    };
 
     const output = await tool.execute(input, toolContext('Bash', input));
 
     expect(backend.started).toBe(0);
-    expect(output.stdout).toBe('hello');
+    expect(output.stdout).toContain('key=[]');
+    // The flag does not hand the command the raw environment: the command is
+    // still the agent's command.
+    expect(output.stdout).not.toContain('sk-s3cret');
     expect(output.sandboxed).toBe(false);
     expect(output.sandboxReason).toMatch(/dangerouslyDisableSandbox/);
   });
@@ -343,6 +405,29 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
     expect(output.exitCode).toBe(124);
     expect(output.stderr).toContain('ran past its timeout');
     expect(output.truncated).toBe(true);
+    // The result says the command was stopped, and not only the header does.
+    expect(output.timedOut).toBe(true);
+  });
+
+  it('reports the partial output of a command that ran past its timeout', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = { command: 'printf partial; sleep 30', timeout: 250 };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // The direct path reports what the command had produced when it was
+    // stopped; the sandboxed path reports the same.
+    expect(output.stdout).toContain('partial');
+    expect(output.exitCode).toBe(124);
+    expect(output.timedOut).toBe(true);
   });
 
   it('reports a sandbox that never came up as not sandboxed', async () => {
@@ -362,10 +447,15 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
     // The flag comes from the backend's **establishment report**: a sandbox that
     // never came up is not a sandbox.
     expect(output.sandboxed).toBe(false);
-    expect(output.sandboxReason).toBe('the sandbox never came up');
+    // The reason the sandbox never came up is its own member: it is not the
+    // reason the command ran outside the sandbox — it ran inside a sandbox that
+    // never came up.
+    expect(output.sandboxEstablishmentReason).toBe('the sandbox never came up');
+    expect(output.sandboxReason).toBeUndefined();
   });
 
-  it('caps the output of a command on the sandboxed path', async () => {    const root = temporaryDirectory();
+  it('caps the output of a command on the sandboxed path', async () => {
+    const root = temporaryDirectory();
     const tool = createBashTool(
       builtinDeps({
         rules: ruleSet({ allow: ['Bash'], cwd: root }),
@@ -380,6 +470,327 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
 
     expect(output.stdout.length).toBe(200_000);
     expect(output.truncated).toBe(true);
+  });
+
+  it('caps the standard error of a command that ran past its timeout', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = {
+      command: "head -c 300000 /dev/zero | tr '\\0' 'x' >&2; sleep 30",
+      timeout: 500,
+    };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // The cap bites **after** the timeout message is appended, so the reported
+    // standard error never exceeds the cap.
+    expect(output.stderr.length).toBe(MAX_BASH_OUTPUT_CHARS);
+    expect(output.stderr.length).toBeLessThanOrEqual(MAX_BASH_OUTPUT_CHARS);
+  });
+
+  it('does not report a sandboxed run that failed as a command that succeeded', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: recordingBackend({ failWait: true }),
+      }),
+    );
+    const input = { command: 'printf hello' };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // The direct path reports `127` for a command that could not be started, and
+    // this is the same failure.
+    expect(output.exitCode).toBe(127);
+    expect(output.stdout).toBe('');
+    expect(output.stderr).toContain('could not report its result');
+  });
+});
+
+// --- the no-policy path ------------------------------------------------------------
+
+describe('CC-008b — the path of a session that has no sandbox policy', () => {
+  it('runs the command on the host with the filtered environment', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        env: { PATH: '/usr/bin:/bin', ANTHROPIC_API_KEY: 'sk-s3cret' },
+      }),
+    );
+    const input = { command: 'echo "key=[$ANTHROPIC_API_KEY]"' };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // No sandbox at all — but the command still does not see the agent's
+    // credentials: the environment is filtered against the same allowlist.
+    expect(output.stdout).toContain('key=[]');
+    expect(output.stdout).not.toContain('sk-s3cret');
+    expect(output.sandboxed).toBe(false);
+    expect(output.sandboxReason).toBe(SANDBOX_NOT_CONFIGURED_REASON);
+  });
+
+  it('never asks the backend anything, because there is no policy to evaluate', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello' };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    expect(backend.probes).toBe(0);
+    expect(backend.started).toBe(0);
+    expect(output.sandboxed).toBe(false);
+  });
+});
+
+// --- the flag and the policy --------------------------------------------------------
+
+describe('CC-008b — the sandbox-skip flag against the policy', () => {
+  it('refuses the command when the sandbox is switched off, even with the flag', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, enabled: false },
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+
+    await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
+      'the sandbox refused to run the command: sandbox.enabled is false',
+    );
+    expect(backend.started).toBe(0);
+  });
+
+  it('refuses the command when the platform is excluded, even with the flag', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, enabledPlatforms: [] },
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+
+    await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
+      `the sandbox refused to run the command: sandbox.enabledPlatforms excludes ${process.platform}`,
+    );
+    expect(backend.started).toBe(0);
+  });
+
+  it('refuses the command when the backend is missing, even with the flag', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: true },
+        sandboxBackend: unavailableBackend,
+      }),
+    );
+    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+
+    await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
+      'the sandbox refused to run the command: sandbox backend is unavailable and sandbox.failIfUnavailable is true',
+    );
+  });
+
+  it('does not read the flag from the prototype of the input', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: backend,
+      }),
+    );
+    // The validator reads an **own** field, so the runner must read one too:
+    // an inherited field is not a field the model supplied.
+    const input = Object.create({ dangerouslyDisableSandbox: true }) as {
+      command: string;
+    };
+    input.command = 'printf hello';
+
+    const validation = await tool.validateInput(input, toolContext('Bash', input));
+    expect(validation.ok).toBe(true);
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // The sandbox is **not** skipped: the flag was never on the input.
+    expect(backend.started).toBe(1);
+    expect(output.sandboxed).toBe(true);
+  });
+
+  it('attaches the sandboxOverride reason kind to a call that asks for an unsandboxed run', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ ask: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+
+    const decision = await tool.checkPermissions(input, toolContext('Bash', input));
+
+    expect(decision?.reasonKind).toBe('sandboxOverride');
+    expect(describeReason(decision as PermissionDecision, 'Bash')).toBe(
+      'Run outside of the sandbox',
+    );
+    expect(decision?.reason).toBe(SANDBOX_OVERRIDE_REASON);
+  });
+
+  it('keeps the denial reason of a call that asks for an unsandboxed run', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ deny: ['Bash(curl *)'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = { command: 'curl https://example.com', dangerouslyDisableSandbox: true };
+
+    const decision = await tool.checkPermissions(input, toolContext('Bash', input));
+
+    expect(decision?.behavior).toBe('deny');
+    // The flag never turns a refusal into an approval, so the refusal keeps its
+    // own reason.
+    expect(decision?.reasonKind).not.toBe('sandboxOverride');
+    expect(decision?.reason).toContain('Bash(curl *)');
+  });
+});
+
+// --- the availability ----------------------------------------------------------------
+
+describe('CC-008b — the availability of the backend', () => {
+  it('probes the backend exactly once per call, and hands the answer to the launcher', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello' };
+
+    await tool.execute(input, toolContext('Bash', input));
+
+    // One probe: the launcher does not probe a second time, because the tool
+    // hands it the answer it already has.
+    expect(backend.probes).toBe(1);
+    expect(backend.lastSpec?.availability).toBe('available');
+  });
+
+  it('treats a probe that throws as an unavailable backend', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: true },
+        sandboxBackend: throwingProbeBackend,
+      }),
+    );
+    const input = { command: 'printf hello' };
+
+    await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
+      'the sandbox refused to run the command: sandbox backend is unavailable and sandbox.failIfUnavailable is true',
+    );
+  });
+
+  it('carries the reason and the warning of the probe into the result', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend({
+      available: false,
+      reason: 'the test backend is not available',
+      warning: 'the unshare binary is not installed',
+    });
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: false },
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello' };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    expect(output.sandboxAvailability?.available).toBe(false);
+    expect(output.sandboxAvailability?.reason).toBe('the test backend is not available');
+    expect(output.sandboxAvailability?.warning).toBe('the unshare binary is not installed');
+  });
+
+  it('evaluates the policy against the platform the session supplies', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxPlatform: 'darwin',
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = { command: 'printf hello' };
+
+    await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
+      'the sandbox refused to run the command: sandbox.enabledPlatforms excludes darwin',
+    );
+  });
+
+  it('does not hand the timeout to the launcher, so the tool keeps the partial output', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello', timeout: 5000 };
+
+    await tool.execute(input, toolContext('Bash', input));
+
+    // The launcher kills the command on its own only when it is told to, and a
+    // launcher that kills it never hands the output over.
+    expect(backend.lastSpec?.timeoutMs).toBeUndefined();
   });
 });
 
@@ -412,6 +823,60 @@ describe('CC-008b step 3 — the policy reaches the launcher', () => {
     expect(bind).toBeDefined();
   });
 
+  it('hands the masked filesystem paths of the policy to the plan', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: {
+          ...DEFAULT_SANDBOX_POLICY,
+          filesystem: {
+            denyRead: ['secrets'],
+            denyWrite: ['out'],
+            credentials: ['keys'],
+          },
+        },
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello' };
+
+    await tool.execute(input, toolContext('Bash', input));
+
+    // The deny lists and the credential list become **masked** paths.
+    expect(backend.lastPlan?.protectedPaths).toEqual([
+      path.join(root, 'secrets'),
+      path.join(root, 'out'),
+      path.join(root, 'keys'),
+    ]);
+  });
+
+  it('reports the scope of the excludedCommands list', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: {
+          ...DEFAULT_SANDBOX_POLICY,
+          allowUnsandboxedCommands: true,
+          excludedCommands: ['*'],
+        },
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = { command: 'printf hello' };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // A list that matches every command switches the sandbox off for the whole
+    // command space, and the scope says so.
+    expect(output.sandboxed).toBe(false);
+    expect(output.sandboxExemptionScope).toBe('all');
+  });
+
   it('reads the sandbox policy out of the settings document the loader merged', () => {
     const root = temporaryDirectory();
     const cwd = path.join(root, 'project');
@@ -425,8 +890,8 @@ describe('CC-008b step 3 — the policy reaches the launcher', () => {
 
     const result = loadSettings({ cwd, configDir, restricted: false });
 
-    expect(result.sandboxPolicy?.enabled).toBe(false);
-    expect(result.sandboxPolicy?.excludedCommands).toEqual(['git status']);
+    expect(result.sandboxPolicy.enabled).toBe(false);
+    expect(result.sandboxPolicy.excludedCommands).toEqual(['git status']);
   });
 
   it('uses the default policy when the settings document says nothing about the sandbox', () => {
@@ -460,8 +925,8 @@ describe('CC-008b step 3 — the policy reaches the launcher', () => {
 
     // The project tier's block wins as a whole; the user tier's block is not
     // merged into it.
-    expect(result.sandboxPolicy?.enabled).toBe(false);
-    expect(result.sandboxPolicy?.allowUnsandboxedCommands).toBe(true);
+    expect(result.sandboxPolicy.enabled).toBe(false);
+    expect(result.sandboxPolicy.allowUnsandboxedCommands).toBe(true);
   });
 });
 
@@ -586,6 +1051,37 @@ describe('CC-008b step 5 — the safety of the sandboxed command', () => {
       expect(output.stdout).not.toContain('sk-s3cret');
     },
   );
+
+  it.skipIf(!bubblewrapAvailable)(
+    'confines the command to the sandbox: a host path outside it is unreachable',
+    async () => {
+      const root = temporaryDirectory();
+      // A path of the host that the sandbox does not bind: the working tree is
+      // bound, the scratch directory is a private tmpfs, and nothing else is.
+      const outside = temporaryDirectory();
+      const secret = path.join(outside, 'secret.txt');
+      writeFileSync(secret, 'the secret');
+      const tool = createBashTool(
+        builtinDeps({
+          rules: ruleSet({ allow: ['Bash'], cwd: root }),
+          cwd: root,
+          env: { PATH: '/usr/bin:/bin' },
+          sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        }),
+      );
+      const input = { command: `cat ${secret}` };
+
+      const output = await tool.execute(input, toolContext('Bash', input));
+
+      // The command ran **inside** the sandbox, and the sandbox does not carry
+      // the host's file: a plain spawn with a filtered environment would have
+      // printed the secret.
+      expect(output.sandboxed).toBe(true);
+      expect(output.stdout).not.toContain('the secret');
+      expect(output.stdout).toBe('');
+      expect(output.exitCode).not.toBe(0);
+    },
+  );
 });
 
 // --- step 6: the header ------------------------------------------------------------
@@ -607,5 +1103,23 @@ describe('CC-008b step 6 — the header of the tool', () => {
     expect(header).toMatch(/launchSandbox/);
     expect(header).toMatch(/dangerouslyDisableSandbox/);
     expect(header).toMatch(/never skips a permission rule/i);
+    // The header's claim about the flag and the policy is the code's claim.
+    expect(header).toMatch(/never overrides a policy error/i);
+    expect(header).toMatch(/sandboxPolicy: settings\.sandboxPolicy/);
+  });
+
+  it('describes the code it claims to describe', () => {
+    const source = readFileSync(
+      new URL('../../src/tools/builtins/bash.ts', import.meta.url),
+      'utf8',
+    );
+
+    // A header that names a call the code never makes is a header that lies.
+    expect(source).toContain('launchSandbox(');
+    expect(source).toContain('evaluateSandbox(');
+    // The flag is read as an own field, exactly as the validator reads it.
+    expect(source).toContain("readInputField(input, 'dangerouslyDisableSandbox')");
+    // Every path filters the environment through the sandbox's own filter.
+    expect(source).toContain("sandboxEnvironment(spec, 'unconfined')");
   });
 });

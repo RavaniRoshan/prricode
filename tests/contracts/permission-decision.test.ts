@@ -30,6 +30,7 @@ import {
 } from '../../src/permissions/decision.js';
 import type { SettingsLoadResult } from '../../src/config/loader.js';
 import type { SettingsSource, SettingsTier } from '../../src/config/tiers.js';
+import { DEFAULT_SANDBOX_POLICY } from '../../src/platform/sandbox/policy.js';
 import {
   applyPermissionRequestHook,
   buildApprovalPrompt,
@@ -818,6 +819,7 @@ describe('the settings adapter', () => {
       errors: [],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
 
     const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
@@ -846,6 +848,7 @@ describe('the settings adapter', () => {
       errors: [],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
 
     const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
@@ -866,6 +869,7 @@ describe('the settings adapter', () => {
       errors: [],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
 
     const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
@@ -919,6 +923,7 @@ describe('the settings adapter', () => {
       errors: [],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
 
     const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
@@ -957,6 +962,7 @@ describe('the settings adapter', () => {
       errors: [],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
 
     const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
@@ -987,6 +993,7 @@ describe('the settings adapter', () => {
       errors: [],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
 
     const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
@@ -1023,6 +1030,7 @@ describe('the settings adapter', () => {
       errors: [],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
 
     const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
@@ -1055,6 +1063,7 @@ describe('the settings adapter', () => {
       errors: [],
       readMode: new Map(),
       linkedAway: [],
+      sandboxPolicy: DEFAULT_SANDBOX_POLICY,
     };
 
     const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
