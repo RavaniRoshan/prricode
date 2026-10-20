@@ -215,6 +215,67 @@ The result of `installPluginFromMarketplace` carries `{ success, message, depNot
 - A **stray orphan marker** left in a staged plugin is removed, with the warning `Could not drop a stray orphan marker from the staged plugin: <reason>`.
 - A version transition is computed as a `{ from, to }` pair.
 
+## Plugins — the manifest's path boundary
+
+**Implementation choice.** §2.8 says nothing about a plugin reaching outside its own root, so the rule is this implementation's. The plan's Global Constraint requires "path boundaries … enforced by **implementation-owned** code, independent of model instructions".
+
+A manifest-declared path is used only when it is inside the plugin root — **lexically** and through **`realpath`** — and a refusal carries one of two named reasons: *"it resolves outside the plugin root"* or *"it is a symlink that resolves outside the plugin root"*. The check applies to the commands, the skills, the agents, the metadata sources and every other manifest key. A path that does not exist is allowed and the caller reports *"it does not exist"*.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the path-boundary tests.
+
+## Skills — the discovery order and the scan
+
+The five **origins** — `project`, `local`, `user`, `plugin`, `mcp` — are the plan's. The **order** they take precedence in (`project > local > user > plugin > mcp`) and the meaning of `local` are this implementation's.
+
+The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdirectory, the frontmatter `description`, the `own` flag, the precedence and the byte limit — is this implementation's: §2.8 marks that scan *"not traced to resolved relations"*.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the precedence and override tests.
+
+## Plugins — the command byte limit
+
+**Implementation choice** for the number; the **wording** is REA observed. The limit is **10 000** bytes and the warning is *"Skipping plugin command `<path>`: exceeds `10000` byte limit"*.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the byte-limit tests.
+
+## Plugins — a name two plugins provide
+
+**Implementation choice.** No naming or collision rule for plugin skills exists in §2.8. Two plugins that provide the same skill or subagent name **collide**; the collision is **reported** — a warning naming both providers, and a `collidesWith` field on the resolved record — and the names are **not** namespaced.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the collision tests.
+
+## Skills — the `skillOverrides` merge
+
+**Implementation choice — a documented divergence.** The merged settings' `skillOverrides` block merges **per leaf**, so a user tier's override for one skill survives a local tier that declares a different one. The audit's `Ble` order is **per key** (*"the first source that defines a key wins"*), so under the target's model the local block would replace the user block whole. The divergence is inherited from the settings tier model and is labelled in the source.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the per-leaf merge test.
+
+## Skills — a frontmatter field that is present but `undefined`
+
+**Implementation choice — a documented divergence.** Such a field is treated as **absent**. The audit's literal reading — *"the first of `source`, `pluginName`, `path`, or `frontmatterProblem` **whose value is not a string**"* — would throw on it, since `undefined` is not a string.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the undefined-field test.
+
+## Subagents
+
+**Entirely a implementation choice.** §2.8 records the subagent definition lifecycle as *"Partial … not traced"*: the names and the storage are observed, the behavior is not. This implementation models the registry on the skill registry and says so.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the subagent registry tests.
+
+## The IDE bridge
+
+**Entirely a implementation choice.** §2.8 observes only the two `mcp__ide__executeCode` / `mcp__ide__getDiagnostics` tools; there is no observed lock-file, port or discovery mechanism to copy. Two rules are this implementation's:
+
+- an **action is validated as a single path segment** — no empty, `.`, `..`, `/`, `\` or NUL — before anything is sent;
+- a **skill file or a subagent definition file over 1 MiB** is surfaced with a problem and **never read**.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the IDE action and byte-cap tests.
+
+## The telemetry destination
+
+**Implementation choice** for the rewriting; the **default** is REA observed. `telemetry.log` is given a destination of `anthropic` unless the caller asked for `collector`. This implementation additionally **normalizes an unrecognised caller destination to `anthropic`** — the audit's literal wording, but a **behaviour change** from passing any destination through.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the telemetry tests.
+
 ## Conformance table
 
 | Claim | Evidence class | Pinned by |
