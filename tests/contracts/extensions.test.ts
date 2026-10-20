@@ -103,7 +103,13 @@ import {
   createPluginManager,
   type PluginInstallRequest,
 } from '../../src/extensions/plugins/registry.js';
-import { createIdeBridge, IDE_ACTIONS, isIdeAction, type IdeIntegration } from '../../src/integration/ide/bridge.js';
+import {
+  createHttpIdeTransport,
+  createIdeBridge,
+  IDE_ACTIONS,
+  isIdeAction,
+  type IdeIntegration,
+} from '../../src/integration/ide/bridge.js';
 
 const temps: string[] = [];
 
@@ -2179,6 +2185,18 @@ describe('the subagent registry', () => {
 // ---------------------------------------------------------------------------
 
 describe('the IDE bridge', () => {
+  /** An integration the default transport can be handed. */
+  function integration(name: string): IdeIntegration {
+    return {
+      name,
+      transport: 'http',
+      endpoint: 'http://127.0.0.1:1234',
+      lockPath: `/config/ide/${name}.lock`,
+      alive: true,
+      source: 'local',
+    };
+  }
+
   it('lists the IDE integrations it discovers and resolves one by name', () => {
     const configDir = tempDir();
     writeFile(
@@ -2336,5 +2354,24 @@ describe('the IDE bridge', () => {
 
     expect(response.ok).toBe(true);
     expect(seen).toEqual(['formatDocument']);
+  });
+
+  it('refuses to send an IDE request to a host that is not a loopback address', async () => {
+    const transport = createHttpIdeTransport();
+
+    await expect(
+      transport.send(
+        { ...integration('vscode'), endpoint: 'http://example.com:1234' },
+        { ide: 'vscode', action: 'executeCode' },
+      ),
+    ).rejects.toThrow(/Refusing to send an IDE request to example\.com/);
+  });
+
+  it('refuses to send an IDE request whose action is not a single path segment', async () => {
+    const transport = createHttpIdeTransport();
+
+    await expect(
+      transport.send(integration('vscode'), { ide: 'vscode', action: '../../admin' }),
+    ).rejects.toThrow(/single path segment/);
   });
 });
