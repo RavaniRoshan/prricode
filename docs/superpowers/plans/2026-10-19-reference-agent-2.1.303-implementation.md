@@ -882,17 +882,17 @@ export interface PreToolUseHookApproval {
 
 **Design note.** The target's hook surface has three parts that this implementation must keep distinct: a set of **decision-capable** events, a per-event **execution classification** (locally / later / low-value / container-internal), and the **handler types** (`command`, `http`, `mcp_tool`, `prompt`, `agent`). The exit-code contract matters more than the event list: `0` is success and applies the JSON output, `2` is a blocking error on a blockable event, and anything else is a non-blocking error. A `PreToolUse` hook returning `allow` must **not** override a deny or ask rule, and a hook returning `deny` must hold in every mode including `bypassPermissions` — the target changed this behaviour in a later release without a deprecation warning, so this implementation must pick one and document it. Note also that two of the names the target's static analysis surfaced (`StatusLine`, `FileSuggestion`) are **settings-level display handlers, not hook events**; this implementation must not treat them as decision points.
 
-- [ ] **Step 1: Write the failing registry test** — `HOOK_EVENTS` contains exactly the 33 decision-capable and surfaced events; `register` then `for('PreToolUse')` returns only that event's hooks; a `mcp_tool` hook carrying a `server` is discoverable by server; `StatusLine` and `FileSuggestion` are **not** in `HOOK_EVENTS`.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement `src/extensions/hooks/registry.ts`** with the closed event list from Global Constraints and an explicit `displayHandler` list kept separate.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing matcher test** — a matcher containing only letters, digits, `_`, `-`, space, `,` and `|` is an **exact-string** match (or `|`-separated alternatives); any other matcher is an **unanchored JavaScript regular expression**. `matchToolName('Edit|Write', 'Write')` is true; `matchToolName('*', 'Bash')` is true; `matchToolName('Edit', 'Read')` is false; a matcher containing a character outside the allowed set is rejected.
-- [ ] **Step 6: Implement `matchToolName`** in `src/extensions/hooks/schema.ts` with the two-mode semantics, and reject a malformed matcher rather than silently treating it as a literal.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing runner test** — a `PermissionRequest` hook returning `decision.behavior === 'deny'` blocks the tool call; a hook returning `allow` does **not** override a deny or ask rule; a hook with severity `stop` denies all tool calls for the session; a hook that exits non-zero with something other than `2` produces a notice and leaves the session usable; exit code `2` on a blockable event blocks.
-- [ ] **Step 9: Implement `src/extensions/hooks/runner.ts`** with the exit-code contract and the deny > defer > ask > allow combination order.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Commit.**
+- [x] **Step 1: Write the failing registry test** — `HOOK_EVENTS` contains exactly the 33 decision-capable and surfaced events; `register` then `for('PreToolUse')` returns only that event's hooks; a `mcp_tool` hook carrying a `server` is discoverable by server; `StatusLine` and `FileSuggestion` are **not** in `HOOK_EVENTS`.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement `src/extensions/hooks/registry.ts`** with the closed event list from Global Constraints and an explicit `displayHandler` list kept separate.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing matcher test** — a matcher containing only letters, digits, `_`, `-`, space, `,` and `|` is an **exact-string** match (or `|`-separated alternatives); any other matcher is an **unanchored JavaScript regular expression**. `matchToolName('Edit|Write', 'Write')` is true; `matchToolName('*', 'Bash')` is true; `matchToolName('Edit', 'Read')` is false; a matcher containing a character outside the allowed set is rejected.
+- [x] **Step 6: Implement `matchToolName`** in `src/extensions/hooks/schema.ts` with the two-mode semantics, and reject a malformed matcher rather than silently treating it as a literal.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing runner test** — a `PermissionRequest` hook returning `decision.behavior === 'deny'` blocks the tool call; a hook returning `allow` does **not** override a deny or ask rule; a hook with severity `stop` denies all tool calls for the session; a hook that exits non-zero with something other than `2` produces a notice and leaves the session usable; exit code `2` on a blockable event blocks.
+- [x] **Step 9: Implement `src/extensions/hooks/runner.ts`** with the exit-code contract and the deny > defer > ask > allow combination order.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Commit.**
   ```bash
   git add src/extensions/hooks tests/contracts/hooks.test.ts
   git commit -m "feat(hooks): hook registry, matchers, runner"
