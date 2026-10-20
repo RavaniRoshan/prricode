@@ -813,8 +813,15 @@ The record is `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-s
 is produced by `scripts/verify-rea.ts --write` from the target's own source, and
 `scripts/verify-rea.ts` re-derives it and **fails** when the target has an entry the
 record does not name. It currently re-derives the **tool registry** (88 names), the
-**telemetry vocabulary** (3 084 events) and the **environment-variable surface** (1 273
-names), and all three are fully accounted for.
+**telemetry vocabulary** (3 084 events), the **environment-variable surface** (1 273
+names), the **settings document** (183 keys) and the **command-line flag vocabulary**
+(150 flags), and all five are fully accounted for.
+
+The **settings document** and the **flag vocabulary** were re-derived after the
+implementations had already been written, and each derivation matched the implementation
+**exactly** — 183 keys with no difference in either direction, and 150 flags of which the
+implementation knows every one, its only two extra being its own project extensions. That
+is an independent confirmation of two large surfaces, not a restatement of them.
 
 Building it found that the earlier record of the tool inventory was **incomplete**: nine
 tools the target has — `Cd`, `JavaScript`, `MultiEdit`, `NotebookRead`, `REPL`, `Task` and

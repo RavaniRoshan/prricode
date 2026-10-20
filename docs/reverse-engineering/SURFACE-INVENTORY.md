@@ -9,6 +9,29 @@ The verifier re-derives each inventory from the source and fails when the
 target has an entry this file does not name. A gap in the audit shows up here
 as a missing row, not as a paragraph nobody notices.
 
+## What this verifier does not cover, and why
+
+**The slash-command registry is not here.** It is the one large surface whose
+reading cannot be reduced to a literal scan: the registry holds computed
+descriptions, template names and minified identifiers, and a pattern-based
+reading of it disagrees with a parser-based reading — a pattern finds 92
+distinct names, a parser finds 100, and the difference is eleven commands the
+pattern misses. A verifier built on the pattern would therefore be wrong in
+exactly the way the pattern is wrong, and would report a false completeness.
+
+The registry is read with a **TypeScript parser** instead, and that reading is
+recorded in `docs/compatibility/command-surface.md` with the reconciliation
+between the two counts. The registry's names are checked against the
+implementation by the conformance tests, not by this file.
+
+**The gated blocks, the sibling config documents and the browser tool bundle**
+are likewise not here: each is a surface with its own shape, and each is
+recorded in the conformance document for the surface it belongs to.
+
+**This file is not a feature count.** It is the target's *enumerated* surface,
+for the surfaces that can be enumerated. A surface that is not enumerated is a
+gap in the audit, and the audit's §8 names every one of them.
+
 ---
 ## The tool registry
 
@@ -4475,3 +4498,350 @@ Every environment variable the target reads, re-derived from the target's own la
 | `http_proxy` |
 | `https_proxy` |
 | `no_proxy` |
+
+## The settings document
+
+Every key the target's settings document accepts, re-derived from the target's own settings factory.
+
+| name |
+|---|
+| `$schema` |
+| `additionalMarketplaces` |
+| `advisorModel` |
+| `agent` |
+| `agentPushNotifEnabled` |
+| `allowAllClaudeAiMcps` |
+| `allowClaudeInChromeWithManagedMcp` |
+| `allowManagedHooksOnly` |
+| `allowManagedMcpServersOnly` |
+| `allowManagedPermissionRulesOnly` |
+| `allowedChannelPlugins` |
+| `allowedHttpHookUrls` |
+| `allowedMarketplaces` |
+| `allowedMcpServers` |
+| `allowedProviders` |
+| `alwaysThinkingEnabled` |
+| `apiKeyHelper` |
+| `appendPlugins` |
+| `askUserQuestionTimeout` |
+| `attribution` |
+| `autoCompactEnabled` |
+| `autoCompactWindow` |
+| `autoContinueAtUsageLimit` |
+| `autoDreamEnabled` |
+| `autoMemoryDirectory` |
+| `autoMemoryEnabled` |
+| `autoScrollEnabled` |
+| `autoUpdatesChannel` |
+| `autoUploadSessions` |
+| `availableModels` |
+| `availableModelsMatch` |
+| `awaySummaryEnabled` |
+| `awsAuthRefresh` |
+| `awsCredentialExport` |
+| `bashEditDiffEnabled` |
+| `bashOutputMaxChars` |
+| `blockedMarketplaces` |
+| `breakReminder` |
+| `channelsEnabled` |
+| `claudeMd` |
+| `claudeMdExcludes` |
+| `cleanupPeriodDays` |
+| `companyAnnouncements` |
+| `crossSessionInbound` |
+| `daemonColdStart` |
+| `defaultShell` |
+| `deniedMcpServers` |
+| `deniedModels` |
+| `desktopSessionCleanupPeriodDays` |
+| `dialogExpiry` |
+| `disableAgentView` |
+| `disableAllHooks` |
+| `disableArtifact` |
+| `disableAutoMode` |
+| `disableBundledSkills` |
+| `disableClaudeAiConnectors` |
+| `disableCommandPluginSources` |
+| `disableRemoteControl` |
+| `disableSideloadFlags` |
+| `disableSkillShellExecution` |
+| `disableWorkflows` |
+| `disabledMcpjsonServers` |
+| `doneMeansMerged` |
+| `editorMode` |
+| `effortLevel` |
+| `emojiCompletionEnabled` |
+| `enableAllProjectMcpServers` |
+| `enableArtifact` |
+| `enableWorkflows` |
+| `enabledMcpjsonServers` |
+| `enabledPlugins` |
+| `enforceAvailableModels` |
+| `env` |
+| `extraKnownMarketplaces` |
+| `fallbackModel` |
+| `fastMode` |
+| `fastModePerSessionOptIn` |
+| `feedbackDrafts` |
+| `feedbackSurveyRate` |
+| `fileCheckpointingEnabled` |
+| `fileSuggestion` |
+| `footerLinksRegexes` |
+| `forceLoginGatewayUrl` |
+| `forceLoginMethod` |
+| `forceLoginOrgUUID` |
+| `forceRemoteSettingsRefresh` |
+| `gatewayInternalNetworks` |
+| `gcpAuthRefresh` |
+| `hooks` |
+| `httpHookAllowedEnvVars` |
+| `idleCompaction` |
+| `includeCoAuthoredBy` |
+| `includeGitInstructions` |
+| `inputNeededNotifEnabled` |
+| `isolatePeerMachines` |
+| `keybindingFlavor` |
+| `language` |
+| `managedMcpServers` |
+| `managedSourcesBehavior` |
+| `maxEffortLevel` |
+| `maxProseWidth` |
+| `minimumVersion` |
+| `model` |
+| `modelOverrides` |
+| `modelPicker` |
+| `modelPricing` |
+| `modelProposedGoals` |
+| `modelSettings` |
+| `otelHeadersHelper` |
+| `outputStyle` |
+| `parentSettingsBehavior` |
+| `permissions` |
+| `plansDirectory` |
+| `pluginConfigs` |
+| `pluginSuggestionMarketplaces` |
+| `pluginTrustMessage` |
+| `policyHelper` |
+| `policyHelpers` |
+| `prUrlTemplate` |
+| `precomputeCompactionEnabled` |
+| `preferredNotifChannel` |
+| `prefersReducedMotion` |
+| `prependPlugins` |
+| `processWrapper` |
+| `promptCacheTtl` |
+| `promptSuggestionEnabled` |
+| `proxyAuthHelper` |
+| `quietHours` |
+| `remote` |
+| `remoteControl` |
+| `remoteControlAtStartup` |
+| `remoteTools` |
+| `requiredMaximumVersion` |
+| `requiredMinimumVersion` |
+| `respectGitignore` |
+| `respondToBashCommands` |
+| `sandbox` |
+| `showClearContextOnPlanAccept` |
+| `showMessageTimestamps` |
+| `showThinkingSummaries` |
+| `showTurnDuration` |
+| `skillListingBudgetFraction` |
+| `skillListingMaxDescChars` |
+| `skillOverrides` |
+| `skipDangerousModePermissionPrompt` |
+| `skipWebFetchPreflight` |
+| `skipWorkflowUsageWarning` |
+| `spellcheck` |
+| `spinnerTipsEnabled` |
+| `spinnerTipsOverride` |
+| `spinnerVerbs` |
+| `sshConfigs` |
+| `statusLine` |
+| `strictKnownMarketplaces` |
+| `strictPluginOnlyCustomization` |
+| `subagentPromptCacheTtl` |
+| `subagentStatusLine` |
+| `switchModelsOnFlag` |
+| `syncClaudeAiPlugins` |
+| `syncClaudeAiSkills` |
+| `syntaxHighlightingDisabled` |
+| `taskOutputMaxChars` |
+| `teammateMode` |
+| `terminalProgressBarEnabled` |
+| `terminalTitleFromRename` |
+| `theme` |
+| `timeFormat` |
+| `timeZone` |
+| `todoFeatureEnabled` |
+| `totalTokensReminder` |
+| `totalTokensReminderAfterUserTurn` |
+| `totalTokensReminderBudget` |
+| `tui` |
+| `ultracode` |
+| `verbose` |
+| `viewMode` |
+| `vimInsertModeRemaps` |
+| `voice` |
+| `wheelScrollAccelerationEnabled` |
+| `workflowKeywordTriggerEnabled` |
+| `workflowSizeGuideline` |
+| `worktree` |
+| `wslInheritsWindowsSettings` |
+
+## The command-line flag vocabulary
+
+Every flag the target's parser names, re-derived from the parser's own chunk.
+
+| name |
+|---|
+| `--add-dir` |
+| `--advisor` |
+| `--agent` |
+| `--agent-color` |
+| `--agent-id` |
+| `--agent-name` |
+| `--agent-type` |
+| `--agents` |
+| `--all` |
+| `--allow-dangerously-skip-permissions` |
+| `--allow-other-models` |
+| `--allowed-tools` |
+| `--allowedTools` |
+| `--append-subagent-system-prompt` |
+| `--append-subagent-system-prompt-file` |
+| `--append-system-prompt` |
+| `--append-system-prompt-file` |
+| `--attach-serve` |
+| `--autocompact` |
+| `--await-claim` |
+| `--await-initialize` |
+| `--ax-screen-reader` |
+| `--background` |
+| `--bare` |
+| `--betas` |
+| `--bg` |
+| `--brief` |
+| `--channels` |
+| `--chrome` |
+| `--client-data-url` |
+| `--cloud` |
+| `--continue` |
+| `--correlation-id` |
+| `--dangerously-load-development-channels` |
+| `--dangerously-skip-permissions` |
+| `--debug` |
+| `--debug-file` |
+| `--debug-to-stderr` |
+| `--deep-link-cwd-b64` |
+| `--deep-link-last-fetch` |
+| `--deep-link-origin` |
+| `--deep-link-repo` |
+| `--desktop` |
+| `--disable-slash-commands` |
+| `--disallowed-tools` |
+| `--disallowedTools` |
+| `--effort` |
+| `--enable-auth-status` |
+| `--enable-auto-mode` |
+| `--environment` |
+| `--exclude-dynamic-system-prompt-sections` |
+| `--exec` |
+| `--fallback-model` |
+| `--fast-mode` |
+| `--file` |
+| `--fork-session` |
+| `--forward-home-settings` |
+| `--forward-subagent-text` |
+| `--from-pr` |
+| `--handle-uri` |
+| `--hard-fail` |
+| `--help` |
+| `--host-auth-is-org-sign-in` |
+| `--ide` |
+| `--include-hook-events` |
+| `--include-partial-messages` |
+| `--include-unsupported-models` |
+| `--inherit-permission-mode` |
+| `--init` |
+| `--init-only` |
+| `--input-format` |
+| `--json-schema` |
+| `--maintenance` |
+| `--managed-settings` |
+| `--max-budget-usd` |
+| `--max-thinking-tokens` |
+| `--max-turns` |
+| `--mcp-config` |
+| `--messaging-socket-path` |
+| `--model` |
+| `--name` |
+| `--no-chrome` |
+| `--no-session-persistence` |
+| `--on-branch` |
+| `--output-format` |
+| `--parent-session-id` |
+| `--permission-mode` |
+| `--permission-prompt-tool` |
+| `--permission-prompts` |
+| `--plan-mode-instructions` |
+| `--plan-mode-required` |
+| `--plugin-dir` |
+| `--plugin-dir-no-mcp` |
+| `--plugin-url` |
+| `--pool` |
+| `--prefill` |
+| `--prefill-b64` |
+| `--print` |
+| `--proactivity` |
+| `--project` |
+| `--project-config-root` |
+| `--prompt-suggestions` |
+| `--rc` |
+| `--ref` |
+| `--remote` |
+| `--remote-control` |
+| `--remote-control-session-name-prefix` |
+| `--replay-user-messages` |
+| `--reply-on-resume` |
+| `--restricted` |
+| `--resume` |
+| `--resume-drops-turn` |
+| `--resume-session-at` |
+| `--rewind-files` |
+| `--routine` |
+| `--safe-mode` |
+| `--sdk-url` |
+| `--session-id` |
+| `--session-mirror` |
+| `--setting-sources` |
+| `--settings` |
+| `--strict-mcp-config` |
+| `--system-prompt` |
+| `--system-prompt-file` |
+| `--system-prompt-snapshot` |
+| `--task-budget` |
+| `--team-name` |
+| `--teammate-mode` |
+| `--teleport` |
+| `--thinking` |
+| `--thinking-display` |
+| `--tmux` |
+| `--tools` |
+| `--verbose` |
+| `--version` |
+| `--watch-artifact` |
+| `--watch-artifact-no-autoreact` |
+| `--workload` |
+| `--worktree` |
+| `-V` |
+| `-c` |
+| `-d` |
+| `-d2e` |
+| `-h` |
+| `-m` |
+| `-n` |
+| `-p` |
+| `-r` |
+| `-v` |
+| `-w` |

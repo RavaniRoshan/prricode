@@ -248,6 +248,49 @@ function deriveEnvironment(files: readonly string[]): Set<string> {
   return names;
 }
 
+/**
+ * The settings document: the target's own settings factory, `cc`, and the
+ * object literal it returns.
+ *
+ * The literal's **spread** at its end merges the gated blocks in, so the
+ * document's own members are what the factory declares, and the spread's
+ * contribution is a separate surface.
+ */
+function deriveSettings(files: readonly string[]): Set<string> {
+  const keys = new Set<string>();
+  for (const file of files) {
+    if (!file.endsWith('chunk-c9s0jh80.js')) continue;
+    const text = readFileSync(file, 'utf8');
+    const factory = text.indexOf('function cc(e,{strictPolicyHelperKeys');
+    if (factory === -1) continue;
+    const returned = text.indexOf('return{', factory);
+    if (returned === -1) continue;
+    const brace = text.indexOf('{', returned);
+    for (const key of keysOfObject(text, brace)) keys.add(key);
+  }
+  return keys;
+}
+
+/**
+ * The command-line flag vocabulary: every flag-shaped literal the target's own
+ * parser names.
+ *
+ * The seven sets the parser keeps overlap, and the short forms share their
+ * long ones, so the vocabulary is their **union** — which is what the target
+ * accepts.
+ */
+function deriveFlags(files: readonly string[]): Set<string> {
+  const flags = new Set<string>();
+  for (const file of files) {
+    if (!file.endsWith('chunk-0y0ptpy9.js')) continue;
+    const text = readFileSync(file, 'utf8');
+    for (const match of text.matchAll(/"(--?[A-Za-z0-9][A-Za-z0-9-]*)"/g)) {
+      flags.add(match[1] ?? '');
+    }
+  }
+  return flags;
+}
+
 /** The inventory the record carries, parsed out of the markdown. */
 function recordedEntries(markdown: string, heading: string): Set<string> {
   const entries = new Set<string>();
@@ -278,6 +321,8 @@ function main(): number {
   const tools = deriveTools(files);
   const telemetry = deriveTelemetry(files);
   const environment = deriveEnvironment(files);
+  const settings = deriveSettings(files);
+  const flags = deriveFlags(files);
 
   if (process.argv.includes('--write')) {
     // The record is **generated from the derivation**, so it cannot drift from
@@ -297,6 +342,16 @@ function main(): number {
         heading: 'The environment-variable surface',
         note: 'Every environment variable the target reads, re-derived from the target\'s own lazy namespace and its direct reads.',
         entries: [...environment].sort(),
+      },
+      {
+        heading: 'The settings document',
+        note: 'Every key the target\'s settings document accepts, re-derived from the target\'s own settings factory.',
+        entries: [...settings].sort(),
+      },
+      {
+        heading: 'The command-line flag vocabulary',
+        note: 'Every flag the target\'s parser names, re-derived from the parser\'s own chunk.',
+        entries: [...flags].sort(),
       },
     ];
     const body = sections
@@ -370,7 +425,7 @@ function main(): number {
 
   if (deriveOnly) {
     process.stdout.write(
-      `tools ${tools.names.size}\ntelemetry ${telemetry.size}\nenvironment ${environment.size}\n`,
+      `tools ${tools.names.size}\ntelemetry ${telemetry.size}\nenvironment ${environment.size}\nsettings ${settings.size}\nflags ${flags.size}\n`,
     );
     for (const name of [...tools.names].sort()) {
       process.stdout.write(`tool\t${name}\t${tools.hints.get(name) ?? ''}\n`);
@@ -395,6 +450,8 @@ function main(): number {
   compare('the tool registry', tools.names, 'The tool registry');
   compare('the telemetry vocabulary', telemetry, 'The telemetry vocabulary');
   compare('the environment-variable surface', environment, 'The environment-variable surface');
+  compare('the settings document', settings, 'The settings document');
+  compare('the command-line flag vocabulary', flags, 'The command-line flag vocabulary');
 
   let failed = 0;
   for (const check of checks) {

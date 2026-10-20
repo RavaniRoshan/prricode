@@ -153,6 +153,39 @@ export function keysOfObject(text: string, at: number): string[] {
       expectingKey = false;
       continue;
     }
+    if (character === '.' && text.startsWith('...', index) && depth === 0 && expectingKey) {
+      // A **spread** (`...name(...)`) is not a key: the members it contributes
+      // come from elsewhere, and reading the name as a key would invent one.
+      index += 3;
+      const name = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(text.slice(index));
+      if (name !== null) index += name[0].length;
+      let probe = index;
+      while (probe < end && /\s/.test(text[probe] ?? '')) probe += 1;
+      if (text[probe] === '(') {
+        // The call's arguments are skipped whole, so a parameter name inside
+        // them is never mistaken for a key.
+        let inner = 0;
+        while (probe < end) {
+          const inner_character = text[probe];
+          if (inner_character === '"' || inner_character === "'" || inner_character === '`') {
+            probe = endOfString(text, probe);
+            continue;
+          }
+          if (inner_character === '(') inner += 1;
+          else if (inner_character === ')') {
+            inner -= 1;
+            if (inner === 0) {
+              probe += 1;
+              break;
+            }
+          }
+          probe += 1;
+        }
+        index = probe;
+      }
+      expectingKey = false;
+      continue;
+    }
     if (character === '{' || character === '[' || character === '(') {
       depth += 1;
       index += 1;
