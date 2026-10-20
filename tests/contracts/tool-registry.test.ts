@@ -3825,6 +3825,39 @@ describe('the browser surface', () => {
     expect(decision?.behavior).toBe('ask');
   });
 
+  it('re-checks the safe subset against the rewritten input', async () => {
+    const deps = builtinDeps();
+    const tool = createBrowserTools(deps).find((entry) => entry.name === 'tabs_context_mcp');
+
+    const safe = await tool?.recheckPermission({}, toolContext('tabs_context_mcp', {}));
+    expect(safe?.decision?.behavior).toBe('allow');
+
+    // A rewrite that makes the call unsafe asks, and a rewrite that leaves it
+    // safe still does not.
+    const unsafe = await tool?.recheckPermission(
+      { createIfEmpty: true },
+      toolContext('tabs_context_mcp', { createIfEmpty: true }),
+    );
+    expect(unsafe?.decision?.behavior).toBe('ask');
+  });
+
+  it('lets a scoped rule match a browser call\'s own content', async () => {
+    const deps = builtinDeps({ rules: ruleSet({ deny: ['navigate(https://example.com/*)'] }) });
+    const tool = createBrowserTools(deps).find((entry) => entry.name === 'navigate');
+
+    const denied = await tool?.checkPermissions(
+      { url: 'https://example.com/page' },
+      toolContext('navigate', { url: 'https://example.com/page' }),
+    );
+    expect(denied?.behavior).toBe('deny');
+
+    const allowed = await tool?.checkPermissions(
+      { url: 'https://other.test/page' },
+      toolContext('navigate', { url: 'https://other.test/page' }),
+    );
+    expect(allowed?.behavior).toBe('ask');
+  });
+
   it('refuses every browser tool and names the capability it needs', async () => {
     const deps = builtinDeps();
     const tools = createBrowserTools(deps);

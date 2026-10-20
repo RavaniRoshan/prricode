@@ -178,6 +178,16 @@ const PRIMARY_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
   LSP: ['filePath'],
   memory_read: ['path'],
   memory_write: ['path'],
+  // The browser surface (`CC-032`). A scoped rule on a browser tool matches
+  // the call's own content — the URL it navigates to, the code it runs in the
+  // page, the query it searches for, the action it performs and the browser it
+  // selects. Without a primary field a scoped rule on one of these tools would
+  // be half-live: it would never match, and the user would not know.
+  navigate: ['url'],
+  javascript_tool: ['text'],
+  find: ['query'],
+  computer: ['action'],
+  select_browser: ['deviceId'],
 };
 
 const PATH_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {

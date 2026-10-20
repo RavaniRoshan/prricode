@@ -383,6 +383,12 @@ this implementation.
 | a domain rule | the target's own pseudo-tool, matched on the host | not implemented — there is no site to allow or deny |
 | a blanket allow | the target **excludes** the browser tools from every whole-tool allow rule | not implemented — this implementation's rule engine has no whole-tool-allow concept to exclude, so a user's `allow: ["navigate"]` allows the call (and the call then refuses) |
 
+A **scoped** rule on a browser tool does match, and it matches the call's own
+content: the URL for `navigate`, the code for `javascript_tool`, the query for
+`find`, the action for `computer` and the `deviceId` for `select_browser`. A
+rule written `navigate(https://example.com/*)` therefore blocks that URL and
+leaves every other one alone.
+
 The **safe** predicate is the target's own: five tools are always safe
 (`list_connected_browsers`, `resize_window`, `shortcuts_list`, `switch_browser`,
 `tabs_close_mcp`), and three more are safe unless they change something
@@ -429,7 +435,7 @@ Each one is labelled in the code as well as here.
 - the **validation** — the target validates its own input inside its MCP server; the check that runs here, and the typed codes it reports, are this implementation's own;
 - the **schemas** — the target's, byte for byte, and they do **not** close their object, so a browser call may carry an argument the schema does not name. The rest of this implementation's tools close theirs; the browser tools do not, because the target's do not;
 - the **tool names** — the target's **bare** names, not the server-prefixed ones the model calls, because the server prefix carries the product's own name and the bare names are what the target's own tool array holds;
-- the **rule matching** — because the names are bare, a rule is written `navigate(...)` and not with the server prefix;
+- the **rule matching** — because the names are bare, a rule is written `navigate(...)` and not with the server prefix. A scoped rule on a browser tool matches the call's own content — the URL for `navigate`, the code for `javascript_tool`, the query for `find`, the action for `computer` and the `deviceId` for `select_browser` — so a scoped rule is never half-live;
 - the **output shapes** — the target's tools answer with an MCP tool result; there is no such envelope here, and none is invented;
 - the **unimplemented rules** — the non-web-URL denial, the unresolvable-tab denial, the domain rule and the exclusion from every blanket allow are the target's own rules and they are **not** implemented here, because each of them judges a site or a tab and there is neither.
 
@@ -555,6 +561,7 @@ These are the places where the clone differs from the target *by choice*, each o
 | The browser **timeout table**, the `browser_batch` override, the two-minute `switch_browser` wait and the three result caps are the target's | REA observed | F-17 | same file — "carries the target's timeouts and result caps" |
 | The browser tools' **safe subset** and its predicate are the target's | REA observed | F-17 | same file — "reproduces the target's safe subset" |
 | A browser tool of the **safe subset** is allowed without a prompt, and a deny rule and an ask rule both still win | REA observed (the rule is the target's; the *generic prompt* is this implementation's marker) | F-20 | same file — "allows the target's safe subset and asks for everything else", "lets a deny rule block a safe browser tool" and "lets an ask rule ask for a safe browser tool" |
+| A **scoped** rule on a browser tool matches the call's own content, and a rule on one URL leaves the others alone | REA observed (the target's MCP tools are matched by their arguments) | F-20 | same file — "lets a scoped rule match a browser call's own content" |
 | Every browser tool **refuses** and names the capability it needs; none of them pretends to drive a browser | implementation choice (deliberate) | F-17 | same file — "refuses every browser tool and names the capability it needs", "names the browser capability in the refusal" and "does not let a browser tool pretend to drive a browser" |
 | The `OfferChromeSetup` tool carries the target's name, description, prompt, schema and result strings, and **refuses** | REA observed (the data) / implementation choice (the refusal) | F-17 | same file — "carries the setup tool and refuses it" and "asks before offering the setup, the way the target does" |
 | The terminal UI's **theme** is the target's, value for value, and the role→colour rule is the target's | REA observed | F-39 | `tests/contracts/ui-render.test.ts` — "the theme — the target's colours and the role rule" |
