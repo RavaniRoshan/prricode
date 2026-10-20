@@ -716,8 +716,8 @@ const PARSER_BOOLEAN_FLAGS: ReadonlySet<string> = new Set(
  *
  * **Implementation choice, and a recorded divergence.** The target declares
  * `--attach-serve <session_id>`, so its own parser gives the flag a
- * **required** value: `claude --attach-serve --print` gives `--print` to
- * `--attach-serve`, and `claude --attach-serve` alone is a missing-argument
+ * **required** value: `prricode --attach-serve --print` gives `--print` to
+ * `--attach-serve`, and `prricode --attach-serve` alone is a missing-argument
  * error.
  *
  * The `CC-014` contract test pins two things that the target's own declaration

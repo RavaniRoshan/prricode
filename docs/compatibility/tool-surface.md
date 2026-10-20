@@ -420,6 +420,19 @@ needed. **No tool pretends to drive a browser**: none of them returns a page,
 a screenshot, a tab list or a text extraction, and none of them opens a
 socket.
 
+### The clone's own choices on the browser surface
+
+Each one is labelled in the code as well as here.
+
+- the **refusal** — the target has a browser, so the target never refuses; the refusal, its wording and its error code are this implementation's own;
+- the **safe-subset rule** — the rule is the target's own, but the target's hook decides it on the whole rule engine while this implementation decides it on the *generic prompt* marker; that is why a deny rule and an ask rule both still win here;
+- the **validation** — the target validates its own input inside its MCP server; the check that runs here, and the typed codes it reports, are this implementation's own;
+- the **schemas** — the target's, byte for byte, and they do **not** close their object, so a browser call may carry an argument the schema does not name. The rest of this implementation's tools close theirs; the browser tools do not, because the target's do not;
+- the **tool names** — the target's **bare** names, not the server-prefixed ones the model calls, because the server prefix carries the product's own name and the bare names are what the target's own tool array holds;
+- the **rule matching** — because the names are bare, a rule is written `navigate(...)` and not with the server prefix;
+- the **output shapes** — the target's tools answer with an MCP tool result; there is no such envelope here, and none is invented;
+- the **unimplemented rules** — the non-web-URL denial, the unresolvable-tab denial, the domain rule and the exclusion from every blanket allow are the target's own rules and they are **not** implemented here, because each of them judges a site or a tab and there is neither.
+
 ## Unpinned surfaces (implementation choices, labelled in the code)
 
 - The `nonExecutionKind` vocabulary: `unknown_tool`, `permission_denied`, `permission_unresolved`, `permission_check_failed`, `validation_error`, `path_changed`, `execution_failed`. The audit pins the *field*, not the values.

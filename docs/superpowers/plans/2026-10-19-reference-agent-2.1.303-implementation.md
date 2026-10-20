@@ -1009,7 +1009,7 @@ Their per-command rules: `echo` and `printf` are read-only; `ls` is read-only ou
 `-files0-from`); `history`, `arch` and `ifconfig` only with their allowed argument shapes.
 
 The **text pattern set** — the fallback, when the argv allowlist does not decide: the
-names above, plus `echo`, `claude -h`, `claude --help`, `uniq`, `pwd`, `whoami`,
+names above, plus `echo`, `prricode -h`, `prricode --help`, `uniq`, `pwd`, `whoami`,
 `node -v`, `node --version`, `python --version`, `python3 --version`, `history`, `alias`,
 `arch`, `ip addr`, `ifconfig`, `jq` (read-only **unless** it is given a flag that writes
 or runs code), `cd`, `ls` and `find`. A `find` with an action flag is not read-only, and

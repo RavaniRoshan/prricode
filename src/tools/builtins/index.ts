@@ -32,6 +32,7 @@ import type { ToolDefinition, ToolRegistry } from '../registry.js';
 import { createAgentTool } from './agent.js';
 import { createAskUserQuestionTool } from './askuserquestion.js';
 import { createBashTool } from './bash.js';
+import { createBrowserTools } from './browser.js';
 import { createCdTool } from './cd.js';
 import { createEditTool } from './edit.js';
 import { createEndConversationTool } from './endconversation.js';
@@ -50,6 +51,7 @@ import { createMonitorTool } from './monitor.js';
 import { createMultiEditTool } from './multiedit.js';
 import { createNotebookEditTool } from './notebookedit.js';
 import { createNotebookReadTool } from './notebookread.js';
+import { createOfferChromeSetupTool } from './offerChromeSetup.js';
 import { createPowerShellTool } from './powershell.js';
 import { createProposeGoalTool } from './proposegoal.js';
 import { createReadMcpResourceTool } from './readmcpresource.js';
@@ -97,6 +99,7 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = Object.freeze([
   'Monitor',
   'NotebookEdit',
   'NotebookRead',
+  'OfferChromeSetup',
   'PowerShell',
   'ProposeGoal',
   'Read',
@@ -122,6 +125,31 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = Object.freeze([
   'memory_list',
   'memory_read',
   'memory_write',
+  // The browser surface: the target's twenty-two browser tools, in the target's
+  // own order (`chunk-g8377zgj.js:4271`). Every one of them refuses — there is
+  // no browser behind them — and the tool names are the target's bare names.
+  'javascript_tool',
+  'read_page',
+  'find',
+  'form_input',
+  'computer',
+  'browser_batch',
+  'navigate',
+  'resize_window',
+  'gif_creator',
+  'upload_image',
+  'get_page_text',
+  'tabs_context_mcp',
+  'tabs_create_mcp',
+  'tabs_close_mcp',
+  'read_console_messages',
+  'read_network_requests',
+  'shortcuts_list',
+  'shortcuts_execute',
+  'file_upload',
+  'switch_browser',
+  'list_connected_browsers',
+  'select_browser',
 ]);
 
 /**
@@ -163,6 +191,7 @@ export function createBuiltinTools(deps: BuiltinToolDeps): ToolDefinition[] {
     createMonitorTool(scoped),
     createNotebookEditTool(scoped),
     createNotebookReadTool(scoped),
+    createOfferChromeSetupTool(scoped),
     createPowerShellTool(scoped),
     createProposeGoalTool(scoped),
     createReadTool(scoped),
@@ -188,6 +217,9 @@ export function createBuiltinTools(deps: BuiltinToolDeps): ToolDefinition[] {
     createMemoryListTool(scoped),
     createMemoryReadTool(scoped),
     createMemoryWriteTool(scoped),
+    // The browser surface: the target's twenty-two browser tools, in the target's
+    // own order. Every one of them refuses — there is no browser behind them.
+    ...createBrowserTools(scoped),
   ];
 }
 
@@ -219,6 +251,19 @@ export function registerBuiltinTools(registry: ToolRegistry, deps: BuiltinToolDe
 export { createAgentTool } from './agent.js';
 export { createAskUserQuestionTool } from './askuserquestion.js';
 export { createBashTool } from './bash.js';
+export {
+  BROWSER_RESULT_CAPPED_TOOLS,
+  BROWSER_RESULT_SIZE_CAP,
+  BROWSER_SAFE_TOOL_NAMES,
+  BROWSER_SELECTION_TOOL_NAMES,
+  BROWSER_SESSION_TOOL_NAMES,
+  BROWSER_TIMEOUTS,
+  BROWSER_TOOL_NAMES,
+  BROWSER_TOOL_SPECS,
+  createBrowserTools,
+  isBrowserSafeTool,
+  type BrowserToolSpec,
+} from './browser.js';
 export { createCdTool } from './cd.js';
 export { createEditTool } from './edit.js';
 export { createEndConversationTool } from './endconversation.js';
@@ -237,6 +282,20 @@ export { createMonitorTool } from './monitor.js';
 export { createMultiEditTool } from './multiedit.js';
 export { createNotebookEditTool, NOTEBOOK_EDIT_MODES } from './notebookedit.js';
 export { createNotebookReadTool } from './notebookread.js';
+export {
+  OFFER_CHROME_SETUP_ASK_MESSAGE,
+  OFFER_CHROME_SETUP_CONNECTED_MESSAGE,
+  OFFER_CHROME_SETUP_DESCRIPTION,
+  OFFER_CHROME_SETUP_INPUT_SCHEMA,
+  OFFER_CHROME_SETUP_MOBILE_MESSAGE,
+  OFFER_CHROME_SETUP_NOT_NOW_MESSAGE,
+  OFFER_CHROME_SETUP_NO_ATTEMPT_MESSAGE,
+  OFFER_CHROME_SETUP_OUTPUT_SCHEMA,
+  OFFER_CHROME_SETUP_PROMPT,
+  OFFER_CHROME_SETUP_WHEN_TO_USE,
+  createOfferChromeSetupTool,
+  type OfferChromeSetupOutcome,
+} from './offerChromeSetup.js';
 export { createPowerShellTool } from './powershell.js';
 export { createProposeGoalTool } from './proposegoal.js';
 export { createReadMcpResourceTool } from './readmcpresource.js';

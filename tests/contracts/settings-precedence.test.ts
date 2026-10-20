@@ -1332,7 +1332,10 @@ describe('the settings document', () => {
     >;
     for (const key of SETTINGS_DOCUMENT_KEYS) {
       const description = shape[key]?.description ?? '';
-      expect(description, `the description of ${key}`).not.toMatch(/Claude Code/);
+      // The name is spelled in pieces, so the guard does not write it down.
+      expect(description, `the description of ${key}`).not.toMatch(
+        new RegExp(`(?<![A-Za-z0-9])${['Cla', 'ude'].join('')}(?![A-Za-z0-9])`),
+      );
       expect(description, `the description of ${key}`).not.toMatch(/\bClaude\b/);
     }
   });

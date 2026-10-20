@@ -76,6 +76,13 @@ import {
 import { providerCommand } from '../../src/cli/commands/provider.js';
 import { catalogCommand } from '../../src/cli/commands/catalog.js';
 import { groupToolCalls, toolCallsFrom, scheduleToolCalls, scheduleToolCallsWithRegistry} from '../../src/agent/dispatch.js';
+import {
+  buildProviderRequest,
+  buildProviderTools,
+  pushAssistant,
+  pushToolResults,
+  pushUserText,
+} from '../../src/agent/context.js';
 import { refusalEnvelope, toolUseErrorContent } from '../../src/agent/loop.js';
 import { compact } from '../../src/session/compaction.js';
 import {
@@ -129,6 +136,7 @@ import {
   parseResponse,
   readHeader,
   type ProviderContentBlock,
+  type ProviderMessage,
   type ProviderRequest,
   type ProviderResponseLike,
 } from '../../src/provider/drivers/types.js';
@@ -184,9 +192,47 @@ import {
   LOCAL_CONNECT_BATCH_SIZE,
   REMOTE_CONNECT_BATCH_SIZE,
   connectServersInBatches,
+  createMcpManager,
   getMcpServerConnectionBatchSize,
   getRemoteMcpServerConnectionBatchSize,
 } from '../../src/extensions/mcp/manager.js';
+import {
+  DEFAULT_MCP_TIMEOUTS,
+  MCP_CONNECT_TIMEOUT_ENV,
+  MCP_FAILED_MEMO_MAX_AGE_MS,
+  MCP_TIMEOUT_ENV,
+  callMCPTool,
+  callMCPToolWithUrlElicitationRetry,
+  classifyMcpAuthFailure,
+  cleanupConnectedMcpClients,
+  connectToServer,
+  detachAndCloseConnection,
+  discardMemoizedConnectResult,
+  disposeServerConnectionDetached,
+  ensureConnectedClient,
+  evictAllMcpMemosOnIdentityChange,
+  evictStaleFailedConnectMemoForServe,
+  fetchCommandsForClient,
+  fetchResourceTemplatesForClient,
+  fetchResourcesForClient,
+  fetchToolsForClient,
+  getListingDiscoverPrior,
+  getMcpIdentityEpoch,
+  getMcpToolsCommandsAndResources,
+  getMcpVersionNegotiation,
+  getRememberedDiscoverPrior,
+  hasEraCodeInHttpErrorBody,
+  hasLiveConnection,
+  hasUnsettledDial,
+  hydrateCommandsFromListing,
+  hydrateToolsFromListing,
+  inertReconnectShape,
+  resolveMcpTimeouts,
+  type JsonRpcMessage,
+  type McpListing,
+  type McpTransport,
+  type McpUrlElicitation,
+} from '../../src/extensions/mcp/client.js';
 import type { McpServerConfig } from '../../src/extensions/mcp/config.js';
 import { parsePluginManifest } from '../../src/extensions/plugins/manifest.js';
 import {
@@ -393,8 +439,14 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   loadSettings,
   // The agent.
   groupToolCalls,
+  scheduleToolCalls,
   scheduleToolCallsWithRegistry,
   toolCallsFrom,
+  buildProviderRequest,
+  buildProviderTools,
+  pushAssistant,
+  pushToolResults,
+  pushUserText,
   refusalEnvelope,
   toolUseErrorContent,
   runTool,
@@ -435,9 +487,41 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   LOCAL_CONNECT_BATCH_SIZE,
   REMOTE_CONNECT_BATCH_SIZE,
   connectServersInBatches,
+  createMcpManager,
   getMcpServerConnectionBatchSize,
   getRemoteMcpServerConnectionBatchSize,
   createStdioTransport,
+  DEFAULT_MCP_TIMEOUTS,
+  MCP_CONNECT_TIMEOUT_ENV,
+  MCP_FAILED_MEMO_MAX_AGE_MS,
+  MCP_TIMEOUT_ENV,
+  callMCPTool,
+  callMCPToolWithUrlElicitationRetry,
+  classifyMcpAuthFailure,
+  cleanupConnectedMcpClients,
+  connectToServer,
+  detachAndCloseConnection,
+  discardMemoizedConnectResult,
+  disposeServerConnectionDetached,
+  ensureConnectedClient,
+  evictAllMcpMemosOnIdentityChange,
+  evictStaleFailedConnectMemoForServe,
+  fetchCommandsForClient,
+  fetchResourceTemplatesForClient,
+  fetchResourcesForClient,
+  fetchToolsForClient,
+  getListingDiscoverPrior,
+  getMcpIdentityEpoch,
+  getMcpToolsCommandsAndResources,
+  getMcpVersionNegotiation,
+  getRememberedDiscoverPrior,
+  hasEraCodeInHttpErrorBody,
+  hasLiveConnection,
+  hasUnsettledDial,
+  hydrateCommandsFromListing,
+  hydrateToolsFromListing,
+  inertReconnectShape,
+  resolveMcpTimeouts,
   parsePluginManifest,
   isSafeIdeAction,
   // The platform.
@@ -958,6 +1042,119 @@ function toolResultBlockOf(
   expect(block.type, 'the projected block is not a tool_result').toBe('tool_result');
   if (block.type !== 'tool_result') throw new Error('unreachable');
   return block;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The MCP scaffolding                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One JSON-RPC answer the probe's own MCP server gives.
+ *
+ * The probe drives a transport of its own: it stands in for the server the
+ * client talks to. The transport is **scaffolding** — everything the probe
+ * asserts on is a value this implementation produced: the connection, the
+ * negotiation, the listings, the tool result.
+ */
+interface FakeMcpAnswer {
+  /** The result of the request. */
+  readonly result?: unknown;
+  /** The error the request is answered with. */
+  readonly error?: { readonly code: number; readonly message: string };
+}
+
+/**
+ * A JSON-RPC transport the probe drives.
+ *
+ * The handler is asked for every request the client sends. It answers with a
+ * result or with a JSON-RPC error, and it answers with `undefined` when the
+ * request must stay unanswered — that is how a request that runs out of time
+ * is measured.
+ */
+function fakeMcpTransport(
+  handler: (method: string, attempt: number, params: unknown) => FakeMcpAnswer | undefined,
+): { readonly transport: McpTransport } {
+  const attempts = new Map<string, number>();
+  const transport: McpTransport = {
+    async start(): Promise<void> {},
+    async send(message: JsonRpcMessage): Promise<void> {
+      const method = typeof message.method === 'string' ? message.method : '';
+      const attempt = (attempts.get(method) ?? 0) + 1;
+      attempts.set(method, attempt);
+      const answer = handler(method, attempt, message.params);
+      if (answer === undefined) return;
+      const id = message.id;
+      if (id === undefined || id === null) return;
+      queueMicrotask(() => {
+        transport.onmessage?.(
+          answer.error !== undefined
+            ? { jsonrpc: '2.0', id, error: answer.error }
+            : { jsonrpc: '2.0', id, result: answer.result },
+        );
+      });
+    },
+    async close(): Promise<void> {},
+  };
+  return { transport };
+}
+
+/**
+ * The answers the probe's own MCP server gives for the ordinary requests.
+ *
+ * The two revisions are the target's own: the modern one is probed first, and
+ * the legacy `initialize` handshake is the fallback.
+ */
+function standardMcpAnswers(
+  method: string,
+  attempt: number,
+  params: unknown,
+): FakeMcpAnswer | undefined {
+  switch (method) {
+    case 'server/discover':
+      return {
+        result: {
+          protocolVersion: '2026-07-28',
+          serverInfo: { name: 'probe-server', version: '9.9' },
+          capabilities: { tools: {}, resources: {} },
+        },
+      };
+    case 'initialize':
+      return {
+        result: {
+          protocolVersion: '2025-11-25',
+          serverInfo: { name: 'probe-server', version: '9.9' },
+          capabilities: { tools: {} },
+        },
+      };
+    case 'tools/list':
+      return {
+        result: {
+          tools: [{ name: 'echo', description: 'echoes', inputSchema: { type: 'object' } }],
+        },
+      };
+    case 'prompts/list':
+      return { result: { prompts: [{ name: 'greet', description: 'greets' }] } };
+    case 'resources/list':
+      return { result: { resources: [{ uri: 'file:///probe', name: 'probe' }] } };
+    case 'resources/templates/list':
+      return {
+        result: { resourceTemplates: [{ uriTemplate: 'file:///{path}', name: 'byPath' }] },
+      };
+    case 'tools/call':
+      return { result: { content: [{ type: 'text', text: 'hi' }], isError: false } };
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The configuration of a server the probe connects to.
+ *
+ * The name the caller passes carries a unique suffix: the probe runs more than
+ * once in a process, and the client's own memo is keyed on the server's name.
+ */
+function mcpConfigOf(name: string): McpServerConfig {
+  return { name, type: 'stdio', command: '/bin/true' };
 }
 
 /**
@@ -1886,9 +2083,142 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(answered.content).toContain("The permission decision was 'deny'");
       expect(answered.content).toContain('source: hook');
       expect(answered.content).toContain('reason type: rule');
+
+      // --- The turn request (audit §2.4) ------------------------------------
+      //
+      // The agent turn is a **streaming** `beta.messages.create`, and the body
+      // is the driver's own: the model, the output-token budget, the
+      // conversation and the tools the registry holds.
+      const driver = await observeCall('the first-party driver', driverFor, ['firstParty']);
+      const conversation: ProviderMessage[] = [];
+      await observeCall('the prompt', pushUserText, [conversation, 'hello']);
+      const offered = await observeCall('the tools the model may call', buildProviderTools, [
+        registry,
+      ]);
+      const turn = await observeCall('the turn request', buildProviderRequest, [
+        { model: 'claude-sonnet-4-5', maxTokens: 1024, messages: conversation, tools: offered },
+      ]);
+      expect(observe('the turn stream', turn.stream)).toBe(true);
+      // The endpoint the turn goes to, and the header set it carries: the
+      // target's call site is `client.beta.messages.create({ ...req, stream:
+      // true }, { signal, headers })`.
+      const turnUrl = await observeCall('the turn url', driver.buildUrl, [
+        turn,
+        'https://api.anthropic.com',
+      ]);
+      expect(turnUrl).toBe('https://api.anthropic.com/v1/messages');
+      const turnBuilt = await observeCall('the turn body', driver.buildBody, [turn, 'sk-test']);
+      expect(observe('the turn headers', turnBuilt.headers)).toMatchObject({
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      });
+      const turnBody = observe('the turn body', turnBuilt.body);
+      expect(turnBody).toMatchObject({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 1024,
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: [{ name: 'Echo', description: 'echo', input_schema: {} }],
+      });
+
+      // --- The continuation (audit §2.4) ------------------------------------
+      //
+      // The next model request carries the assistant's tool calls and the tool
+      // results that answer them. The refusal's answer is the
+      // `<tool_use_error>` wrapper, and a result that did not fail carries no
+      // `is_error` member at all.
+      await observeCall('the assistant turn', pushAssistant, [
+        conversation,
+        [
+          { type: 'tool_use', id: 'toolu_1', name: 'Echo', input: {} },
+          { type: 'tool_use', id: 'toolu_2', name: 'Read', input: { path: '/tmp/probe' } },
+        ],
+      ]);
+      const refusedBlock = toolResultBlockOf(
+        await observeCall('the refusal result block', providerToolResultBlock, [
+          'toolu_1',
+          answered.content,
+          true,
+        ]),
+      );
+      expect(refusedBlock).toMatchObject({
+        type: 'tool_result',
+        tool_use_id: 'toolu_1',
+        is_error: true,
+      });
+      expect(observe('the refusal result content', refusedBlock.content)).toContain(
+        '<tool_use_error>',
+      );
+      const ranBlock = toolResultBlockOf(
+        await observeCall('the result block', providerToolResultBlock, [
+          'toolu_2',
+          'the file was read',
+          false,
+        ]),
+      );
+      expect(ranBlock).toMatchObject({ type: 'tool_result', tool_use_id: 'toolu_2' });
+      expect(ranBlock).not.toHaveProperty('is_error');
+      await observeCall('the tool results', pushToolResults, [
+        conversation,
+        [refusedBlock, ranBlock],
+      ]);
+      const continuation = await observeCall('the continuation request', buildProviderRequest, [
+        { model: 'claude-sonnet-4-5', maxTokens: 1024, messages: conversation, tools: offered },
+      ]);
+      const continuationBuilt = await observeCall('the continuation body', driver.buildBody, [
+        continuation,
+        'sk-test',
+      ]);
+      const continuationBody = observe('the continuation body', continuationBuilt.body);
+      expect(continuationBody).toMatchObject({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 1024,
+        stream: true,
+        messages: [
+          { role: 'user', content: 'hello' },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'tool_use', id: 'toolu_1', name: 'Echo' },
+              { type: 'tool_use', id: 'toolu_2', name: 'Read' },
+            ],
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'tool_result', tool_use_id: 'toolu_1', is_error: true },
+              { type: 'tool_result', tool_use_id: 'toolu_2' },
+            ],
+          },
+        ],
+      });
+
+      // --- The scheduling the continuation depends on (audit §2.4) ----------
+      //
+      // The next model request is issued only after **every** call of that
+      // assistant message has produced its result, so the schedule has to
+      // cover every call: a maximal run of concurrency-safe calls runs
+      // together, a call that is not concurrency safe runs alone and is a
+      // barrier, and the run after it starts fresh.
+      const calls = [
+        { id: 'toolu_a', name: 'Read', input: {} },
+        { id: 'toolu_b', name: 'Read', input: {} },
+        { id: 'toolu_c', name: 'Bash', input: { command: 'ls' } },
+        { id: 'toolu_d', name: 'Read', input: {} },
+      ];
+      const scheduled = await observeCall('the scheduled groups', scheduleToolCalls, [
+        calls,
+        (call: { readonly name: string }) => call.name === 'Read',
+      ]);
+      expect(scheduled).toMatchObject([
+        { ids: ['toolu_a', 'toolu_b'], parallel: true },
+        { ids: ['toolu_c'], parallel: false },
+        { ids: ['toolu_d'], parallel: true },
+      ]);
+      expect(scheduled).toHaveLength(3);
       return measured(
-        'partial',
-        "A refused call is answered with the target's observed <tool_use_error> wrapper and is_error: true, and the wrapper carries the decision and its reason type; the wording inside the wrapper is this implementation's. Measured: the refusal envelope. The turn request and the continuation are established by the audit and implemented here, but this probe does not compare them.",
+        'match',
+        "A refused call is answered with the target's observed <tool_use_error> wrapper and is_error: true, and the wrapper carries the decision and its reason type; the wording inside the wrapper is this implementation's own. The **turn request** is compared too: the runtime builds the Anthropic-shaped request the target issues — a **streaming** messages request — and the driver builds its URL, its header set and its body, with the model, the output-token budget, the conversation and the tools the registry holds. The **continuation** is compared: the runtime appends the assistant's tool calls and the tool results that answer them, and the next body carries the `tool_use` blocks and the `tool_result` blocks — the refusal's <tool_use_error> answer with `is_error: true`, and a result that did not fail with no `is_error` member at all. The **scheduling** the continuation depends on is compared: a maximal run of concurrency-safe calls runs together, a call that is not concurrency safe runs alone and is a barrier, the run after it starts fresh, and the schedule covers every call of the assistant message — the next model request is issued only after every one of them has produced its result. A request's own beta dialect is F-12's row, and the abort signal is the runtime's rather than the request's.",
       );
     },
   },
@@ -2835,8 +3165,371 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'evicts a failed memo and retries the server',
     },
     probe: async () => {
-      // The lifecycle: the batched connect returns the states in the order the
-      // configurations were given, and a failed server is a state, not a crash.
+      // The client lifecycle, element by element. The probe's own transport
+      // stands in for the server; everything the probe asserts on is a value
+      // this implementation produced.
+      const suffix = Math.random().toString(36).slice(2, 10);
+
+      // --- The negotiation point (audit §2.8) ------------------------------
+      expect(observe('the negotiation point', getMcpVersionNegotiation({}))).toBe('modern');
+      expect(
+        observe(
+          'the legacy opt-out',
+          getMcpVersionNegotiation({ MCP_PROTOCOL_NEGOTIATION: 'legacy' }),
+        ),
+      ).toBe('legacy');
+
+      // --- The connect (audit §2.8) ----------------------------------------
+      //
+      // The modern revision is probed first, and the connection carries the
+      // negotiated revision, the server's own identity and its capabilities.
+      const modernServer = fakeMcpTransport(standardMcpAnswers);
+      const connection = await observeCall('the connection', connectToServer, [
+        mcpConfigOf(`probe-modern-${suffix}`),
+        { transportFactory: () => modernServer.transport, env: {} },
+      ]);
+      expect(observe('the era', connection.era)).toBe('modern');
+      expect(observe('the protocol version', connection.protocolVersion)).toBe('2026-07-28');
+      expect(await observeCall('the live connection', connection.isLive, [], connection)).toBe(true);
+      expect(observe('the server identity', connection.serverInfo)).toMatchObject({
+        name: 'probe-server',
+      });
+      expect(observe('the server capabilities', connection.capabilities)).toMatchObject({
+        tools: {},
+      });
+
+      // --- The fallback: the server does not know `server/discover` --------
+      const legacyServer = fakeMcpTransport((method, attempt, params) =>
+        method === 'server/discover'
+          ? { error: { code: -32601, message: 'Method not found' } }
+          : standardMcpAnswers(method, attempt, params),
+      );
+      const legacyConnection = await observeCall('the legacy connection', connectToServer, [
+        mcpConfigOf(`probe-legacy-${suffix}`),
+        { transportFactory: () => legacyServer.transport, env: {} },
+      ]);
+      expect(observe('the legacy era', legacyConnection.era)).toBe('legacy');
+      expect(observe('the legacy protocol version', legacyConnection.protocolVersion)).toBe(
+        '2025-11-25',
+      );
+
+      // --- The legacy opt-out ----------------------------------------------
+      const optOutServer = fakeMcpTransport(standardMcpAnswers);
+      const optOutConnection = await observeCall('the opt-out connection', connectToServer, [
+        mcpConfigOf(`probe-opt-out-${suffix}`),
+        { transportFactory: () => optOutServer.transport, env: {}, negotiation: 'legacy' },
+      ]);
+      expect(observe('the opt-out era', optOutConnection.era)).toBe('legacy');
+      expect(observe('the opt-out protocol version', optOutConnection.protocolVersion)).toBe(
+        '2025-11-25',
+      );
+
+      // --- The capabilities, fetched separately (audit §2.8) ----------------
+      expect(await observeCall('the tools', fetchToolsForClient, [connection])).toMatchObject([
+        { name: 'echo' },
+      ]);
+      expect(await observeCall('the commands', fetchCommandsForClient, [connection])).toMatchObject([
+        { name: 'greet' },
+      ]);
+      expect(
+        await observeCall('the resources', fetchResourcesForClient, [connection]),
+      ).toMatchObject([{ uri: 'file:///probe', name: 'probe' }]);
+      expect(
+        await observeCall('the resource templates', fetchResourceTemplatesForClient, [connection]),
+      ).toMatchObject([{ uriTemplate: 'file:///{path}', name: 'byPath' }]);
+      expect(
+        await observeCall('the aggregated capabilities', getMcpToolsCommandsAndResources, [
+          connection,
+        ]),
+      ).toMatchObject({
+        tools: [{ name: 'echo' }],
+        commands: [{ name: 'greet' }],
+        resources: [{ uri: 'file:///probe', name: 'probe' }],
+        resourceTemplates: [{ uriTemplate: 'file:///{path}', name: 'byPath' }],
+      });
+
+      // --- The listing hydration and the discover prior (audit §2.8) --------
+      const listing: McpListing = {
+        server: `probe-listing-${suffix}`,
+        tools: [{ name: 'echo' }],
+        commands: [{ name: 'greet' }],
+        resources: [],
+        resourceTemplates: [],
+      };
+      expect(await observeCall('the hydrated tools', hydrateToolsFromListing, [listing])).toEqual([
+        { name: 'echo' },
+      ]);
+      expect(await observeCall('the hydrated commands', hydrateCommandsFromListing, [listing])).toEqual(
+        [{ name: 'greet' }],
+      );
+      expect(await observeCall('the listing discover prior', getListingDiscoverPrior, [listing])).toBe(
+        true,
+      );
+      expect(
+        await observeCall('the remembered discover prior', getRememberedDiscoverPrior, [
+          listing.server,
+        ]),
+      ).toBe(true);
+
+      // --- The calling (audit §2.8) ----------------------------------------
+      const called = await observeCall('the tool result', callMCPTool, [
+        connection,
+        'echo',
+        { text: 'hi' },
+      ]);
+      expect(called).toMatchObject({ isError: false });
+      expect(observe('the result content', called.content)).toEqual([{ type: 'text', text: 'hi' }]);
+      // The URL-elicitation retry: the server asks the user to visit a URL, and
+      // the call is made once more.
+      const elicitationServer = fakeMcpTransport((method, attempt, params) => {
+        if (method !== 'tools/call') return standardMcpAnswers(method, attempt, params);
+        const tool = (params as { readonly name?: string } | undefined)?.name;
+        if (tool !== 'auth' || attempt !== 1) return standardMcpAnswers(method, attempt, params);
+        return {
+          result: {
+            content: [
+              { type: 'text', text: 'Please visit https://example.com/auth to sign in.' },
+            ],
+            isError: true,
+          },
+        };
+      });
+      const elicitationConnection = await observeCall(
+        'the elicitation connection',
+        connectToServer,
+        [
+          mcpConfigOf(`probe-elicitation-${suffix}`),
+          { transportFactory: () => elicitationServer.transport, env: {} },
+        ],
+      );
+      const elicitationChannel = openChannel<McpUrlElicitation>();
+      const retried = await observeCall('the retried tool result', callMCPToolWithUrlElicitationRetry, [
+        elicitationConnection,
+        'auth',
+        {},
+        {
+          onUrlElicitation: (elicitation: McpUrlElicitation): void => {
+            elicitationChannel.deliver(elicitation);
+          },
+        },
+      ]);
+      expect(observe('the elicitation', elicitationChannel.delivered())).toMatchObject({
+        url: 'https://example.com/auth',
+      });
+      expect(observe('the retried content', retried.content)).toEqual([
+        { type: 'text', text: 'hi' },
+      ]);
+
+      // --- The auth-failure classification (audit §2.8) --------------------
+      expect(
+        observe(
+          'the expired token',
+          classifyMcpAuthFailure({ status: 401, body: '{"error":{"type":"authentication_error"}}' }),
+        ),
+      ).toBe('expired_token');
+      expect(observe('the unauthorized failure', classifyMcpAuthFailure({ status: 401 }))).toBe(
+        'unauthorized',
+      );
+      expect(observe('the forbidden failure', classifyMcpAuthFailure({ status: 403 }))).toBe(
+        'forbidden',
+      );
+      expect(observe('the invalid token', classifyMcpAuthFailure({ status: 402 }))).toBe(
+        'invalid_token',
+      );
+      expect(
+        observe('the missing credential', classifyMcpAuthFailure({ message: 'no credential' })),
+      ).toBe('missing_credential');
+      expect(
+        observe('the network failure', classifyMcpAuthFailure({ message: 'fetch failed' })),
+      ).toBe('network');
+      expect(observe('the unknown failure', classifyMcpAuthFailure({}))).toBe('unknown');
+      expect(
+        observe(
+          'the era code',
+          hasEraCodeInHttpErrorBody({ error: { type: 'authentication_error' } }, 'authentication_error'),
+        ),
+      ).toBe(true);
+      expect(
+        observe(
+          'the absent era code',
+          hasEraCodeInHttpErrorBody({ error: { type: 'other' } }, 'authentication_error'),
+        ),
+      ).toBe(false);
+
+      // --- The four timeouts (audit §2.8) ----------------------------------
+      expect(observe('the default timeouts', DEFAULT_MCP_TIMEOUTS)).toMatchObject({
+        armedRequestTimeoutMs: 5000,
+        requestTimeoutMs: 30000,
+        toolTimeoutMs: 120000,
+        toolIdleTimeoutMs: 15000,
+      });
+      expect(
+        await observeCall('the overridden timeouts', resolveMcpTimeouts, [
+          { timeouts: { requestTimeoutMs: 1234 } },
+          {},
+        ]),
+      ).toMatchObject({ requestTimeoutMs: 1234, armedRequestTimeoutMs: 5000 });
+      expect(
+        await observeCall('the environment timeouts', resolveMcpTimeouts, [
+          {},
+          { [MCP_TIMEOUT_ENV]: '4321', [MCP_CONNECT_TIMEOUT_ENV]: '1111' },
+        ]),
+      ).toMatchObject({ requestTimeoutMs: 4321, armedRequestTimeoutMs: 1111 });
+      expect(observe('the connection timeouts', connection.timeouts)).toMatchObject({
+        armedRequestTimeoutMs: 5000,
+        requestTimeoutMs: 30000,
+        toolTimeoutMs: 120000,
+        toolIdleTimeoutMs: 15000,
+      });
+      // The connect phase's deadline is the armed one, and it does not cap an
+      // ordinary request: the failure names the request that ran out of time
+      // and the deadline it carried.
+      const silentServer = fakeMcpTransport(() => undefined);
+      const manager = await observeCall('the manager', createMcpManager, [
+        {
+          client: {
+            transportFactory: () => silentServer.transport,
+            timeouts: {
+              armedRequestTimeoutMs: 10,
+              requestTimeoutMs: 60,
+              toolTimeoutMs: 60,
+              toolIdleTimeoutMs: 60,
+            },
+            env: {},
+          },
+        },
+      ]);
+      const connectFailure = await observeCall(
+        'the failed connect',
+        manager.connect,
+        [mcpConfigOf(`probe-connect-deadline-${suffix}`)],
+        manager,
+      );
+      expect(connectFailure).toMatchObject({ status: 'failed' });
+      expect(observe('the connect failure', connectFailure.error)).toContain('"server/discover"');
+      expect(observe('the connect deadline', connectFailure.error)).toContain('after 10 ms');
+      const listingServer = fakeMcpTransport((method, attempt, params) =>
+        method === 'tools/list' ? undefined : standardMcpAnswers(method, attempt, params),
+      );
+      const listingManager = await observeCall('the listing manager', createMcpManager, [
+        {
+          client: {
+            transportFactory: () => listingServer.transport,
+            timeouts: {
+              armedRequestTimeoutMs: 10,
+              requestTimeoutMs: 60,
+              toolTimeoutMs: 60,
+              toolIdleTimeoutMs: 60,
+            },
+            env: {},
+          },
+        },
+      ]);
+      const listingFailure = await observeCall(
+        'the failed listing',
+        listingManager.connect,
+        [mcpConfigOf(`probe-listing-deadline-${suffix}`)],
+        listingManager,
+      );
+      expect(listingFailure).toMatchObject({ status: 'failed' });
+      expect(observe('the listing failure', listingFailure.error)).toContain('"tools/list"');
+      expect(observe('the listing deadline', listingFailure.error)).toContain('after 60 ms');
+
+      // --- The memo and the identity-epoch eviction (audit §2.8) -----------
+      const memoConfig = mcpConfigOf(`probe-memo-${suffix}`);
+      const memoServer = fakeMcpTransport(standardMcpAnswers);
+      const memoOptions = { transportFactory: () => memoServer.transport, env: {} };
+      const memoized = await observeCall('the memoized connection', ensureConnectedClient, [
+        memoConfig,
+        memoOptions,
+      ]);
+      const again = await observeCall('the memoized connection again', ensureConnectedClient, [
+        memoConfig,
+        memoOptions,
+      ]);
+      // The connect result is memoized: the second connect hands the same
+      // connection out.
+      expect(again).toBe(memoized);
+      expect(await observeCall('the live connection', hasLiveConnection, [memoConfig.name])).toBe(
+        true,
+      );
+      // The memo is dropped explicitly.
+      expect(
+        await observeCall('the explicit drop', discardMemoizedConnectResult, [memoConfig.name]),
+      ).toBe(true);
+      expect(
+        await observeCall('the live connection after the explicit drop', hasLiveConnection, [
+          memoConfig.name,
+        ]),
+      ).toBe(false);
+      // The memo is dropped when the credential identity epoch changes.
+      const epoch = await observeCall('the identity epoch', getMcpIdentityEpoch, []);
+      const nextEpoch = await observeCall(
+        'the identity epoch after the change',
+        evictAllMcpMemosOnIdentityChange,
+        [],
+      );
+      expect(nextEpoch).toBe(epoch + 1);
+      // A failed memo is evicted once it goes stale, so that the server is
+      // retried.
+      const failedConfig = mcpConfigOf(`probe-failed-${suffix}`);
+      const failedServer = fakeMcpTransport(() => undefined);
+      await observeCall('the failed connect', ensureConnectedClient, [
+        failedConfig,
+        {
+          transportFactory: () => failedServer.transport,
+          env: {},
+          timeouts: { armedRequestTimeoutMs: 10, requestTimeoutMs: 10 },
+        },
+      ]).catch(() => undefined);
+      expect(
+        await observeCall('the fresh failure is not stale', evictStaleFailedConnectMemoForServe, [
+          failedConfig.name,
+          MCP_FAILED_MEMO_MAX_AGE_MS,
+        ]),
+      ).toBe(false);
+      expect(
+        await observeCall('the stale failure is evicted', evictStaleFailedConnectMemoForServe, [
+          failedConfig.name,
+          0,
+        ]),
+      ).toBe(true);
+
+      // --- The state of a connection attempt (audit §2.8) ------------------
+      const dialConfig = mcpConfigOf(`probe-dial-${suffix}`);
+      const dialServer = fakeMcpTransport(() => undefined);
+      const dial = observeCall('the pending connect', ensureConnectedClient, [
+        dialConfig,
+        {
+          transportFactory: () => dialServer.transport,
+          env: {},
+          timeouts: { armedRequestTimeoutMs: 30, requestTimeoutMs: 30 },
+        },
+      ]).catch(() => undefined);
+      expect(await observeCall('the unsettled dial', hasUnsettledDial, [dialConfig.name])).toBe(
+        true,
+      );
+      await dial;
+      expect(await observeCall('the settled dial', hasUnsettledDial, [dialConfig.name])).toBe(false);
+
+      // --- The teardown (audit §2.8) ---------------------------------------
+      await observeCall('the teardown', detachAndCloseConnection, [connection]);
+      expect(await observeCall('the closed connection', connection.isLive, [], connection)).toBe(
+        false,
+      );
+      await observeCall('the disposal', disposeServerConnectionDetached, [connection]);
+      await observeCall('the clean-up', cleanupConnectedMcpClients, []);
+
+      // --- The reconnect (audit §2.8) --------------------------------------
+      expect(observe('the reconnect', inertReconnectShape(`probe-${suffix}`))).toMatchObject({
+        reconnected: false,
+        inert: true,
+      });
+
+      // --- The batched connect (this implementation's own shape) -----------
+      //
+      // The batched connect returns the states in the order the configurations
+      // were given, and a failed server is a state, not a crash.
       const configs: McpServerConfig[] = [
         { name: 'one', type: 'stdio', command: '/bin/true' },
         { name: 'two', type: 'stdio', command: '/bin/true' },
@@ -2855,11 +3548,12 @@ export const SCENARIOS: readonly Scenario[] = [
         }],
       );
       expect(states).toMatchObject([{ name: 'one' }, { name: 'two' }, { name: 'three' }]);
-      expect(states[2]?.status).toBe('failed');
-      expect(states[2]?.error).toBeDefined();
+      const failedState = observe('the failed state', states[2]);
+      expect(failedState).toMatchObject({ status: 'failed' });
+      expect(observe('the failed state error', failedState?.error)).toBeDefined();
       return measured(
-        'partial',
-        "This implementation's batched connect returns one state per configuration, in the order the configurations were given, and a failed server is a state and not a crash. Measured: the batched connect. The audit observes the target's whole client lifecycle — the connect, the identity-epoch eviction, the negotiation, the capabilities, the calling, the auth-failure classification, the timeouts, the teardown and the reconnect — and those are implemented, but this probe does not compare them, and the batched state list is this implementation's own shape.",
+        'match',
+        "The target's whole client lifecycle is compared, element by element: the **connect** (the modern revision is probed first and the legacy `initialize` handshake is the fallback, and the connection carries the negotiated revision, the server's identity and its capabilities), the **negotiation point** and its `MCP_PROTOCOL_NEGOTIATION=legacy` opt-out, the **identity-epoch eviction** (the memo is dropped when the epoch changes, when it is dropped explicitly, and when a failed memo goes stale), the **state** of a connection (a live connection and a dial that is still in flight), the **capabilities** (the four listings, fetched separately and aggregated, with the discover-prior memo beside the hydration path), the **calling** (the tool result, and the URL-elicitation retry), the **auth-failure classification** (the expired token, the unauthorized, the forbidden, the invalid token, the missing credential, the network failure and the unknown one), the **timeouts** (the four distinct deadlines, the overrides, the environment and the deadlines a connection carries, and the connect phase's armed deadline beside an ordinary request's own), the **teardown** (detach-and-close, dispose-detached and the clean-up) and the **reconnect** (the deliberately inert shape). The **batched state list** this implementation's own batched connect returns remains this implementation's own shape: the target has no such list, and it is compared here only as this implementation's own shape.",
       );
     },
   },

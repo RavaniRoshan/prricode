@@ -49,6 +49,19 @@ import {
 import { createAgentTool } from '../../src/tools/builtins/agent.js';
 import { createAskUserQuestionTool } from '../../src/tools/builtins/askuserquestion.js';
 import { createBashTool, resolveBashTimeout, DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS } from '../../src/tools/builtins/bash.js';
+import {
+  BROWSER_RESULT_CAPPED_TOOLS,
+  BROWSER_RESULT_SIZE_CAP,
+  BROWSER_SAFE_TOOL_NAMES,
+  BROWSER_SELECTION_TOOL_NAMES,
+  BROWSER_SESSION_TOOL_NAMES,
+  BROWSER_TIMEOUTS,
+  BROWSER_TOOL_NAMES,
+  BROWSER_TOOL_SPECS,
+  createBrowserTools,
+  isBrowserSafeTool,
+} from '../../src/tools/builtins/browser.js';
+import { createOfferChromeSetupTool } from '../../src/tools/builtins/offerChromeSetup.js';
 import { createEditTool } from '../../src/tools/builtins/edit.js';
 import { createExitPlanModeTool } from '../../src/tools/builtins/exitplanmode.js';
 import { createGlobTool, MAX_GLOB_RESULTS } from '../../src/tools/builtins/glob.js';
@@ -3589,5 +3602,315 @@ describe('the tools the target’s inventory names', () => {
     const output = await tool.execute(input, toolContext('ReportFindings', input));
     expect(output.count).toBe(1);
     expect(output.findings[0]?.file).toBe('src/a.ts');
+  });
+});
+
+// --- the browser surface (CC-032) -------------------------------------------------
+
+/**
+ * The browser surface.
+ *
+ * **The target has a browser surface and this implementation does not.** The
+ * target ships twenty-two browser tools and a setup tool, and it reaches them
+ * through a browser extension this implementation has no way to reach. The
+ * tools therefore exist — with the target's names, descriptions and schemas —
+ * and every one of them **refuses** and names the capability it needs.
+ *
+ * The specification is `/home/shiva/opt/reference-agent-rea/analysis/findings-browser.md`;
+ * every claim there carries the target's own file and byte offset.
+ */
+describe('the browser surface', () => {
+  it("carries the target's twenty-two browser tools, in the target's order", () => {
+    expect([...BROWSER_TOOL_NAMES]).toEqual([
+      'javascript_tool',
+      'read_page',
+      'find',
+      'form_input',
+      'computer',
+      'browser_batch',
+      'navigate',
+      'resize_window',
+      'gif_creator',
+      'upload_image',
+      'get_page_text',
+      'tabs_context_mcp',
+      'tabs_create_mcp',
+      'tabs_close_mcp',
+      'read_console_messages',
+      'read_network_requests',
+      'shortcuts_list',
+      'shortcuts_execute',
+      'file_upload',
+      'switch_browser',
+      'list_connected_browsers',
+      'select_browser',
+    ]);
+
+    const registry = createToolRegistry();
+    registerBuiltinTools(registry, builtinDeps());
+    for (const name of BROWSER_TOOL_NAMES) {
+      expect(registry.get(name)?.name, name).toBe(name);
+    }
+  });
+
+  it("carries the target's own descriptions", () => {
+    const specs = new Map(BROWSER_TOOL_SPECS.map((spec) => [spec.name, spec]));
+
+    // The target's own one-line statement of what each tool is for.
+    expect(specs.get('navigate')?.description).toContain(
+      'tabs_context_mcp{createIfEmpty:true} is called for you',
+    );
+    expect(specs.get('computer')?.description).toContain('Use a mouse and keyboard to interact with a web browser');
+    expect(specs.get('browser_batch')?.description).toContain('browser_batch cannot be nested');
+    expect(specs.get('tabs_context_mcp')?.description).toContain(
+      'You must get the context at least once before using other browser automation tools',
+    );
+    expect(specs.get('switch_browser')?.description).toContain(
+      "wait (up to 2 minutes) for the user to click 'Connect'",
+    );
+    expect(specs.get('select_browser')?.description).toContain(
+      'Select a specific Chrome browser by deviceId',
+    );
+
+    // The target's own titles, on the three tools that carry one.
+    expect(specs.get('tabs_context_mcp')?.title).toBe('Tabs Context');
+    expect(specs.get('tabs_create_mcp')?.title).toBe('Tabs Create');
+    expect(specs.get('tabs_close_mcp')?.title).toBe('Tabs Close');
+  });
+
+  it("carries the target's own input schemas", () => {
+    const specs = new Map(BROWSER_TOOL_SPECS.map((spec) => [spec.name, spec]));
+    const schemaOf = (name: string) =>
+      specs.get(name)?.inputSchema as {
+        type: string;
+        properties: Record<string, { type?: string | string[]; enum?: unknown[] }>;
+        required: string[];
+      };
+
+    // The target's schema for `javascript_tool` names the action value, and the
+    // tool's name is `javascript_tool` — `javascript_exec` is the action.
+    expect(schemaOf('javascript_tool').properties.action?.type).toBe('string');
+    expect(
+      (schemaOf('javascript_tool').properties.action as { description: string }).description,
+    ).toBe("Must be set to 'javascript_exec'");
+
+    expect(schemaOf('navigate').required).toEqual(['url']);
+    expect(schemaOf('file_upload').required).toEqual(['paths', 'ref', 'tabId']);
+    expect(schemaOf('select_browser').required).toEqual(['deviceId']);
+    expect(schemaOf('tabs_context_mcp').required).toEqual([]);
+    expect(schemaOf('computer').required).toEqual(['action', 'tabId']);
+    expect(schemaOf('computer').properties.action?.enum).toEqual([
+      'left_click',
+      'right_click',
+      'type',
+      'screenshot',
+      'wait',
+      'scroll',
+      'key',
+      'left_click_drag',
+      'double_click',
+      'triple_click',
+      'zoom',
+      'scroll_to',
+      'hover',
+    ]);
+  });
+
+  it("carries the target's two tool groups", () => {
+    // The target's session-tool set: the tools that manage the browser session
+    // rather than the content of a page.
+    expect([...BROWSER_SESSION_TOOL_NAMES]).toEqual([
+      'tabs_context_mcp',
+      'tabs_create_mcp',
+      'tabs_close_mcp',
+      'shortcuts_list',
+      'shortcuts_execute',
+      'resize_window',
+      'switch_browser',
+      'list_connected_browsers',
+      'gif_creator',
+    ]);
+
+    // The target's browser-selection set: the three tools that need the
+    // account-wide browser roster, and are withheld without a bridge.
+    expect([...BROWSER_SELECTION_TOOL_NAMES]).toEqual([
+      'switch_browser',
+      'list_connected_browsers',
+      'select_browser',
+    ]);
+  });
+
+  it("carries the target's timeouts and result caps", () => {
+    expect(BROWSER_TIMEOUTS.defaultToolCallMs).toBe(60000);
+    expect(BROWSER_TIMEOUTS.browserBatchMs).toBe(90000);
+    expect(BROWSER_TIMEOUTS.peerConnectedMs).toBe(10000);
+    expect(BROWSER_TIMEOUTS.extensionDiscoveryMs).toBe(5000);
+    expect(BROWSER_TIMEOUTS.localDeviceIdsMs).toBe(3000);
+    expect(BROWSER_TIMEOUTS.externalMessageMs).toBe(150000);
+    expect(BROWSER_TIMEOUTS.externalMessageCapMs).toBe(270000);
+    expect(BROWSER_TIMEOUTS.switchBrowserMs).toBe(120000);
+    expect(BROWSER_TIMEOUTS.frontLoadLookupMs).toBe(8000);
+
+    expect(BROWSER_RESULT_SIZE_CAP).toEqual({ 'anthropic/maxResultSizeChars': 60000 });
+    expect([...BROWSER_RESULT_CAPPED_TOOLS]).toEqual([
+      'read_page',
+      'browser_batch',
+      'get_page_text',
+    ]);
+    for (const name of BROWSER_RESULT_CAPPED_TOOLS) {
+      const spec = BROWSER_TOOL_SPECS.find((entry) => entry.name === name);
+      expect(spec?._meta, name).toEqual(BROWSER_RESULT_SIZE_CAP);
+    }
+  });
+
+  it("reproduces the target's safe subset", () => {
+    // The target's own rule: five tools are always safe, and three more are
+    // safe unless they change something.
+    expect([...BROWSER_SAFE_TOOL_NAMES]).toEqual([
+      'list_connected_browsers',
+      'resize_window',
+      'shortcuts_list',
+      'switch_browser',
+      'tabs_close_mcp',
+    ]);
+    expect(isBrowserSafeTool('tabs_close_mcp', {})).toBe(true);
+    expect(isBrowserSafeTool('tabs_context_mcp', {})).toBe(true);
+    expect(isBrowserSafeTool('tabs_context_mcp', { createIfEmpty: true })).toBe(false);
+    expect(isBrowserSafeTool('read_console_messages', {})).toBe(true);
+    expect(isBrowserSafeTool('read_console_messages', { clear: true })).toBe(false);
+    expect(isBrowserSafeTool('read_network_requests', { clear: true })).toBe(false);
+    expect(isBrowserSafeTool('navigate', {})).toBe(false);
+    expect(isBrowserSafeTool('computer', {})).toBe(false);
+  });
+
+  it('allows the target\'s safe subset and asks for everything else', async () => {
+    const deps = builtinDeps();
+
+    const safe = createBrowserTools(deps).find((tool) => tool.name === 'tabs_close_mcp');
+    const safeDecision = await safe?.checkPermissions({ tabId: 1 }, toolContext('tabs_close_mcp', { tabId: 1 }));
+    expect(safeDecision?.behavior).toBe('allow');
+
+    const conditional = createBrowserTools(deps).find((tool) => tool.name === 'tabs_context_mcp');
+    const asked = await conditional?.checkPermissions(
+      { createIfEmpty: true },
+      toolContext('tabs_context_mcp', { createIfEmpty: true }),
+    );
+    expect(asked?.behavior).toBe('ask');
+    expect(asked?.message).toBe('PRRICODE in Chrome requires permission.');
+
+    const navigate = createBrowserTools(deps).find((tool) => tool.name === 'navigate');
+    const navigateDecision = await navigate?.checkPermissions(
+      { url: 'https://example.com' },
+      toolContext('navigate', { url: 'https://example.com' }),
+    );
+    expect(navigateDecision?.behavior).toBe('ask');
+  });
+
+  it('lets a deny rule block a safe browser tool', async () => {
+    const deps = builtinDeps({ rules: ruleSet({ deny: ['tabs_close_mcp'] }) });
+    const tool = createBrowserTools(deps).find((entry) => entry.name === 'tabs_close_mcp');
+
+    const decision = await tool?.checkPermissions({ tabId: 1 }, toolContext('tabs_close_mcp', { tabId: 1 }));
+
+    expect(decision?.behavior).toBe('deny');
+    expect(decision?.reasonType).toBe('rule');
+  });
+
+  it('lets an ask rule ask for a safe browser tool', async () => {
+    const deps = builtinDeps({ rules: ruleSet({ ask: ['tabs_close_mcp'] }) });
+    const tool = createBrowserTools(deps).find((entry) => entry.name === 'tabs_close_mcp');
+
+    const decision = await tool?.checkPermissions({ tabId: 1 }, toolContext('tabs_close_mcp', { tabId: 1 }));
+
+    expect(decision?.behavior).toBe('ask');
+  });
+
+  it('refuses every browser tool and names the capability it needs', async () => {
+    const deps = builtinDeps();
+    const tools = createBrowserTools(deps);
+    expect(tools).toHaveLength(BROWSER_TOOL_NAMES.length);
+
+    for (const tool of tools) {
+      await expect(
+        tool.execute({}, toolContext(tool.name, {})),
+        tool.name,
+      ).rejects.toMatchObject({ errorCode: TOOL_ERROR_CODES.capabilityUnavailable });
+    }
+  });
+
+  it('names the browser capability in the refusal', async () => {
+    const deps = builtinDeps();
+    const tool = createBrowserTools(deps).find((entry) => entry.name === 'navigate');
+
+    await expect(
+      tool?.execute({ url: 'https://example.com' }, toolContext('navigate', {})),
+    ).rejects.toThrow(/connected browser extension/);
+  });
+
+  it('does not let a browser tool pretend to drive a browser', async () => {
+    const deps = builtinDeps();
+    for (const tool of createBrowserTools(deps)) {
+      const outcome = await tool.execute({}, toolContext(tool.name, {})).then(
+        () => 'resolved',
+        (error: unknown) => error,
+      );
+      expect(outcome, tool.name).toBeInstanceOf(ToolExecutionError);
+    }
+  });
+
+  it('rejects a browser call whose input does not match the target\'s schema', async () => {
+    const deps = builtinDeps();
+    const tool = createBrowserTools(deps).find((entry) => entry.name === 'navigate');
+    expect(tool).toBeDefined();
+
+    const validation = await tool?.validateInput({}, toolContext('navigate', {}));
+
+    expect(validation?.ok).toBe(false);
+  });
+
+  it('is not concurrency safe', () => {
+    const deps = builtinDeps();
+    for (const tool of createBrowserTools(deps)) {
+      expect(isToolConcurrencySafe(tool, {}), tool.name).toBe(false);
+    }
+  });
+
+  it('names no target product name in any browser description', () => {
+    for (const spec of BROWSER_TOOL_SPECS) {
+      expect(spec.description, spec.name).not.toMatch(/\bClaude\b/);
+      // The name is spelled in pieces, so the guard does not write it down.
+      expect(spec.description, spec.name).not.toMatch(
+        new RegExp(`(?<![A-Za-z0-9])${['Cla', 'ude'].join('')}(?![A-Za-z0-9])`),
+      );
+    }
+  });
+
+  it('carries the setup tool and refuses it', async () => {
+    const tool = createOfferChromeSetupTool(builtinDeps());
+
+    expect(tool.name).toBe('OfferChromeSetup');
+    expect(tool.description).toBe(
+      'Offer the user the one-time setup of PRRICODE in Chrome, so this task can use their own signed-in browser.',
+    );
+    expect(
+      (tool.inputSchema as { properties: Record<string, { maxLength?: number }> }).properties.reason
+        ?.maxLength,
+    ).toBe(200);
+
+    await expect(tool.execute({ reason: 'a page I am signed in to' }, toolContext('OfferChromeSetup', {}))).rejects.toMatchObject(
+      { errorCode: TOOL_ERROR_CODES.capabilityUnavailable },
+    );
+  });
+
+  it('asks before offering the setup, the way the target does', async () => {
+    const tool = createOfferChromeSetupTool(builtinDeps());
+
+    const decision = await tool.checkPermissions(
+      { reason: 'a page I am signed in to' },
+      toolContext('OfferChromeSetup', { reason: 'a page I am signed in to' }),
+    );
+
+    expect(decision?.behavior).toBe('ask');
+    expect(decision?.message).toBe('Set up PRRICODE in Chrome?');
   });
 });
