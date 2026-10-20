@@ -15,7 +15,15 @@
  * outcome of the carried-prompt vocabulary.
  */
 
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -49,6 +57,13 @@ function makeRoot(): string {
   const root = mkdtempSync(path.join(tmpdir(), 'session-store-'));
   roots.push(root);
   return root;
+}
+
+/** Wait for a while — the clock the test needs is the file's creation time. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 afterEach(() => {
@@ -504,6 +519,75 @@ describe('the session store', () => {
       envelope,
     });
     expect(() => parseSessionEvent(result)).toThrow(SessionFormatError);
+  });
+});
+
+describe("the session lookup's ordering", () => {
+  it("orders the sessions by the file's modification time, not by the last record", async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    // The **records** say one of the two is the newer; the **file** says the
+    // other one is. The target's sort key is the file's modification time.
+    const byRecord = await store.create({ cwd: CWD, sessionId: 'by-record' });
+    await store.append(byRecord, userMessage('m1', 'hello', 9000));
+    const byFile = await store.create({ cwd: CWD, sessionId: 'by-file' });
+    await store.append(byFile, userMessage('m1', 'hello', 1000));
+
+    const early = new Date(1_700_000_000_000);
+    const late = new Date(1_700_000_060_000);
+    utimesSync(byRecord.path, early, early);
+    utimesSync(byFile.path, late, late);
+
+    const summaries = await store.list({ cwd: CWD });
+    expect(summaries.map((summary) => summary.sessionId)).toEqual(['by-file', 'by-record']);
+    // The summary still reports the clock of the last record — it is the
+    // summary's own clock — but the ordering does not use it.
+    expect(summaries[0]?.updatedAt).toBe(1000);
+    expect(summaries[0]?.modifiedAt).toBe(late.getTime());
+  });
+
+  it("breaks a tie on the modification time with the file's creation time", async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const first = await store.create({ cwd: CWD, sessionId: 'first' });
+    await store.append(first, userMessage('m1', 'hello', 1000));
+    // The two files must have **different** creation times for the tie-break
+    // to have something to decide.
+    await sleep(20);
+    const second = await store.create({ cwd: CWD, sessionId: 'second' });
+    await store.append(second, userMessage('m1', 'hello', 2000));
+
+    const same = new Date(1_700_000_000_000);
+    utimesSync(first.path, same, same);
+    utimesSync(second.path, same, same);
+
+    const summaries = await store.list({ cwd: CWD });
+    expect(summaries).toHaveLength(2);
+    // The modification times are equal, so the **creation time** decides, and
+    // the newer file comes first.
+    expect(summaries[0]?.modifiedAt).toBe(summaries[1]?.modifiedAt);
+    expect(summaries[0]?.createdAt).toBeGreaterThan(summaries[1]?.createdAt ?? 0);
+    expect(summaries.map((summary) => summary.sessionId)).toEqual(['second', 'first']);
+  });
+
+  it('marks a session that ran a /loop command as a loop session', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(
+      handle,
+      userMessage('m1', '<command-name>/loop</command-name>', 1000),
+    );
+
+    const summaries = await store.list({ cwd: CWD });
+    expect(summaries[0]?.isLoopSession).toBe(true);
+
+    const plain = await store.create({ cwd: CWD, sessionId: 'session-02' });
+    await store.append(plain, userMessage('m1', 'hello', 2000));
+    const both = await store.list({ cwd: CWD });
+    expect(both.find((summary) => summary.sessionId === 'session-02')?.isLoopSession).toBe(false);
   });
 });
 

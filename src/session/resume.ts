@@ -122,9 +122,12 @@
  * says so rather than claiming the target verifies it.
  *
  * The target's `--continue` **ordering** rule — which candidates its lookup
- * skips — is not observed either: the lookup lives in a module outside the
- * retained scope. This implementation's rule is its own, and `continueSession` says so
- * where it is implemented.
+ * skips — **is** observed: the REA closed the residual by reading the
+ * target's own source, and the rules live in `isResumableCandidate` and
+ * `selectResumableCandidate` in this module. What the target's records carry
+ * and this implementation's records do not is stated where each rule is
+ * implemented: a rule whose field is **absent** cannot fire, and the member
+ * it needs is read when a caller sets it.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -141,7 +144,14 @@ import {
   requestedToolUseId,
   type SessionEvent,
 } from './event.js';
-import { readAllSessionEvents, resolveSessionTarget, type SessionStore, type SessionSummary } from './store.js';
+import {
+  projectDirectoryName,
+  readAllSessionEvents,
+  resolveSessionTarget,
+  type SessionKind,
+  type SessionStore,
+  type SessionSummary,
+} from './store.js';
 
 export type { SessionEvent } from './event.js';
 
@@ -1562,6 +1572,296 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
 }
 
 /* -------------------------------------------------------------------------- */
+/* The lookup's candidate rules                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The entrypoints whose sessions the target's lookup skips.
+ *
+ * **Observed** (the REA's session-lookup finding): the SDK entrypoint set is
+ * exactly `sdk-cli`, `sdk-ts` and `sdk-py`. It is the **only** entrypoint
+ * filter: a `--print` session — `entrypoint: "print"` — is never excluded by
+ * it, and no code in the target's store lookup excludes a print session.
+ */
+export const SDK_ENTRYPOINTS: readonly string[] = Object.freeze(['sdk-cli', 'sdk-ts', 'sdk-py']);
+
+/**
+ * The report of a session that is **live in the background**.
+ *
+ * **Observed** (the REA's session-lookup finding): the target's lookup takes
+ * an `onNewestRunningInBackground` callback that captures the newest session
+ * already running in the background — so a background session is **reported**
+ * rather than silently continued, and the lookup continues with nothing.
+ */
+export interface BackgroundSessionReport {
+  /** The id of the session that is running. */
+  sessionId: string;
+  /**
+   * Whether the report is **provable** — the target's own flag.
+   *
+   * The target reports a session as provable when its live record does
+   * **not** belong to another process's pid domain.
+   */
+  provable?: boolean;
+}
+
+/** The options the candidate rules run with. */
+export interface ResumableCandidateOptions {
+  /**
+   * The ids of the sessions that are **live in the background**.
+   *
+   * This is the target's own list of live sessions. When the list cannot be
+   * read, the rule changes shape — see `liveSessionsUnreadable`.
+   */
+  liveSessionIds?: ReadonlySet<string>;
+  /**
+   * Whether the live-session list **could not be read**.
+   *
+   * **Observed** (the REA's session-lookup finding): the target reads the
+   * live-session list once, and a failed read changes the rule: **every**
+   * session carrying a session kind or a continued-in id is skipped instead,
+   * because a running one cannot be resumed.
+   */
+  liveSessionsUnreadable?: boolean;
+  /**
+   * The liveness predicate, used when no set of ids is given.
+   *
+   * It answers for a **single** session; the target's rule asks about the
+   * candidate itself and about the session it was continued into.
+   */
+  isLiveSession?: (sessionId: string) => boolean;
+  /**
+   * The ids whose live record belongs to **another** process's pid domain.
+   *
+   * The target reports such a session as **not** provable.
+   */
+  foreignSessionIds?: ReadonlySet<string>;
+  /**
+   * Whether **this process** is itself an SDK entrypoint.
+   *
+   * The target reads its own entrypoint from the environment; this
+   * implementation has no SDK entrypoint of its own, so the guard is off
+   * unless a caller says otherwise.
+   */
+  isSdkEntrypoint?: boolean;
+  /** The working directory the lookup ran for. */
+  cwd?: string;
+  /**
+   * Whether the **fork** flag is set.
+   *
+   * The target's fork bypasses the live-background skip: a fork always loads
+   * a copy, so a live session is not the one that would be continued.
+   */
+  forkSession?: boolean;
+  /**
+   * The callback that **reports** a session that is live in the background.
+   *
+   * The target reports it and continues with nothing: the report replaces the
+   * lookup's result.
+   */
+  onNewestRunningInBackground?: (report: BackgroundSessionReport) => void;
+}
+
+/**
+ * Whether an own member of the summary is `true`.
+ *
+ * The member names are **caller-supplied data**, so an inherited one is not
+ * the summary's own: `Object.hasOwn` decides.
+ */
+function ownFlag(
+  summary: SessionSummary,
+  key: 'bookkeepingOnly' | 'isSidechain' | 'superseded' | 'isLoopSession',
+): boolean {
+  return Object.hasOwn(summary, key) && summary[key] === true;
+}
+
+/** An own string member of the summary. */
+function ownText(
+  summary: SessionSummary,
+  key: 'teamName' | 'entrypoint' | 'recordedCwd' | 'continuedInSessionId',
+): string | undefined {
+  if (!Object.hasOwn(summary, key)) return undefined;
+  const value = summary[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** The session's own kind, when it carries one. */
+function ownSessionKind(summary: SessionSummary): SessionKind | undefined {
+  if (!Object.hasOwn(summary, 'sessionKind')) return undefined;
+  const value = summary['sessionKind'];
+  return value === 'bg' || value === 'daemon' || value === 'daemon-worker' ? value : undefined;
+}
+
+/**
+ * Whether a recorded working directory is a **different** directory that has
+ * the **same** project slug.
+ *
+ * **Observed** (the REA's session-lookup finding): the target's lookup skips a
+ * session whose recorded cwd is "a different directory with the same project
+ * slug" — a sibling worktree, whose path encodes to the slug of the current
+ * one.
+ */
+function isDifferentDirectoryWithSameSlug(recordedCwd: string, cwd: string): boolean {
+  if (path.resolve(recordedCwd) === path.resolve(cwd)) return false;
+  return projectDirectoryName(recordedCwd) === projectDirectoryName(cwd);
+}
+
+/** Whether the live-session list could not be read. */
+function liveListUnreadable(options: ResumableCandidateOptions): boolean {
+  return options.liveSessionsUnreadable === true;
+}
+
+/** Whether a session is live in the background. */
+function isLive(options: ResumableCandidateOptions, sessionId: string): boolean {
+  // A list that could not be read holds nothing: the target's `h` is
+  // `undefined`, and every `h?.has(...)` is then false.
+  if (liveListUnreadable(options)) return false;
+  if (options.liveSessionIds !== undefined) return options.liveSessionIds.has(sessionId);
+  if (options.isLiveSession !== undefined) return options.isLiveSession(sessionId);
+  return false;
+}
+
+/** Report a session that is live in the background. */
+function reportBackground(options: ResumableCandidateOptions, sessionId: string): void {
+  const report: BackgroundSessionReport = {
+    sessionId,
+    provable: !(options.foreignSessionIds?.has(sessionId) ?? false),
+  };
+  options.onNewestRunningInBackground?.(report);
+}
+
+/**
+ * Whether a session is a **candidate** for the lookup.
+ *
+ * **Observed** (the REA's session-lookup finding): the target's lookup lists
+ * the sessions of the current project directory, runs each candidate through a
+ * filter, and takes the **first** survivor. The filter skips:
+ *
+ *   - a session whose recorded working directory is a **different** directory
+ *     with the **same** project slug;
+ *   - a **sidechain** session;
+ *   - a **team** session;
+ *   - a `daemon` or `daemon-worker` session;
+ *   - an **SDK** session — the entrypoint is `sdk-cli`, `sdk-ts` or `sdk-py` —
+ *     unless the current process is itself an SDK entrypoint;
+ *   - a **`/loop`** session;
+ *   - a **bookkeeping-only** session;
+ *   - a session that was **continued into** a session that is live in the
+ *     background — that session is *reported*, and the lookup continues with
+ *     nothing;
+ *   - a session that is **itself** live in the background — it is *reported*,
+ *     not continued;
+ *   - a **superseded** session;
+ *   - and, when the live-session list **could not be read**, every session
+ *     carrying a session kind or a continued-in id.
+ *
+ * **The two corrections the audit used to guess wrong.** A print session is
+ * marked only by its **entrypoint** (`"print"`), and the only entrypoint
+ * filter is the **SDK** set — so **no** code here excludes a `--print`
+ * session; and the only slash-command exclusion is **`/loop`**. A **finished**
+ * `bg` session is still a candidate: only `daemon` and `daemon-worker` are
+ * excluded by kind.
+ *
+ * **The fields the rules need.** Each rule fires only when the member it
+ * needs is **present**. This implementation's record format carries no
+ * bookkeeping-only mark, no sidechain mark, no team name, no session kind, no
+ * entrypoint, no recorded working directory and no continued-in id, so those
+ * rules cannot fire on a session this store produced; the members are read
+ * when a caller sets them, and the rules are then the target's.
+ */
+export function isResumableCandidate(
+  summary: SessionSummary,
+  options: ResumableCandidateOptions = {},
+): boolean {
+  // The **per-candidate** filters.
+  const recordedCwd = ownText(summary, 'recordedCwd');
+  if (
+    recordedCwd !== undefined &&
+    options.cwd !== undefined &&
+    isDifferentDirectoryWithSameSlug(recordedCwd, options.cwd)
+  ) {
+    return false;
+  }
+  if (ownFlag(summary, 'isSidechain')) return false;
+  if (ownText(summary, 'teamName') !== undefined) return false;
+  const kind = ownSessionKind(summary);
+  if (kind === 'daemon' || kind === 'daemon-worker') return false;
+  if (options.isSdkEntrypoint !== true) {
+    const entrypoint = ownText(summary, 'entrypoint');
+    if (entrypoint !== undefined && SDK_ENTRYPOINTS.includes(entrypoint)) return false;
+    if (ownFlag(summary, 'isLoopSession')) return false;
+  }
+
+  // The **lookup's** predicate.
+  if (ownFlag(summary, 'bookkeepingOnly')) return false;
+
+  const continuedIn = ownText(summary, 'continuedInSessionId');
+  if (options.forkSession !== true) {
+    // A candidate that was continued into a session that is live: that
+    // session is reported, and the lookup continues with nothing.
+    if (continuedIn !== undefined && isLive(options, continuedIn)) {
+      reportBackground(options, continuedIn);
+      return false;
+    }
+    // A candidate that is itself live: it is reported, not continued.
+    if (isLive(options, summary.sessionId)) {
+      reportBackground(options, summary.sessionId);
+      return false;
+    }
+  }
+
+  // A superseded session — one that was continued into another — is skipped.
+  if (ownFlag(summary, 'superseded') || continuedIn !== undefined) return false;
+  // A fork always loads a copy, so the live-background skip does not apply.
+  if (options.forkSession === true) return true;
+
+  // The live list could not be read: a running session cannot be resumed, so
+  // every session carrying a session kind or a continued-in id is skipped.
+  if (liveListUnreadable(options) && (kind !== undefined || continuedIn !== undefined)) {
+    return false;
+  }
+
+  return true;
+}
+
+/** The outcome of the lookup. */
+export interface SessionLookupResult {
+  /** The **first** survivor, when there is one. */
+  summary?: SessionSummary;
+  /** The session that is live in the background, when one was reported. */
+  background?: BackgroundSessionReport;
+}
+
+/**
+ * The lookup: the **first** survivor of an ordered list of candidates.
+ *
+ * **Observed** (the REA's session-lookup finding): the target's lookup walks
+ * the list in order and takes the first accepted entry. A session that is
+ * live in the background is **reported** through the background callback, and
+ * the lookup continues with nothing.
+ */
+export function selectResumableCandidate(
+  summaries: readonly SessionSummary[],
+  options: ResumableCandidateOptions = {},
+): SessionLookupResult {
+  let background: BackgroundSessionReport | undefined;
+  const effective: ResumableCandidateOptions = {
+    ...options,
+    onNewestRunningInBackground: (report) => {
+      background = report;
+      options.onNewestRunningInBackground?.(report);
+    },
+  };
+  for (const summary of summaries) {
+    if (isResumableCandidate(summary, effective)) return { summary };
+    // A reported background session ends the lookup: the target continues
+    // with nothing.
+    if (background !== undefined) return { background };
+  }
+  return background === undefined ? {} : { background };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Continuing the newest session                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -1702,6 +2002,23 @@ export interface ContinueSessionOptions {
    */
   isLiveSession?: (sessionId: string) => boolean;
   /**
+   * The ids of the sessions that are **live in the background**.
+   *
+   * **Observed** (the REA's session-lookup finding): the target's lookup reads
+   * the live-session list once. The list is what decides whether a candidate
+   * is skipped as a running one, and it is the target's own list of live
+   * sessions.
+   */
+  liveSessionIds?: ReadonlySet<string>;
+  /**
+   * Whether the live-session list **could not be read**.
+   *
+   * **Observed** (the REA's session-lookup finding): a failed read changes the
+   * rule: every session carrying a session kind or a continued-in id is
+   * skipped instead, because a running one cannot be resumed.
+   */
+  liveSessionsUnreadable?: boolean;
+  /**
    * The startup that follows the restore.
    *
    * This implementation restores the previous session and then **starts** it. A failure
@@ -1789,10 +2106,19 @@ export interface SessionContinueResult {
  * the previous session (<reason>). Run prricode --resume to pick a session, or
  * start a new one.` when it happened **before**."
  *
- * **Implementation choice.** The audit does not record the *ordering* rule inside the
- * target's lookup — which candidates it skips — so this implementation's rule is its
- * own: the **newest** session of the working directory, and the newest
- * session is *reported* when it is already running in the background.
+ * **Observed** (the REA's session-lookup finding): the lookup's **ordering**
+ * rule and its **skip** rules are the target's own — the sessions are ordered
+ * by the file's modification time and then by its creation time, and each
+ * candidate is run through the target's filter before the **first** survivor
+ * is taken. The rules live in `isResumableCandidate` and
+ * `selectResumableCandidate`, above.
+ *
+ * **One deliberate difference.** The target *drops* a candidate that is itself
+ * live and lets the walk continue, and it *reports* a candidate that was
+ * continued into a live session. This implementation **reports** a live
+ * candidate in both cases and continues with nothing, because the `--continue`
+ * path has to name the session that is running — the target's own background
+ * message names a session id.
  *
  * **Not implemented.** The target's path also clears the session caches
  * first, passes `resumeSource: "store"` and `includeAttribution: true`, and
@@ -1833,23 +2159,34 @@ export async function continueSession(
     };
   };
 
-  // The lookup: the **newest** session of the working directory.
+  // The lookup: the sessions of the working directory, in the target's order
+  // — the file's modification time, then its creation time — and the **first**
+  // one that survives the skip rules.
   let summaries: SessionSummary[];
   try {
     summaries = await options.store.list({ cwd: options.cwd });
   } catch (error) {
     return fail('load_error', messageOf(error), false, errorNameOf(error));
   }
-  const newest = summaries[0];
-  if (newest === undefined) {
-    return fail('not_found', CONTINUE_NOT_FOUND_MESSAGE, false);
-  }
-  if (options.isLiveSession?.(newest.sessionId) === true) {
+  const lookup = selectResumableCandidate(summaries, {
+    cwd: options.cwd,
+    forkSession: options.forkSession === true,
+    ...(options.liveSessionIds === undefined ? {} : { liveSessionIds: options.liveSessionIds }),
+    ...(options.liveSessionsUnreadable === undefined
+      ? {}
+      : { liveSessionsUnreadable: options.liveSessionsUnreadable }),
+    ...(options.isLiveSession === undefined ? {} : { isLiveSession: options.isLiveSession }),
+  });
+  if (lookup.background !== undefined) {
     // The session is already running in the background: it is **reported**,
     // not silently continued.
     const reported = fail('background_running', CONTINUE_BACKGROUND_RUNNING_MESSAGE, false);
-    reported.backgroundSessionId = newest.sessionId;
+    reported.backgroundSessionId = lookup.background.sessionId;
     return reported;
+  }
+  const newest = lookup.summary;
+  if (newest === undefined) {
+    return fail('not_found', CONTINUE_NOT_FOUND_MESSAGE, false);
   }
 
   // The session's stored state: the target's worker refuses to start a turn

@@ -1,8 +1,8 @@
 # Session format and resume semantics
 
 **Target:** the pinned reference build `2.1.303`, Linux x86-64, SHA-256 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`.
-**Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.6 "Sessions, persistence, and resumption".
-**Owning task:** `CC-009` (the schema, the version policy, the migration path) and `CC-019` (the measured results).
+**Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.6 "Sessions, persistence, and resumption", and — for the lookup's ordering and skip rules — the REA's session-lookup finding, read from the target's own source.
+**Owning task:** `CC-009` (the schema, the version policy, the migration path), `CC-009d` (the lookup's ordering and skip rules) and `CC-019` (the measured results).
 **Matrix rows:** F-24 … F-27 in [`feature-matrix.md`](feature-matrix.md).
 
 > **This implementation's session format is not the target's.** The target states outright that its transcript entry format is internal and "changes between versions, so scripts that parse these files directly can break on any release". This implementation therefore defines its **own** versioned format and does not claim compatibility with the target's file layout. What *is* reproduced is the target's **behavior**: the selection rules, the attach-versus-replay behavior, the drop guard, the interrupted-turn rule, and the tool-call pairing.
@@ -108,7 +108,7 @@ The failure-reason vocabulary is `not_found_explicit_id`, `processing_error`, `l
 
 ## The `--continue` behavior
 
-`--continue` takes **no** session id: the store selects the **newest** session for the working directory. The three failure messages are the target's:
+`--continue` takes **no** session id: the store selects the **newest** session for the working directory — more exactly, the **first** session that survives the lookup's skip rules (see below). The three failure messages are the target's:
 
 - `No conversation found to continue` — there is nothing to continue.
 - `PRRICODE exited: could not continue the previous session (<reason>). Run prricode --resume to pick a session, or start a new one.` — the failure happened **before** the restore.
@@ -120,9 +120,71 @@ A session that is **already running in the background** is **reported** rather t
 
 The telemetry is the target's: `tengu_continue` with `{success}` and `resume_duration_ms`, or `{success: false, error_name}`.
 
-> **Implementation choice.** The **store-level ordering rule** inside the lookup — which candidate sessions are skipped (a live background session, a headless one, an SDK one, a slash-command one) — **was not traced**: it lives in a module outside the retained scope. This implementation selects the newest session and reports a background-running one. That is a **labelled implementation choice**, not an observed behavior.
+> The **lookup's** ordering and skip rules are the target's own — see [The lookup's ordering and skip rules](#the-lookups-ordering-and-skip-rules) below. They were closed by reading the target's source, and this implementation follows them.
 
-**Pinned by:** `tests/contracts/session-store.test.ts` and `tests/contracts/session-resume.test.ts` — the continue tests.
+**Pinned by:** `tests/contracts/session-store.test.ts` and `tests/contracts/session-resume.test.ts` — the continue tests, the ordering tests and the skip-rule tests.
+
+## The lookup's ordering and skip rules
+
+**Observed** (the REA's session-lookup finding, read from the target's own source).
+
+The lookup lists the sessions of the current project directory, runs each candidate through a filter, and takes the **first** survivor.
+
+### The order
+
+| Key | Clock | Direction |
+|---|---|---|
+| 1 | the session file's **modification time** | descending |
+| 2 | the session file's **creation time** | descending |
+
+There is **no sequence number**. The timestamp of the session's last **record** is reported by the summary, and it is **not** the sort key: a session whose last record is older than another's is still the newer one when its file was modified later.
+
+### The skip rules
+
+| The candidate is… | the lookup… | the field the rule needs |
+|---|---|---|
+| a **bookkeeping-only** session | skips it | `bookkeepingOnly` |
+| a **sidechain** session | skips it | `isSidechain` |
+| a **team** session | skips it | `teamName` |
+| a `daemon` or `daemon-worker` session | skips it | `sessionKind` |
+| an **SDK** session — the entrypoint is `sdk-cli`, `sdk-ts` or `sdk-py` | skips it, **unless the current process is itself an SDK entrypoint** | `entrypoint` |
+| a **`/loop`** session | skips it | `isLoopSession` |
+| a session whose recorded working directory is a **different directory with the same project slug** | skips it | `recordedCwd` |
+| **superseded** — continued into another session | skips it | `superseded` / `continuedInSessionId` |
+| **live in the background** | **reports** it through the background callback, and continues with nothing | the live-session list |
+| continued into a session that is **live** | **reports** that live session, and continues with nothing | `continuedInSessionId` + the live-session list |
+
+**The two corrections the audit used to guess wrong.** The audit once claimed that the lookup skipped *headless* and *slash-command* sessions. It skips neither in that way, and this implementation follows the corrected rule:
+
+- a print session is marked only by its **entrypoint** (`"print"`), and the only entrypoint filter is the **SDK** set — so **no** code excludes a `--print` session;
+- the only slash-command exclusion is **`/loop`**;
+- a **finished** `bg` session is still a candidate — only `daemon` and `daemon-worker` are excluded by kind.
+
+### When the live-session list cannot be read
+
+The rule changes shape: **every** session carrying a session kind or a continued-in id is skipped instead, because a running one cannot be resumed. A list that **can** be read but is empty skips nothing. This implementation's caller says which of the two it is: `liveSessionIds` (read) or `liveSessionsUnreadable` (not read).
+
+### What this implementation's records carry
+
+Every rule fires **only when the member it needs is present**. This implementation's record format is its own, and it carries none of the target's session marks, so the rules below cannot fire on a session this store produced — the member is read when a caller sets it, and the rule is then the target's.
+
+| Rule | The member | Can it fire here? |
+|---|---|---|
+| bookkeeping-only | `bookkeepingOnly` | **no** — the record format has no bookkeeping-only record |
+| sidechain | `isSidechain` | **no** — the record format has no sidechain mark |
+| team | `teamName` | **no** — the record format has no team name |
+| `daemon` / `daemon-worker` | `sessionKind` | **no** — the record format has no session kind |
+| SDK entrypoint | `entrypoint` | **no** — the record format has no entrypoint |
+| `/loop` | `isLoopSession` | **yes** — the store derives it the way the target does, by scanning the transcript for `<command-name>/loop</command-name>` |
+| same project slug, different directory | `recordedCwd` | **no** — the record format has no project-path record |
+| superseded | `superseded` / `continuedInSessionId` | **no** — the record format has no continued-in id |
+| live in the background | the caller's live-session list | **yes** — the caller supplies the list |
+
+### One deliberate difference
+
+The target **drops** a candidate that is itself live and lets the walk continue, and it **reports** a candidate that was continued into a live session. This implementation **reports** a live candidate in both cases and continues with nothing, because the `--continue` path has to name the session that is running — the target's own background message names a session id.
+
+**Pinned by:** `tests/contracts/session-store.test.ts` — the ordering tests and the `/loop` test; `tests/contracts/session-resume.test.ts` — the skip-rule tests, the live-background tests and the first-survivor test.
 
 ## Compaction
 
@@ -183,7 +245,11 @@ The store is append-only, the last row per id wins, and a prompt is not delivere
 | The drop guard refuses a resume that would split a tool turn | REA observed (the mechanism) + implementation choice (the exact rule) | F-25 | same file — the drop-guard tests |
 | The resume point is the last assistant message with a tool use, else the last message | REA observed | F-25 | `tests/contracts/session-resume.test.ts` — the two resume-point tests |
 | A leaf tie is won by the record written last | implementation choice | F-25 | same file — "wins a leaf tie with the one that was written last" |
-| `--continue` selects the newest session, reports a background-running one, and uses the target's two failure messages | REA observed (the messages and the newest-session rule) + **implementation choice** (the store-level ordering rule was not traced) | F-25 | `tests/contracts/session-store.test.ts` — the continue tests |
+| `--continue` selects the newest session, reports a background-running one, and uses the target's two failure messages | REA observed | F-25 | `tests/contracts/session-store.test.ts` — the continue tests |
+| The lookup orders the sessions by the file's **modification time**, then its **creation time** — not by the last record's timestamp | REA observed | F-25 | `tests/contracts/session-store.test.ts` — "orders the sessions by the file's modification time, not by the last record", "breaks a tie on the modification time with the file's creation time" |
+| The lookup skips the target's candidates — bookkeeping-only, sidechain, team, `daemon`/`daemon-worker`, SDK, `/loop`, same-slug, superseded — and takes the **first** survivor | REA observed (the rules) + the field each rule needs (see above) | F-25 | `tests/contracts/session-resume.test.ts` — the skip-rule tests, "takes the first survivor of the ordered list" |
+| A `--print` session is **not** excluded, and a finished `bg` session is still a candidate | REA observed | F-25 | same file — "keeps a print session", "keeps a finished background session" |
+| A live background session is **reported** rather than continued, and the live list that cannot be read changes the rule | REA observed | F-25 | same file — "reports a session that is live in the background rather than continuing it", "skips every session carrying a session kind or a continued-in id when the live list cannot be read" |
 | The interrupted turn is detected by the backward walk | REA observed | F-25 | `tests/contracts/session-resume.test.ts` — the two interrupted-turn tests |
 | A `tool_use` is answered by the `tool_result` with the same id, and the pending id is removed on arrival | REA observed | F-25 | `tests/contracts/session-resume.test.ts` — "pairs a tool_result with the tool_call it answers", "keeps a tool call whose result never arrived pending" |
 | The compaction boundary skips the prefix and does not delete it, and the boundary is located by the parent link | REA observed (the mechanism) + implementation choice (the model) | F-27 | `tests/contracts/session-resume.test.ts` — the compaction tests |

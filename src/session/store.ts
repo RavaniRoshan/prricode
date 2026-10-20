@@ -41,19 +41,29 @@
  * record whose version this build does not know is refused with a
  * `SessionVersionError` whatever its position in the file.
  *
- * ## The reader streams, and the index has two clocks
+ * ## The reader streams, and the index has three clocks
  *
  * The reader holds **one line** at a time: a transcript is never buffered, so
  * a session that grew to a gigabyte costs a gigabyte of reading and not a
  * gigabyte of memory. The index of a working directory is built from a
  * streaming pass over each transcript.
  *
- * The summary carries **two clocks**, and they are kept apart on purpose:
- * `updatedAt` is the timestamp of the session's last **record**, and
- * `modifiedAt` is the **file's** modification time — the clock the target's
- * ambiguity error reports ("modified <ISO timestamp>"). A transcript that
- * cannot be read has no last record, so its `updatedAt` is `0`: the clock of
- * an error never becomes the clock of the summary.
+ * The summary carries **three clocks**, and they are kept apart on purpose:
+ * `updatedAt` is the timestamp of the session's last **record**, `modifiedAt`
+ * is the **file's** modification time — the clock the target's ambiguity error
+ * reports ("modified <ISO timestamp>") — and `createdAt` is the **file's**
+ * creation time. A transcript that cannot be read has no last record, so its
+ * `updatedAt` is `0`: the clock of an error never becomes the clock of the
+ * summary.
+ *
+ * ## The index is ordered by the file's stat
+ *
+ * **Observed** (the REA's session-lookup finding): the lookup's sort key is
+ * the session file's **modification time**, descending, and a tie is broken by
+ * the file's **creation time**, also descending. There is no sequence number.
+ * The index therefore reports the **record** clock as well, but orders by the
+ * **file's** two clocks — a session whose last record is older than another's
+ * is still the newer one when its file was modified later.
  *
  * ## A handle is checked where it is used
  *
@@ -238,6 +248,135 @@ export interface SessionSummary {
    * `updatedAt` never mixes two epochs.
    */
   modifiedAt?: number;
+  /**
+   * When the transcript was **created**, in epoch milliseconds.
+   *
+   * This is the **file's** creation time, and it is the clock the target's
+   * ordering tie-breaks with. It is a third clock, kept apart from
+   * `updatedAt` (the last record) and `modifiedAt` (the file's modification
+   * time).
+   */
+  createdAt?: number;
+
+  /* ------------------------------------------------------------------ */
+  /* The target's own fields                                             */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Whether the session is a **bookkeeping-only** session.
+   *
+   * **The target's field.** The target's lookup skips these candidates. This
+   * implementation's record format has no bookkeeping-only record, so the
+   * member is **absent** unless a caller sets it — and the skip rule fires
+   * only when it is present.
+   */
+  bookkeepingOnly?: boolean;
+  /**
+   * Whether the session is a **sidechain** session.
+   *
+   * **The target's field.** The target's lookup skips these candidates, and
+   * this implementation's record format carries no sidechain mark, so the
+   * member is absent unless a caller sets it.
+   */
+  isSidechain?: boolean;
+  /**
+   * The name of the **team** the session belongs to.
+   *
+   * **The target's field.** The target's lookup skips a session that carries
+   * one. This implementation's record format carries no team name, so the
+   * member is absent unless a caller sets it.
+   */
+  teamName?: string;
+  /**
+   * The session's **kind**.
+   *
+   * **The target's field.** The target records only three kinds — `bg`,
+   * `daemon` and `daemon-worker` — and its lookup skips the last two by
+   * kind. There is **no** `--print`/headless kind: a print session is
+   * recorded only by its `entrypoint`. This implementation's record format
+   * carries no session kind, so the member is absent unless a caller sets it.
+   */
+  sessionKind?: SessionKind;
+  /**
+   * The **entrypoint** the session was started from.
+   *
+   * **The target's field.** The only entrypoint filter the target's lookup
+   * applies is the **SDK** set — `sdk-cli`, `sdk-ts` and `sdk-py` — so a
+   * `--print` session (`entrypoint: "print"`) is never excluded by it. This
+   * implementation's record format carries no entrypoint, so the member is
+   * absent unless a caller sets it.
+   */
+  entrypoint?: string;
+  /**
+   * Whether the session ran a **`/loop`** command.
+   *
+   * **The target's field**, and the only slash-command exclusion the target
+   * has. The target derives it by scanning the transcript for
+   * `<command-name>/loop</command-name>`; this implementation's store derives
+   * it the same way, from the **text** of the session's messages.
+   */
+  isLoopSession?: boolean;
+  /**
+   * The working directory the session was **recorded** in.
+   *
+   * **The target's field.** The target's lookup skips a session whose recorded
+   * working directory is a *different* directory with the *same* project slug
+   * — a sibling worktree. This implementation's record format carries no
+   * project-path record, so the member is absent unless a caller sets it.
+   */
+  recordedCwd?: string;
+  /**
+   * The id of the session this one was **continued into**.
+   *
+   * **The target's field.** The target marks such a session *superseded* and
+   * skips it, and when the session it was continued into is live in the
+   * background, that session is *reported* instead. This implementation's
+   * record format carries no continued-in id, so the member is absent unless a
+   * caller sets it.
+   */
+  continuedInSessionId?: string;
+  /**
+   * Whether the session was **superseded** — continued into another session.
+   *
+   * **The target's field.** The target derives the mark from a continued-in
+   * id; this implementation reads either member, so a summary that carries
+   * only the id is superseded too.
+   */
+  superseded?: boolean;
+}
+
+/**
+ * The kinds of session the target records.
+ *
+ * **Observed** (the REA's session-lookup finding): `sessionKind` is only ever
+ * `bg`, `daemon` or `daemon-worker`. There is **no** `--print`/headless
+ * session kind — a print session is recorded only by its `entrypoint`.
+ */
+export type SessionKind = 'bg' | 'daemon' | 'daemon-worker';
+
+/**
+ * The marker of a `/loop` command in a transcript.
+ *
+ * **Observed** (the REA's session-lookup finding): the target detects a loop
+ * session by scanning the transcript for `<command-name>/loop</command-name>`.
+ */
+export const LOOP_COMMAND_MARKER = '<command-name>/loop</command-name>';
+
+/**
+ * The target's ordering comparator.
+ *
+ * **Observed** (the REA's session-lookup finding): the sort key is the
+ * session file's **modification time**, descending, and a tie is broken by the
+ * file's **creation time**, also descending. There is no sequence number.
+ *
+ * The **record** clock — the timestamp of the session's last record — is not
+ * the sort key: it is reported by the summary, and the target's own lookup
+ * fixes the order from the file's stat.
+ */
+export function compareSessionSummaries(left: SessionSummary, right: SessionSummary): number {
+  const byModified = (right.modifiedAt ?? 0) - (left.modifiedAt ?? 0);
+  if (byModified !== 0) return byModified;
+  return (right.createdAt ?? 0) - (left.createdAt ?? 0);
 }
 
 /** The store's contract. */
@@ -262,7 +401,14 @@ export interface SessionStore {
   append(handle: SessionHandle, event: SessionEvent): Promise<void>;
   /** Read the records back, in order. */
   read(handle: SessionHandle): AsyncIterable<SessionEvent>;
-  /** The sessions of a working directory, newest first. */
+  /**
+   * The sessions of a working directory, newest first.
+   *
+   * **Observed** (the REA's session-lookup finding): "newest" is the session
+   * file's **modification time**, descending, tie-broken by the file's
+   * **creation time**, also descending. The timestamp of the session's last
+   * *record* is reported by the summary, and it is not the sort key.
+   */
   list(opts: { cwd: string; limit?: number }): Promise<SessionSummary[]>;
 }
 
@@ -579,7 +725,7 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
         summaries.push(await summarizeFile(sessionId, filePath));
       }
 
-      summaries.sort((left, right) => right.updatedAt - left.updatedAt);
+      summaries.sort(compareSessionSummaries);
       const limit = opts.limit;
       return limit === undefined ? summaries : summaries.slice(0, Math.max(0, limit));
     },
@@ -592,16 +738,23 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
  * The summary is built from a **streaming** pass: the transcript is never held
  * in memory. `updatedAt` is the timestamp of the session's last **record**,
  * and `modifiedAt` is the **file's** modification time — two clocks, kept
- * apart on purpose.
+ * apart on purpose. `createdAt` is the **file's** creation time, the clock the
+ * target's ordering tie-breaks with.
  */
 async function summarizeFile(sessionId: string, filePath: string): Promise<SessionSummary> {
   const details = await stat(filePath).catch(() => undefined);
   const modifiedAt = details?.mtimeMs ?? 0;
+  // The file's **creation** time. A file system that does not record one
+  // reports zero, and the change time stands in for it — the target reads the
+  // same two clocks off the same stat.
+  const createdAt =
+    details === undefined ? 0 : details.birthtimeMs > 0 ? details.birthtimeMs : details.ctimeMs;
 
   let startedAt = 0;
   let updatedAt = 0;
   let messageCount = 0;
   let title: string | undefined;
+  let isLoopSession = false;
   try {
     for await (const event of readSessionFile(filePath)) {
       if (startedAt === 0) startedAt = event.ts;
@@ -610,6 +763,12 @@ async function summarizeFile(sessionId: string, filePath: string): Promise<Sessi
       if (title === undefined && event.t === 'user_message') {
         const trimmed = event.text.trim();
         if (trimmed !== '') title = trimmed;
+      }
+      // The target detects a loop session by scanning the transcript for the
+      // `/loop` command marker; the **text** of a message is where a slash
+      // command is expanded.
+      if (!isLoopSession && (event.t === 'user_message' || event.t === 'assistant_message')) {
+        if (event.text.includes(LOOP_COMMAND_MARKER)) isLoopSession = true;
       }
     }
   } catch (error) {
@@ -625,6 +784,8 @@ async function summarizeFile(sessionId: string, filePath: string): Promise<Sessi
       messageCount: 0,
       error: messageOf(error),
       modifiedAt,
+      createdAt,
+      isLoopSession,
     };
   }
 
@@ -635,6 +796,8 @@ async function summarizeFile(sessionId: string, filePath: string): Promise<Sessi
     updatedAt,
     messageCount,
     modifiedAt,
+    createdAt,
+    isLoopSession,
   };
   if (title !== undefined) summary.title = title;
   return summary;

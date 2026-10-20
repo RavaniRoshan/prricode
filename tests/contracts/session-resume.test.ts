@@ -19,19 +19,23 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { SESSION_SCHEMA_VERSION, SessionVersionError, type SessionEvent } from '../../src/session/event.js';
-import { createSessionStore } from '../../src/session/store.js';
+import { createSessionStore, type SessionSummary } from '../../src/session/store.js';
 import {
   CONTINUE_BACKGROUND_RUNNING_MESSAGE,
   CONTINUE_NOT_FOUND_MESSAGE,
+  SDK_ENTRYPOINTS,
   SESSION_CONTINUE_TELEMETRY_EVENT,
   SESSION_RESUME_PRINT_TELEMETRY_EVENT,
   SESSION_RESUMED_TELEMETRY_EVENT,
   contextToProviderMessages,
   continueSession,
+  isResumableCandidate,
   pairToolCalls,
   resumeAtMessage,
   resumeEvents,
   resumeSession,
+  selectResumableCandidate,
+  type BackgroundSessionReport,
   type ContextItem,
   type SessionContinueTelemetry,
   type SessionResumePrintTelemetry,
@@ -151,6 +155,20 @@ function toolUseIds(context: ContextItem[]): string[] {
     }
   }
   return ids;
+}
+
+/** A session summary, with the target's own fields left out. */
+function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
+  return {
+    sessionId: 'session-01',
+    path: '/home/user/project/session-01.jsonl',
+    startedAt: 1000,
+    updatedAt: 1000,
+    messageCount: 1,
+    modifiedAt: 1000,
+    createdAt: 1000,
+    ...overrides,
+  };
 }
 
 describe('the resume algorithm', () => {
@@ -1357,5 +1375,163 @@ describe('the --continue selection', () => {
     expect(result.status).toBe('continued');
     expect(result.adoptedSessionId).toBe('forked-01');
     expect(result.resume?.resumedAsFork).toBe(true);
+  });
+});
+
+describe("the session lookup's skip rules", () => {
+  it('skips a bookkeeping-only session', () => {
+    expect(isResumableCandidate(summary({ bookkeepingOnly: true }), {})).toBe(false);
+    expect(isResumableCandidate(summary(), {})).toBe(true);
+  });
+
+  it('skips a sidechain session', () => {
+    expect(isResumableCandidate(summary({ isSidechain: true }), {})).toBe(false);
+  });
+
+  it('skips a team session', () => {
+    expect(isResumableCandidate(summary({ teamName: 'backend' }), {})).toBe(false);
+  });
+
+  it('skips a daemon session and a daemon-worker session', () => {
+    expect(isResumableCandidate(summary({ sessionKind: 'daemon' }), {})).toBe(false);
+    expect(isResumableCandidate(summary({ sessionKind: 'daemon-worker' }), {})).toBe(false);
+  });
+
+  it('keeps a finished background session', () => {
+    // A `bg` session is **not** filtered by its kind: only `daemon` and
+    // `daemon-worker` are. A finished background session is still a candidate.
+    expect(isResumableCandidate(summary({ sessionKind: 'bg' }), {})).toBe(true);
+  });
+
+  it('skips an SDK session, unless this process is itself an SDK entrypoint', () => {
+    for (const entrypoint of SDK_ENTRYPOINTS) {
+      expect(isResumableCandidate(summary({ entrypoint }), {})).toBe(false);
+    }
+    // The guard is the **current process's** entrypoint: an SDK process
+    // resumes an SDK session.
+    expect(
+      isResumableCandidate(summary({ entrypoint: 'sdk-ts' }), { isSdkEntrypoint: true }),
+    ).toBe(true);
+  });
+
+  it('keeps a print session', () => {
+    // The only entrypoint filter is the SDK set, so **nothing** excludes a
+    // `--print` session: it is marked by its entrypoint alone.
+    expect(isResumableCandidate(summary({ entrypoint: 'print' }), {})).toBe(true);
+  });
+
+  it('skips a /loop session', () => {
+    expect(isResumableCandidate(summary({ isLoopSession: true }), {})).toBe(false);
+  });
+
+  it('skips a session that was continued into another one', () => {
+    expect(isResumableCandidate(summary({ superseded: true }), {})).toBe(false);
+    // The target marks a session superseded when it carries a continued-in id.
+    expect(isResumableCandidate(summary({ continuedInSessionId: 'other' }), {})).toBe(false);
+  });
+
+  it('skips a session whose recorded working directory is a different directory with the same project slug', () => {
+    // Two different directories that share the project slug: the recorded
+    // working directory is a **different** directory.
+    expect(
+      isResumableCandidate(summary({ recordedCwd: '/home/user/my/project' }), {
+        cwd: '/home/user/my project',
+      }),
+    ).toBe(false);
+    // A different slug is a different project, so the rule does not fire.
+    expect(
+      isResumableCandidate(summary({ recordedCwd: '/home/user/other' }), {
+        cwd: '/home/user/project',
+      }),
+    ).toBe(true);
+    // The same directory is not a different directory.
+    expect(
+      isResumableCandidate(summary({ recordedCwd: '/home/user/project' }), {
+        cwd: '/home/user/project',
+      }),
+    ).toBe(true);
+  });
+
+  it('skips every session carrying a session kind or a continued-in id when the live list cannot be read', () => {
+    const options = { liveSessionsUnreadable: true };
+    expect(isResumableCandidate(summary({ sessionKind: 'bg' }), options)).toBe(false);
+    expect(isResumableCandidate(summary({ sessionKind: 'daemon' }), options)).toBe(false);
+    expect(isResumableCandidate(summary({ continuedInSessionId: 'other' }), options)).toBe(false);
+    // A session that carries neither is still a candidate.
+    expect(isResumableCandidate(summary(), options)).toBe(true);
+  });
+
+  it('takes the first survivor of the ordered list', () => {
+    const result = selectResumableCandidate(
+      [
+        summary({ sessionId: 'skipped', bookkeepingOnly: true }),
+        summary({ sessionId: 'kept' }),
+      ],
+      {},
+    );
+    expect(result.summary?.sessionId).toBe('kept');
+    expect(result.background).toBeUndefined();
+  });
+
+  it('reports a session that is live in the background rather than continuing it', () => {
+    const reports: BackgroundSessionReport[] = [];
+    const result = selectResumableCandidate([summary({ sessionId: 'live' })], {
+      liveSessionIds: new Set(['live']),
+      onNewestRunningInBackground: (report) => reports.push(report),
+    });
+
+    // The live session is **reported**, not continued.
+    expect(result.summary).toBeUndefined();
+    expect(result.background?.sessionId).toBe('live');
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.sessionId).toBe('live');
+  });
+
+  it('reports the session a candidate was continued into when that one is live', () => {
+    const reports: BackgroundSessionReport[] = [];
+    const result = selectResumableCandidate(
+      [summary({ sessionId: 'old', continuedInSessionId: 'live' })],
+      {
+        liveSessionIds: new Set(['live']),
+        onNewestRunningInBackground: (report) => reports.push(report),
+      },
+    );
+
+    expect(result.summary).toBeUndefined();
+    expect(result.background?.sessionId).toBe('live');
+    expect(reports).toHaveLength(1);
+  });
+
+  it('keeps a live session when the fork flag is set', () => {
+    const result = selectResumableCandidate([summary({ sessionId: 'live' })], {
+      liveSessionIds: new Set(['live']),
+      forkSession: true,
+    });
+
+    // A fork always loads a copy, so the live-background skip does not apply.
+    expect(result.summary?.sessionId).toBe('live');
+    expect(result.background).toBeUndefined();
+  });
+
+  it('continues the first session that survives the skip rules', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const older = await store.create({ cwd: CWD, sessionId: 'older' });
+    await store.append(older, userMessage('m1', 'hello', 1000));
+    const newer = await store.create({ cwd: CWD, sessionId: 'newer' });
+    await store.append(newer, userMessage('m1', 'hello', 2000));
+
+    // The newest session is live in the background: it is reported, and the
+    // lookup does not continue it.
+    const reported = await continueSession({
+      store,
+      cwd: CWD,
+      liveSessionIds: new Set(['newer']),
+    });
+    expect(reported.status).toBe('failed');
+    expect(reported.failure?.reason).toBe('background_running');
+    expect(reported.failure?.detail).toBe(CONTINUE_BACKGROUND_RUNNING_MESSAGE);
+    expect(reported.backgroundSessionId).toBe('newer');
   });
 });
