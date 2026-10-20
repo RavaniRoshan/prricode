@@ -94,7 +94,7 @@ import { PROVIDER_EXTENSION_NOTICE } from './commands/shared.js';
 import { loadSettings } from '../config/loader.js';
 import { parseSettingsDocument } from '../config/schema.js';
 import type { SettingsSource, SettingsTier } from '../config/tiers.js';
-import { TIER_PRECEDENCE, documentOf } from '../config/tiers.js';
+import { TIER_PRECEDENCE, documentOf, mergeSettingsValue } from '../config/tiers.js';
 import type { HookRegistry } from '../extensions/hooks/registry.js';
 import { createHookRegistry } from '../extensions/hooks/registry.js';
 import { createHookApproval, createPreToolUseApproval } from '../extensions/hooks/runner.js';
@@ -1141,16 +1141,24 @@ function mergedTopLevelKey(
   tiers: ReadonlyMap<SettingsSource, SettingsTier>,
   key: string,
 ): unknown {
-  for (const source of TIER_PRECEDENCE) {
+  // Fold from the **lowest** tier upwards — the order the target composes its
+  // effective settings in — and let the per-key value rule decide what the
+  // value becomes. An array setting two tiers define is the **concatenation**
+  // of both, and the two named object keys are shallow-merged one level; every
+  // other value is the higher tier's, whole.
+  let value: unknown;
+  let found = false;
+  for (const source of [...TIER_PRECEDENCE].reverse()) {
     const tier = tiers.get(source);
     if (tier === undefined) continue;
     const document = documentOf(tier);
     if (typeof document !== 'object' || document === null) continue;
     const record = document as Record<string, unknown>;
     if (!Object.hasOwn(record, key)) continue;
-    return record[key];
+    value = found ? mergeSettingsValue(value, record[key], key) : record[key];
+    found = true;
   }
-  return undefined;
+  return found ? value : undefined;
 }
 
 /** Whether a `hipaa` settings member marks a HIPAA-configured session. */

@@ -23,29 +23,32 @@
  * tier's block applies as a whole over any lower tier and is never merged key by key
  * ("the spellcheck block in `<source>` applies (as a whole, over any lower tier)").
  *
- * The audit's §2.7 final line is explicit about what is *not* known: "the per-key
- * merge for ordinary (non-merged, non-top-level) settings keys is not derived". The
- * ordinary-key path is therefore an **open gap in the evidence**, and this module
- * never claims otherwise.
+ * The audit's §2.7 used to end with "the per-key merge for ordinary (non-merged,
+ * non-top-level) settings keys is not derived". That line was **closed by source
+ * reading** and the rule is now observed: the target merges the tiers **per top-level
+ * key**, in the order `Ps` — user, project, local, flag, policy, increasing priority —
+ * and the value rule is decided per key. See {@link mergeSettingsValue} for the table
+ * and `/home/shiva/opt/reference-agent-rea/analysis/findings-config-merge.md` for the
+ * quoted source.
+ *
+ * Observed:
+ *
+ *   - `TIER_PRECEDENCE` is the target's `Ps` order, highest first: policy, flag,
+ *     local, project, user. The target composes its effective settings in the
+ *     reverse of it, and so does this module.
+ *   - `effectiveOrdinarySource` resolves an **ordinary** key (neither a top-level nor
+ *     a merged key) through the per-top-level-key rule, and the value it reports is
+ *     the **merged** value — an array two tiers define is the concatenation of both.
+ *   - `effectiveSource` resolves through the **observed** top-level order only
+ *     (`C7s`): policy, flag, user. It says nothing about ordinary keys; a caller that
+ *     wants the ordinary path must ask for it explicitly with
+ *     `effectiveOrdinarySource`.
+ *   - `resolveTopLevelKey` reads a *literal top-level* key; `resolveMergedKey`
+ *     accepts a dotted path so that a merged setting can be resolved per unit
+ *     (`skills.my-skill`).
  *
  * Implementation choices (the audit does not pin them, so they are marked as such here):
  *
- *   - `TIER_PRECEDENCE` is the *composition* used for the whole-block rule. It is
- *     consistent with both observed orderings (policy > flag > user, and
- *     local > project > user) but the audit does not state a block ordering, so this
- *     ordering is a reimplementation decision and is not claimed as target-verified.
- *   - `effectiveOrdinarySource` resolves an **ordinary** key (neither a top-level nor
- *     a merged key). The target's per-key merge for ordinary keys is **not derived**
- *     from the target — see the audit's §2.7 final line — so this function is an
- *     **underived implementation choice**: this implementation applies the one precedence rule the audit
- *     *does* state (the whole-block rule) to the tiers the two observed orderings do
- *     not cover. It is not a claim about the target.
- *   - `effectiveSource` resolves through the **observed** top-level order only. It
- *     says nothing about ordinary keys; a caller that wants the ordinary path must
- *     ask for it explicitly with `effectiveOrdinarySource`.
- *   - `resolveTopLevelKey` reads a *literal top-level* key; `resolveMergedKey`
- *     accepts a dotted path so that a merged setting can be resolved per leaf
- *     (`skills.my-skill`).
  *   - `SETTINGS_SOURCES` is a **membership list, not an ordering**. It is a reimplementation
  *     convenience for iterating the five sources; it is not a fifth observed
  *     ordering.
@@ -339,12 +342,10 @@ export function resolveMergedKey(tiers: SettingsTierMap, key: string): SettingsT
  *
  * This resolves through the *observed* top-level order (`policySettings`,
  * `flagSettings`, `userSettings`) and nothing else. It says **nothing** about
- * ordinary keys: the target's per-key merge for ordinary keys is not derived
- * (audit §2.7, final line), so this function must not be read as "the tier the
- * target would use for any key".
+ * ordinary keys.
  *
- * Use `effectiveOrdinarySource` for an ordinary key — that path is an explicitly
- * underived implementation choice — and `resolveMergedKey` for a merged key.
+ * Use `effectiveOrdinarySource` for an ordinary key and `resolveMergedKey` for a
+ * merged key.
  */
 export function effectiveSource(tiers: SettingsTierMap, key: string): SettingsSource | null {
   return resolveTopLevelKey(tiers, key)[0]?.source ?? null;
@@ -357,10 +358,9 @@ export function effectiveSource(tiers: SettingsTierMap, key: string): SettingsSo
  * The target's per-key merge for ordinary keys is **not derived** from the target
  * (audit §2.7, final line: "the per-key merge for ordinary (non-merged,
  * non-top-level) settings keys is not derived"). This function is therefore an
- * **underived implementation choice**, not an observed behaviour: this implementation resolves an
- * ordinary key with the whole-block rule — the one precedence rule the audit *does*
- * state — applied over the tiers the two observed orderings do not cover, and it
- * honours the observed per-key scope restrictions (`spellcheck` is user-only).
+ * **Observed**: the ordinary key resolves through the target's per-top-level-key
+ * rule, and the value is the **merged** value — see {@link mergeSettingsValue}. The
+ * observed per-key scope restrictions are honoured (`spellcheck` is user-only).
  */
 export function effectiveOrdinarySource(tiers: SettingsTierMap, key: string): SettingsSource | null {
   return resolveBlock(tiers, key)?.source ?? null;
@@ -375,23 +375,131 @@ export function effectiveOrdinarySource(tiers: SettingsTierMap, key: string): Se
  * ignored exactly as the target's own message says.
  */
 export function resolveBlock(tiers: SettingsTierMap, key: string): SettingsTier | undefined {
-  for (const source of TIER_PRECEDENCE) {
-    if (!isSourceAllowedForKey(key, source)) continue;
-    if (!tiers.has(source)) continue;
-    const document = documentOf(tiers.get(source));
+  // Fold from the **lowest** tier upwards — the order the target composes its
+  // effective settings in — so the value rule decides what the value becomes,
+  // and the **highest** tier that defines the key is the source that supplied
+  // it. The two are not the same thing: an array setting defined by two tiers
+  // is the **concatenation** of both, but the source is still the higher tier.
+  let value: unknown;
+  let found = false;
+  let source: SettingsSource | undefined;
+  for (const candidate of [...TIER_PRECEDENCE].reverse()) {
+    if (!isSourceAllowedForKey(key, candidate)) continue;
+    if (!tiers.has(candidate)) continue;
+    const document = documentOf(tiers.get(candidate));
     const lookup = lookupPath(document, [key]);
-    if (lookup.found) return { source, value: lookup.value };
+    if (!lookup.found) continue;
+    value = found ? mergeSettingsValue(value, lookup.value, key) : lookup.value;
+    found = true;
+    source = candidate;
   }
-  return undefined;
+  if (!found || source === undefined) return undefined;
+  return { source, value };
 }
 
 /** Keys that must never be copied onto a merged object. */
 const UNSAFE_MERGE_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
- * Merge two documents key by key. A key defined by `high` replaces the value from
- * `low`; two plain objects are merged recursively so that e.g. two tiers that each
- * define a different skill both survive.
+ * The keys whose value the higher tier **replaces** outright.
+ *
+ * `modelPicker` is replaced whatever it holds. `fallbackModel` is an array, and
+ * arrays are otherwise concatenated, so it is named here to be replaced instead.
+ */
+const REPLACED_KEYS: ReadonlySet<string> = new Set(['fallbackModel', 'modelPicker']);
+
+/**
+ * The keys whose value is **shallow-merged one level** rather than replaced.
+ *
+ * The merge is one level deep: the higher tier's own keys win, and the lower
+ * tier's other keys survive. It is not a deep merge.
+ */
+const SHALLOW_MERGED_KEYS: ReadonlySet<string> = new Set([
+  'extraKnownMarketplaces',
+  'managedMcpServers',
+]);
+
+/**
+ * The observed per-key value rule.
+ *
+ * The target merges the settings tiers **per top-level key**, and this is the
+ * rule that decides what happens to the **value** of a key when two tiers define
+ * it. It is a small table, and the default is the one that matters:
+ *
+ * | the key's value | the rule |
+ * |---|---|
+ * | `modelPicker` | the higher tier **replaces** the value |
+ * | an **array** | the two arrays are **concatenated and de-duplicated** |
+ * | an array, key `fallbackModel` | the higher tier **replaces** the value |
+ * | an object, key `extraKnownMarketplaces` or `managedMcpServers` | a **one-level shallow merge** |
+ * | **anything else** | the higher tier **replaces** the value **wholesale** |
+ *
+ * The last row is the load-bearing one: an ordinary object-valued setting is
+ * **not** merged key by key, and the higher tier's object wins whole. There is
+ * no per-leaf merge.
+ *
+ * **Observed** — the target's own source, quoted in
+ * `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.7 and recorded in
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-config-merge.md`.
+ */
+export function mergeSettingsValue(
+  existing: unknown,
+  incoming: unknown,
+  key: string,
+): unknown {
+  if (REPLACED_KEYS.has(key)) return incoming;
+  if (Array.isArray(existing) && Array.isArray(incoming)) {
+    return deduplicate([...existing, ...incoming]);
+  }
+  if (SHALLOW_MERGED_KEYS.has(key) && isPlainObject(existing) && isPlainObject(incoming)) {
+    return { ...existing, ...incoming };
+  }
+  return incoming;
+}
+
+/**
+ * De-duplicate an array, keeping the first occurrence of each value.
+ *
+ * Two values are the same when their canonical JSON is the same, so two
+ * structurally equal objects collapse into one and the order of the first
+ * occurrences is kept.
+ */
+function deduplicate(values: readonly unknown[]): unknown[] {
+  const seen = new Set<string>();
+  const out: unknown[] = [];
+  for (const value of values) {
+    const key = canonicalJson(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+/** A value's canonical JSON, used only to compare two values for equality. */
+function canonicalJson(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  try {
+    return JSON.stringify(value, (_key, item: unknown) => {
+      if (isPlainObject(item)) {
+        const sorted: Record<string, unknown> = {};
+        for (const name of Object.keys(item).sort()) sorted[name] = item[name];
+        return sorted;
+      }
+      return item;
+    }) ?? 'undefined';
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Merge two documents **per top-level key**.
+ *
+ * A key defined by `high` replaces the value from `low`, except where the
+ * observed per-key value rule says otherwise — see {@link mergeSettingsValue}.
+ * Two plain objects are **not** merged recursively: the higher tier's object
+ * wins whole, which is what the target does.
  *
  * `__proto__`, `constructor` and `prototype` are never copied: a settings file is
  * attacker-influenced data and must not be able to replace the prototype of the
@@ -404,12 +512,7 @@ export function mergeDocuments(
   const merged: Record<string, unknown> = { ...low };
   for (const [key, value] of Object.entries(high)) {
     if (UNSAFE_MERGE_KEYS.has(key)) continue;
-    const existing = merged[key];
-    if (isPlainObject(existing) && isPlainObject(value)) {
-      merged[key] = mergeDocuments(existing, value);
-    } else {
-      merged[key] = value;
-    }
+    merged[key] = mergeSettingsValue(merged[key], value, key);
   }
   return merged;
 }
@@ -463,23 +566,54 @@ function restrictDocument(
  * The merged-settings document: every merged key takes the value of the first source
  * in `MERGED_KEY_ORDER` that defines it.
  *
- * Implementation choice (not observed): the audit says "the first source that defines a key
- * wins" but does not define the granularity of a merged key. This implementation merges per
- * **leaf**, so two tiers that define different skills both survive, and the higher
- * tier wins the leaves it defines.
+ * **Observed.** The target's merged-key rule is "the first source that defines the
+ * key wins", and the key is the merged key's **own unit** — a skill name under
+ * `skillOverrides`, for instance. The value is taken **whole**: a source that defines
+ * a unit does not merge its leaves with a lower tier's leaves of the same unit.
+ * Two tiers that define *different* units both survive, because the units are
+ * claimed one at a time.
  *
  * A key with a scope restriction (`spellcheck`) is honoured here as well: a project
  * or local definition of a restricted key is ignored entirely, so only a tier the
  * restriction names contributes it.
  */
 export function mergeMergedSettings(tiers: SettingsTierMap): Record<string, unknown> {
-  let merged: Record<string, unknown> = {};
-  // Fold from the lowest tier upwards so the highest tier wins per key.
-  for (const source of [...MERGED_KEY_ORDER].reverse()) {
+  const merged: Record<string, unknown> = {};
+  // The units each merged key has claimed, so the first source that defines a
+  // unit wins it and a later source cannot contribute to it.
+  const claimed = new Map<string, Set<string>>();
+
+  // The merged order, **highest first**: the first source that defines a
+  // merged key wins it, and it wins it **whole**.
+  for (const source of MERGED_KEY_ORDER) {
     if (!tiers.has(source)) continue;
     const document = documentOf(tiers.get(source));
     if (!isPlainObject(document)) continue;
-    merged = mergeDocuments(merged, restrictDocument(document, source));
+    for (const [key, value] of Object.entries(restrictDocument(document, source))) {
+      if (UNSAFE_MERGE_KEYS.has(key)) continue;
+      if (!isPlainObject(value)) {
+        // A merged key whose value is not an object is claimed whole.
+        if (Object.prototype.hasOwnProperty.call(merged, key)) continue;
+        merged[key] = value;
+        continue;
+      }
+      // A merged key's **own units** are the merged units. The first source
+      // that defines a unit wins it whole — the target's merged-key rule is
+      // "the first source that defines the key wins", not a per-leaf merge.
+      let units = claimed.get(key);
+      if (units === undefined) {
+        units = new Set<string>();
+        claimed.set(key, units);
+        merged[key] = {};
+      }
+      const target = merged[key] as Record<string, unknown>;
+      for (const [unit, unitValue] of Object.entries(value)) {
+        if (UNSAFE_MERGE_KEYS.has(unit)) continue;
+        if (units.has(unit)) continue;
+        units.add(unit);
+        target[unit] = unitValue;
+      }
+    }
   }
   return merged;
 }

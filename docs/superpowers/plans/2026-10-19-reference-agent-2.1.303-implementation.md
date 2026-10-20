@@ -847,27 +847,49 @@ target's own words in `chunk-6bp7hdav.js`.
   rule — and `EFFECTIVE_SETTINGS_ORDER: readonly SettingsSource[]` — `Ps`, in increasing
   priority.
 
-- [ ] **Step 1: Write the failing test** — two tiers that define the same **object**
+- [x] **Step 1: Write the failing test** — two tiers that define the same **object**
   setting: the higher tier's value wins **whole**, not key by key; two tiers that define
   the same **array** setting: the values are **concatenated** and de-duplicated; the two
   named object keys are **shallow**-merged one level; `fallbackModel` and `modelPicker`
   are replaced.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the merge is per leaf.
-- [ ] **Step 3: Implement the per-key value rule** in `src/config/tiers.ts` — a function
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the merge is per leaf.
+- [x] **Step 3: Implement the per-key value rule** in `src/config/tiers.ts` — a function
   of `(existing, incoming, key)` that returns the merged value, and `undefined` for the
   default case, which the merge helper reads as "the incoming value replaces".
-- [ ] **Step 4: Replace the per-leaf merge** — `mergeDocuments` becomes a per-top-level-key
+- [x] **Step 4: Replace the per-leaf merge** — `mergeDocuments` becomes a per-top-level-key
   merge that uses the value rule. The `__proto__`/`constructor`/`prototype` guard stays.
-- [ ] **Step 5: Apply the tier order** — the effective settings are composed in the
+- [x] **Step 5: Apply the tier order** — the effective settings are composed in the
   order `user < project < local < flag < policy`.
-- [ ] **Step 6: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 7: Update the conformance document** — the row's outcome becomes `match`,
+- [x] **Step 6: Run it to verify it passes** — expected: PASS.
+- [x] **Step 7: Update the conformance document** — the row's outcome becomes `match`,
   the "implementation choice" label comes off, and the observed rule is stated.
-- [ ] **Step 8: Commit.**
+- [x] **Step 8: Commit.**
   ```bash
   git add src/config tests/contracts/settings-precedence.test.ts docs/compatibility/settings-precedence.md
   git commit -m "fix(config): the settings merge is per top-level key, as the target merges it"
   ```
+
+
+**Result:** the settings merge is now the target's rule. `mergeSettingsValue` in
+`src/config/tiers.ts` is the observed per-key value table — `modelPicker` and
+`fallbackModel` are replaced, arrays are concatenated and de-duplicated, the two named
+object keys are shallow-merged one level, and **everything else is replaced whole**.
+`mergeDocuments` merges **per top-level key** and no longer recurses into plain objects.
+`resolveBlock` and the CLI's `mergedTopLevelKey` now return the **merged** value — so an
+array two tiers define is the concatenation of both — while the source they report is
+still the highest tier that defines the key. `mergeMergedSettings` gives a merged key's
+**unit** to the first source in the merged order that defines it, whole.
+
+The tier composition order is the target's `Ps`: user, project, local, flag, policy,
+increasing priority.
+
+**Verification.** The twelve new tests were checked by **mutation** rather than by a
+red-first run: restoring the per-leaf merge turns five of them red, and making the
+resolver return the highest tier's value alone turns two more red. The suite is green at
+**1837 tests** and `npx tsc --noEmit` is clean.
+
+**Consequence.** The "implementation choice" label on the per-leaf merge is **off**: it
+was a divergence from an observed rule, and the conformance document now says so.
 
 **Note.** The compatibility harness measures the clone and reports the outcome; this
 task must not edit `docs/compatibility/results.md` or `tests/compatibility/**` — the

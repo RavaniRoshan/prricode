@@ -38,6 +38,7 @@ import {
   resolveTopLevelKey,
   type SettingsSource,
   type SettingsTier,
+  type SettingsTierMap,
 } from '../../src/config/tiers.js';
 import { loadSettings } from '../../src/config/loader.js';
 import {
@@ -92,6 +93,108 @@ afterEach(() => {
     const workspace = workspaces.pop();
     if (workspace) rmSync(workspace.root, { recursive: true, force: true });
   }
+});
+
+describe('the settings merge is per top-level key', () => {
+  // The target merges the tiers **per top-level key**, and the value rule is
+  // decided per key. An ordinary object-valued setting is **not** merged key by
+  // key: the higher tier's object wins whole. See the audit's §2.7.
+
+  it('lets the higher tier replace an object whole, not key by key', () => {
+    const merged = mergeDocuments(
+      { modelPicker: { provider: 'user', detail: { a: 1, b: 2 } } },
+      { modelPicker: { provider: 'policy', detail: { a: 9 } } },
+    );
+
+    // The higher tier's object wins **whole**: the lower tier's `detail.b` does
+    // not survive.
+    expect(merged['modelPicker']).toEqual({ provider: 'policy', detail: { a: 9 } });
+  });
+
+  it('concatenates and de-duplicates an array', () => {
+    const merged = mergeDocuments({ allow: ['a', 'b'] }, { allow: ['b', 'c'] });
+
+    expect(merged['allow']).toEqual(['a', 'b', 'c']);
+  });
+
+  it('replaces fallbackModel rather than concatenating it', () => {
+    const merged = mergeDocuments(
+      { fallbackModel: ['a', 'b'] },
+      { fallbackModel: ['c'] },
+    );
+
+    expect(merged['fallbackModel']).toEqual(['c']);
+  });
+
+  it('replaces modelPicker outright', () => {
+    const merged = mergeDocuments({ modelPicker: { a: 1 } }, { modelPicker: { b: 2 } });
+
+    expect(merged['modelPicker']).toEqual({ b: 2 });
+  });
+
+  it('shallow-merges the two named object keys one level', () => {
+    const merged = mergeDocuments(
+      { managedMcpServers: { alpha: { keep: true }, beta: { keep: true } } },
+      { managedMcpServers: { alpha: { changed: true } } },
+    );
+
+    // One level: `alpha` is replaced whole, and `beta` survives.
+    expect(merged['managedMcpServers']).toEqual({
+      alpha: { changed: true },
+      beta: { keep: true },
+    });
+  });
+
+  it('shallow-merges extraKnownMarketplaces the same way', () => {
+    const merged = mergeDocuments(
+      { extraKnownMarketplaces: { alpha: { keep: true } } },
+      { extraKnownMarketplaces: { beta: { added: true } } },
+    );
+
+    expect(merged['extraKnownMarketplaces']).toEqual({
+      alpha: { keep: true },
+      beta: { added: true },
+    });
+  });
+
+  it('replaces an ordinary object whole, with no exception', () => {
+    const merged = mergeDocuments(
+      { somethingElse: { from: 'low', keep: true } },
+      { somethingElse: { from: 'high' } },
+    );
+
+    expect(merged['somethingElse']).toEqual({ from: 'high' });
+  });
+});
+
+describe('a merged key is won whole by the first source that defines it', () => {
+  // The target's merged-key rule is "the first source that defines the key
+  // wins", and the key is the merged key's own unit. The value is not merged
+  // leaf by leaf with a lower tier's value of the same unit.
+
+  it('gives a unit to the first source in the merged order, whole', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { skills: { alpha: { enabled: false, fromUser: true } } }],
+      ['projectSettings', { skills: { alpha: { enabled: true } } }],
+    ]);
+
+    const merged = mergeMergedSettings(tiers);
+
+    // The project tier comes before the user tier in the merged order, so it
+    // wins `alpha` **whole**: the user tier's `fromUser` does not survive.
+    expect(merged['skills']).toEqual({ alpha: { enabled: true } });
+  });
+
+  it('keeps the units of two different tiers', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { skills: { alpha: { enabled: false } } }],
+      ['projectSettings', { skills: { beta: { enabled: true } } }],
+    ]);
+
+    const merged = mergeMergedSettings(tiers);
+
+    expect(merged['skills']).toEqual({ alpha: { enabled: false }, beta: { enabled: true } });
+  });
 });
 
 describe('settings tier resolution', () => {
@@ -226,6 +329,49 @@ describe('ordinary key resolution', () => {
     expect(effectiveSource(tiers, 'model')).toBe('userSettings');
     // The ordinary path is a separate path and must not be silently identical.
     expect(effectiveOrdinarySource(tiers, 'model')).toBe('localSettings');
+  });
+});
+
+describe('the ordinary key resolves to the merged value', () => {
+  // The target's effective settings are composed per top-level key, and the
+  // value rule decides what the value becomes. So an array two tiers define is
+  // the **concatenation** of both — not the higher tier's alone — while the
+  // source that supplied it is still the higher tier.
+
+  it('concatenates an array two tiers define', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { allow: ['a'] }],
+      ['projectSettings', { allow: ['b'] }],
+    ]);
+
+    const resolved = resolveBlock(tiers as SettingsTierMap, 'allow');
+
+    expect(resolved?.value).toEqual(['a', 'b']);
+    // The **source** is still the higher tier that defines the key.
+    expect(resolved?.source).toBe('projectSettings');
+  });
+
+  it('gives the higher tier an object whole, not key by key', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { thing: { fromUser: true } }],
+      ['projectSettings', { thing: { fromProject: true } }],
+    ]);
+
+    const resolved = resolveBlock(tiers as SettingsTierMap, 'thing');
+
+    expect(resolved?.value).toEqual({ fromProject: true });
+    expect(resolved?.source).toBe('projectSettings');
+  });
+
+  it('shallow-merges the two named object keys one level', () => {
+    const tiers = new Map<SettingsSource, unknown>([
+      ['userSettings', { managedMcpServers: { alpha: { keep: true } } }],
+      ['projectSettings', { managedMcpServers: { beta: { added: true } } }],
+    ]);
+
+    const resolved = resolveBlock(tiers as SettingsTierMap, 'managedMcpServers');
+
+    expect(resolved?.value).toEqual({ alpha: { keep: true }, beta: { added: true } });
   });
 });
 

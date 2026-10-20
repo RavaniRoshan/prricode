@@ -28,14 +28,24 @@ These are **different**, and the difference is the whole model. Inverting either
 
 A third observed literal, the source enumeration order `D_ = ["userSettings", "projectSettings", "localSettings"]`, is the order the tiers are read in and carries the scope map `{ userSettings: "user", projectSettings: "project", localSettings: "local" }`.
 
-A **fourth** composition, `TIER_PRECEDENCE`, is a **implementation choice**, not an observed literal: it is the ordering used for the whole-block rule and is consistent with both observed orderings.
+A **fourth** composition, `TIER_PRECEDENCE`, is the target's own `Ps` order seen from the top: `policySettings`, `flagSettings`, `localSettings`, `projectSettings`, `userSettings`. The target composes its effective settings in the reverse of it — user, project, local, flag, policy, increasing priority — and so does this implementation.
 
 ## Precedence rules
 
 1. **Top-level keys** resolve strictly through `TOP_LEVEL_KEY_ORDER`. The resolver returns the full `[{ source, value }]` list for every source that defines the key; the **first** entry is effective.
 2. **Merged keys** resolve through `MERGED_KEY_ORDER`; the first source defining the key wins.
 3. **Block granularity.** A higher tier's block applies **as a whole** over any lower tier and is never merged key by key. The target's own message states it: "the spellcheck block in `<source>` applies (as a whole, over any lower tier)".
-4. **Ordinary keys.** The per-tier merge for a key that is neither top-level nor a known merged key is **not derived from the target** — the audit records this as an open gap. This implementation composes project/local over user and labels it an underived implementation choice; it is **not** claimed as target-verified.
+4. **Ordinary keys** resolve through the target's **per-top-level-key** rule, and the value is the **merged** value. The rule was closed by source reading and the audit's §2.7 no longer records it as an open gap. The value rule is a table:
+
+   | the key's value | the rule |
+   |---|---|
+   | `modelPicker` | the higher tier **replaces** the value |
+   | an **array** | the two arrays are **concatenated and de-duplicated** |
+   | an array, key `fallbackModel` | the higher tier **replaces** the value |
+   | an object, key `extraKnownMarketplaces` or `managedMcpServers` | a **one-level shallow merge** |
+   | **anything else** | the higher tier **replaces** the value **wholesale** |
+
+   The last row is the load-bearing one: an ordinary object-valued setting is **not** merged key by key, and the higher tier's object wins whole. The source that supplied a key is still the **highest** tier that defines it, which is not the same thing as the value: an array two tiers define is the concatenation of both.derived implementation choice; it is **not** claimed as target-verified.
 
 ## Scope restrictions
 
@@ -78,7 +88,9 @@ The same-file case reports `as_read` rather than `none`, and the distinction is 
 | --- | --- | --- |
 | The two orderings exist, differ, and are not interchangeable | REA observed | F-03 | `tests/contracts/settings-precedence.test.ts` — "settings tier resolution" |
 | A project or local tier never wins a top-level key | REA observed | F-04 | same file |
-| The ordinary-key path is distinct from the top-level path and is labelled an underived implementation choice | implementation choice | F-04 | same file |
+| The ordinary-key path is distinct from the top-level path | REA observed | F-04 | same file |
+| The settings merge is per top-level key, and the value rule is decided per key: arrays concatenate and de-duplicate, two named object keys shallow-merge one level, and everything else is replaced whole | REA observed | F-04 | same file — "the settings merge is per top-level key" |
+| A merged key is won **whole** by the first source in the merged order that defines it | REA observed | F-05 | same file — "a merged key is won whole by the first source that defines it" |
 | A higher tier's block wins whole; the lower tier's block is not consulted | REA observed | F-04 | same file — "settings tier resolution" |
 | `spellcheck` resolves user-only, and a project/local spellcheck block is ignored by every path | REA observed | F-05 | same file — "settings scope separation" |
 | The enumeration order and scope map are pinned | REA observed | F-03 | same file — "settings scope separation" |
