@@ -17,13 +17,22 @@
  *     and `retryable: false` is appended, and the turn returns `aborted` — also
  *     when the abort arrives during a tool;
  *   - the permission integration: `allow` runs the tool, `deny` refuses it and
- *     ends the turn without a tool result, `ask` refuses it rather than
+ *     answers it with a `<tool_use_error>` result, `ask` refuses it rather than
  *     running it, and an unregistered tool is a refusal rather than a crash;
- *   - the re-check of a rewritten input, and that the stricter verdict wins;
- *   - that the dispatch groups agree with the `parallel` flag;
+ *   - the **combination** rule: the tool's own verdict and the session's
+ *     verdict, the one exception the generic prompt makes, and the short
+ *     circuit a tool's own denial is;
+ *   - the re-check of a rewritten input, that the stricter verdict wins, and
+ *     that the session's service is consulted with the **rewritten** input;
+ *   - that the transcript is **well formed** after a refusal and after an
+ *     interruption: no empty message, no unanswered tool call;
+ *   - that the groups agree with the `parallel` flag;
  *   - that a second turn reuses the session handle and appends to the same
  *     transcript;
- *   - the mapping of the provider's stop reasons onto the runtime's five.
+ *   - the mapping of the provider's stop reasons onto the runtime's five;
+ *   - the two numeric implementation choices: the output-token budget and the round cap;
+ *   - the `approveAsk` seam: an ask it resolves runs the call, and an ask it
+ *     does not resolve refuses it.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -35,15 +44,20 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createAgentRuntime,
   ABORTED_MESSAGE,
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_MAX_TURNS,
+  sessionKeyOf,
   type AgentRuntime,
   type TurnInput,
   type TurnResult,
 } from '../../src/agent/loop.js';
+import { TURN_SOURCE } from '../../src/agent/context.js';
 import { groupToolCalls, toolCallsFrom, type ToolCall } from '../../src/agent/dispatch.js';
-import type { PermissionDecision } from '../../src/permissions/decision.js';
+import type { PermissionDecision, ToolContext } from '../../src/permissions/decision.js';
 import type {
   ProviderDriver,
   ProviderEvent,
+  ProviderMessage,
   ProviderRequest,
   StopReason,
 } from '../../src/provider/drivers/types.js';
@@ -108,6 +122,8 @@ interface FakeRound {
 
 /** A fake driver that also carries the transport. */
 interface FakeDriver extends ProviderDriver {
+  /** The marker that declares the driver the turn's transport. */
+  readonly [TURN_SOURCE]: true;
   /** The transport seam: the driver sends the request. */
   send(request: ProviderRequest, signal?: AbortSignal): AsyncIterable<ProviderEvent>;
   /** The requests the driver was given. */
@@ -117,17 +133,19 @@ interface FakeDriver extends ProviderDriver {
 function fakeDriver(
   rounds: FakeRound[],
   onRequest?: (request: ProviderRequest, index: number) => void,
+  repeatLastRound = false,
 ): FakeDriver {
   const requests: ProviderRequest[] = [];
 
   return {
     route: 'firstParty',
     requests,
+    [TURN_SOURCE]: true,
     async *send(request: ProviderRequest): AsyncIterable<ProviderEvent> {
       const index = requests.length;
       requests.push(request);
       onRequest?.(request, index);
-      const round = rounds[index];
+      const round = rounds[index] ?? (repeatLastRound ? rounds[rounds.length - 1] : undefined);
       if (round === undefined) return;
       if (round.wait !== undefined) await round.wait;
       for (const event of round.events) yield event;
@@ -138,6 +156,45 @@ function fakeDriver(
     parseStream: () => ({ events: [], state: {} }),
     parseNonStreaming: () => ({ events: [] }),
     classifyError: (status: number) => ({ message: `HTTP ${status}`, retryable: false }),
+    calculateNonstreamingTimeout: () => 1_000,
+    betaFlagsFor: (flags: string[]) => flags,
+  };
+}
+
+/**
+ * A driver that carries a `send` member but does **not** declare itself the
+ * turn's transport.
+ */
+function unmarkedDriver(): ProviderDriver & { send: () => Promise<unknown> } {
+  return {
+    route: 'firstParty',
+    send: async () => ({ ok: true }),
+    buildUrl: () => 'https://api.anthropic.com/v1/messages',
+    buildHeaders: () => ({}),
+    buildBody: () => ({ body: {}, headers: {} }),
+    parseStream: () => ({ events: [], state: {} }),
+    parseNonStreaming: () => ({ events: [] }),
+    classifyError: () => ({ message: 'HTTP 500', retryable: false }),
+    calculateNonstreamingTimeout: () => 1_000,
+    betaFlagsFor: (flags: string[]) => flags,
+  };
+}
+
+/**
+ * A driver that declares itself the turn's transport but whose `send` returns
+ * a promise rather than a stream of events.
+ */
+function promisingDriver(): ProviderDriver & { [TURN_SOURCE]: true; send: () => Promise<unknown> } {
+  return {
+    route: 'firstParty',
+    [TURN_SOURCE]: true,
+    send: async () => ({ ok: true }),
+    buildUrl: () => 'https://api.anthropic.com/v1/messages',
+    buildHeaders: () => ({}),
+    buildBody: () => ({ body: {}, headers: {} }),
+    parseStream: () => ({ events: [], state: {} }),
+    parseNonStreaming: () => ({ events: [] }),
+    classifyError: () => ({ message: 'HTTP 500', retryable: false }),
     calculateNonstreamingTimeout: () => 1_000,
     betaFlagsFor: (flags: string[]) => flags,
   };
@@ -230,20 +287,32 @@ function harness(options: {
   rounds: FakeRound[];
   tools?: ToolDefinition[];
   permission?: PermissionChecker;
+  approveAsk?: (
+    ctx: ToolContext,
+    decision: PermissionDecision,
+  ) => Promise<PermissionDecision | undefined>;
+  maxTokens?: number;
+  maxTurns?: number;
+  repeatLastRound?: boolean;
+  now?: () => number;
   onRequest?: (request: ProviderRequest, index: number) => void;
 }): Harness {
   const store = new RecordingStore(createSessionStore({ configDir: makeRoot() }));
   const registry = createToolRegistry();
   for (const tool of options.tools ?? []) registry.register(tool);
 
-  const driver = fakeDriver(options.rounds, options.onRequest);
+  const driver = fakeDriver(options.rounds, options.onRequest, options.repeatLastRound ?? false);
 
   const runtime = createAgentRuntime({
     driver,
     registry,
     store,
     permission: options.permission ?? allowAll,
+    approveAsk: options.approveAsk,
     cwd: CWD,
+    maxTokens: options.maxTokens,
+    maxTurns: options.maxTurns,
+    now: options.now,
   });
 
   return { runtime, store, driver };
@@ -291,6 +360,48 @@ function promptOccurrences(request: ProviderRequest, text: string): number {
     }
   }
   return count;
+}
+
+/**
+ * The ways a request is **not** well formed.
+ *
+ * A request is well formed when no message is empty, when two user messages do
+ * not follow each other, and when every `tool_use` has a `tool_result` that
+ * answers it.
+ */
+function malformed(request: ProviderRequest): string[] {
+  const problems: string[] = [];
+  const toolUses: string[] = [];
+  const toolResults: string[] = [];
+  let previous: ProviderMessage['role'] | undefined;
+
+  for (const message of request.messages) {
+    const content = message.content;
+    if (typeof content === 'string') {
+      if (content === '') problems.push('an empty message');
+    } else {
+      if (content.length === 0) problems.push('an empty message');
+      for (const block of content) {
+        if (block.type === 'tool_use') toolUses.push(block.id);
+        if (block.type === 'tool_result') toolResults.push(block.tool_use_id);
+      }
+    }
+    if (previous === 'user' && message.role === 'user') {
+      problems.push('two user messages in a row');
+    }
+    previous = message.role;
+  }
+
+  for (const id of toolUses) {
+    if (!toolResults.includes(id)) problems.push(`the tool use '${id}' is unanswered`);
+  }
+
+  return problems;
+}
+
+/** The tool-result records of a turn. */
+function toolResultRecords(events: SessionEvent[]): SessionEvent[] {
+  return events.filter((event) => event.t === 'tool_result');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -464,7 +575,7 @@ describe('the agent runtime', () => {
     expect(store.appended.some((event) => event.t === 'tool_result')).toBe(false);
   });
 
-  it('a denied call is refused, recorded, and ends the turn without a tool result', async () => {
+  it('a denied call is refused, answered with a tool_use_error, and ends the turn', async () => {
     const executed: string[] = [];
     const { runtime, store, driver } = harness({
       rounds: [{ events: toolTurn('toolu_01', 'Echo', {}) }],
@@ -480,10 +591,29 @@ describe('the agent runtime', () => {
     // The denial is recorded.
     const request = result.events.find((event) => event.t === 'permission_request');
     expect(request?.t === 'permission_request' ? request.decision?.behavior : '').toBe('deny');
+    // The transcript reads tool_call → permission_request → tool_result.
+    const order = result.events
+      .filter(
+        (event) =>
+          event.t === 'tool_call' || event.t === 'permission_request' || event.t === 'tool_result',
+      )
+      .map((event) => event.t);
+    expect(order).toEqual(['tool_call', 'permission_request', 'tool_result']);
 
-    // No tool result is recorded and no second request is issued: nothing is
-    // sent back to the provider as if the tool had run.
-    expect(store.appended.some((event) => event.t === 'tool_result')).toBe(false);
+    // The result is a real answer: the `<tool_use_error>` wrapper the target
+    // produces, carrying the decision and its reason type.
+    const record = result.events.find((event) => event.t === 'tool_result');
+    const envelope = record?.t === 'tool_result' ? record.envelope : undefined;
+    expect(envelope?.isError).toBe(true);
+    expect(envelope?.content).toBe(
+      "<tool_use_error>The rule denies this call. The permission decision was 'deny' (source: unknown, reason type: other). Ask the user to approve the call, or change the permission rules.</tool_use_error>",
+    );
+    expect(envelope?.permissionDecision?.decision).toBe('deny');
+    expect(envelope?.permissionDecision?.source).toBe('unknown');
+    expect(envelope?.permissionDecision?.reasonType).toBe('other');
+    expect(envelope?.nonExecutionKind).toBe('permission_denied');
+
+    // The refusal ends the turn: no second request is issued in this turn.
     expect(driver.requests).toHaveLength(1);
   });
 
@@ -502,7 +632,15 @@ describe('the agent runtime', () => {
 
     const request = result.events.find((event) => event.t === 'permission_request');
     expect(request?.t === 'permission_request' ? request.decision?.behavior : '').toBe('ask');
-    expect(store.appended.some((event) => event.t === 'tool_result')).toBe(false);
+
+    // The refusal is answered: the call that did not run produces the error
+    // result the target produces.
+    const record = result.events.find((event) => event.t === 'tool_result');
+    expect(record?.t === 'tool_result' ? record.envelope.isError : false).toBe(true);
+    expect(record?.t === 'tool_result' ? record.envelope.content : '').toContain('<tool_use_error>');
+    expect(record?.t === 'tool_result' ? record.envelope.nonExecutionKind : '').toBe(
+      'permission_unresolved',
+    );
   });
 
   it('an unregistered tool is a refusal, not a crash', async () => {
@@ -524,6 +662,451 @@ describe('the agent runtime', () => {
     const result = await runtime.runTurn(input);
 
     expect(result.stopReason).toBe('tool_use');
+  });
+
+  it('an unregistered tool is answered with a tool result and no permission request', async () => {
+    const { runtime, store } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Missing', {}) }],
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // No permission was ever asked for the call, so there is no permission
+    // request: the record kind is the tool result, and only that.
+    expect(store.appended.some((event) => event.t === 'permission_request')).toBe(false);
+
+    // The call is answered with the error result the target produces.
+    const record = result.events.find((event) => event.t === 'tool_result');
+    expect(record?.t === 'tool_result' ? record.envelope.isError : false).toBe(true);
+    expect(record?.t === 'tool_result' ? record.envelope.content : '').toContain('<tool_use_error>');
+    expect(record?.t === 'tool_result' ? record.envelope.nonExecutionKind : '').toBe('unknown_tool');
+  });
+
+  it('the permission request is recorded before the tool runs', async () => {
+    let clock = 0;
+    let executedAt = 0;
+    const { runtime } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', {}) }],
+      tools: [
+        fakeTool({
+          name: 'Echo',
+          onExecute: () => {
+            clock += 1;
+            executedAt = clock;
+          },
+        }),
+      ],
+      now: () => {
+        clock += 1;
+        return clock;
+      },
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // The chronology of a call is the check, the execution and the result: the
+    // decision is recorded when it is made, not after the tool has run.
+    const record = result.events.find((event) => event.t === 'permission_request');
+    expect(record?.t === 'permission_request' ? record.ts : 0).toBeLessThan(executedAt);
+  });
+
+  it('a denied turn leaves the next request well formed', async () => {
+    const { runtime, driver } = harness({
+      rounds: [
+        { events: toolTurn('toolu_01', 'Echo', {}) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo' })],
+      permission: denyAll,
+    });
+
+    const first = await runtime.runTurn(input);
+    expect(first.stopReason).toBe('tool_use');
+
+    const second = await runtime.runTurn({ ...input, prompt: 'again' });
+    expect(second.stopReason).toBe('end_turn');
+
+    // The second turn's request is well formed: no empty assistant message, no
+    // unanswered tool call, and no two user messages in a row.
+    const request = driver.requests[1]!;
+    expect(malformed(request)).toEqual([]);
+
+    // The denied call is answered, so the model observes the decision.
+    expect(toolResultBlocks(request)).toHaveLength(1);
+    const assistant = request.messages.filter((message) => message.role === 'assistant');
+    expect(assistant).toHaveLength(1);
+  });
+
+  it('an interrupted turn never leaves an empty assistant message', async () => {
+    const controller = new AbortController();
+    const { runtime, driver } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Slow', {}) }],
+      tools: [
+        fakeTool({
+          name: 'Slow',
+          wait: new Promise<void>((resolve) => setTimeout(resolve, 40)),
+          onExecute: () => {
+            controller.abort();
+          },
+        }),
+      ],
+    });
+
+    const first = await runtime.runTurn(input, controller.signal);
+    expect(first.stopReason).toBe('aborted');
+
+    const second = await runtime.runTurn({ ...input, prompt: 'again' });
+    expect(second.stopReason).toBe('end_turn');
+
+    // The interrupted call left no result, so its `tool_use` block is dropped —
+    // and the assistant message it was in is dropped with it: the request never
+    // carries an empty message.
+    const request = driver.requests[1]!;
+    expect(malformed(request)).toEqual([]);
+    expect(request.messages.every((message) => message.role !== 'assistant')).toBe(true);
+
+    // The third turn's transcript holds the interrupted call **between** the two
+    // prompts, so the projection drops the empty assistant message and merges
+    // the two user messages that were left.
+    const third = await runtime.runTurn({ ...input, prompt: 'once more' });
+    expect(third.stopReason).toBe('end_turn');
+    expect(malformed(driver.requests[2]!)).toEqual([]);
+  });
+
+  it('a refused call with a max_tokens stop is reported as max_tokens', async () => {
+    const { runtime } = harness({
+      rounds: [
+        {
+          events: [
+            { type: 'message_start', messageId: 'msg_01', model: 'test-model' },
+            { type: 'tool_use', id: 'toolu_01', name: 'Echo', input: {} },
+            { type: 'message_stop', stopReason: 'max_tokens' },
+          ],
+        },
+      ],
+      tools: [fakeTool({ name: 'Echo' })],
+      permission: denyAll,
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // The refusal does not report the turn as `tool_use`: the provider's own
+    // stop reason governs, and it is preserved.
+    expect(result.stopReason).toBe('max_tokens');
+    expect(result.providerStopReason).toBe('max_tokens');
+  });
+
+  it("a tool's allow overrides the service's generic no-rule-match ask", async () => {
+    const executed: string[] = [];
+    const { runtime } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', {}) }, { events: finalTurn('done') }],
+      tools: [
+        fakeTool({
+          name: 'Echo',
+          decision: { behavior: 'allow', source: 'hook', reasonType: 'other' },
+          onExecute: () => executed.push('Echo'),
+        }),
+      ],
+      permission: async () => ({
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reasonKind: 'noRuleMatch',
+        reason: 'No permission rule matched.',
+      }),
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // The generic prompt carries no rule, so it does not override the tool's
+    // own allow: the call runs.
+    expect(executed).toEqual(['Echo']);
+    expect(result.stopReason).toBe('end_turn');
+  });
+
+  it("a tool's allow does not override an ask rule", async () => {
+    const executed: string[] = [];
+    const { runtime } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', {}) }],
+      tools: [
+        fakeTool({
+          name: 'Echo',
+          decision: { behavior: 'allow', source: 'hook', reasonType: 'other' },
+          onExecute: () => executed.push('Echo'),
+        }),
+      ],
+      permission: async () => ({
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'rule',
+        reasonKind: 'rule',
+        reason: 'A permission rule requires approval.',
+      }),
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // Every other ask restricts the call, so the call is refused.
+    expect(executed).toEqual([]);
+    expect(result.stopReason).toBe('tool_use');
+  });
+
+  it("a tool's own denial short-circuits the session service", async () => {
+    const consulted: unknown[] = [];
+    const { runtime } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', {}) }],
+      tools: [
+        fakeTool({
+          name: 'Echo',
+          decision: {
+            behavior: 'deny',
+            source: 'hook',
+            reasonType: 'other',
+            reason: 'The tool refuses this call.',
+          },
+        }),
+      ],
+      permission: async (ctx) => {
+        consulted.push(ctx);
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // The session's service is not consulted for a call the tool already
+    // refused.
+    expect(consulted).toHaveLength(0);
+    expect(result.stopReason).toBe('tool_use');
+  });
+
+  it('the re-check consults the session service with the rewritten input', async () => {
+    const executed: string[] = [];
+    const seen: unknown[] = [];
+    const { runtime } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', { value: 'original' }) }],
+      tools: [
+        fakeTool({
+          name: 'Echo',
+          decision: {
+            behavior: 'allow',
+            source: 'hook',
+            reasonType: 'other',
+            updatedInput: { value: 'rewritten' },
+          },
+          recheck: { behavior: 'allow', source: 'unknown', reasonType: 'other' },
+          onExecute: () => executed.push('Echo'),
+        }),
+      ],
+      permission: async (ctx) => {
+        seen.push(ctx.input);
+        if (seen.length === 2) {
+          return {
+            behavior: 'deny',
+            source: 'unknown',
+            reasonType: 'other',
+            reason: 'The rewritten input is not allowed.',
+          };
+        }
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // The service was consulted twice: with the original input, and with the
+    // **effective** (rewritten) one.
+    expect(seen).toEqual([{ value: 'original' }, { value: 'rewritten' }]);
+    // The re-check's denial governs: the call did not run.
+    expect(executed).toEqual([]);
+    expect(result.stopReason).toBe('tool_use');
+  });
+
+  it('the re-check may not widen an ask into an allow', async () => {
+    const executed: string[] = [];
+    const { runtime } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', { value: 'original' }) }],
+      tools: [
+        fakeTool({
+          name: 'Echo',
+          decision: {
+            behavior: 'ask',
+            source: 'hook',
+            reasonType: 'other',
+            reason: 'This call needs approval.',
+            updatedInput: { value: 'rewritten' },
+          },
+          recheck: { behavior: 'allow', source: 'unknown', reasonType: 'other' },
+          onExecute: () => executed.push('Echo'),
+        }),
+      ],
+      permission: async () => ({ behavior: 'allow', source: 'unknown', reasonType: 'other' }),
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // The ask of the first check stands: the re-check may only restrict.
+    expect(executed).toEqual([]);
+    expect(result.stopReason).toBe('tool_use');
+  });
+
+  it('an ask that approveAsk resolves runs the call', async () => {
+    const executed: string[] = [];
+    const { runtime } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', {}) }, { events: finalTurn('done') }],
+      tools: [fakeTool({ name: 'Echo', onExecute: () => executed.push('Echo') })],
+      permission: askAll,
+      approveAsk: async () => ({
+        behavior: 'allow',
+        source: 'user_temporary',
+        reasonType: 'other',
+      }),
+    });
+
+    const result = await runtime.runTurn(input);
+
+    expect(executed).toEqual(['Echo']);
+    expect(result.stopReason).toBe('end_turn');
+    const record = result.events.find((event) => event.t === 'tool_result');
+    expect(record?.t === 'tool_result' ? record.envelope.isError : true).toBe(false);
+  });
+
+  it('an ask that approveAsk does not resolve refuses the call', async () => {
+    const executed: string[] = [];
+    const { runtime } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', {}) }],
+      tools: [fakeTool({ name: 'Echo', onExecute: () => executed.push('Echo') })],
+      permission: askAll,
+      approveAsk: async () => undefined,
+    });
+
+    const result = await runtime.runTurn(input);
+
+    expect(executed).toEqual([]);
+    expect(result.stopReason).toBe('tool_use');
+    const record = result.events.find((event) => event.t === 'tool_result');
+    expect(record?.t === 'tool_result' ? record.envelope.isError : false).toBe(true);
+    expect(record?.t === 'tool_result' ? record.envelope.content : '').toContain('<tool_use_error>');
+  });
+
+  it('a session that cannot be opened names the store reason', async () => {
+    const { runtime } = harness({ rounds: [] });
+
+    const result = await runtime.runTurn({ prompt: 'p', sessionId: 'bad id!', model: 'm' });
+
+    // The failure is not an unexplained `error`: the store's own reason is
+    // named.
+    expect(result.stopReason).toBe('error');
+    expect(result.message).toBeDefined();
+    expect(result.message).toContain('bad id!');
+    expect(result.message).toContain('not usable as a file name');
+  });
+
+  it('the request asks for the default output-token budget', async () => {
+    const { runtime, driver } = harness({
+      rounds: [{ events: finalTurn('done') }],
+    });
+
+    await runtime.runTurn(input);
+
+    expect(DEFAULT_MAX_TOKENS).toBe(4096);
+    expect(driver.requests[0]?.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+  });
+
+  it('the caller may name the output-token budget', async () => {
+    const { runtime, driver } = harness({
+      rounds: [{ events: finalTurn('done') }],
+      maxTokens: 512,
+    });
+
+    await runtime.runTurn(input);
+
+    expect(driver.requests[0]?.maxTokens).toBe(512);
+  });
+
+  it('the round cap ends the turn with an error', async () => {
+    const { runtime, driver } = harness({
+      rounds: [{ events: toolTurn('toolu_01', 'Echo', {}) }],
+      repeatLastRound: true,
+      tools: [fakeTool({ name: 'Echo' })],
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // The turn ran the cap's worth of rounds and gave up.
+    expect(DEFAULT_MAX_TURNS).toBe(32);
+    expect(driver.requests).toHaveLength(DEFAULT_MAX_TURNS);
+    expect(result.stopReason).toBe('error');
+
+    // The reason is in the transcript, and in the result.
+    const last = result.events[result.events.length - 1];
+    expect(last?.t === 'provider_event' ? last.event : undefined).toEqual({
+      type: 'error',
+      message: expect.stringContaining(String(DEFAULT_MAX_TURNS)),
+      retryable: false,
+    });
+    expect(result.message).toContain(String(DEFAULT_MAX_TURNS));
+  });
+
+  it('an empty tool-use id is minted once and used everywhere', async () => {
+    const { runtime, driver } = harness({
+      rounds: [{ events: toolTurn('', 'Echo', {}) }, { events: finalTurn('done') }],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+    });
+
+    const result = await runtime.runTurn(input);
+
+    const call = result.events.find((event) => event.t === 'tool_call');
+    const callId = call?.t === 'tool_call' ? call.id : '';
+    expect(callId).not.toBe('');
+
+    // The record, the envelope and the request all carry the minted id, so the
+    // call and its answer pair up.
+    const record = result.events.find((event) => event.t === 'tool_result');
+    expect(record?.t === 'tool_result' ? record.envelope.toolUseId : '').toBe(callId);
+    expect(toolResultBlocks(driver.requests[1]!)[0]?.toolUseId).toBe(callId);
+    expect(malformed(driver.requests[1]!)).toEqual([]);
+  });
+
+  it('the session key is injective for arbitrary session ids', () => {
+    expect(sessionKeyOf('/a', 'b\0c')).not.toBe(sessionKeyOf('/a\0b', 'c'));
+    expect(sessionKeyOf('/a', 'b')).toBe(sessionKeyOf('/a', 'b'));
+  });
+
+  it('a driver that does not declare itself a turn source is not adopted', async () => {
+    const store = new RecordingStore(createSessionStore({ configDir: makeRoot() }));
+    const registry = createToolRegistry();
+    const runtime = createAgentRuntime({
+      driver: unmarkedDriver(),
+      registry,
+      store,
+      permission: allowAll,
+      cwd: CWD,
+    });
+
+    const result = await runtime.runTurn(input);
+
+    expect(result.stopReason).toBe('error');
+    expect(result.message).toContain('carries no turn source');
+  });
+
+  it("a driver's send member must return an async iterable", async () => {
+    const store = new RecordingStore(createSessionStore({ configDir: makeRoot() }));
+    const registry = createToolRegistry();
+    const runtime = createAgentRuntime({
+      driver: promisingDriver(),
+      registry,
+      store,
+      permission: allowAll,
+      cwd: CWD,
+    });
+
+    const result = await runtime.runTurn(input);
+
+    // The failure is named, not the runtime's "…is not iterable".
+    expect(result.stopReason).toBe('error');
+    expect(result.message).toContain('must return an async iterable of provider events');
+    expect(result.message).toContain('a promise');
   });
 
   it('a rewritten input is re-checked in full, and the stricter verdict wins', async () => {
@@ -596,6 +1179,7 @@ describe('the agent runtime', () => {
     const cases: { provider: StopReason; expected: TurnResult['stopReason'] }[] = [
       { provider: 'end_turn', expected: 'end_turn' },
       { provider: 'max_tokens', expected: 'max_tokens' },
+      { provider: 'tool_use', expected: 'tool_use' },
       { provider: 'stop_sequence', expected: 'end_turn' },
       { provider: 'refusal', expected: 'end_turn' },
     ];

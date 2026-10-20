@@ -45,16 +45,18 @@
  * honoured:
  *
  *   - `allow` — the tool runs.
- *   - `deny` — the tool does **not** run. The turn ends with the refusal
- *     recorded, and **no** tool result is sent back to the provider as if the
- *     tool had run.
+ *   - `deny` — the tool does **not** run. The refusal is **answered**: the
+ *     call produces a `<tool_use_error>` tool result that carries the decision
+ *     and its reason type, and the turn ends with the refusal recorded.
  *   - `ask` — the runtime **cannot prompt**: there is no user interface in this
  *     milestone, so the call is **refused** rather than run, and the refusal is
- *     recorded. The CLI and UI tasks (`CC-014`, `CC-015`) supply the prompt
- *     through the `approveAsk` dependency, and the permission service's own
- *     `canUseTool` prompt is the second seam.
+ *     answered the same way. The CLI and UI tasks (`CC-014`, `CC-015`) supply
+ *     the prompt through the `approveAsk` dependency, and the permission
+ *     service's own `canUseTool` prompt is the second seam.
  *
- * A tool name that is **not registered** is a refusal, not a crash.
+ * A tool name that is **not registered** is a refusal, not a crash — and it is
+ * answered with the same error result. It produces **no** `permission_request`
+ * record: no permission was ever asked for it.
  *
  * **Two checks are consulted, and the stricter verdict governs.** The tool's
  * own check (`ToolDefinition.checkPermissions`) and the session's permission
@@ -68,13 +70,25 @@
  *     mode-level refusal, a safety check — restricts the call;
  *   - two `allow`s are the tool's own.
  *
- * For this implementation's built-in tools the two checks are the *same* check — the tool
- * holds the session's rules and mode, and the prompt — so the session's
- * `PermissionRequest` hook is invoked twice per call. The duplication cannot
- * widen a decision (the stricter verdict governs and a rewrite is re-checked),
- * but a caller that wants the hook to fire **once** binds the runtime's
- * `permission` service to a hook-free variant and lets the tool's own check
- * carry the hook and the prompt.
+ * **The two checks are two checks, not one check run twice.** By default the
+ * runtime's service runs with the runtime's own options — an empty rule set in
+ * the `default` mode, and **no hook** — while the built-in tools carry the
+ * session's rules, the session's mode and the session's `PermissionRequest`
+ * hook. The service's default verdict is therefore the *generic* "no rule
+ * matched" prompt, and the `PermissionRequest` hook of `permissionOptions()`
+ * fires **once** per call — in the runtime's own service call. A caller that
+ * binds the same hook and the same rules to both sees the hook twice, but that
+ * is the caller's doing: the two runs are two different checks, and the
+ * duplication cannot widen a decision (the stricter verdict governs, and a
+ * rewrite is re-checked).
+ *
+ * ## The session key
+ *
+ * The runtime keeps one handle per session, and the key is **injective** for
+ * the pair it names. The working directory and the session id are both
+ * caller-supplied, so the key is `JSON.stringify([cwd, sessionId])`: a
+ * separator character inside either of them cannot make two different pairs
+ * share one transcript.
  *
  * ## A rewrite is re-checked in full
  *
@@ -111,7 +125,7 @@
  * |---|---|---|
  * | `end_turn` | `end_turn` | the provider finished with no tool call |
  * | `max_tokens` | `max_tokens` | the provider's output was truncated |
- * | `tool_use` | `tool_use` | the turn ended with a pending call — a denial or a refusal, so no result was produced |
+ * | `tool_use` | `tool_use` | the provider ended its turn with a pending call |
  * | `stop_sequence` | `end_turn` | **implementation choice**: the turn finished with no pending tool call, and `end_turn` is the union's member for that |
  * | `refusal` | `end_turn` | **implementation choice**: the same — a refusal is a completed turn, not a failure of the runtime |
  *
@@ -119,6 +133,11 @@
  * `TurnResult.providerStopReason`, so a `stop_sequence` and a `refusal` remain
  * distinguishable to a caller even though the runtime's five-member union
  * cannot express them.
+ *
+ * **A refusal has no stop reason of its own.** A refused call is answered with
+ * a tool result, and the turn's stop reason is the mapped reason of the round
+ * that ended it — so a provider that stopped with `max_tokens` and was refused
+ * a call is reported as `max_tokens`, not as `tool_use`.
  *
  * ## What the runtime records
  *
@@ -128,13 +147,28 @@
  * `permission_request`; and every tool result that reached the provider becomes
  * a `tool_result`.
  *
- * **A refused call produces no `tool_result` record.** The result was never
- * sent to the provider, so recording one would claim a conversation that did
- * not happen — and the transcript is replayed to the model when the session is
- * resumed. The refusal is in the transcript as the `permission_request`
- * record. (This is a **divergence from the target**, which answers a denied
- * call with a `<tool_use_error>` tool result; this implementation ends the turn instead,
- * and the header says so rather than claiming the target does.)
+ * **A refused call is answered with a `tool_result` record.** The answer is the
+ * `<tool_use_error>` wrapper the target produces. The audit states that a call
+ * which is "refused by an isolation latch", "refused by a permission rule" or
+ * "routed elsewhere" produces "a `tool_result` whose content is a
+ * `<tool_use_error>…</tool_use_error>` wrapper with `is_error: true`" (§2.4),
+ * and that "permission decisions are threaded back to the model through the tool
+ * result, so the model observes the decision and its reason type" (§2.4). The
+ * implementation answers the same way: the runner's envelope already carries the
+ * decision, the reason type, the remedy and the user's own feedback, and the
+ * runtime wraps its content in the `<tool_use_error>` wrapper.
+ *
+ * The transcript therefore reads **`tool_call` → `permission_request` →
+ * `tool_result`**, and the `tool_result` is a real answer. The
+ * `permission_request` record is written **when the decision is made** — before
+ * the tool runs — and it is written only when a permission was actually asked:
+ * a call to a tool the registry does not hold is a `tool_result` and nothing
+ * else.
+ *
+ * **Implementation choice**: this implementation ends the turn after a refusal. The audit pins the
+ * *answer* — a `<tool_use_error>` tool result — and not whether the turn
+ * continues, so the answer is carried in the transcript and reaches the model
+ * in the session's next request.
  *
  * ## Implementation choices
  *
@@ -144,10 +178,13 @@
  *   - the **number of tool rounds** a turn may run before the runtime gives up;
  *   - the way a tool result's content is carried into the request (a string as
  *     it is, anything else as its JSON serialization);
+ *   - the **wording** of the `<tool_use_error>` wrapper's parts — the audit
+ *     pins the wrapper, not what is written inside it;
  *   - the fact that a call whose **input validation** failed is reported back
  *     to the provider as an error result (the audit records the target's
- *     `<tool_use_error>` for a validation failure), while a call that was
- *     **refused** ends the turn.
+ *     `<tool_use_error>` for a validation failure, and the tool runner owns the
+ *     content of that result), while a call that was **refused** is answered
+ *     with a `<tool_use_error>` wrapper of its own.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -222,6 +259,15 @@ export interface TurnResult {
    * keeps them apart.
    */
   providerStopReason?: StopReason;
+  /**
+   * Why the turn stopped, in words.
+   *
+   * It is **optional**: a turn that stopped well has nothing to explain. A turn
+   * that failed names its cause — the store's reason, the provider's error, the
+   * tool's failure — so a caller that reads only the result can tell a session
+   * that could not be opened from a provider that failed.
+   */
+  message?: string;
 }
 
 /** The agent runtime. */
@@ -240,8 +286,9 @@ export interface AgentRuntimeDeps {
    * The provider driver.
    *
    * The driver builds the request — its URL, its headers, its body — and a
-   * driver that carries a `send` member is also the turn **source**. A caller
-   * that keeps the transport elsewhere supplies a `source` instead.
+   * driver that declares itself the turn's transport (it carries the
+   * `TURN_SOURCE` marker) is also the turn **source**. A caller that keeps the
+   * transport elsewhere supplies a `source` instead.
    */
   driver: ProviderDriver;
   /** The tools the model may call. */
@@ -255,7 +302,7 @@ export interface AgentRuntimeDeps {
    * the tool's own verdict governs the call.
    */
   permission: PermissionChecker;
-  /** The transport, when the driver does not carry one. */
+  /** The transport, when the driver does not declare itself one. */
   source?: ProviderTurnSource;
   /**
    * The options the permission service is called with.
@@ -312,6 +359,19 @@ export const DEFAULT_MAX_TURNS = 32;
  */
 export const ABORTED_MESSAGE = 'The turn was aborted before it finished.';
 
+/**
+ * The key a session's handle is kept under.
+ *
+ * The working directory and the session id are both **caller-supplied** data,
+ * so the key is the JSON encoding of the pair: a separator character inside
+ * either of them cannot make two different pairs share one transcript. The key
+ * is a `Map` key, and the map is the only lookup — it is never an index into
+ * an object, so none of the `Object.prototype` hazards apply.
+ */
+export function sessionKeyOf(cwd: string, sessionId: string): string {
+  return JSON.stringify([cwd, sessionId]);
+}
+
 /* -------------------------------------------------------------------------- */
 /* The runtime                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -334,18 +394,8 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
   /** The handles of the sessions this runtime has opened. */
   const handles = new Map<string, SessionHandle>();
 
-  /**
-   * The key a session's handle is kept under.
-   *
-   * The session id is **caller-supplied** data, so it is never a bare index
-   * into an object: the key is a `Map` key, and the map is the only lookup.
-   */
-  function sessionKey(sessionId: string): string {
-    return `${cwd}\u0000${sessionId}`;
-  }
-
   async function handleFor(sessionId: string): Promise<SessionHandle> {
-    const key = sessionKey(sessionId);
+    const key = sessionKeyOf(cwd, sessionId);
     const existing = handles.get(key);
     if (existing !== undefined) return existing;
     const handle = await deps.store.create({ cwd, sessionId });
@@ -370,9 +420,14 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     let handle: SessionHandle;
     try {
       handle = await handleFor(input.sessionId);
-    } catch {
-      // The session could not be opened: there is nowhere to record the turn.
-      return { events, stopReason: 'error' };
+    } catch (error) {
+      // The session could not be opened: there is nowhere to record the turn,
+      // so the turn reports the store's own reason instead of a bare `error`.
+      return {
+        events,
+        stopReason: 'error',
+        message: `The session '${input.sessionId}' could not be opened: ${messageOf(error)}`,
+      };
     }
 
     const append = async (event: SessionEvent): Promise<void> => {
@@ -387,7 +442,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         t: 'provider_event',
         event: { type: 'error', message: ABORTED_MESSAGE, retryable: false },
       });
-      return { events, stopReason: 'aborted' };
+      return { events, stopReason: 'aborted', message: ABORTED_MESSAGE };
     };
 
     /** The turn failed. */
@@ -397,7 +452,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         t: 'provider_event',
         event: { type: 'error', message, retryable: false },
       });
-      return { events, stopReason: 'error' };
+      return { events, stopReason: 'error', message };
     };
 
     /**
@@ -414,6 +469,22 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         // The transcript could not take the record. The turn still reports why
         // it stopped.
       }
+    };
+
+    /**
+     * Record the decision a call was governed by.
+     *
+     * The record is written **when the decision is made**, which is before the
+     * tool runs: the chronology of a call is the check, the execution and the
+     * result, and the decision belongs to the check. A call that was never
+     * checked — a tool the registry does not hold — produces no record at all,
+     * because no permission was ever asked for it.
+     */
+    const recordDecision = async (
+      toolName: string,
+      decision: PermissionDecision,
+    ): Promise<void> => {
+      await appendSafely({ ...base(), t: 'permission_request', toolName, decision });
     };
 
     try {
@@ -440,7 +511,9 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 
         const collected = await collect(request, signal, append);
         if (collected.kind === 'aborted') return aborted();
-        if (collected.kind === 'error') return failed(collected.message ?? 'The provider request failed.');
+        if (collected.kind === 'error') {
+          return failed(collected.message ?? `The provider request for '${input.model}' failed.`);
+        }
 
         const summary = summarise(collected.events);
 
@@ -450,6 +523,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
             events,
             stopReason: 'error',
             providerStopReason: summary.stopReason,
+            message: summary.error.message,
           };
         }
 
@@ -466,10 +540,18 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           };
         }
 
+        // The tool calls of this assistant message. A provider that sends an
+        // **empty** tool-use id gets one minted here, so the id the record, the
+        // context, the envelope, the answer and the request all carry is the
+        // same one — the call and its answer pair up.
+        const calls = summary.calls.map((call) =>
+          call.id !== '' ? call : { ...call, id: idFactory() },
+        );
+
         // The tool calls of this assistant message. **Implementation choice**: they run
         // in the order they appear — see the module header.
-        const plan = groupToolCalls(summary.calls);
-        const order = callsInPlan(summary.calls, plan);
+        const plan = groupToolCalls(calls);
+        const order = callsInPlan(calls, plan);
         const resultBlocks: ProviderContentBlock[] = [];
         let refused = false;
 
@@ -479,61 +561,57 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           await append({
             ...base(),
             t: 'tool_call',
-            id: call.id !== '' ? call.id : idFactory(),
+            id: call.id,
             name: call.name,
             input: call.input,
           });
 
-          const outcome = await dispatchCall(call, input.sessionId, signal);
+          const outcome = await dispatchCall(call, input.sessionId, signal, recordDecision);
           if (outcome.kind === 'aborted') return aborted();
 
           const envelope = outcome.envelope;
           if (envelope === undefined) {
-            return failed('The tool call produced no result.');
+            return failed(`The ${call.name} call produced no result.`);
           }
 
-          await append({
-            ...base(),
-            t: 'permission_request',
-            toolName: call.name,
-            decision: outcome.decision,
-          });
+          if (outcome.kind === 'failed') {
+            return failed(outcome.message ?? `The ${call.name} call failed.`);
+          }
+
+          // The answer the model observes: the call's own result, or — for a
+          // refusal — the `<tool_use_error>` wrapper the target produces.
+          const answer = outcome.kind === 'refused' ? refusalEnvelope(envelope) : envelope;
+          await append({ ...base(), t: 'tool_result', envelope: answer });
+          resultBlocks.push(toolResultBlock(call.id, answer.content, answer.isError));
 
           if (outcome.kind === 'refused') {
-            // The call did not run. No result is sent back to the provider as if
-            // it had, and the turn ends here.
+            // The call did not run. It is answered with the refusal, and the
+            // turn ends here.
             refused = true;
             break;
           }
-          if (outcome.kind === 'failed') {
-            return failed(outcome.message ?? 'The tool call failed.');
-          }
-
-          await append({ ...base(), t: 'tool_result', envelope });
-          resultBlocks.push(toolResultBlock(call.id, envelope.content, envelope.isError));
         }
 
         if (refused) {
-          // The conversation keeps the assistant's text but not the unanswered
-          // call: a request that carries a tool call nothing answers is not
-          // well-formed.
-          if (summary.text !== '') {
-            pushAssistant(conversation, [{ type: 'text', text: summary.text }]);
-          }
+          // The turn ends with the refusal. The stop reason is the provider's
+          // own, mapped: a provider that stopped with `max_tokens` is reported
+          // as `max_tokens`, not as `tool_use`.
           return {
             events,
-            stopReason: 'tool_use',
+            stopReason: mapStopReason(summary.stopReason),
             providerStopReason: summary.stopReason,
           };
         }
 
         // The assistant's message and the results go into the conversation, and
         // the **next** request carries them.
-        pushAssistant(conversation, assistantBlocks(summary));
+        pushAssistant(conversation, assistantBlocks(summary.text, calls));
         pushToolResults(conversation, resultBlocks);
       }
 
-      return failed(`The turn ran more than ${maxTurns} tool rounds, so it was stopped.`);
+      return failed(
+        `The turn ran more than ${maxTurns} tool rounds for the model '${input.model}', so it was stopped.`,
+      );
     } catch (error) {
       return failed(messageOf(error));
     }
@@ -561,12 +639,13 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     call: ToolCall,
     sessionId: string,
     signal: AbortSignal | undefined,
+    recordDecision: DecisionRecorder,
   ): Promise<CallOutcome> {
     const holder: DecisionHolder = { decision: undefined };
     const ctx = toolContextFor(call, sessionId);
 
     const raced = await raceAbort(
-      runTool(wrappedRegistry(holder), call.name, call.input, ctx, {
+      runTool(wrappedRegistry(holder, call.name, recordDecision), call.name, call.input, ctx, {
         approveAsk: deps.approveAsk,
         cwd,
       }),
@@ -576,7 +655,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     if (raced.kind === 'aborted') {
       // The tool was abandoned: its result is neither appended nor sent back to
       // the provider.
-      return { kind: 'aborted', decision: holder.decision };
+      return { kind: 'aborted' };
     }
 
     const envelope = raced.value;
@@ -584,12 +663,9 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 
     if (kind === 'permission_denied' || kind === 'permission_unresolved' || kind === 'unknown_tool') {
       // A denial, an unresolved approval and an unknown tool are **refusals**:
-      // the call did not run, and the turn ends with it.
-      return {
-        kind: 'refused',
-        envelope,
-        decision: recordedDecision(holder.decision, envelope),
-      };
+      // the call did not run, and the turn ends with it. The refusal is
+      // answered with the `<tool_use_error>` the target produces.
+      return { kind: 'refused', envelope };
     }
 
     if (kind === 'permission_check_failed') {
@@ -597,17 +673,13 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
       return {
         kind: 'failed',
         envelope,
-        decision: recordedDecision(holder.decision, envelope),
-        message: errorMessageOf(envelope) ?? 'The permission check failed.',
+        message:
+          errorMessageOf(envelope) ?? `The permission check for '${call.name}' failed.`,
       };
     }
 
     // The tool ran — or the call failed inside it, which the model observes.
-    return {
-      kind: 'ran',
-      envelope,
-      decision: recordedDecision(holder.decision, envelope),
-    };
+    return { kind: 'ran', envelope };
   }
 
   /**
@@ -617,22 +689,35 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
    * check the runner performs, and what makes a rewritten input run the whole
    * check again.
    */
-  function wrappedRegistry(holder: DecisionHolder): ToolRegistry {
+  function wrappedRegistry(
+    holder: DecisionHolder,
+    calledName: string,
+    recordDecision: DecisionRecorder,
+  ): ToolRegistry {
     return {
       register(): void {
         throw new Error('The agent runtime does not register tools.');
       },
       get(name: string): ToolDefinition | undefined {
         const tool = deps.registry.get(name);
-        return tool === undefined ? undefined : wrapTool(tool, holder);
+        return tool === undefined
+          ? undefined
+          : wrapTool(tool, holder, calledName, recordDecision);
       },
       list(): readonly ToolDefinition[] {
-        return deps.registry.list().map((tool) => wrapTool(tool, holder));
+        return deps.registry
+          .list()
+          .map((tool) => wrapTool(tool, holder, calledName, recordDecision));
       },
     };
   }
 
-  function wrapTool(tool: ToolDefinition, holder: DecisionHolder): ToolDefinition {
+  function wrapTool(
+    tool: ToolDefinition,
+    holder: DecisionHolder,
+    calledName: string,
+    recordDecision: DecisionRecorder,
+  ): ToolDefinition {
     return {
       name: tool.name,
       description: tool.description,
@@ -644,11 +729,13 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           // A denial stands on its own: the session's service is not consulted
           // for a call the tool already refused.
           holder.decision = own;
+          await recordDecision(calledName, own);
           return own;
         }
         const service = await deps.permission(ctx, permissionOptions());
         const effective = combineDecisions(own, service);
         holder.decision = effective;
+        if (effective !== undefined) await recordDecision(calledName, effective);
         return effective;
       },
       recheckPermission: async (input: unknown, ctx: ToolContext): Promise<ToolRecheck> => {
@@ -658,7 +745,9 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         const own = await tool.recheckPermission(input, ctx);
         const service = await deps.permission(ctx, permissionOptions());
         const effective = combineDecisions(own.decision, service);
-        holder.decision = stricterDecision(holder.decision, effective);
+        const governed = stricterDecision(holder.decision, effective);
+        holder.decision = governed;
+        if (effective !== undefined) await recordDecision(calledName, governed ?? effective);
         const recheck: ToolRecheck = { decision: effective };
         if (own.approvedPath !== undefined) recheck.approvedPath = own.approvedPath;
         return recheck;
@@ -684,13 +773,31 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
       return {
         kind: 'error',
         events,
-        message: 'The provider driver cannot send a request: it carries no turn source.',
+        message:
+          "The provider driver cannot send a request: it carries no turn source. Mark the driver with TURN_SOURCE, or supply the runtime's 'source' dependency.",
+      };
+    }
+
+    let stream: unknown;
+    try {
+      stream = source.send(request, signal);
+    } catch (error) {
+      return { kind: 'error', events, message: messageOf(error) };
+    }
+
+    if (!isAsyncIterable(stream)) {
+      // A named failure: the transport is not a transport. The old code let
+      // the "…is not iterable" of the runtime speak for itself.
+      return {
+        kind: 'error',
+        events,
+        message: `The provider driver's 'send' member must return an async iterable of provider events; it returned ${describeReturned(stream)}.`,
       };
     }
 
     let iterator: AsyncIterator<ProviderEvent>;
     try {
-      iterator = source.send(request, signal)[Symbol.asyncIterator]();
+      iterator = stream[Symbol.asyncIterator]();
     } catch (error) {
       return { kind: 'error', events, message: messageOf(error) };
     }
@@ -728,11 +835,17 @@ interface CallOutcome {
   kind: 'ran' | 'refused' | 'failed' | 'aborted';
   /** The runner's envelope, when the call produced one. */
   envelope?: ToolResultEnvelope;
-  /** The decision that governed the call. */
-  decision: PermissionDecision | undefined;
   /** The message of a failure. */
   message?: string;
 }
+
+/**
+ * Records the decision a call was governed by.
+ *
+ * The recorder is called **when the decision is made**, so the transcript's
+ * chronology is the check, the execution and the result.
+ */
+type DecisionRecorder = (toolName: string, decision: PermissionDecision) => Promise<void>;
 
 /** The holder of the decision a call was governed by. */
 interface DecisionHolder {
@@ -758,7 +871,7 @@ interface TurnSummary {
   /** The provider's stop reason. */
   stopReason: StopReason | undefined;
   /** The error the provider reported, when it reported one. */
-  error: ProviderEvent | undefined;
+  error: Extract<ProviderEvent, { type: 'error' }> | undefined;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -771,7 +884,7 @@ interface TurnSummary {
 function summarise(events: ProviderEvent[]): TurnSummary {
   let text = '';
   let stopReason: StopReason | undefined;
-  let error: ProviderEvent | undefined;
+  let error: Extract<ProviderEvent, { type: 'error' }> | undefined;
   for (const event of events) {
     switch (event.type) {
       case 'text_delta':
@@ -793,12 +906,14 @@ function summarise(events: ProviderEvent[]): TurnSummary {
 /**
  * The blocks of the assistant's message.
  *
- * The text it produced and the tool calls it made, in that order.
+ * The text it produced and the tool calls it made, in that order. The calls
+ * are the ones of the round, so a minted tool-use id is the one the request
+ * carries.
  */
-function assistantBlocks(summary: TurnSummary): ProviderContentBlock[] {
+function assistantBlocks(text: string, calls: ToolCall[]): ProviderContentBlock[] {
   const blocks: ProviderContentBlock[] = [];
-  if (summary.text !== '') blocks.push({ type: 'text', text: summary.text });
-  for (const call of summary.calls) {
+  if (text !== '') blocks.push({ type: 'text', text });
+  for (const call of calls) {
     blocks.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input });
   }
   return blocks;
@@ -911,25 +1026,44 @@ export function decisionFromEnvelope(envelope: ToolResultEnvelope): PermissionDe
 }
 
 /**
- * The decision the transcript records.
+ * The answer a refusal produces.
  *
- * The envelope carries the decision that **governed** the call — the one an
- * approval settled, when the prompt resolved an `ask` — so its summary wins
- * over the decision the runtime computed before the call ran.
+ * The audit records that a call which is refused by a permission rule — or by
+ * an isolation latch, or routed elsewhere — produces "a `tool_result` whose
+ * content is a `<tool_use_error>…</tool_use_error>` wrapper with `is_error:
+ * true`" (§2.4), and that "permission decisions are threaded back to the model
+ * through the tool result, so the model observes the decision and its reason
+ * type" (§2.4).
+ *
+ * The wrapper is built from the envelope the tool runner already produced: the
+ * runner's decision, its reason type, its remedy and the user's own feedback
+ * all ride along, and the content becomes the wrapper.
  */
-export function recordedDecision(
-  computed: PermissionDecision | undefined,
-  envelope: ToolResultEnvelope,
-): PermissionDecision | undefined {
-  if (computed === undefined) return decisionFromEnvelope(envelope);
-  const summary = envelope.permissionDecision;
-  if (summary === undefined) return computed;
-  return {
-    ...computed,
-    behavior: summary.decision,
-    source: summary.source,
-    reasonType: summary.reasonType ?? computed.reasonType,
-  };
+export function refusalEnvelope(envelope: ToolResultEnvelope): ToolResultEnvelope {
+  return { ...envelope, content: toolUseErrorContent(envelope), isError: true };
+}
+
+/**
+ * The content of the `<tool_use_error>` wrapper.
+ *
+ * **Implementation choice**: the audit pins the wrapper, not what is written inside it.
+ * The parts are the reason the refusal was reported with, the decision and its
+ * reason type, the remedy and the user's own feedback — so the model observes
+ * the decision and its reason type.
+ */
+export function toolUseErrorContent(envelope: ToolResultEnvelope): string {
+  const decision = decisionFromEnvelope(envelope);
+  const parts: string[] = [
+    decision?.reason ?? errorMessageOf(envelope) ?? 'The tool call did not run.',
+  ];
+  if (decision !== undefined) {
+    parts.push(
+      `The permission decision was '${decision.behavior}' (source: ${decision.source}, reason type: ${decision.reasonType}).`,
+    );
+  }
+  if (envelope.remedy !== undefined) parts.push(envelope.remedy);
+  if (envelope.userFeedback !== undefined) parts.push(`The user said: ${envelope.userFeedback}`);
+  return `<tool_use_error>${parts.join(' ')}</tool_use_error>`;
 }
 
 /** The message of an error envelope, when the envelope carries one. */
@@ -940,6 +1074,25 @@ function errorMessageOf(envelope: ToolResultEnvelope): string | undefined {
   if (!Object.hasOwn(record, 'message')) return undefined;
   const message = record['message'];
   return typeof message === 'string' ? message : undefined;
+}
+
+/**
+ * Whether a value is an async iterable of provider events.
+ *
+ * The member is the well-known `Symbol.asyncIterator`, so the lookup is a read
+ * of a fixed member rather than of a caller-supplied key.
+ */
+function isAsyncIterable(value: unknown): value is AsyncIterable<ProviderEvent> {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator];
+  return typeof candidate === 'function';
+}
+
+/** What a `send` member returned, in words. */
+function describeReturned(value: unknown): string {
+  if (value instanceof Promise) return 'a promise';
+  if (value === null) return 'null';
+  return `a value of type ${typeof value}`;
 }
 
 /** The message of a thrown value. */

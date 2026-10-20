@@ -149,18 +149,6 @@ export function groupToolCalls(
 }
 
 /**
- * The order the calls run in.
- *
- * **Implementation choice** (see the module header): the calls run in the order they
- * appear in the assistant message, and each call's result is appended before
- * the next provider request is issued. The target's own concurrent scheduling
- * order is one of the three bounded REA residuals and is **not** claimed.
- */
-export function dispatchOrder(calls: ToolCall[]): ToolCall[] {
-  return [...calls];
-}
-
-/**
  * Flatten a dispatch plan into the order the calls run in.
  *
  * The groups are read in order, and the calls of a group in the order they
