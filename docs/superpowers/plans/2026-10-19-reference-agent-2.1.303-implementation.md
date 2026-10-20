@@ -983,38 +983,72 @@ safe — the target's own default, and it is what the read is wrapped in:
 
 **The classifier's rule is established** — it was read from the source, and the record is
 `/home/shiva/opt/reference-agent-rea/analysis/findings-read-only-classifier.md`. A shell
-command is read-only when it **parses simply** and **every** command in it is either a
-known read-only command or a write command invoked in a read-only way.
+command is read-only when the session is **not** *diskless* — the cloud session with no
+local disk — and the classifier returns `allow`.
 
-The target's decision sequence, in order:
+The command is **split** on `&&`, `||`, `|`, `;`, `&`, `|&` and a newline, and **every
+element** must pass.
 
-1. too long → not read-only;
-2. the command does not parse simply → not read-only;
-3. it contains a **subshell** or a **compound statement** → not read-only;
-4. it contains a **`&`** (backgrounding) → not read-only;
-5. it makes a **bare assignment** to an environment variable that is not allowlisted → not read-only;
-6. it contains an **unquoted variable expansion** → not read-only;
-7. it contains a **Windows UNC path** → the target *asks* rather than deciding;
-8. it is a compound `cd`+`git` command, or a git command that would need extra checks → not read-only;
-9. every command in it passes the per-command test → **read-only**.
+An element passes when it has **no output redirection** (only `<`, `<<`, `<&`, `<<<`, a
+target of `/dev/null`, or a `>&N` to a file descriptor are allowed), **no** `/dev/tcp` or
+`/dev/udp` target, **no** inline environment variable outside the known-safe list, **no**
+`~name` argument, **no** UNC path, and the **argv allowlist** or the **text pattern set**
+accepts it.
 
-The **per-command test**: no writing redirect, no `/dev/tcp` or `/dev/udp` redirect, no
-UNC path among the arguments, no environment variable outside the allowlist, no
-dangerous argument, and the command itself is read-only.
+The **argv allowlist** — the read-only commands:
 
-The **read-only command tables** the target uses:
+`cal`, `uptime`, `cat`, `head`, `tail`, `wc`, `stat`, `strings`, `hexdump`, `od`, `nl`,
+`id`, `uname`, `free`, `df`, `du`, `locale`, `groups`, `nproc`, `basename`, `dirname`,
+`realpath`, `cut`, `paste`, `tr`, `column`, `tac`, `rev`, `fold`, `expand`, `unexpand`,
+`fmt`, `comm`, `cmp`, `numfmt`, `readlink`, `diff`, `true`, `false`, `sleep`, `which`,
+`type`, `expr`, `seq`, `tsort`, `pr`, plus `docker ps` and `docker images`.
 
-- `read` — `cd`, `ls`, `find`, `cat`, `head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `paste`, `column`, `tr`, `file`, `stat`, `diff`, `awk`, `gawk`, `mawk`, `nawk`, `strings`, `hexdump`, `od`, `base64`, `nl`, `tac`, `man`, `rev`, `fold`, `expand`, `unexpand`, `fmt`, `comm`, `cmp`, `pr`, `numfmt`, `tsort`, `grep`, `egrep`, `fgrep`, `rg`, `git`, `jq`, `sha256sum`, `sha1sum`, `md5sum`;
-- `create` — `mkdir`, `touch`;
-- `write` — `rm`, `rmdir`, `mv`, `cp`, `sed`, `tee`;
-- a **glob-safe** set — `ls`, `cat`, `head`, `tail`, `wc`, `stat`, `grep`, `egrep`, `fgrep`, `diff`, `du`, `df`, `echo`, `strings`, `hexdump`, `od`, `nl`, `cut`, `column`, `tr`, `tac`, `rev`, `cmp`, `basename`, `dirname`, `realpath`, `readlink`, `sha256sum`, `sha1sum`, `md5sum`, `cd`;
-- a **pattern** set — `echo`, `claude -h`, `claude --help`, `uniq`, `pwd`, `whoami`, `node -v`, `node --version`, `python --version`, `python3 --version`, `history`, `alias`, `arch`, `ip addr`, `ifconfig`, and `jq` **unless** it is given a flag that writes or runs code.
+Their per-command rules: `echo` and `printf` are read-only; `ls` is read-only outright;
+`cd` only with **at most one** argument; `find` only with no action flag (`-delete`,
+`-rm`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint`, `-fprint0`, `-fls`, `-fprintf`,
+`-files0-from`); `history`, `arch` and `ifconfig` only with their allowed argument shapes.
 
-The per-command argument rules the target applies: `ls` is read-only outright; `cd` only
-with **at most one** argument; `find` is read-only **unless** an argument is `-delete`,
-`-rm`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint0?`, `-fls`, `-fprintf` or
-`-files0-from`; `git` is **not** read-only when the text contains ` -c ` or ` --exec-path=`;
-`history`, `arch` and `ifconfig` only with their allowed argument shapes.
+The **text pattern set** — the fallback, when the argv allowlist does not decide: the
+names above, plus `echo`, `claude -h`, `claude --help`, `uniq`, `pwd`, `whoami`,
+`node -v`, `node --version`, `python --version`, `python3 --version`, `history`, `alias`,
+`arch`, `ip addr`, `ifconfig`, `jq` (read-only **unless** it is given a flag that writes
+or runs code), `cd`, `ls` and `find`. A `find` with an action flag is not read-only, and
+neither is a `git` command carrying `-c`, `--exec-path` or `--config-env`.
+
+The **refusal map**: a command that matches the known-command-with-allowlisted-flags map
+is **refused** by the text fallback, so it is read-only only if the argv allowlist or the
+glob path accepted it. The map covers `xargs`, `file`, `sed`, `sort`, `man`, `help`,
+`netstat`, `ps`, `base64`, `grep`, `egrep`, `fgrep`, `rg`, `sha256sum`, `sha1sum`,
+`md5sum`, `tree`, `date`, `hostname`, `lsof`, `pgrep`, `tput`, `ss`, `fd`, `fdfind` and
+`test`; the read-only **git** subcommands (`git diff`, `git log`, `git show`,
+`git shortlog`, `git reflog`, `git stash list`, `git ls-remote`, `git status`,
+`git blame`, `git ls-files`, `git config --get`, `git remote show`, `git remote`,
+`git merge-base`, `git rev-parse`, `git rev-list`, `git describe`, `git cat-file`,
+`git for-each-ref`, `git grep`, `git stash show`, `git worktree list`, `git tag`,
+`git branch`); and `docker logs`, `docker inspect`.
+
+The **glob path**: a command whose text contains an unquoted glob is read-only only if
+its first word is in the **glob-safe** set — `ls`, `cat`, `head`, `tail`, `wc`, `stat`,
+`grep`, `egrep`, `fgrep`, `diff`, `du`, `df`, `echo`, `strings`, `hexdump`, `od`, `nl`,
+`cut`, `column`, `tr`, `tac`, `rev`, `cmp`, `basename`, `dirname`, `realpath`,
+`readlink`, `sha256sum`, `sha1sum`, `md5sum`, `cd`.
+
+The known-safe inline environment variables: `GOEXPERIMENT`, `GOOS`, `GOARCH`,
+`CGO_ENABLED`, `GO111MODULE`, `RUST_BACKTRACE`, `RUST_LOG`, `NODE_ENV`,
+`PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD`,
+`PYTEST_DEBUG`, `ANTHROPIC_API_KEY`, `LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_TIME`,
+`CHARSET`, `TERM`, `COLORTERM`, `NO_COLOR`, `FORCE_COLOR`, `TZ`, `LS_COLORS`, `LSCOLORS`,
+`GREP_COLOR`, `GREP_COLORS`, `GCC_COLORS`, `TIME_STYLE`, `BLOCK_SIZE`, `BLOCKSIZE`,
+`COLUMNS`, `LINES`, `CLICOLOR`, `CLICOLOR_FORCE`, `CI`, `DEBIAN_FRONTEND`,
+`GIT_TERMINAL_PROMPT`.
+
+The classifier's behaviours are **`allow`**, **`ask`** (a Windows UNC path) and
+**`passthrough`** — there is no `deny` — and the reason it reports names the failing
+element: *"The part it could not verify is `<part>`: the command itself, or a flag,
+argument, variable prefix or redirect on it, is not on the read-only list."*
+
+**Note.** The command *kind* table (`read` / `write` / `create`) belongs to the **path**
+layer, not to this classifier. The classifier's list is the argv allowlist above.
 
 **This implementation already has the machinery**: `src/permissions/shell.ts` is the
 shell lexer — the sub-commands, their redirections and their invocations — and the
