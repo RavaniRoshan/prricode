@@ -338,3 +338,67 @@ export function nthArgumentObjectAt(text: string, at: number, nth: number): numb
   }
   return -1;
 }
+
+/**
+ * The string elements of the array literal that starts at `at`.
+ *
+ * An array literal can hold a **spread** (`...[...]`), which a regular
+ * expression cannot cross, so the array is read with the same balance
+ * discipline as an object.
+ */
+export function elementsOfArray(text: string, at: number): string[] {
+  if (text[at] !== '[') return [];
+  let depth = 0;
+  let index = at;
+  let end = -1;
+  while (index < text.length) {
+    const character = text[index];
+    if (character === '"' || character === "'" || character === '`') {
+      index = endOfString(text, index);
+      continue;
+    }
+    if (character === '[') depth += 1;
+    else if (character === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        end = index;
+        break;
+      }
+    }
+    index += 1;
+  }
+  if (end === -1) return [];
+  const elements: string[] = [];
+  index = at + 1;
+  while (index < end) {
+    const character = text[index];
+    if (character === '"' || character === "'" || character === '`') {
+      const literalEnd = endOfString(text, index);
+      const literal = text.slice(index + 1, literalEnd - 1);
+      if (!literal.includes('${')) elements.push(literal);
+      index = literalEnd;
+      continue;
+    }
+    index += 1;
+  }
+  return elements;
+}
+
+/**
+ * Every array or set literal in the text that holds at least `minimum`
+ * string members, with where it starts.
+ */
+export function collections(
+  text: string,
+  minimum: number,
+): { members: string[]; offset: number }[] {
+  const found: { members: string[]; offset: number }[] = [];
+  for (const match of text.matchAll(/(?:new Set\(|\[|=\[)/g)) {
+    const at = match.index ?? 0;
+    const open = text.indexOf('[', at);
+    if (open === -1) continue;
+    const members = elementsOfArray(text, open);
+    if (members.length >= minimum) found.push({ members, offset: open });
+  }
+  return found;
+}

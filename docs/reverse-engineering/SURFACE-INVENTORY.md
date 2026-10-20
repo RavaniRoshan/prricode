@@ -9,29 +9,6 @@ The verifier re-derives each inventory from the source and fails when the
 target has an entry this file does not name. A gap in the audit shows up here
 as a missing row, not as a paragraph nobody notices.
 
-## What this verifier does not cover, and why
-
-**The slash-command registry is not here.** It is the one large surface whose
-reading cannot be reduced to a literal scan: the registry holds computed
-descriptions, template names and minified identifiers, and a pattern-based
-reading of it disagrees with a parser-based reading — a pattern finds 92
-distinct names, a parser finds 100, and the difference is eleven commands the
-pattern misses. A verifier built on the pattern would therefore be wrong in
-exactly the way the pattern is wrong, and would report a false completeness.
-
-The registry is read with a **TypeScript parser** instead, and that reading is
-recorded in `docs/compatibility/command-surface.md` with the reconciliation
-between the two counts. The registry's names are checked against the
-implementation by the conformance tests, not by this file.
-
-**The gated blocks, the sibling config documents and the browser tool bundle**
-are likewise not here: each is a surface with its own shape, and each is
-recorded in the conformance document for the surface it belongs to.
-
-**This file is not a feature count.** It is the target's *enumerated* surface,
-for the surfaces that can be enumerated. A surface that is not enumerated is a
-gap in the audit, and the audit's §8 names every one of them.
-
 ---
 ## The tool registry
 
@@ -4689,9 +4666,9 @@ Every key the target's settings document accepts, re-derived from the target's o
 | `worktree` |
 | `wslInheritsWindowsSettings` |
 
-## The command-line flag vocabulary
+## The value-taking flags
 
-Every flag the target's parser names, re-derived from the parser's own chunk.
+Re-derived from the target's own parser, and told apart by the target's own relationships.
 
 | name |
 |---|
@@ -4703,9 +4680,6 @@ Every flag the target's parser names, re-derived from the parser's own chunk.
 | `--agent-name` |
 | `--agent-type` |
 | `--agents` |
-| `--all` |
-| `--allow-dangerously-skip-permissions` |
-| `--allow-other-models` |
 | `--allowed-tools` |
 | `--allowedTools` |
 | `--append-subagent-system-prompt` |
@@ -4714,60 +4688,28 @@ Every flag the target's parser names, re-derived from the parser's own chunk.
 | `--append-system-prompt-file` |
 | `--attach-serve` |
 | `--autocompact` |
-| `--await-claim` |
-| `--await-initialize` |
-| `--ax-screen-reader` |
-| `--background` |
-| `--bare` |
 | `--betas` |
-| `--bg` |
-| `--brief` |
 | `--channels` |
-| `--chrome` |
 | `--client-data-url` |
-| `--cloud` |
-| `--continue` |
 | `--correlation-id` |
 | `--dangerously-load-development-channels` |
-| `--dangerously-skip-permissions` |
-| `--debug` |
 | `--debug-file` |
-| `--debug-to-stderr` |
 | `--deep-link-cwd-b64` |
 | `--deep-link-last-fetch` |
-| `--deep-link-origin` |
 | `--deep-link-repo` |
-| `--desktop` |
-| `--disable-slash-commands` |
 | `--disallowed-tools` |
 | `--disallowedTools` |
 | `--effort` |
-| `--enable-auth-status` |
-| `--enable-auto-mode` |
 | `--environment` |
-| `--exclude-dynamic-system-prompt-sections` |
 | `--exec` |
 | `--fallback-model` |
 | `--fast-mode` |
 | `--file` |
-| `--fork-session` |
 | `--forward-home-settings` |
-| `--forward-subagent-text` |
-| `--from-pr` |
 | `--handle-uri` |
-| `--hard-fail` |
-| `--help` |
-| `--host-auth-is-org-sign-in` |
-| `--ide` |
-| `--include-hook-events` |
-| `--include-partial-messages` |
-| `--include-unsupported-models` |
 | `--inherit-permission-mode` |
-| `--init` |
-| `--init-only` |
 | `--input-format` |
 | `--json-schema` |
-| `--maintenance` |
 | `--managed-settings` |
 | `--max-budget-usd` |
 | `--max-thinking-tokens` |
@@ -4776,8 +4718,6 @@ Every flag the target's parser names, re-derived from the parser's own chunk.
 | `--messaging-socket-path` |
 | `--model` |
 | `--name` |
-| `--no-chrome` |
-| `--no-session-persistence` |
 | `--on-branch` |
 | `--output-format` |
 | `--parent-session-id` |
@@ -4785,63 +4725,166 @@ Every flag the target's parser names, re-derived from the parser's own chunk.
 | `--permission-prompt-tool` |
 | `--permission-prompts` |
 | `--plan-mode-instructions` |
-| `--plan-mode-required` |
 | `--plugin-dir` |
 | `--plugin-dir-no-mcp` |
 | `--plugin-url` |
 | `--pool` |
 | `--prefill` |
 | `--prefill-b64` |
-| `--print` |
 | `--proactivity` |
-| `--project` |
 | `--project-config-root` |
-| `--prompt-suggestions` |
-| `--rc` |
 | `--ref` |
-| `--remote` |
-| `--remote-control` |
 | `--remote-control-session-name-prefix` |
-| `--replay-user-messages` |
-| `--reply-on-resume` |
-| `--restricted` |
-| `--resume` |
 | `--resume-drops-turn` |
 | `--resume-session-at` |
 | `--rewind-files` |
 | `--routine` |
-| `--safe-mode` |
 | `--sdk-url` |
 | `--session-id` |
-| `--session-mirror` |
 | `--setting-sources` |
 | `--settings` |
-| `--strict-mcp-config` |
 | `--system-prompt` |
 | `--system-prompt-file` |
 | `--system-prompt-snapshot` |
 | `--task-budget` |
 | `--team-name` |
 | `--teammate-mode` |
-| `--teleport` |
 | `--thinking` |
 | `--thinking-display` |
-| `--tmux` |
 | `--tools` |
-| `--verbose` |
-| `--version` |
 | `--watch-artifact` |
 | `--watch-artifact-no-autoreact` |
 | `--workload` |
-| `--worktree` |
-| `-V` |
-| `-c` |
-| `-d` |
-| `-d2e` |
-| `-h` |
 | `-m` |
 | `-n` |
+
+## The boolean flags
+
+Re-derived from the target's own parser, and told apart by the target's own relationships.
+
+| name |
+|---|
+| `--allow-dangerously-skip-permissions` |
+| `--allow-other-models` |
+| `--await-claim` |
+| `--await-initialize` |
+| `--ax-screen-reader` |
+| `--background` |
+| `--bare` |
+| `--bg` |
+| `--brief` |
+| `--chrome` |
+| `--continue` |
+| `--dangerously-skip-permissions` |
+| `--debug-to-stderr` |
+| `--deep-link-origin` |
+| `--desktop` |
+| `--disable-slash-commands` |
+| `--enable-auth-status` |
+| `--enable-auto-mode` |
+| `--exclude-dynamic-system-prompt-sections` |
+| `--fork-session` |
+| `--forward-subagent-text` |
+| `--hard-fail` |
+| `--host-auth-is-org-sign-in` |
+| `--ide` |
+| `--include-hook-events` |
+| `--include-partial-messages` |
+| `--include-unsupported-models` |
+| `--init` |
+| `--init-only` |
+| `--maintenance` |
+| `--no-chrome` |
+| `--no-session-persistence` |
+| `--plan-mode-required` |
+| `--print` |
+| `--replay-user-messages` |
+| `--reply-on-resume` |
+| `--restricted` |
+| `--safe-mode` |
+| `--session-mirror` |
+| `--strict-mcp-config` |
+| `--tmux` |
+| `--verbose` |
+| `-c` |
+| `-d2e` |
 | `-p` |
+
+## The optional-value flags
+
+Re-derived from the target's own parser, and told apart by the target's own relationships.
+
+| name |
+|---|
+| `--cloud` |
+| `--debug` |
+| `--from-pr` |
+| `--project` |
+| `--prompt-suggestions` |
+| `--rc` |
+| `--remote` |
+| `--remote-control` |
+| `--resume` |
+| `--teleport` |
+| `--worktree` |
+| `-d` |
 | `-r` |
-| `-v` |
 | `-w` |
+
+## The repeatable flags
+
+Re-derived from the target's own parser, and told apart by the target's own relationships.
+
+| name |
+|---|
+| `--add-dir` |
+| `--allowed-tools` |
+| `--allowedTools` |
+| `--betas` |
+| `--channels` |
+| `--dangerously-load-development-channels` |
+| `--disallowed-tools` |
+| `--disallowedTools` |
+| `--file` |
+| `--mcp-config` |
+| `--tools` |
+
+## The command tokens
+
+Re-derived from the target's own parser, and told apart by the target's own relationships.
+
+| name |
+|---|
+| `--background` |
+| `--bg` |
+| `--help` |
+| `--print` |
+| `--routine` |
+| `--version` |
+| `-V` |
+| `-h` |
+| `-p` |
+| `-v` |
+
+## The session subcommands
+
+Re-derived from the target's own parser, and told apart by the target's own relationships.
+
+| name |
+|---|
+| `attach` |
+| `kill` |
+| `logs` |
+| `respawn` |
+| `rm` |
+| `stop` |
+
+## The carve-out flags
+
+Re-derived from the target's own parser, and told apart by the target's own relationships.
+
+| name |
+|---|
+| `--exec` |
+| `--handle-uri` |
+| `-m` |

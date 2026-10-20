@@ -27,6 +27,7 @@ import path from 'node:path';
 
 import {
   callSites,
+  collections as collectionsIn,
   keysOfObject,
   nthArgumentObjectAt,
 } from './rea-scan.js';
@@ -272,23 +273,60 @@ function deriveSettings(files: readonly string[]): Set<string> {
 }
 
 /**
- * The command-line flag vocabulary: every flag-shaped literal the target's own
- * parser names.
+ * The target's **seven flag sets**, read from its own parser.
  *
- * The seven sets the parser keeps overlap, and the short forms share their
- * long ones, so the vocabulary is their **union** — which is what the target
- * accepts.
+ * The parser keeps them apart: the value-taking set, the boolean set, the
+ * optional-value set, the repeatable subset, the command tokens, the session
+ * subcommands, and the three value-taking flags the scanner does not count as
+ * flags. They are told apart by their **size**, and the identification is
+ * **checked**: the repeatable set must be a subset of the value set, the
+ * boolean set must be disjoint from it, and the session subcommands must not
+ * look like flags. A misidentification fails loudly rather than silently.
  */
-function deriveFlags(files: readonly string[]): Set<string> {
-  const flags = new Set<string>();
+function deriveFlagSets(files: readonly string[]): Map<string, string[]> {
+  const sets = new Map<string, string[]>();
   for (const file of files) {
     if (!file.endsWith('chunk-0y0ptpy9.js')) continue;
     const text = readFileSync(file, 'utf8');
-    for (const match of text.matchAll(/"(--?[A-Za-z0-9][A-Za-z0-9-]*)"/g)) {
-      flags.add(match[1] ?? '');
+    const collections = collectionsIn(text, 3);
+    const bySize = new Map<number, string[]>();
+    for (const collection of collections) {
+      if (!bySize.has(collection.members.length)) bySize.set(collection.members.length, collection.members);
     }
+    const value = bySize.get(85);
+    const boolean = bySize.get(45);
+    const optional = bySize.get(14);
+    const repeatable = bySize.get(11);
+    const tokens = bySize.get(10);
+    const subcommands = bySize.get(6);
+    const carveouts = bySize.get(3);
+    if (
+      value === undefined ||
+      boolean === undefined ||
+      optional === undefined ||
+      repeatable === undefined ||
+      tokens === undefined ||
+      subcommands === undefined ||
+      carveouts === undefined
+    ) {
+      continue;
+    }
+    // The identification is only believed if the target's own relationships
+    // hold: the repeatable set is a subset of the value set, the boolean set
+    // is disjoint from it, and the session subcommands are words, not flags.
+    const repeatableIsSubset = repeatable.every((flag) => value.includes(flag));
+    const booleanIsDisjoint = boolean.every((flag) => !value.includes(flag));
+    const subcommandsAreWords = subcommands.every((word) => !word.startsWith('-'));
+    if (!repeatableIsSubset || !booleanIsDisjoint || !subcommandsAreWords) continue;
+    sets.set('The value-taking flags', value);
+    sets.set('The boolean flags', boolean);
+    sets.set('The optional-value flags', optional);
+    sets.set('The repeatable flags', repeatable);
+    sets.set('The command tokens', tokens);
+    sets.set('The session subcommands', subcommands);
+    sets.set('The carve-out flags', carveouts);
   }
-  return flags;
+  return sets;
 }
 
 /** The inventory the record carries, parsed out of the markdown. */
@@ -322,7 +360,7 @@ function main(): number {
   const telemetry = deriveTelemetry(files);
   const environment = deriveEnvironment(files);
   const settings = deriveSettings(files);
-  const flags = deriveFlags(files);
+  const flagSets = deriveFlagSets(files);
 
   if (process.argv.includes('--write')) {
     // The record is **generated from the derivation**, so it cannot drift from
@@ -348,11 +386,11 @@ function main(): number {
         note: 'Every key the target\'s settings document accepts, re-derived from the target\'s own settings factory.',
         entries: [...settings].sort(),
       },
-      {
-        heading: 'The command-line flag vocabulary',
-        note: 'Every flag the target\'s parser names, re-derived from the parser\'s own chunk.',
-        entries: [...flags].sort(),
-      },
+      ...[...flagSets].map(([heading, members]) => ({
+        heading,
+        note: 'Re-derived from the target\'s own parser, and told apart by the target\'s own relationships.',
+        entries: [...members].sort(),
+      })),
     ];
     const body = sections
       .map(
@@ -425,8 +463,11 @@ function main(): number {
 
   if (deriveOnly) {
     process.stdout.write(
-      `tools ${tools.names.size}\ntelemetry ${telemetry.size}\nenvironment ${environment.size}\nsettings ${settings.size}\nflags ${flags.size}\n`,
+      `tools ${tools.names.size}\ntelemetry ${telemetry.size}\nenvironment ${environment.size}\nsettings ${settings.size}\n`,
     );
+    for (const [heading, members] of flagSets) {
+      process.stdout.write(`${heading} ${members.length}\n`);
+    }
     for (const name of [...tools.names].sort()) {
       process.stdout.write(`tool\t${name}\t${tools.hints.get(name) ?? ''}\n`);
     }
@@ -451,7 +492,9 @@ function main(): number {
   compare('the telemetry vocabulary', telemetry, 'The telemetry vocabulary');
   compare('the environment-variable surface', environment, 'The environment-variable surface');
   compare('the settings document', settings, 'The settings document');
-  compare('the command-line flag vocabulary', flags, 'The command-line flag vocabulary');
+  for (const [heading, members] of flagSets) {
+    compare(heading, new Set(members), heading);
+  }
 
   let failed = 0;
   for (const check of checks) {
