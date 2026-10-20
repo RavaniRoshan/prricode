@@ -428,7 +428,23 @@ Additional observed event names: `StatusLine`, `FileSuggestion`, `PermissionRequ
 - **Events.** `emitMcpServerConnectionEvent` publishes a connection event.
 - **Discovery grants.** `captureDiscoveryGrantLeg` records a grant leg, and `denyTokenlessFirstPartyDesignWrite` denies a token-less first-party design write.
 
-**Partial:** the skills registry and the subagent definition lifecycle were not traced to resolved relations. Their names and storage are observed; their behavior was not.
+**The hook-result merge rules are observed** (`chunk-4jsg44k7.js`). When two hook results are combined:
+- a **permission decision** is merged by **strictness**, with `allow: 1`, `ask: 2`, `deny: 3` — the **stricter** decision wins, and the reason is taken from the stricter one;
+- `additionalContext` and `watchPaths` are **concatenated** (both lists), while every other member takes the newer value;
+- the block reason is `permissionDecisionReason`, or `Blocked by hook` when the hook denied without giving a reason;
+- an `allow` decision carrying `updatedPermissions` maps each permission, and a `setMode` permission's mode is **normalized** before it is applied;
+- when a hook result is merged into a permission-request result, the result carries `permissionBehavior`, `hookPermissionDecisionReason`, `permissionRequestResult`, and the `updatedInput` **only when the behavior is `allow`**.
+
+**The skill-save protocol is observed** (`chunk-4jsg44k7.js`). A skill folder that holds **synced copies of the user's account skills** is special: a change or a new file there is **not** saved to the account, the model must not report it as saved, and the next account sync can overwrite or remove it. The note the target appends is: *"Note: this file is inside the folder that holds synced copies of the user's account skills. A change or new file here is not saved to their account, so do not report it as saved, and the next sync from their account can overwrite or remove it."* The tool that saves a skill is described by a capability set (`review`, `card`, `cloud`, `linked`, `policy`) and five guidance modes, each with its own wording:
+- `save_tool` — "To save a skill change for the user, use the `<tool>` tool."
+- `propose_tool` — "To let the user save this change, call `<tool>` with the complete SKILL.md."
+- `send_file` — "To pass this change to the user, send them the complete SKILL.md with the `<tool>` tool."
+- `no_save_tool` — "This session has no tool that saves a skill to the user's account: tell the user that this change is not saved, and point them to their claude.ai settings, where skills are managed."
+- `report_unsaved` — "Say in your reply that this change is not saved to the user's account."
+
+The mode is selected as follows. A **remote call**, or a call with an `agentId`, or a file list that contains no `skill.md` (compared case-insensitively by basename), all select `report_unsaved`. Otherwise the session's tools are inspected: when the mode would be `send_file` but there is no send-capable tool, the answer is `no_save_tool`; otherwise the mode stands. The folder note is appended only for a known mode.
+
+**Partial:** the skills **discovery** registry and the subagent definition lifecycle were not traced to resolved relations. Their names and storage are observed; their behavior was not.
 
 ### 2.9 Native and platform sandbox
 
