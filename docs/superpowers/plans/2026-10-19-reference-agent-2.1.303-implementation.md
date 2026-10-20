@@ -920,22 +920,22 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Residual risk to state plainly.** All five layers share one kernel; any kernel privilege-escalation reachable from the sandbox defeats every layer, and user namespaces widen that reachable surface. Only a microVM moves the boundary below the kernel. This implementation's documentation must say so rather than imply a stronger guarantee than it has.
 
-- [ ] **Step 1: Write the failing policy test** — `enabledPlatforms` excluding the current platform denies with the reason naming the platform; `enabled: false` denies; `failIfUnavailable: false` runs the shell unconfined but says so; `allowUnsandboxedCommands: true` and a matching `excludedCommands` entry runs unconfined; a non-matching command is sandboxed.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement `src/platform/sandbox/policy.ts`** with the exact reason strings the target uses.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing launcher test** — the `Bash` tool refuses to run when the sandbox is required and unavailable, unless `failIfUnavailable: false` is set; a protected path that does **not** exist at startup is still masked, so a sandboxed process cannot create it.
-- [ ] **Step 6: Implement the sandbox launcher** on Linux: user and mount namespaces, `PR_SET_NO_NEW_PRIVS`, an explicit read-only bind for the working tree, tmpfs masks over the protected configuration paths, and a seccomp-BPF filter with the denylist above.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing Landlock test** — a rule bound to a path is not walked by a later rename or a symlink swap; the launcher degrades gracefully when `landlock_create_ruleset` reports an ABI below the required level, and reports the reduced protection in its status rather than pretending.
-- [ ] **Step 9: Implement `src/platform/sandbox/landlock.ts`** with ABI feature detection and an explicit reduced-protection status.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Write the failing supervisor test** — the supervisor re-validates a notification id immediately before acting on arguments it read from target memory, and it never authorizes a path that layers 1–3 would deny.
-- [ ] **Step 12: Implement `src/platform/sandbox/seccomp.ts`** as observability and emulation, with the `ID_VALID` re-check enforced immediately before use.
-- [ ] **Step 13: Write the failing proxy test** — the proxy refuses a request to a loopback, link-local, or cloud-metadata address, and refuses a hostname whose resolved address is not in the allowlist.
-- [ ] **Step 14: Implement `src/platform/sandbox/proxy.ts`**.
-- [ ] **Step 15: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 16: Commit.**
+- [x] **Step 1: Write the failing policy test** — `enabledPlatforms` excluding the current platform denies with the reason naming the platform; `enabled: false` denies; `failIfUnavailable: false` runs the shell unconfined but says so; `allowUnsandboxedCommands: true` and a matching `excludedCommands` entry runs unconfined; a non-matching command is sandboxed.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement `src/platform/sandbox/policy.ts`** with the exact reason strings the target uses.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing launcher test** — the `Bash` tool refuses to run when the sandbox is required and unavailable, unless `failIfUnavailable: false` is set; a protected path that does **not** exist at startup is still masked, so a sandboxed process cannot create it.
+- [x] **Step 6: Implement the sandbox launcher** on Linux: user and mount namespaces, `PR_SET_NO_NEW_PRIVS`, an explicit read-only bind for the working tree, tmpfs masks over the protected configuration paths, and a seccomp-BPF filter with the denylist above.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing Landlock test** — a rule bound to a path is not walked by a later rename or a symlink swap; the launcher degrades gracefully when `landlock_create_ruleset` reports an ABI below the required level, and reports the reduced protection in its status rather than pretending.
+- [x] **Step 9: Implement `src/platform/sandbox/landlock.ts`** with ABI feature detection and an explicit reduced-protection status.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Write the failing supervisor test** — the supervisor re-validates a notification id immediately before acting on arguments it read from target memory, and it never authorizes a path that layers 1–3 would deny.
+- [x] **Step 12: Implement `src/platform/sandbox/seccomp.ts`** as observability and emulation, with the `ID_VALID` re-check enforced immediately before use.
+- [x] **Step 13: Write the failing proxy test** — the proxy refuses a request to a loopback, link-local, or cloud-metadata address, and refuses a hostname whose resolved address is not in the allowlist.
+- [x] **Step 14: Implement `src/platform/sandbox/proxy.ts`**.
+- [x] **Step 15: Run it to verify it passes** — expected: PASS.
+- [x] **Step 16: Commit.**
   ```bash
   git add src/platform tests/security/sandbox.test.ts
   git commit -m "feat(platform): layered sandbox policy, launcher, and supervisor"
