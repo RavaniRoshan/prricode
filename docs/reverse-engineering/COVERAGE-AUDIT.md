@@ -411,7 +411,24 @@ Additional observed event names: `StatusLine`, `FileSuggestion`, `PermissionRequ
 - A **stray orphan marker** left in a staged plugin is removed, with the warning `Could not drop a stray orphan marker from the staged plugin: <reason>`.
 - A version transition is computed as a `{ from, to }` pair.
 
-*Partial:* the complete server lifecycle (config discovery → spawn → initialize → tool list refresh → reconnect → shutdown), the skills registry, and the subagent definition lifecycle were not traced to resolved relations. The subsystems are named and their storage is observed; their behavior was not.
+**The MCP client lifecycle is observed** (the export surface of `chunk-6s9yz1tm.js`).
+
+- **Connect.** `connectToServer` and `ensureConnectedClient` are the entry points. A connect result is **memoized**, and the memo is dropped when the credential **identity epoch** changes (`getMcpIdentityEpoch`, `evictAllMcpMemosOnIdentityChange`), when it goes stale (`evictStaleFailedConnectMemoForServe`), or explicitly (`discardMemoizedConnectResult`). So a credential change invalidates the connection rather than reusing it.
+- **State.** `hasLiveConnection` reports a live connection; `hasUnsettledDial` reports a connection attempt still in flight.
+- **Batching.** `getMcpServerConnectionBatchSize` (local) and `getRemoteMcpServerConnectionBatchSize` (remote) are the two batch sizes, matching the 3 and 20 already observed in the env-var reference.
+- **Negotiation.** `getMcpVersionNegotiation` is the protocol-version negotiation point, and the `MCP_PROTOCOL_NEGOTIATION` setting selects the legacy path.
+- **Capabilities** are fetched separately: `fetchToolsForClient`, `fetchCommandsForClient`, `fetchResourcesForClient`, and `fetchResourceTemplatesForClient`, aggregated by `getMcpToolsCommandsAndResources`. A **listing** hydration path exists alongside the fetch path (`hydrateToolsFromListing`, `hydrateCommandsFromListing`), with a "discover prior" memo (`getListingDiscoverPrior`, `getRememberedDiscoverPrior`) so a listing is not re-discovered.
+- **Tool composition.** `composeMcpTool` builds the tool the model sees, and `capMcpInstructions` bounds the instructions it carries.
+- **Calling.** `callMCPTool`, with `callMCPToolWithUrlElicitationRetry` for the URL-elicitation case.
+- **Auth failures** are classified by `classifyMcpAuthFailure`, and `hasEraCodeInHttpErrorBody` inspects the error body.
+- **Fetch variants.** There are four: a vendor first-party proxy fetch (`createAgentAiProxyFetch`), a first-party API fetch (`createFirstPartyApiMcpFetch`), a CLI-owned bearer fetch (`createCliOwnedBearerFetch`), and a CCR proxy fetch (`createCcrProxyFetch`).
+- **Timeouts.** Four distinct ones: an armed-request timeout, a request timeout, a tool timeout, and a tool **idle** timeout.
+- **Teardown.** `detachAndCloseConnection`, `disposeServerConnectionDetached`, and `cleanupConnectedMcpClients`.
+- **Reconnect.** `inertReconnectShape` is the shape of a reconnect that is deliberately inert.
+- **Events.** `emitMcpServerConnectionEvent` publishes a connection event.
+- **Discovery grants.** `captureDiscoveryGrantLeg` records a grant leg, and `denyTokenlessFirstPartyDesignWrite` denies a token-less first-party design write.
+
+**Partial:** the skills registry and the subagent definition lifecycle were not traced to resolved relations. Their names and storage are observed; their behavior was not.
 
 ### 2.9 Native and platform sandbox
 
