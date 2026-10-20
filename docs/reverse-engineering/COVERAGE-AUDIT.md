@@ -390,7 +390,16 @@ Additional observed event names: `StatusLine`, `FileSuggestion`, `PermissionRequ
 
 *Hook sources.* Hooks may be of type `mcp_tool`, in which case they carry a `server` field; the registry collects the set of MCP servers that contribute `mcp_tool` hooks, and a helper reports whether a given server contributes any hook at all.
 
-*Partial:* the complete server lifecycle (config discovery → spawn → initialize → tool list refresh → reconnect → shutdown), the plugin install/marketplace lifecycle, the skills registry, and the subagent definition lifecycle were not traced to resolved relations. The `mcp-discovery-cache`, `mcp-skill-archives`, `plugins`, `plans`, `todos`, and `tasks` directories in the storage layout indicate these subsystems exist, but the analyzed scope does not establish their behavior.
+**The plugin marketplace install flow is observed** (in `chunk-4jsg44k7.js`). The main entry is `installPluginFromMarketplace`, and its result carries `{ success, message, depNote, installedDisabled, installedDisabledByDefault, enableHint, otherProjectsNote }`.
+
+- An install records the plugin's **version**, the **install source** (`ui-suggestion` or `ui-discover`), the **trigger**, and the **surface**.
+- The install can **succeed while the plugin stays disabled**. The result distinguishes the two reasons: `installedDisabledByDefault` is reported as `by-default` and `installedDisabled` (a setting turned it off) as `in-settings`.
+- A successful install returns an **enable hint** — `enable it in /plugin` or `enable it in /plugin or run: <command>` — so the user is told how to turn it on.
+- A **refused** install is distinct from a **failed** one. A refusal is logged at `info` level with `installPluginFromMarketplace refused for <plugin>: <reason>` and a failure reason of `command-source-refused` — the install is refused when the **command source** is not trusted — while a genuine failure is logged at `error` level with `failed`. The telemetry carries the reason (`failureCode`, `command-source-refused`, or `unexpected-error`), an `errorKind`, the plugin id, the marketplace name, the trigger, and the surface.
+- A **stray orphan marker** left in a staged plugin is removed, with the warning `Could not drop a stray orphan marker from the staged plugin: <reason>`.
+- A version transition is computed as a `{ from, to }` pair.
+
+*Partial:* the complete server lifecycle (config discovery → spawn → initialize → tool list refresh → reconnect → shutdown), the skills registry, and the subagent definition lifecycle were not traced to resolved relations. The subsystems are named and their storage is observed; their behavior was not.
 
 ### 2.9 Native and platform sandbox
 
