@@ -250,6 +250,11 @@ export type PermissionReasonType = 'rule' | 'safetyCheck' | 'other';
  * is "Run outside of the sandbox"; `workingDir` is the working directory; and
  * `safetyCheck` is a refusal that is independent of the rule engine.
  *
+ * **The `sandboxOverride` kind is an ask, and the reading is the target's own.**
+ * The target's `Bash` tool builds the decision itself: a call that asks to run
+ * outside the sandbox is put to the user, and the decision carries the kind and
+ * the message. See {@link sandboxOverrideDecision}.
+ *
  * **There is no seventh kind.** The case where no rule matched at all — the
  * generic prompt — is the target's `permissionPromptTool`: the target's own
  * six do not name it separately, so this implementation does not either. The
@@ -265,6 +270,42 @@ export type PermissionReasonKind =
   | 'sandboxOverride'
   | 'workingDir'
   | 'safetyCheck';
+
+/**
+ * The message the target reports for a call that asks to run outside the
+ * sandbox.
+ *
+ * **Observed** — the target's own source. The target's `Bash` tool builds the
+ * decision itself, and the decision carries the message "Run outside of the
+ * sandbox"; the target's reason renderer prints the same words for the
+ * `sandboxOverride` reason kind.
+ */
+export const SANDBOX_OVERRIDE_MESSAGE = 'Run outside of the sandbox';
+
+/**
+ * The target's `sandboxOverride` decision.
+ *
+ * **Observed** — the target's own `Bash` tool. The target produces an **ask**,
+ * not an allow: a call that asks to run outside the sandbox is put to the user
+ * with the reason kind `sandboxOverride` and the message "Run outside of the
+ * sandbox".
+ *
+ * **It is not the generic prompt.** The generic prompt is the ask that exists
+ * only because no rule matched, and it carries the `noRuleMatched` marker so
+ * that a `PreToolUse` hook's approval replaces it. The sandbox override is a
+ * different question — "shall this run outside the sandbox?" — and the marker
+ * is **not** set: the question is about the sandbox, not about the rules.
+ */
+export function sandboxOverrideDecision(): PermissionDecision {
+  return {
+    behavior: 'ask',
+    source: 'unknown',
+    reasonType: 'other',
+    reasonKind: 'sandboxOverride',
+    reason: SANDBOX_OVERRIDE_MESSAGE,
+    message: SANDBOX_OVERRIDE_MESSAGE,
+  };
+}
 
 /** The permission modes, including the `manual` alias of `default`. */
 export type PermissionMode =
@@ -584,7 +625,7 @@ export function describeReason(decision: PermissionDecision, toolName: string): 
     case 'permissionPromptTool':
       return decision.reason ?? `The ${toolName} tool requires approval for this command.`;
     case 'sandboxOverride':
-      return 'Run outside of the sandbox';
+      return SANDBOX_OVERRIDE_MESSAGE;
     case 'workingDir':
       return decision.reason ?? `This ${toolName} call is allowed because it stays inside the working directory.`;
     case 'safetyCheck':

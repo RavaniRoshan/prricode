@@ -136,13 +136,88 @@ The target's `sandbox.filesystem.{allowRead, allowWrite, denyRead, denyWrite, cr
 
 > A `denyWrite`-only mask is not expressible in a mount namespace — denying a write there denies the read too — so a `denyWrite` path is masked entirely. That is the fail-safe reading, and it is labelled as such in the source.
 
+## The target's sandbox routing (REA observed — read from the target's own source)
+
+**This section is the `CC-024` reading.** The audit recorded the `sandboxOverride` reason kind and never read the rule behind it, so `F-37` was `unknown`. The rule is in the target's own bundle, and it was read there.
+
+### Where the reading came from
+
+| What | Where |
+|---|---|
+| the POSIX `Bash` tool's permission check | `/home/shiva/opt/reference-agent-rea/extracted-patched/chunk-4jsg44k7.js`, offset `4761941` |
+| the routing predicate — "must this command be sandboxed?" | the same file, offset `999205` |
+| the Windows/PowerShell tool's **identical** rule | `chunk-tt5xyzk8.js`, offset `97149` |
+| `areUnsandboxedCommandsAllowed` and the strict-mode test | `chunk-a8rm68wf.js`, offset `939287` |
+| the `sandbox.allowUnsandboxedCommands` settings description | `chunk-c9s0jh80.js`, offset `164183` |
+| the `unsandboxedCommandsDisabled` **feature flag** | `chunk-640jjsts.js`, offset `968` |
+
+### The flag is the target's own
+
+The target's `Bash` tool declares the field in its **input schema**, and describes it: *"Set this to true to dangerously override sandbox mode and run commands without sandboxing."* The tool's permission check reads that same field.
+
+**The plan's assumption was wrong.** `docs/PROGRESS.md` and the `CC-024` milestone both record `dangerouslyDisableSandbox` as **this implementation's** flag. It is the **target's**, and the label goes the other way: the flag is **REA observed**, reproduced under the target's own name.
+
+### The routing rule
+
+The target asks its own predicate — *"must this command be sandboxed?"* — **twice**: once with the flag and once without. The flag is what changes the routing when the two answers differ.
+
+The predicate, in the target's own order:
+
+1. the sandbox is switched off, or the platform is excluded → the command is not sandboxed, and the flag changes nothing;
+2. the flag is set **and** the policy **permits** unsandboxed commands → the command is **not** sandboxed;
+3. the command is covered by the `excludedCommands` list → the command is not sandboxed, and the flag changes nothing;
+4. otherwise the command is sandboxed.
+
+The policy's permission is the target's `sandbox.allowUnsandboxedCommands`, and the target's own settings block says what it means: *"Allow commands to run outside the sandbox via the `dangerouslyDisableSandbox` parameter. When false, the `dangerouslyDisableSandbox` parameter is completely ignored and all commands must run sandboxed. Default: true."*
+
+### The report
+
+The target does not honour the flag silently. Its permission check produces an **ask**:
+
+```js
+{ behavior: 'ask', decisionReason: { type: 'sandboxOverride', reason: 'dangerouslyDisableSandbox' },
+  message: 'Run outside of the sandbox' }
+```
+
+and it produces it only when **all** of the following hold:
+
+| # | Condition |
+|---|---|
+| 1 | the call carries the flag |
+| 2 | the ordinary decision is neither a `deny` nor an `ask` — an **allow** |
+| 3 | the ordinary decision's reason is **not** rule-derived (a rule, or a compound escalation whose every part is a rule) |
+| 4 | the flag is what changes the routing |
+
+A **denial** keeps its own reason. An **ask** that was already put to the user is not asked again. A **rule-derived** allow keeps its rule: the target's own test asks whether the decision's reason is a rule, and a rule-derived allow is left alone.
+
+### What this implementation reproduces, and what it does not
+
+| The target's | This implementation |
+|---|---|
+| the flag's name and its place in the input schema | **reproduced** — the same field, the same name |
+| the routing rule of points 1–4 | **reproduced** — `sandboxRoutingOf` in `src/tools/builtins/bash.ts` |
+| the `sandboxOverride` **ask**, with the message "Run outside of the sandbox" | **reproduced** — `sandboxOverrideDecision` in `src/permissions/decision.ts` |
+| a shell the **user typed** (`!` in the composer) runs outside the sandbox whatever the settings say | **not reproduced** — this implementation has no user-typed shell dispatch |
+| a **remote** session that requires the sandbox refuses an unsandboxed command outright | **not reproduced** — this implementation has no remote session |
+| the **Windows** enterprise policy refuses a compound command that would run unsandboxed | **not reproduced** — this implementation's backend is Linux-only |
+| the target's `sandbox.allowUnsandboxedCommands` default is **`true`** | **this implementation's default is `false`** — see "Implementation choices" |
+| the target's `excludedCommands` list works whatever `allowUnsandboxedCommands` says | **this implementation's list needs `allowUnsandboxedCommands`** — the two switches are one here, and the target's are two |
+
+### The clone-choice labels
+
+- The **flag** (`dangerouslyDisableSandbox`) is **the target's own** — REA observed, not an implementation choice. The plan's assumption that it was this implementation's was wrong, and this is the label that says so.
+- The **routing predicate** and the **override ask** are **the target's** — REA observed.
+- The **sandbox policy's defaults** are **this implementation's own**: `enabled: true` (the target's documented default is `false`), `failIfUnavailable: true` (the target's is `false`), `allowUnsandboxedCommands: false` (the target's is `true`), and `enabledPlatforms: ['linux']` (the target's list is not pinned).
+- The **per-command refusal** when the backend is missing is **this implementation's own**: the target refuses at **start-up**, not per command.
+- The **filtered environment**, the **refusal's own wording** and the **result's own members** (`sandboxReason`, `sandboxExemptions`, `sandboxExemptionScope`, `sandboxAvailability`) are this implementation's own.
+
 ## Implementation choices
 
 These are this implementation's decisions, not the target's observed behavior:
 
 - **The bubblewrap backend.** The target uses bubblewrap and socat on Linux/WSL2, so the choice is compatible; the version and setuid exposure are this implementation's own.
 - **The read-only working tree by default**, with `readWritePaths` for the writable areas. This diverges from the target's writable project directory.
-- **`failIfUnavailable: true` and `enabled: true` as the defaults.** The target's documented default is that a failed sandbox start **falls back to running unsandboxed**; this implementation fails closed by default.
+- **`failIfUnavailable: true`, `enabled: true` and `allowUnsandboxedCommands: false` as the defaults.** The target's documented default is that a failed sandbox start **falls back to running unsandboxed**; this implementation fails closed by default. The target's `allowUnsandboxedCommands` default is `true`, and this implementation's is `false` — so **the `dangerouslyDisableSandbox` flag is inert until a settings document sets `sandbox.allowUnsandboxedCommands: true`**. The target's own settings text is the rule: "when false, the `dangerouslyDisableSandbox` parameter is completely ignored and all commands must run sandboxed". The default is this implementation's own, and it is named here rather than papered over.
 - **`enabledPlatforms: ['linux']`.** The target's list is not pinned.
 - **The sandbox does not inherit the host environment.** Safe, but observable: `~/.ssh` and `~/.aws/credentials` are unreachable, whereas the target's default read access is "most of the machine".
 - **Private address ranges are refused** beyond the three named classes (loopback, link-local, cloud-metadata). This implementation's `metadata.goog` and `instance-data` names are also guesses the target does not pin.
@@ -183,3 +258,10 @@ These are this implementation's decisions, not the target's observed behavior:
 | The **helper's plan** is the target's: the environment it reads (`SRT_OBSERVE_SOCK`, `SRT_ENCODED_CMD`), the namespaces it unshares (`pid`, `mount`, `user`), the mounts it performs (the private root and `/proc`), the `prctl` it sets (`PR_SET_NO_NEW_PRIVS`), the seccomp flags (`SECCOMP_FILTER_FLAG_TSYNC_ESRCH` and `SECCOMP_FILTER_FLAG_NEW_LISTENER`), the descriptors it hands over and the order it does its work in | REA observed (audit §2.9) | F-34 | same file — "builds the plan the target's helper executes" |
 | The **filter** hands the target's 27 observed syscalls to the notification listener with `SECCOMP_RET_USER_NOTIF`, and the **enforcement** filter never does | REA observed (audit §2.9) | F-35 | same file — "hands the observed syscalls to the notification listener", "notifies for every one of the target's 27 observed syscalls" |
 | The **listener** serves the notifications with the target's own ioctl requests — `0xc0502100` to receive and `0xc0182101` to answer — and never denies | REA observed (audit §2.9) | F-35 | same file — "serves the notifications with the target's own ioctl requests", "never denies: the listener answers every call it serves", "reports that no listener is attached when there is no channel" |
+| The `dangerouslyDisableSandbox` field is the **target's own** — its name, its place in the input schema, and the description the target gives it | REA observed | F-37 | `tests/security/bash-sandbox.test.ts` — "routes the command outside the sandbox, and says why" |
+| The routing rule: the flag is consulted **before** the command's own exemption, and only when the policy permits unsandboxed commands | REA observed | F-37 | same file — "routes the command outside the sandbox, and says why" |
+| The override is an **ask** with the `sandboxOverride` reason kind and the message "Run outside of the sandbox" | REA observed | F-37 | same file — "asks the user before a call that asks for an unsandboxed run" |
+| A rule-derived allow keeps its own reason, and an ask that was already put to the user is not asked again | REA observed | F-37 | same file — "keeps the rule of an allow the rules produced", "keeps the ask of a call that was already put to the user" |
+| The flag is **completely ignored** when the policy forbids unsandboxed commands | REA observed | F-37 | same file — "ignores the flag when the policy forbids unsandboxed commands" |
+| No question is asked when the command would run outside the sandbox anyway | REA observed | F-37 | same file — "asks nothing when the command would run outside the sandbox anyway" |
+| The `sandbox.allowUnsandboxedCommands` default is **this implementation's own** (`false`), and the target's is `true` | implementation choice | F-37 | same file — "ignores the flag when the policy forbids unsandboxed commands" |

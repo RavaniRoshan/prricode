@@ -28,6 +28,34 @@
  * rule: the permission check runs on the command whether the flag is set or not.
  * The flag skips the **sandbox** and nothing else.
  *
+ * **The flag is the target's own, and its routing is the target's too.** The
+ * reading the `CC-024` milestone is built on established both, from the
+ * target's own bundle:
+ *
+ *   - the **field name** — the target's `Bash` tool declares
+ *     `dangerouslyDisableSandbox` in its input schema, described as "Set this
+ *     to true to dangerously override sandbox mode and run commands without
+ *     sandboxing", and the tool's permission check reads that same field. The
+ *     flag is therefore the **target's data**, and this implementation
+ *     reproduces it under the target's name;
+ *   - the **routing** — the target asks its own predicate "must this command
+ *     be sandboxed?" twice, once with the flag and once without, and the flag
+ *     is what changes the routing when the two answers differ. The predicate
+ *     consults the flag **before** the command's own exemption, and it
+ *     consults it only when the policy **permits** unsandboxed commands: the
+ *     target's own settings block says that
+ *     `sandbox.allowUnsandboxedCommands` "allows commands to run outside the
+ *     sandbox via the `dangerouslyDisableSandbox` parameter" and that "when
+ *     false, the `dangerouslyDisableSandbox` parameter is completely ignored and
+ *     all commands must run sandboxed". See {@link sandboxRoutingOf};
+ *   - the **report** — the target does not silently honour the flag. When the
+ *     ordinary decision is an **allow** that is not rule-derived, the target
+ *     replaces it with an **ask** whose reason kind is `sandboxOverride` and
+ *     whose message is "Run outside of the sandbox", so the user is asked
+ *     whether the command may run outside the sandbox. A denial keeps its own
+ *     reason, an ask that was already put to the user is not asked again, and
+ *     a rule-derived allow keeps its rule.
+ *
  * **The flag never overrides a policy error.** The flag is a **tool input field**
  * — the model supplies it — while `sandbox.enabled: false` and
  * `sandbox.enabledPlatforms` are the **user's settings file**. A model that could
@@ -143,7 +171,12 @@
 import { spawn, type ChildProcess} from 'node:child_process';
 
 import { ToolExecutionError, TOOL_ERROR_CODES, type ToolDefinition } from '../registry.js';
-import type { PermissionDecision, ToolContext } from '../../permissions/decision.js';
+import {
+  SANDBOX_OVERRIDE_MESSAGE,
+  sandboxOverrideDecision,
+  type PermissionDecision,
+  type ToolContext,
+} from '../../permissions/decision.js';
 import { isReadOnlyCommand } from '../readonly.js';
 import {
   SandboxRefusedError,
@@ -160,6 +193,7 @@ import {
   exemptionScope,
   type SandboxAvailability,
   type SandboxExemptionScope,
+  type SandboxPolicy,
 } from '../../platform/sandbox/policy.js';
 
 import {
@@ -296,22 +330,26 @@ export const SANDBOX_NOT_CONFIGURED_REASON =
   'no sandbox policy is configured for this session, so the command runs outside the sandbox';
 
 /**
- * The reason a command runs outside the sandbox when the call asked for it.
- *
- * The wording is this implementation's own: the audit names the policy's reasons, not the
- * flag's.
- */
-export const SANDBOX_SKIPPED_BY_CALL_REASON =
-  'the call asked for the sandbox to be skipped (dangerouslyDisableSandbox)';
-
-/**
  * The reason a permission decision carries when the call asked for an
  * unsandboxed run.
  *
- * The wording is the target's: the audit records the reason kind
- * `sandboxOverride` as "Run outside of the sandbox".
+ * **The target's.** The target's own source renders the `sandboxOverride`
+ * decision reason as "Run outside of the sandbox", and the decision the target
+ * builds carries the same words as its message.
  */
-export const SANDBOX_OVERRIDE_REASON = 'Run outside of the sandbox';
+export const SANDBOX_OVERRIDE_REASON = SANDBOX_OVERRIDE_MESSAGE;
+
+/**
+ * The reason a command runs outside the sandbox when the call asked for it.
+ *
+ * **The wording is this implementation's own**: the target reports *that* the
+ * command runs outside the sandbox, and the target's own reason for it is the
+ * flag's name — the target's decision reason carries the string
+ * `dangerouslyDisableSandbox`. The target's tool-result shape is not the
+ * audit's, so this implementation's own sentence is what the result carries.
+ */
+export const SANDBOX_SKIPPED_BY_CALL_REASON =
+  'the call asked for the sandbox to be skipped (dangerouslyDisableSandbox)';
 
 /**
  * The grace period the tool gives the launcher to hand over the output of a
@@ -760,21 +798,149 @@ function capOutput(text: string): { text: string; truncated: boolean } {
 }
 
 /**
- * Attach the `sandboxOverride` reason kind to a decision about a call that asked
- * to run outside the sandbox.
+ * The target's routing: what the call's flag does to the command's sandbox.
  *
- * The kind is the audit's: "Run outside of the sandbox" is what the user is told
- * when the call asks for an unsandboxed run. A **denial** keeps its own reason:
- * the flag never turns a refusal into an approval, so the refusal has to say why
- * it is a refusal.
+ * **Observed** — the target's own source, read for the `CC-024` milestone. The
+ * target's `Bash` tool consults the flag through a predicate that answers
+ * *"must this command be sandboxed?"*, and it asks that predicate **twice**:
+ * once with the flag and once without. The override is produced only when the
+ * two answers differ, so the flag is the thing that changed the routing.
+ *
+ * The target consults the flag **before** the command's own exemption, and it
+ * consults it only when the policy **permits** unsandboxed commands. The
+ * target's own settings block says so: `sandbox.allowUnsandboxedCommands`
+ * "allows commands to run outside the sandbox via the
+ * `dangerouslyDisableSandbox` parameter", and "when false, the
+ * `dangerouslyDisableSandbox` parameter is completely ignored and all commands
+ * must run sandboxed".
+ */
+export interface SandboxRouting {
+  /**
+   * Whether the flag routes the command outside the sandbox.
+   *
+   * It is `false` when the sandbox does not apply at all (it is switched off,
+   * or the platform is excluded), when the policy forbids unsandboxed
+   * commands, and when there is no policy.
+   */
+  readonly flagRoutesOutside: boolean;
+  /**
+   * Whether the flag is what **changes** the routing.
+   *
+   * It is `false` when the command would have run outside the sandbox anyway
+   * — the target's exemption list, for instance — because then the flag
+   * changes nothing and the target asks no question.
+   */
+  readonly flagChangedRouting: boolean;
+}
+
+/**
+ * The target's routing, reproduced.
+ *
+ * The predicate answers the target's question — "must this command be
+ * sandboxed?" — for the command **with** the flag and **without** it, and the
+ * two answers are what the override is built from.
+ *
+ * The target's own predicate also knows two things this implementation does
+ * not: a shell the **user typed** (`!` in the composer) is routed outside the
+ * sandbox whatever the settings say, and a **remote** session that requires
+ * the sandbox refuses an unsandboxed command outright. Neither has a
+ * counterpart here, and both are named in the conformance document.
+ */
+export function sandboxRoutingOf(
+  policy: SandboxPolicy | undefined,
+  platform: string,
+  command: string,
+  flag: boolean,
+): SandboxRouting {
+  // No policy at all: there is no sandbox, so the flag changes nothing.
+  if (policy === undefined) return { flagRoutesOutside: false, flagChangedRouting: false };
+  // The sandbox does not apply here: the flag changes nothing.
+  if (!policy.enabled) return { flagRoutesOutside: false, flagChangedRouting: false };
+  if (!policy.enabledPlatforms.includes(platform)) {
+    return { flagRoutesOutside: false, flagChangedRouting: false };
+  }
+  // The policy forbids unsandboxed commands: the flag is **completely
+  // ignored**, and every command runs sandboxed.
+  if (!policy.allowUnsandboxedCommands) {
+    return { flagRoutesOutside: false, flagChangedRouting: false };
+  }
+  // Without the flag: does the policy sandbox this command? A command the
+  // exemption list covers runs outside the sandbox either way, so the flag
+  // changes nothing — and the target asks no question about it.
+  const withoutFlag = evaluateSandbox(policy, platform, command, 'available');
+  if (withoutFlag.decision !== 'allow') {
+    return { flagRoutesOutside: false, flagChangedRouting: false };
+  }
+  if (!flag) return { flagRoutesOutside: false, flagChangedRouting: false };
+  return { flagRoutesOutside: true, flagChangedRouting: true };
+}
+
+/**
+ * Whether a decision's reason is rule-derived.
+ *
+ * **The target's own test.** The target asks whether the decision's reason is
+ * a rule — or a compound escalation whose every part is a rule — and a
+ * rule-derived allow keeps its own reason: the target does not turn it into a
+ * sandbox override.
+ */
+function isRuleDerived(decision: PermissionDecision): boolean {
+  return decision.reasonKind === 'rule' || decision.reasonKind === 'subcommandResults';
+}
+
+/**
+ * Whether the decision is the user's own answer to a question that was already
+ * put to them.
+ *
+ * **Why the target does not need this test.** The target builds its override
+ * from the decision the permission check produced **before** the prompt: a
+ * decision that is still an `ask` is not an `allow`, and the target's override
+ * condition excludes an `ask`. This implementation's check consults the prompt
+ * itself, so the decision it holds is the user's **answer** — and an answer
+ * that says "yes" must not be asked a second question about the sandbox.
+ */
+function isUserAnswer(decision: PermissionDecision): boolean {
+  return decision.source === 'user_temporary' || decision.source === 'user_permanent';
+}
+
+/**
+ * The target's sandbox override.
+ *
+ * **Observed** — the target's own `Bash` tool. The target produces the
+ * override **ask** when all of the following hold:
+ *
+ *   1. the call carries the `dangerouslyDisableSandbox` flag;
+ *   2. the ordinary decision is neither a `deny` nor an `ask` — an **allow**;
+ *   3. the ordinary decision's reason is **not** rule-derived;
+ *   4. the flag is what changes the routing: with the flag the command runs
+ *      outside the sandbox, and without it the command runs inside.
+ *
+ * The decision it produces is the target's:
+ * `{ behavior: 'ask', decisionReason: { type: 'sandboxOverride', reason:
+ * 'dangerouslyDisableSandbox' }, message: 'Run outside of the sandbox' }`.
+ *
+ * A **denial** keeps its own reason, and so does an **ask** that was already
+ * put to the user: the flag never turns a refusal into an approval, and it
+ * never asks the same person the same question twice.
  */
 function withSandboxOverride(
   decision: PermissionDecision,
   input: unknown,
+  deps: BuiltinToolDeps,
 ): PermissionDecision {
-  if (decision.behavior === 'deny') return decision;
+  if (decision.behavior !== 'allow') return decision;
   if (readInputField(input, 'dangerouslyDisableSandbox') !== true) return decision;
-  return { ...decision, reasonKind: 'sandboxOverride', reason: SANDBOX_OVERRIDE_REASON };
+  if (isRuleDerived(decision)) return decision;
+  if (isUserAnswer(decision)) return decision;
+  const command = readInputField(input, 'command');
+  if (typeof command !== 'string') return decision;
+  const routing = sandboxRoutingOf(
+    deps.sandboxPolicy,
+    deps.sandboxPlatform ?? process.platform,
+    command,
+    true,
+  );
+  if (!routing.flagChangedRouting) return decision;
+  return sandboxOverrideDecision();
 }
 
 /**
@@ -803,7 +969,7 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
 
     async checkPermissions(input, ctx: ToolContext) {
       const decision = await checkToolPermissions(ctx, deps);
-      return withSandboxOverride(decision, input);
+      return withSandboxOverride(decision, input, deps);
     },
 
     async recheckPermission(input, ctx: ToolContext) {
@@ -814,7 +980,7 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
       const decision = recheck.decision;
       return {
         ...recheck,
-        decision: decision === undefined ? undefined : withSandboxOverride(decision, input),
+        decision: decision === undefined ? undefined : withSandboxOverride(decision, input, deps),
       };
     },
 
@@ -887,6 +1053,20 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
 
       const spec: SandboxSpec = { command, cwd, env, policy, platform, availability, backend };
       const scope = exemptionScope(policy);
+      const routing = sandboxRoutingOf(policy, platform, command, skipSandbox);
+
+      if (routing.flagRoutesOutside) {
+        // The flag asks for an unconfined run of a command the policy would
+        // have sandboxed. The target consults the flag **before** the command's
+        // own exemption, so the flag's reason is the one reported. It never
+        // skips a permission rule — the permission check has already run on
+        // this command — and it never overrides the denial above.
+        return runUnconfined(spec, timeout, {
+          reason: SANDBOX_SKIPPED_BY_CALL_REASON,
+          scope,
+          availability: report,
+        });
+      }
 
       if (evaluation.decision === 'unconfined') {
         // The policy itself runs the command outside the sandbox, and its reason
@@ -894,18 +1074,6 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
         return runUnconfined(spec, timeout, {
           reason: evaluation.reason ?? 'the sandbox policy does not sandbox the command',
           ...(evaluation.exemptions === undefined ? {} : { exemptions: evaluation.exemptions }),
-          scope,
-          availability: report,
-        });
-      }
-
-      if (skipSandbox) {
-        // The flag asks for an unconfined run of a command the policy would
-        // have sandboxed. It never skips a permission rule — the permission check
-        // has already run on this command — and it never overrides the denial
-        // above.
-        return runUnconfined(spec, timeout, {
-          reason: SANDBOX_SKIPPED_BY_CALL_REASON,
           scope,
           availability: report,
         });

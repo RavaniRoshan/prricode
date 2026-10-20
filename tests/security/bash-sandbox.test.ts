@@ -20,6 +20,15 @@
  *   - **step 6** — the header no longer claims that the sandbox is not
  *     implemented.
  *
+ * **The `CC-024` block.** The target's own routing was read from the target's
+ * bundle for the `CC-024` milestone, and the block at the end of this file
+ * pins what the reading established: the `dangerouslyDisableSandbox` field is
+ * the **target's own**, the flag is consulted **before** the command's own
+ * exemption and only when the policy permits unsandboxed commands, and the
+ * override is an **ask** with the `sandboxOverride` reason kind and the message
+ * "Run outside of the sandbox". The reading is recorded in
+ * `docs/compatibility/sandbox-surface.md`.
+ *
  * **The backend is a test double.** It mirrors what the real bubblewrap backend
  * does — it runs the command with the environment the launcher filtered — so the
  * environment rule is exercised end to end without depending on the host.
@@ -388,7 +397,13 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
         rules: ruleSet({ allow: ['Bash'], cwd: root }),
         cwd: root,
         env: { PATH: '/usr/bin:/bin', ANTHROPIC_API_KEY: 'sk-s3cret' },
-        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        // The flag is honoured only when the policy **permits** unsandboxed
+        // commands: the target's own settings block says that
+        // `sandbox.allowUnsandboxedCommands` "allows commands to run outside
+        // the sandbox via the `dangerouslyDisableSandbox` parameter", and that
+        // "when false, the `dangerouslyDisableSandbox` parameter is completely
+        // ignored and all commands must run sandboxed".
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, allowUnsandboxedCommands: true },
         sandboxBackend: backend,
       }),
     );
@@ -766,13 +781,16 @@ describe('CC-008b — the sandbox-skip flag against the policy', () => {
     expect(output.sandboxed).toBe(true);
   });
 
-  it('attaches the sandboxOverride reason kind to a call that asks for an unsandboxed run', async () => {
+  it('keeps the ask of a call that was already put to the user', async () => {
     const root = temporaryDirectory();
     const tool = createBashTool(
       builtinDeps({
+        // An **ask rule** matched: the call is already the pending question, so
+        // the target does not put a second question about the sandbox to the
+        // same person.
         rules: ruleSet({ ask: ['Bash'], cwd: root }),
         cwd: root,
-        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, allowUnsandboxedCommands: true },
         sandboxBackend: recordingBackend(),
       }),
     );
@@ -780,11 +798,11 @@ describe('CC-008b — the sandbox-skip flag against the policy', () => {
 
     const decision = await tool.checkPermissions(input, toolContext('Bash', input));
 
-    expect(decision?.reasonKind).toBe('sandboxOverride');
-    expect(describeReason(decision as PermissionDecision, 'Bash')).toBe(
-      'Run outside of the sandbox',
-    );
-    expect(decision?.reason).toBe(SANDBOX_OVERRIDE_REASON);
+    expect(decision?.behavior).toBe('ask');
+    // The ask rule's own reason kind: the target leaves the ordinary question
+    // alone.
+    expect(decision?.reasonKind).toBe('rule');
+    expect(decision?.reasonKind).not.toBe('sandboxOverride');
   });
 
   it('keeps the denial reason of a call that asks for an unsandboxed run', async () => {
@@ -806,6 +824,160 @@ describe('CC-008b — the sandbox-skip flag against the policy', () => {
     // own reason.
     expect(decision?.reasonKind).not.toBe('sandboxOverride');
     expect(decision?.reason).toContain('Bash(curl *)');
+  });
+});
+
+// --- the target's routing ----------------------------------------------------------------
+
+describe('CC-024 — the target\'s sandbox routing', () => {
+  it('asks the user before a call that asks for an unsandboxed run', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        // The **bypass mode's** own allow: an allow that is not rule-derived.
+        // The target asks the user in exactly this case.
+        rules: ruleSet({ cwd: root }),
+        mode: 'bypassPermissions',
+        cwd: root,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, allowUnsandboxedCommands: true },
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+
+    const decision = await tool.checkPermissions(input, toolContext('Bash', input));
+
+    // The target's decision, character for character: an **ask**, the
+    // `sandboxOverride` reason kind, and the message "Run outside of the
+    // sandbox".
+    expect(decision?.behavior).toBe('ask');
+    expect(decision?.reasonKind).toBe('sandboxOverride');
+    expect(decision?.reason).toBe(SANDBOX_OVERRIDE_REASON);
+    expect(describeReason(decision as PermissionDecision, 'Bash')).toBe(
+      'Run outside of the sandbox',
+    );
+  });
+
+  it('keeps the rule of an allow the rules produced', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        // A **rule** produced the allow: the target's own test asks whether the
+        // decision's reason is rule-derived, and a rule-derived allow keeps its
+        // own reason.
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, allowUnsandboxedCommands: true },
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+
+    const decision = await tool.checkPermissions(input, toolContext('Bash', input));
+
+    expect(decision?.behavior).toBe('allow');
+    expect(decision?.reasonKind).toBe('rule');
+    expect(decision?.reasonKind).not.toBe('sandboxOverride');
+  });
+
+  it('ignores the flag when the policy forbids unsandboxed commands', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        mode: 'bypassPermissions',
+        cwd: root,
+        // `sandbox.allowUnsandboxedCommands` is false: the target's own
+        // settings block says the flag is then "completely ignored and all
+        // commands must run sandboxed".
+        sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+
+    const decision = await tool.checkPermissions(input, toolContext('Bash', input));
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // No question is asked: the flag is not in force.
+    expect(decision?.reasonKind).not.toBe('sandboxOverride');
+    expect(decision?.behavior).toBe('allow');
+    // And the command ran **inside** the sandbox.
+    expect(backend.started).toBe(1);
+    expect(output.sandboxed).toBe(true);
+  });
+
+  it('asks nothing when the command would run outside the sandbox anyway', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ cwd: root }),
+        mode: 'bypassPermissions',
+        cwd: root,
+        sandboxPolicy: {
+          ...DEFAULT_SANDBOX_POLICY,
+          allowUnsandboxedCommands: true,
+          excludedCommands: ['git status'],
+        },
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'git status', dangerouslyDisableSandbox: true };
+
+    const decision = await tool.checkPermissions(input, toolContext('Bash', input));
+
+    // The command runs outside the sandbox with or without the flag, so the
+    // flag changes nothing and there is nothing to ask about.
+    expect(decision?.reasonKind).not.toBe('sandboxOverride');
+    expect(decision?.behavior).toBe('allow');
+  });
+
+  it('routes the command outside the sandbox, and says why', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, allowUnsandboxedCommands: true },
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // The target consults the flag **before** the command's own exemption, so
+    // the flag's reason is the one reported.
+    expect(backend.started).toBe(0);
+    expect(output.sandboxed).toBe(false);
+    expect(output.sandboxReason).toMatch(/dangerouslyDisableSandbox/);
+  });
+
+  it('reports the target\'s own reason for a command the exemption list covers', async () => {
+    const root = temporaryDirectory();
+    const backend = recordingBackend();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        sandboxPolicy: {
+          ...DEFAULT_SANDBOX_POLICY,
+          allowUnsandboxedCommands: true,
+          excludedCommands: ['git status'],
+        },
+        sandboxBackend: backend,
+      }),
+    );
+    const input = { command: 'git status' };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // The exemption's own reason: the target's string, verbatim.
+    expect(output.sandboxReason).toBe('sandbox.allowUnsandboxedCommands is true');
+    expect(output.sandboxExemptions).toEqual(['git status']);
   });
 });
 
