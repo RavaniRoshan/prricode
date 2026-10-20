@@ -528,6 +528,45 @@ The earlier hypothesis that field `0x2463b9` is a handler function pointer was r
 
 ---
 
+### 2.10 The command-line surface
+
+**Status: observed (the argument parser's shape and the validation messages).**
+
+**The parser's structure** (`chunk-0y0ptpy9.js`). The scanner walks `argv` until `--` (which ends flag parsing). A token of the form `--flag=value` yields that value; a token equal to a known flag consumes the next token as its value. A token is a **flag** when it has more than one character and starts with `-`. The parser keeps three sets:
+
+- a set of flags that **take a value**;
+- a **repeatable** subset of those — `--allowedTools`, `--allowed-tools`, `--disallowedTools`, `--disallowed-tools`, `--tools`, `--add-dir`, `--mcp-config`, `--betas`, `--file`, `--channels`, `--dangerously-load-development-channels` — which consume **every** following non-flag token;
+- a set of **boolean** flags, which consume the next token only when it does **not** look like a flag — so `-r`/`--resume` takes an *optional* value.
+
+**The subcommands** are `attach`, `logs`, `stop`, `kill`, `respawn`, `rm`. A **short flag cluster** (`/^-[A-Za-z]{2,}$/`, e.g. `-d2e`) is a single token, not two flags. A token that is one of `-p`, `--print`, `--bg`, `--background`, `--routine`, `-h`, `--help`, `-v`, `-V`, `--version`, or that starts with `--routine=`, is a **command**, not a flag.
+
+**A session id** matches `/^(?:session|cse)_[A-Za-z0-9_]+$/`; a path is scanned for such a segment. A **cloud session ref** is an 8-hex-digit id (`/^[a-f0-9]{8}$/`). A **URI** argument starts with `cc://` or `cc+unix://`.
+
+**Headless mode is forced by a non-TTY stdout.** The headless decision is `--print` (or `-p`), `--init-only`, `--sdk-url`, **or `!process.stdout.isTTY`**.
+
+**The validation messages** (verbatim):
+
+| Condition | Message |
+|---|---|
+| an unknown input format | `Error: Invalid input format "<value>".` |
+| `--input-format=stream-json` without `stream-json` output | `Error: --input-format=stream-json requires output-format=stream-json.` |
+| `--input-format=stream-json` without `--print` | `Error: --input-format=stream-json requires --print.` |
+| `--sdk-url` without both stream formats | `Error: --sdk-url requires both --input-format=stream-json and --output-format=stream-json.` |
+| `--no-session-persistence` without `--print` | `Error: --no-session-persistence can only be used with --print mode.` |
+| `--forward-home-settings` with a non-boolean | `Error: --forward-home-settings takes true or false, not <value>.` |
+| `--forward-home-settings` with no cloud target | `Error: --forward-home-settings says whether this machine's settings go into a cloud session; pass --cloud (a new session, or one to attach to) or --environment` |
+| a mode that cannot be combined with resume/continue/teleport | `<mode> cannot be combined with --resume, --continue, or --teleport` |
+| `--init-only` or `--session-id` combined with a mode | `<mode> cannot be combined with --init-only` / `… --session-id` |
+| `--environment` with `--cloud` | `Error: --environment creates a new session; it cannot be combined with --cloud <session_id|url>` |
+| a non-interactive mode with a cloud description | `non-interactive <mode> reads the prompt from the positional or stdin; drop --cloud/--remote <description>.` |
+| a non-interactive mode with `--output-format stream-json` | `<mode> does not support --output-format stream-json` |
+| the task given twice | `Error: the task was given twice: as --cloud's value (<value>) and as the prompt. With --print, give it in one place; to name the session, use -n/--name.` |
+| `--attach-serve` without the serve-only launch | `Error: --attach-serve requires the serve-only headless launch (non-interactive, --input-format stream-json and --output-format stream-json) and an enabled headless cloud client; it never falls back to a plain attach` |
+
+The **input format** is `text` or `stream-json`; the **output format** is `text`, `json` or `stream-json`.
+
+**Partial:** the full flag list is long (roughly ninety value-taking flags and forty boolean ones), and only the flags this implementation's own surface needs are enumerated here. The **exit codes** are not tabulated: this implementation's known ones are `1` for a failed session lookup and `2` for an argument error.
+
 ## 3. Feature matrix
 
 Status vocabulary: **observed** (directly present in the pinned artifact's static structure), **inferred** (strongly implied but not directly established), **documented only** (official docs; not target evidence), **partial** (some of the surface established, some not), **unknown** (not established by the analyzed scope), **not applicable**.
