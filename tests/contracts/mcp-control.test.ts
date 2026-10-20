@@ -31,6 +31,7 @@ import {
   dispatchControlRequest,
   type ControlCallbacks,
   type ControlRequest,
+  type HostControlRequestSubtype,
 } from '../../src/extensions/mcp/control.js';
 
 /** The 23 subtypes the target's host dispatcher handles. */
@@ -74,7 +75,9 @@ function fullCallbacks(overrides: ControlCallbacks = {}): ControlCallbacks {
       ok: true,
     })),
     onMcpReconnect: vi.fn(async (_req: unknown) => ({ ok: true })),
-    onHostRequest: vi.fn(async (_req: { subtype: string; request_id: string }) => ({ ok: true })),
+    onHostRequest: vi.fn(
+      async (_req: ControlRequest & { subtype: HostControlRequestSubtype }) => ({ ok: true }),
+    ),
     onPermissionRequest: vi.fn(),
     ...overrides,
   };
@@ -177,6 +180,58 @@ describe('the host control dispatcher', () => {
     expect(response.subtype).toBe('error');
     expect(response.error).toBe('mcp_authenticate is not supported in this context (callback not registered)');
     expect(Object.keys(response).sort()).toEqual(['error', 'subtype']);
+  });
+
+  it('hands the whole request to the generic host seam', async () => {
+    const onHostRequest = vi.fn(
+      async (_req: ControlRequest & { subtype: HostControlRequestSubtype }) => ({ ok: true }),
+    );
+
+    const response = await dispatchControlRequest(
+      { subtype: 'set_model', request_id: 'req-model', model: 'opus' },
+      { onHostRequest },
+    );
+
+    expect(response.subtype).toBe('success');
+    expect(onHostRequest).toHaveBeenCalledTimes(1);
+    const req = onHostRequest.mock.calls[0]?.[0];
+    expect(req?.subtype).toBe('set_model');
+    expect(req?.request_id).toBe('req-model');
+    // The payload the subtype needs survives the seam.
+    expect(req?.model).toBe('opus');
+  });
+
+  it('hands the path to the generic host seam for a read_file request', async () => {
+    const onHostRequest = vi.fn(
+      async (_req: ControlRequest & { subtype: HostControlRequestSubtype }) => ({ ok: true }),
+    );
+
+    await dispatchControlRequest(
+      { subtype: 'read_file', request_id: 'req-read', path: '/tmp/notes.txt' },
+      { onHostRequest },
+    );
+
+    const req = onHostRequest.mock.calls[0]?.[0];
+    expect(req?.subtype).toBe('read_file');
+    expect(req?.path).toBe('/tmp/notes.txt');
+  });
+
+  it('hands the payload of every generic host subtype to the seam', async () => {
+    const onHostRequest = vi.fn(
+      async (_req: ControlRequest & { subtype: HostControlRequestSubtype }) => ({ ok: true }),
+    );
+
+    await dispatchControlRequest(
+      {
+        subtype: 'mcp_set_servers',
+        request_id: 'req-servers',
+        servers: [{ name: 'notes', type: 'stdio' }],
+      },
+      { onHostRequest },
+    );
+
+    const req = onHostRequest.mock.calls[0]?.[0];
+    expect(req?.servers).toEqual([{ name: 'notes', type: 'stdio' }]);
   });
 
   it('reports the same error text for the other callback-bound subtypes', async () => {
@@ -337,6 +392,50 @@ describe('the transport permission dispatcher', () => {
     );
     // A denial is still a response, so the request is not dropped.
     expect(result.dropped).toBe(false);
+    // The denial reaches the caller.
+    expect(result.response?.response.behavior).toBe('deny');
+    expect(result.response?.response.message).toBe('No permission handler is available.');
+    expect(result.response?.request_id).toBe('req-2');
+  });
+
+  it('hands the synthesized denial of a malformed request back to the caller', async () => {
+    const result = await dispatchCanUseTool(
+      { request_id: 'req-malformed', tool_name: '', input: {} },
+      { onPermissionDecision: vi.fn(async () => ({ behavior: 'allow' as const })) },
+    );
+
+    // The request is answered — with a denial — rather than dropped.
+    expect(result.dropped).toBe(false);
+    expect(result.response?.response.behavior).toBe('deny');
+    expect(result.response?.response.message).toContain('malformed');
+    expect(result.response?.request_id).toBe('req-malformed');
+  });
+
+  it('hands the decision back to the caller', async () => {
+    const result = await dispatchCanUseTool(
+      { request_id: 'req-decision', tool_name: 'Bash', input: {} },
+      { onPermissionDecision: vi.fn(async () => ({ behavior: 'allow' as const })) },
+    );
+
+    expect(result.dropped).toBe(false);
+    expect(result.response?.response.behavior).toBe('allow');
+  });
+
+  it('leaves the validation to the transport permission dispatcher', async () => {
+    const dispatch = vi.fn(async () => ({
+      kind: 'dropped' as const,
+      reason: 'the transport dispatcher said no',
+    }));
+    const transportDispatcher = { dispatch, inFlight: () => [] };
+
+    const result = await dispatchCanUseTool(
+      { request_id: 42, tool_name: 'Bash', input: {} },
+      { transportDispatcher },
+    );
+
+    // This implementation does not pre-empt the dispatcher with its own checks.
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ dropped: true, reason: 'the transport dispatcher said no' });
   });
 
   it('drops a request that carries another subtype', async () => {
@@ -370,6 +469,60 @@ describe('the transport permission dispatcher', () => {
     expect(second.dropped).toBe(true);
     release?.();
     await first;
+  });
+
+  it('does not dispatch the same request id twice with a fresh callback object', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onPermissionDecision = vi.fn(async () => {
+      await gate;
+      return { behavior: 'deny' as const };
+    });
+
+    // A fresh callbacks object per request — which `dispatchCanUseTool`
+    // invites — must not defeat the in-flight deduplication.
+    const first = dispatchCanUseTool(
+      { request_id: 'req-fresh', tool_name: 'Bash', input: {} },
+      { onPermissionDecision: vi.fn(async () => ({ behavior: 'deny' as const })) },
+    );
+    const second = await dispatchCanUseTool(
+      { request_id: 'req-fresh', tool_name: 'Bash', input: {} },
+      { onPermissionDecision: vi.fn(async () => ({ behavior: 'deny' as const })) },
+    );
+
+    expect(second.dropped).toBe(true);
+    expect(second.reason).toContain('already in flight');
+    release?.();
+    await first;
+  });
+
+  it('uses the plan permission callback as the decision when it answers', async () => {
+    const onPermissionRequest = vi.fn(async () => ({ behavior: 'allow' as const }));
+
+    const result = await dispatchCanUseTool(
+      { request_id: 'req-plan-callback', tool_name: 'Bash', input: {} },
+      { onPermissionRequest },
+    );
+
+    expect(onPermissionRequest).toHaveBeenCalledTimes(1);
+    expect(result.dropped).toBe(false);
+    expect(result.response?.response.behavior).toBe('allow');
+  });
+
+  it('does not tell a plan-conformant caller that no handler is available', async () => {
+    const onPermissionRequest = vi.fn();
+
+    const result = await dispatchCanUseTool(
+      { request_id: 'req-plan-notification', tool_name: 'Bash', input: {} },
+      { onPermissionRequest },
+    );
+
+    expect(result.dropped).toBe(false);
+    expect(result.response?.response.behavior).toBe('deny');
+    // A handler *is* available, so the "no handler" wording would be a lie.
+    expect(result.response?.response.message).not.toBe('No permission handler is available.');
   });
 });
 

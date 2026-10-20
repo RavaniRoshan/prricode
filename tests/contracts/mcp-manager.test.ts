@@ -39,7 +39,8 @@
  */
 
 import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -51,6 +52,7 @@ import {
   LEGACY_PROTOCOL_VERSION,
   MODERN_PROTOCOL_VERSION,
   McpRpcError,
+  McpTimeoutError,
   UNSUPPORTED_PROTOCOL_VERSION,
   capMcpInstructions,
   checkMcpProtocolVersionHeader,
@@ -89,6 +91,7 @@ import {
   isRemoteHostAllowed,
   isUnsupportedProtocolVersionError,
   isUrlElicitationResult,
+  mcpConfigKey,
   mcpToolName,
   onMcpServerConnectionEvent,
   rememberDiscoverPrior,
@@ -135,8 +138,13 @@ function send(message) {
   process.stdout.write(JSON.stringify(message) + '\\n');
 }
 
-function bumpCounter() {
-  const file = process.env.FAKE_MCP_STATE_FILE;
+function logMethod(method) {
+  const file = process.env.FAKE_MCP_METHOD_LOG;
+  if (!file || !method) return;
+  try { fs.appendFileSync(file, method + '\\n'); } catch { /* the log is a test aid */ }
+}
+
+function bumpFile(file) {
   if (!file) return 0;
   let current = 0;
   try { current = Number(fs.readFileSync(file, 'utf8')) || 0; } catch { current = 0; }
@@ -145,14 +153,26 @@ function bumpCounter() {
   return current;
 }
 
-const toolList = [
-  {
-    name: 'echo',
-    title: 'Echo',
-    description: 'Echo the input back',
-    inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
-  },
+function bumpCounter() {
+  return bumpFile(process.env.FAKE_MCP_STATE_FILE);
+}
+
+const toolDescription = process.env.FAKE_MCP_TOOL_DESCRIPTION || 'Echo the input back';
+
+const echoTool = {
+  name: 'echo',
+  title: 'Echo',
+  description: toolDescription,
+  inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+};
+
+const ideTools = [
+  { name: 'other', title: 'Other', description: 'An ide tool' },
+  { name: 'executeCode', title: 'Execute', description: 'Runs the code' },
+  { name: 'getDiagnostics', title: 'Diagnostics', description: 'The diagnostics' },
 ];
+
+const toolList = mode === 'ide' ? ideTools : [echoTool];
 
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
@@ -161,6 +181,20 @@ rl.on('line', (line) => {
   if (!message || typeof message !== 'object') return;
   const id = message.id;
   const method = message.method;
+  logMethod(method);
+
+  const delayMethod = process.env.FAKE_MCP_DELAY_METHOD || 'tools/list';
+  const delayMs = Number(process.env.FAKE_MCP_DELAY_MS || '0');
+  if (delayMs > 0 && method === delayMethod) {
+    setTimeout(() => {
+      send({
+        jsonrpc: '2.0',
+        id,
+        result: method === 'tools/list' ? { tools: toolList } : {},
+      });
+    }, delayMs);
+    return;
+  }
 
   if (method === 'initialize') {
     send({
@@ -200,19 +234,39 @@ rl.on('line', (line) => {
       });
       return;
     }
+    if (mode === 'unsupported-modern-version') {
+      // The first probe is refused, and the version the client is told about is
+      // a **modern** one, so the client re-probes with it.
+      const seen = bumpFile(process.env.FAKE_MCP_DISCOVER_COUNTER);
+      if (seen === 1) {
+        send({
+          jsonrpc: '2.0',
+          id,
+          error: {
+            code: -32022,
+            message: 'Unsupported protocol version',
+            data: { supported: ['2026-07-28'] },
+          },
+        });
+        return;
+      }
+      send({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          protocolVersion: '2026-07-28',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'fake-mcp', version: '1.0.0' },
+        },
+      });
+      return;
+    }
     send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } });
     return;
   }
 
   if (method === 'tools/list') {
     if (mode === 'exit-on-list') { process.exit(3); }
-    const delay = Number(process.env.FAKE_MCP_DELAY_MS || '0');
-    if (delay > 0) {
-      setTimeout(() => {
-        send({ jsonrpc: '2.0', id, result: { tools: toolList } });
-      }, delay);
-      return;
-    }
     send({ jsonrpc: '2.0', id, result: { tools: toolList } });
     return;
   }
@@ -256,6 +310,17 @@ rl.on('line', (line) => {
         return;
       }
     }
+    const callDelay = Number(process.env.FAKE_MCP_CALL_DELAY_MS || '0');
+    if (callDelay > 0) {
+      setTimeout(() => {
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: { content: [{ type: 'text', text: 'echo: ' + JSON.stringify(params.arguments || {}) }] },
+        });
+      }, callDelay);
+      return;
+    }
     send({
       jsonrpc: '2.0',
       id,
@@ -283,7 +348,13 @@ function writeFakeServer(mode: string, dir: string): string {
   return file;
 }
 
-/** A stdio config that runs the fake server in the given mode. */
+/**
+ * A stdio config that runs the fake server in the given mode.
+ *
+ * The `extra` members are spread **first**, so the server's own environment is
+ * the mode plus the caller's own entries — and the caller's entries cannot
+ * clobber the mode by accident.
+ */
 function stdioConfig(
   name: string,
   serverPath: string,
@@ -291,12 +362,100 @@ function stdioConfig(
   extra: Partial<McpServerConfig> = {},
 ): McpServerConfig {
   return {
+    ...extra,
     name,
     type: 'stdio',
     command: process.execPath,
     args: [serverPath],
     env: { FAKE_MCP_MODE: mode, ...(extra.env ?? {}) },
-    ...extra,
+  };
+}
+
+/** The methods the fake server saw, in order. */
+function readMethodLog(file: string): string[] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((line) => line.length > 0);
+}
+
+/* -------------------------------------------------------------------------- */
+/* The HTTP stub server                                                       */
+/* -------------------------------------------------------------------------- */
+
+/** The answer a stub HTTP MCP server gives. */
+interface StubAnswer {
+  status: number;
+  body: string;
+  contentType?: string;
+}
+
+/** A stub HTTP MCP server. */
+interface StubServer {
+  /** The endpoint the client talks to. */
+  url: string;
+  /** The headers of every request the server saw, in order. */
+  headers: Array<Record<string, string | string[] | undefined>>;
+  /** The methods the server saw, in order. */
+  methods: string[];
+  /** Close the server. */
+  close: () => Promise<void>;
+}
+
+/**
+ * Start a stub HTTP MCP server.
+ *
+ * The server answers whatever the test's `answer` function says, so a test can
+ * pin the headers it presents and the answers it gives.
+ */
+async function startStubHttpServer(
+  answer: (
+    message: { method: string; id?: unknown; params?: unknown },
+    headers: Record<string, string | string[] | undefined>,
+  ) => StubAnswer,
+): Promise<StubServer> {
+  const headers: Array<Record<string, string | string[] | undefined>> = [];
+  const methods: string[] = [];
+  const server: Server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8');
+      let method = '';
+      let id: unknown;
+      let params: unknown;
+      try {
+        const parsed = JSON.parse(body) as { method?: string; id?: unknown; params?: unknown };
+        method = parsed.method ?? '';
+        id = parsed.id;
+        params = parsed.params;
+      } catch {
+        // The body is not JSON: the answer function sees an empty method.
+      }
+      methods.push(method);
+      headers.push({ ...req.headers });
+      const result = answer({ method, id, params }, req.headers);
+      res.writeHead(result.status, { 'content-type': result.contentType ?? 'application/json' });
+      res.end(result.body);
+    });
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+
+  return {
+    url: `http://127.0.0.1:${port}/mcp`,
+    headers,
+    methods,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      }),
   };
 }
 
@@ -448,15 +607,90 @@ describe('the MCP manager', () => {
   it('honours the legacy opt-out of the modern revision', async () => {
     const dir = makeTempDir();
     const serverPath = writeFakeServer('modern', dir);
-    const manager = createMcpManager();
+    const methodLog = path.join(dir, 'methods.log');
+    // The opt-out lives in the **client's** environment: it says how the
+    // client negotiates, not how the server does.
+    const manager = createMcpManager({ env: { MCP_PROTOCOL_NEGOTIATION: 'legacy' } });
 
     const state = await manager.connect(
-      stdioConfig('opted-out', serverPath, 'modern', { env: { MCP_PROTOCOL_NEGOTIATION: 'legacy' } }),
+      stdioConfig('opted-out', serverPath, 'modern', { env: { FAKE_MCP_METHOD_LOG: methodLog } }),
     );
 
     expect(state.status).toBe('ready');
     expect(state.protocolVersion).toBe(LEGACY_PROTOCOL_VERSION);
+
+    // The modern server was reached through the **legacy handshake**, not
+    // through the modern probe.
+    const methods = readMethodLog(methodLog);
+    expect(methods).toContain('initialize');
+    expect(methods).not.toContain('server/discover');
+
     await manager.disconnect('opted-out');
+  });
+
+  it('re-probes with the first modern version the server names', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('unsupported-modern-version', dir);
+    const methodLog = path.join(dir, 'methods.log');
+    const counter = path.join(dir, 'discover.txt');
+    const manager = createMcpManager();
+
+    const state = await manager.connect(
+      stdioConfig('reprobed', serverPath, 'unsupported-modern-version', {
+        env: { FAKE_MCP_METHOD_LOG: methodLog, FAKE_MCP_DISCOVER_COUNTER: counter },
+      }),
+    );
+
+    expect(state.status).toBe('ready');
+    expect(state.protocolVersion).toBe(MODERN_PROTOCOL_VERSION);
+
+    // The modern probe is made **twice**: once with the client's own version
+    // and once with the version the server named.
+    const methods = readMethodLog(methodLog);
+    expect(methods.filter((method) => method === 'server/discover')).toHaveLength(2);
+    expect(methods).not.toContain('initialize');
+
+    await manager.disconnect('reprobed');
+  });
+
+  it('hides the mcp__ide__ tools the filter covers', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('ide', dir);
+    const manager = createMcpManager();
+
+    await manager.connect(stdioConfig('ide', serverPath, 'ide'));
+
+    const names = manager.toolsFor('ide').map((tool) => tool.name);
+    // The general filter hides the ide tools ...
+    expect(names).not.toContain('mcp__ide__other');
+    // ... and the two special-cased tools are exempt from it.
+    expect(names).toContain('mcp__ide__executeCode');
+    expect(names).toContain('mcp__ide__getDiagnostics');
+
+    await manager.disconnect('ide');
+  });
+
+  it('connects a server again when its environment changed', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+    const manager = createMcpManager();
+
+    const first = await manager.connect(
+      stdioConfig('env-changed', serverPath, 'legacy', { env: { FAKE_MCP_MARKER: '1' } }),
+    );
+    expect(first.status).toBe('ready');
+    const firstConnection = manager.connection('env-changed');
+    expect(firstConnection).toBeDefined();
+
+    const second = await manager.connect(
+      stdioConfig('env-changed', serverPath, 'legacy', { env: { FAKE_MCP_MARKER: '2' } }),
+    );
+    expect(second.status).toBe('ready');
+    // A different environment is a different server: the connection is made
+    // again rather than reused.
+    expect(manager.connection('env-changed')).not.toBe(firstConnection);
+
+    await manager.disconnect('env-changed');
   });
 
   it('marks a server that exits during tools/list as failed without blocking the others', async () => {
@@ -541,6 +775,35 @@ describe('the MCP manager', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('the MCP connect memo', () => {
+  it('treats a different environment, credential or connection as a different server', () => {
+    const base: McpServerConfig = { name: 'identity', type: 'stdio', command: 'server' };
+
+    expect(mcpConfigKey(base)).not.toBe(
+      mcpConfigKey({ ...base, env: { TOKEN: 'one' } }),
+    );
+    expect(mcpConfigKey({ ...base, env: { TOKEN: 'one' } })).not.toBe(
+      mcpConfigKey({ ...base, env: { TOKEN: 'two' } }),
+    );
+    expect(
+      mcpConfigKey({ ...base, credential: { present: true, value: 'one' } }),
+    ).not.toBe(mcpConfigKey({ ...base, credential: { present: true, value: 'two' } }));
+    expect(mcpConfigKey({ ...base, connectionId: 'one' })).not.toBe(
+      mcpConfigKey({ ...base, connectionId: 'two' }),
+    );
+  });
+
+  it('never puts a secret in the configuration identity', () => {
+    const key = mcpConfigKey({
+      name: 'identity',
+      type: 'stdio',
+      command: 'server',
+      env: { TOKEN: 'super-secret' },
+      credential: { present: true, value: 'super-secret' },
+    });
+
+    expect(key).not.toContain('super-secret');
+  });
+
   it('memoizes the connect result and drops it when the identity epoch changes', async () => {
     const dir = makeTempDir();
     const serverPath = writeFakeServer('legacy', dir);
@@ -595,6 +858,28 @@ describe('the MCP connect memo', () => {
     expect(evictStaleFailedConnectMemoForServe('never-seen')).toBe(false);
 
     await manager.disconnect('stale');
+  });
+
+  it('evicts a failed memo and retries the server', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+    const manager = createMcpManager();
+
+    // A server that cannot be reached leaves a **failed** memo behind.
+    const failed = await manager.connect({ name: 'failed-memo', type: 'sdk' });
+    expect(failed.status).toBe('failed');
+
+    // The failed memo is stale, and evicting it says so.
+    expect(evictStaleFailedConnectMemoForServe('failed-memo')).toBe(true);
+    // It is gone, so a second eviction finds nothing.
+    expect(evictStaleFailedConnectMemoForServe('failed-memo')).toBe(false);
+
+    // The next connect retries the server rather than handing out the failure.
+    const retried = await manager.connect(stdioConfig('failed-memo', serverPath, 'legacy'));
+    expect(retried.status).toBe('ready');
+    expect(retried.error).toBeUndefined();
+
+    await manager.disconnect('failed-memo');
   });
 });
 
@@ -786,6 +1071,8 @@ describe('the MCP fetch variants', () => {
 
     expect(seen[0]?.url).toBe('https://proxy.invalid/api/mcp');
     expect(seen[0]?.headers['authorization']).toBe('Bearer proxy-token');
+    // The proxy variant is told apart by its own marker.
+    expect(seen[0]?.headers['x-claude-ai-proxy']).toBe('1');
   });
 
   it('presents the first-party API key in its own header and keeps the API version', async () => {
@@ -839,6 +1126,34 @@ describe('the MCP fetch variants', () => {
     expect(seen[0]?.url).toBe('https://ccr.invalid/mcp');
     expect(seen[0]?.headers['authorization']).toBe('Bearer ccr-token');
     expect(seen[0]?.headers['x-api-key']).toBeUndefined();
+    // The CCR proxy variant is told apart by its own marker.
+    expect(seen[0]?.headers['x-ccr-proxy']).toBe('1');
+    // The two proxy variants are told apart from each other.
+    expect(seen[0]?.headers['x-claude-ai-proxy']).toBeUndefined();
+  });
+
+  it('tells the four variants apart by their markers', async () => {
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      seen.push((init?.headers ?? {}) as Record<string, string>);
+      return new Response('{}', { status: 200 });
+    });
+    const asFetch = fetchImpl as unknown as typeof fetch;
+
+    await createAgentAiProxyFetch({ fetchImpl: asFetch })('https://a.invalid/mcp');
+    await createFirstPartyApiMcpFetch({ fetchImpl: asFetch })('https://b.invalid/mcp');
+    await createCliOwnedBearerFetch({ fetchImpl: asFetch })('https://c.invalid/mcp');
+    await createCcrProxyFetch({ fetchImpl: asFetch })('https://d.invalid/mcp');
+
+    const [claudeAi, firstParty, cliOwned, ccr] = seen;
+    expect(claudeAi?.['x-claude-ai-proxy']).toBe('1');
+    expect(claudeAi?.['x-ccr-proxy']).toBeUndefined();
+    expect(ccr?.['x-ccr-proxy']).toBe('1');
+    expect(ccr?.['x-claude-ai-proxy']).toBeUndefined();
+    expect(firstParty?.['anthropic-version']).toBe('2023-06-01');
+    expect(firstParty?.['x-claude-ai-proxy']).toBeUndefined();
+    expect(cliOwned?.['x-claude-ai-proxy']).toBeUndefined();
+    expect(cliOwned?.['x-ccr-proxy']).toBeUndefined();
   });
 });
 
@@ -893,6 +1208,81 @@ describe('the MCP timeouts', () => {
 
     expect(result.isError).toBe(false);
     await manager.disconnect('slow-tool');
+  });
+
+  it('rejects a tool call that runs out of time with a tool timeout', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+    const manager = createMcpManager({
+      client: { timeouts: { toolTimeoutMs: 150 } },
+    });
+
+    await manager.connect(
+      stdioConfig('tool-timeout', serverPath, 'legacy', {
+        env: { FAKE_MCP_CALL_DELAY_MS: '5000' },
+      }),
+    );
+
+    const error = await manager.callTool('tool-timeout', 'echo', { text: 'hi' }).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+
+    // The tool timeout is its own kind: it is not an ordinary request timeout.
+    expect(error).toBeInstanceOf(McpTimeoutError);
+    expect((error as McpTimeoutError).kind).toBe('tool');
+
+    await manager.disconnect('tool-timeout');
+  });
+
+  it('rejects a silent tool call with a tool idle timeout', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+    const manager = createMcpManager({
+      client: { timeouts: { toolIdleTimeoutMs: 120 } },
+    });
+
+    await manager.connect(
+      stdioConfig('tool-idle', serverPath, 'legacy', {
+        env: { FAKE_MCP_CALL_DELAY_MS: '5000' },
+      }),
+    );
+
+    const error = await manager.callTool('tool-idle', 'echo', { text: 'hi' }).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(McpTimeoutError);
+    expect((error as McpTimeoutError).kind).toBe('toolIdle');
+
+    await manager.disconnect('tool-idle');
+  });
+
+  it('rejects an ordinary request that runs out of time with a request timeout', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+    const manager = createMcpManager({
+      client: { timeouts: { requestTimeoutMs: 150 } },
+    });
+
+    await manager.connect(
+      stdioConfig('request-timeout', serverPath, 'legacy', {
+        env: { FAKE_MCP_DELAY_MS: '5000', FAKE_MCP_DELAY_METHOD: 'prompts/list' },
+      }),
+    );
+
+    const connection = manager.connection('request-timeout');
+    expect(connection).toBeDefined();
+    const error = await connection!.request('prompts/list', {}).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+
+    expect(error).toBeInstanceOf(McpTimeoutError);
+    expect((error as McpTimeoutError).kind).toBe('request');
+
+    await manager.disconnect('request-timeout');
   });
 });
 
@@ -989,6 +1379,24 @@ describe('the MCP connection events', () => {
     expect(events).toContain('connected:evented');
 
     await manager.disconnect('evented');
+  });
+
+  it('publishes a closed event when a connection is closed', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+    const manager = createMcpManager();
+
+    const events: string[] = [];
+    const off = onMcpServerConnectionEvent((event) => {
+      events.push(`${event.type}:${event.server}`);
+    });
+
+    await manager.connect(stdioConfig('closed-event', serverPath, 'legacy'));
+    await manager.disconnect('closed-event');
+    off();
+
+    expect(events).toContain('connected:closed-event');
+    expect(events).toContain('closed:closed-event');
   });
 });
 
@@ -1138,6 +1546,197 @@ describe('the transport seam', () => {
     expect(state.status).toBe('failed');
     expect(state.error).toContain('transport factory');
   });
+
+  it('names the offending value when a configuration has no name', async () => {
+    const manager = createMcpManager();
+    const state = await manager.connect({ name: '', type: 'stdio', command: 'server' });
+    expect(state.status).toBe('failed');
+    expect(state.error).toContain('non-empty name');
+    // The error names the value it was given.
+    expect(state.error).toContain('""');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The HTTP transport                                                         */
+/* -------------------------------------------------------------------------- */
+
+describe('the HTTP transport', () => {
+  it('connects an http server end to end', async () => {
+    const stub = await startStubHttpServer((message) => {
+      if (message.method === 'server/discover') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              protocolVersion: MODERN_PROTOCOL_VERSION,
+              capabilities: { tools: {} },
+              serverInfo: { name: 'stub', version: '1.0.0' },
+            },
+          }),
+        };
+      }
+      if (message.method === 'tools/list') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { tools: [{ name: 'ping', title: 'Ping' }] },
+          }),
+        };
+      }
+      return { status: 200, body: JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }) };
+    });
+
+    const manager = createMcpManager();
+    const state = await manager.connect({ name: 'remote', type: 'http', url: stub.url });
+
+    expect(state.status).toBe('ready');
+    expect(state.protocolVersion).toBe(MODERN_PROTOCOL_VERSION);
+    expect(state.tools).toEqual([{ name: 'mcp__remote__ping', title: 'Ping' }]);
+    expect(stub.methods).toContain('server/discover');
+
+    await manager.disconnect('remote');
+    await stub.close();
+  });
+
+  it('uses the injected fetch implementation', async () => {
+    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fetchImpl = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      calls.push({ url: String(input), headers });
+      const message = JSON.parse(String(init?.body)) as { method: string; id?: unknown };
+      const result =
+        message.method === 'server/discover'
+          ? { protocolVersion: MODERN_PROTOCOL_VERSION, capabilities: { tools: {} } }
+          : { tools: [{ name: 'ping', title: 'Ping' }] };
+      return new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: message.id, result }),
+        { status: 200 },
+      );
+    });
+
+    const manager = createMcpManager({
+      client: { fetchImpl: fetchImpl as unknown as typeof fetch },
+    });
+    const state = await manager.connect({
+      name: 'injected',
+      type: 'http',
+      url: 'https://mcp.invalid/mcp',
+    });
+
+    expect(state.status).toBe('ready');
+    expect(calls[0]?.url).toBe('https://mcp.invalid/mcp');
+    // The transport presents the protocol version in its header.
+    expect(calls[0]?.headers['MCP-Protocol-Version']).toBe(MODERN_PROTOCOL_VERSION);
+
+    await manager.disconnect('injected');
+  });
+
+  it('presents the negotiated version to a modern http server', async () => {
+    // The server negotiates a modern revision of its own.
+    const negotiated = '2026-09-01';
+    const stub = await startStubHttpServer((message) => {
+      if (message.method === 'server/discover') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { protocolVersion: negotiated, capabilities: { tools: {} } },
+          }),
+        };
+      }
+      if (message.method === 'tools/list') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { tools: [{ name: 'ping', title: 'Ping' }] },
+          }),
+        };
+      }
+      return { status: 200, body: JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }) };
+    });
+
+    const manager = createMcpManager();
+    const state = await manager.connect({ name: 'modern-remote', type: 'http', url: stub.url });
+
+    expect(state.status).toBe('ready');
+    expect(state.protocolVersion).toBe(negotiated);
+
+    // The transport presents the version that was **negotiated**, not the one
+    // the probe was made with.
+    const listIndex = stub.methods.indexOf('tools/list');
+    expect(listIndex).toBeGreaterThanOrEqual(0);
+    expect(stub.headers[listIndex]?.['mcp-protocol-version']).toBe(negotiated);
+
+    await manager.disconnect('modern-remote');
+    await stub.close();
+  });
+
+  it('presents the negotiated version to a legacy-only http server', async () => {
+    const stub = await startStubHttpServer((message, headers) => {
+      const version = headers['mcp-protocol-version'];
+      // The server only speaks the legacy era: it refuses the modern revision
+      // with the server-side version contract's 400.
+      if (message.method === 'server/discover') {
+        return { status: 400, body: JSON.stringify({ error: 'unsupported protocol version' }) };
+      }
+      if (version !== LEGACY_PROTOCOL_VERSION) {
+        return { status: 400, body: JSON.stringify({ error: 'unsupported protocol version' }) };
+      }
+      if (message.method === 'initialize') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              protocolVersion: LEGACY_PROTOCOL_VERSION,
+              capabilities: { tools: {} },
+              serverInfo: { name: 'legacy-stub', version: '1.0.0' },
+            },
+          }),
+        };
+      }
+      if (message.method === 'tools/list') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { tools: [{ name: 'ping', title: 'Ping' }] },
+          }),
+        };
+      }
+      return { status: 200, body: JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }) };
+    });
+
+    const manager = createMcpManager();
+    const state = await manager.connect({ name: 'legacy-remote', type: 'http', url: stub.url });
+
+    expect(state.status).toBe('ready');
+    expect(state.protocolVersion).toBe(LEGACY_PROTOCOL_VERSION);
+
+    // The header the transport presented for each request.
+    const versions = stub.headers.map((headers) => headers['mcp-protocol-version']);
+    const initializeIndex = stub.methods.indexOf('initialize');
+    const listIndex = stub.methods.indexOf('tools/list');
+    expect(initializeIndex).toBeGreaterThanOrEqual(0);
+    expect(versions[initializeIndex]).toBe(LEGACY_PROTOCOL_VERSION);
+    // The negotiated version is what the connection keeps presenting.
+    expect(versions[listIndex]).toBe(LEGACY_PROTOCOL_VERSION);
+    // The modern probe carried the modern version.
+    expect(versions[0]).toBe(MODERN_PROTOCOL_VERSION);
+
+    await manager.disconnect('legacy-remote');
+    await stub.close();
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1282,6 +1881,39 @@ describe('the MCP tool description change', () => {
     expect(state.descriptionChanges?.[0]?.current).toBe('A different description');
 
     await manager.disconnect('rug');
+  });
+
+  it('keeps the description baseline across a disconnect', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+    const changes: string[] = [];
+    const manager = createMcpManager({
+      onToolDescriptionChanged: (change) => {
+        changes.push(`${change.tool}:${change.previous}->${change.current}`);
+      },
+    });
+
+    await manager.connect(
+      stdioConfig('rug-across', serverPath, 'legacy', {
+        env: { FAKE_MCP_TOOL_DESCRIPTION: 'The original description' },
+      }),
+    );
+    await manager.disconnect('rug-across');
+
+    // The server comes back with a different description.
+    const state = await manager.connect(
+      stdioConfig('rug-across', serverPath, 'legacy', {
+        env: { FAKE_MCP_TOOL_DESCRIPTION: 'A different description' },
+      }),
+    );
+
+    // The baseline survived the disconnect, so the change is detected.
+    expect(state.descriptionChanges).toHaveLength(1);
+    expect(state.descriptionChanges?.[0]?.previous).toBe('The original description');
+    expect(state.descriptionChanges?.[0]?.current).toBe('A different description');
+    expect(changes).toEqual(['echo:The original description->A different description']);
+
+    await manager.disconnect('rug-across');
   });
 });
 

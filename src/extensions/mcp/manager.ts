@@ -31,15 +31,43 @@
  * known MCP gap (the research report's "Known MCP issues"). This implementation computes
  * the change and re-surfaces it, so a tool cannot silently change what it does
  * after the model saw it. This is a **project requirement**.
+ *
+ * The comparison is made against the **baseline** — the descriptions the model
+ * saw — and the baseline survives a disconnect: a server that is disconnected
+ * and then comes back with a different description is still a rug pull.
+ *
+ * ## The tool list the model sees
+ *
+ * The general "hide the `mcp__ide__` tools" filter is applied where the tool
+ * list is built, so a hidden tool is not offered to the model at all. The two
+ * special-cased tools — `mcp__ide__executeCode` and `mcp__ide__getDiagnostics` —
+ * are exempt from the filter.
+ *
+ * ## Implementation choices
+ *
+ * The audit does not pin these, so they are marked here:
+ *
+ *   - The **batch sizes** are the target's own (`3` local, `20` remote), and
+ *     the two pools run concurrently.
+ *   - The **environment** the manager reads is also the **client's**
+ *     environment: the negotiation opt-out (`MCP_PROTOCOL_NEGOTIATION`) is read
+ *     from it, and it is the *client's* environment that says how the client
+ *     negotiates — never the server's.
  */
 
 import {
+  callMCPTool,
+  callMCPToolWithUrlElicitationRetry,
+  closeMcpConnection,
   connectToServer,
+  detectToolDescriptionChanges,
   discardMemoizedConnectResult,
   ensureConnectedClient,
   evictStaleFailedConnectMemoForServe,
   fetchToolsForClient,
   mcpConfigKey,
+  mcpToolName,
+  shouldHideMcpTool,
   type McpCallOptions,
   type McpConnectOptions,
   type McpConnection,
@@ -49,7 +77,6 @@ import {
   type McpToolDefinition,
   type McpToolDescriptionChange,
   type McpToolSummary,
-  detectToolDescriptionChanges,
 } from './client.js';
 
 export type {
@@ -63,8 +90,6 @@ export type {
   McpToolDescriptionChange,
   McpToolSummary,
 } from './client.js';
-
-import { callMCPTool, callMCPToolWithUrlElicitationRetry } from './client.js';
 
 /* -------------------------------------------------------------------------- */
 /* The batch sizes                                                            */
@@ -225,7 +250,13 @@ export interface McpManager {
 export interface McpManagerOptions {
   /** The options every connect runs with. */
   client?: McpConnectOptions;
-  /** The environment the batch sizes are read from. */
+  /**
+   * The environment the batch sizes **and the client** are read from.
+   *
+   * It is the **client's** environment: the negotiation opt-out
+   * (`MCP_PROTOCOL_NEGOTIATION=legacy`) is read from it, because it says how
+   * the *client* negotiates, not how the server does.
+   */
   env?: NodeJS.ProcessEnv;
   /**
    * Called when a tool's description changed.
@@ -263,7 +294,7 @@ export class McpServerManager implements McpManager {
     // A server whose configuration changed is a different server: the old
     // connection is closed rather than left running.
     if (record?.connection && !sameConfig) {
-      await record.connection.close().catch(() => undefined);
+      await closeMcpConnection(record.connection);
     }
 
     const connecting: McpServerState = { name: config.name, status: 'connecting', tools: [] };
@@ -286,7 +317,9 @@ export class McpServerManager implements McpManager {
       const state: McpServerState = {
         name: config.name,
         status: 'ready',
-        tools: tools.map((tool) => summarizeTool(config.name, tool)),
+        tools: visibleToolsForServer(config.name, tools).map((tool) =>
+          summarizeTool(config.name, tool),
+        ),
         protocolVersion: connection.protocolVersion,
       };
       const previous = record?.tools ?? [];
@@ -317,13 +350,16 @@ export class McpServerManager implements McpManager {
     const record = this.#servers.get(name);
     discardMemoizedConnectResult(name);
     if (record?.connection) {
-      await record.connection.close().catch(() => undefined);
+      await closeMcpConnection(record.connection).catch(() => undefined);
     }
     const state: McpServerState = { name, status: 'disabled', tools: [] };
     this.#servers.set(name, {
       config: record?.config ?? { name, type: 'stdio' },
       state,
-      tools: [],
+      // The **baseline** — the descriptions the model saw — survives the
+      // disconnect: a server that comes back with a different description is a
+      // rug pull, and the change is only detectable against the baseline.
+      tools: record?.tools ?? [],
     });
   }
 
@@ -400,7 +436,7 @@ export class McpServerManager implements McpManager {
     const state: McpServerState = {
       ...record.state,
       status: 'ready',
-      tools: next.map((tool) => summarizeTool(name, tool)),
+      tools: visibleToolsForServer(name, next).map((tool) => summarizeTool(name, tool)),
     };
     if (changes.length > 0) state.descriptionChanges = changes;
 
@@ -441,9 +477,23 @@ export class McpServerManager implements McpManager {
 
 /** The summary of a tool, as the state carries it. */
 function summarizeTool(server: string, tool: McpToolDefinition): McpToolSummary {
-  const summary: McpToolSummary = { name: `mcp__${server}__${tool.name}` };
+  const summary: McpToolSummary = { name: mcpToolName(server, tool.name) };
   if (tool.title !== undefined) summary.title = tool.title;
   return summary;
+}
+
+/**
+ * The tools of a server the model may call.
+ *
+ * The general "hide the `mcp__ide__` tools" filter is applied **here**, where
+ * the tool list is built: a tool the filter hides is not offered to the model
+ * at all. The two special-cased tools are exempt from the filter.
+ */
+export function visibleToolsForServer(
+  server: string,
+  tools: readonly McpToolDefinition[],
+): McpToolDefinition[] {
+  return tools.filter((tool) => !shouldHideMcpTool(mcpToolName(server, tool.name)));
 }
 
 /** Create an MCP server manager. */

@@ -21,9 +21,11 @@
  *     its own validation and deduplication rules. This module **wires it in**
  *     rather than duplicating it.
  *
- * `dispatchCanUseTool` is the seam between the two: it rejects a request whose
- * `request_id` is not a string with **no response** — because no response is
- * possible — and hands everything else to the transport dispatcher.
+ * `dispatchCanUseTool` is the seam between the two: it hands the request to the
+ * transport dispatcher, which owns the validation, the deduplication and the
+ * denial of a malformed request. This module does **not** repeat any of those
+ * checks — the transport dispatcher performs them, and the answers it gives are
+ * the answers this module returns.
  *
  * ## The 23 host subtypes
  *
@@ -53,6 +55,10 @@
  *     callback and has none answers with the target's own "callback not
  *     registered" text, so the wording is the same wherever the callback is
  *     missing.
+ *   - The generic host seam receives the **whole request**, not a projection of
+ *     it: a subtype such as `set_model` needs the model, `read_file` needs the
+ *     path, and `mcp_set_servers` needs the server list. The seam is therefore
+ *     typed as the request itself.
  *   - A request whose `request_id` is not a string cannot be correlated, so the
  *     host dispatcher answers with an error rather than a response it could not
  *     deliver.
@@ -60,11 +66,23 @@
  *     says so.
  *   - `onMessage` receives the rejection notice, so a host can log or report
  *     it.
+ *   - The **`onPermissionDecision` callback** is this implementation's own addition: the
+ *     plan declares `onPermissionRequest`, which is a *notification* that a
+ *     request is waiting. A notification cannot answer a request, so this implementation
+ *     adds a decision callback — and, so that a plan-conformant caller is not
+ *     left with a permanent deny, the plan's callback may **also** return the
+ *     decision. A registered handler that does not answer denies with the
+ *     implementation's own "did not answer" wording, never with the dispatcher's
+ *     "No permission handler is available." — a handler *is* available.
+ *   - The **in-flight bookkeeping** is module-global rather than per callback
+ *     set: an in-flight `request_id` is not dispatched twice, whatever callback
+ *     object the second call carries.
  */
 
 import {
   createTransportPermissionDispatcher,
   type TransportPermissionDispatcher,
+  type TransportPermissionResponse,
 } from '../../permissions/prompts.js';
 
 /* -------------------------------------------------------------------------- */
@@ -230,19 +248,34 @@ export interface ControlCallbacks {
   onMcpOauthCallbackUrl?: (req: { callbackUrl?: string }, callbackUrl?: string) => Promise<unknown>;
   /** The `mcp_reconnect` handler. */
   onMcpReconnect?: (req: unknown) => Promise<unknown>;
-  /** Notified that a permission request is waiting for a decision. */
-  onPermissionRequest?: (req: unknown, requestId: string) => void;
+  /**
+   * Notified that a permission request is waiting for a decision.
+   *
+   * The plan's callback is a **notification**, but it may also **be** the
+   * decision: a callback that returns a decision — or a promise of one — is
+   * used as the decision. A plan-conformant caller therefore answers a request
+   * without registering a second callback, and is never denied for lack of a
+   * handler.
+   */
+  onPermissionRequest?: (
+    req: unknown,
+    requestId: string,
+  ) => void | ControlPermissionDecision | Promise<void | ControlPermissionDecision>;
   /** Receives a notice about a rejected control request. */
   onMessage?: (msg: unknown) => void;
   /**
    * The generic **host seam**.
    *
    * The host subtypes that are not MCP-specific are the host's own actions, and
-   * this is where they are answered. Without it, the target's "callback not
-   * registered" text is the answer.
+   * this is where they are answered. The seam receives the **whole request**,
+   * so a subtype that carries a payload — `set_model` carries the model,
+   * `read_file` the path, `rename_session` the name, `apply_flag_settings` the
+   * flags, `mcp_set_servers` the server list, `file_suggestions` the buffer —
+   * is implementable. Without it, the target's "callback not registered" text
+   * is the answer.
    */
   onHostRequest?: (
-    req: { subtype: HostControlRequestSubtype; request_id: string },
+    req: ControlRequest & { subtype: HostControlRequestSubtype },
   ) => Promise<unknown> | unknown;
   /**
    * The `mcp_status` handler.
@@ -412,7 +445,9 @@ export async function dispatchControlRequest(
       if (!handler) {
         return errorResponse(subtype, callbackNotRegisteredError(subtype), cb, req);
       }
-      const result = await handler({ subtype, request_id: req.request_id });
+      // The seam receives the **whole** request: a subtype that carries a
+      // payload needs it.
+      const result = await handler(req as ControlRequest & { subtype: HostControlRequestSubtype });
       return { subtype: 'success', response: result };
     }
   }
@@ -444,29 +479,75 @@ export interface CanUseToolDispatchResult {
   dropped: boolean;
   /** Why it was dropped. */
   reason?: string;
+  /**
+   * The response to send back to the peer.
+   *
+   * It is present whenever the transport dispatcher answered — including the
+   * **synthesized denial** it produces for a malformed request, and the
+   * decision it produces for a well-formed one. It is absent only when the
+   * request was dropped, because a dropped request has no response.
+   */
+  response?: TransportPermissionResponse;
 }
+
+/**
+ * The request ids that are in flight.
+ *
+ * The set is **module-global**, not per callback set: an in-flight
+ * `request_id` is not dispatched twice, whatever callback object the second
+ * call carries. A caller that builds a fresh callbacks object for every
+ * request — which `dispatchCanUseTool` invites — therefore gets the same
+ * deduplication as a caller that keeps one.
+ */
+const inFlightRequestIds = new Set<string>();
 
 /**
  * The transport dispatchers the control surface built.
  *
- * The dispatcher is cached per callback set, so its own in-flight bookkeeping
- * survives across the calls that share it.
+ * The dispatcher is cached per callback set, so it is built once; the
+ * deduplication it performs is the module-global one above.
  */
 const transportDispatchers = new WeakMap<ControlCallbacks, TransportPermissionDispatcher>();
+
+/** The message a registered handler that did not answer is denied with. */
+export const PERMISSION_NOT_ANSWERED_MESSAGE = 'The permission handler did not answer the permission request.';
+
+/** Whether a value is a permission decision. */
+function asDecision(value: unknown): ControlPermissionDecision | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const behavior = (value as { behavior?: unknown }).behavior;
+  if (behavior !== 'allow' && behavior !== 'deny') return undefined;
+  return value as ControlPermissionDecision;
+}
 
 function transportDispatcherFor(cb: ControlCallbacks): TransportPermissionDispatcher {
   const existing = transportDispatchers.get(cb);
   if (existing) return existing;
-  const dispatcher = createTransportPermissionDispatcher({
-    requestDecision: async (request) => {
-      cb.onPermissionRequest?.(request, request.request_id);
-      const decision = await cb.onPermissionDecision?.(request, request.request_id);
-      if (!decision) {
-        return { behavior: 'deny', message: 'No permission handler is available.' };
-      }
-      return decision;
-    },
-  });
+  // The transport dispatcher owns the "no handler at all" denial, so the
+  // implementation installs a decision handler **only** when there is one to install.
+  const hasHandler = cb.onPermissionRequest !== undefined || cb.onPermissionDecision !== undefined;
+  const dispatcher = createTransportPermissionDispatcher(
+    hasHandler
+      ? {
+          requestDecision: async (request) => {
+            // The plan's callback is notified first, and may itself carry the
+            // decision; the decision callback wins when both answer.
+            const notified = cb.onPermissionRequest?.(request, request.request_id);
+            const fromDecision = asDecision(
+              await cb.onPermissionDecision?.(request, request.request_id),
+            );
+            const fromNotification = asDecision(await notified);
+            const decision = fromDecision ?? fromNotification;
+            if (!decision) {
+              // A handler is registered, but it did not answer. The dispatcher's
+              // own "No permission handler is available." would be a lie here.
+              return { behavior: 'deny', message: PERMISSION_NOT_ANSWERED_MESSAGE };
+            }
+            return decision;
+          },
+        }
+      : {},
+  );
   transportDispatchers.set(cb, dispatcher);
   return dispatcher;
 }
@@ -474,42 +555,51 @@ function transportDispatcherFor(cb: ControlCallbacks): TransportPermissionDispat
 /**
  * Dispatch a `can_use_tool` request to the **transport permission dispatcher**.
  *
+ * The transport dispatcher owns the validation, the deduplication and the
+ * denial of a malformed request, so this function does not repeat any of them:
+ * it hands the request over and reports the answer.
+ *
  * A request whose `request_id` is not a string is dropped with **no response**,
- * because no response is possible: the response could not be correlated.
- * Everything else is handed to the transport dispatcher, which owns the
- * validation, the deduplication and the denial of a malformed request.
+ * because no response is possible: the response could not be correlated. A
+ * request that carries another subtype is dropped for the same reason the
+ * transport dispatcher drops it.
  */
 export async function dispatchCanUseTool(
   req: CanUseToolControlRequest,
   cb: ControlCallbacks,
 ): Promise<CanUseToolDispatchResult> {
   const requestId = req?.request_id;
-  if (typeof requestId !== 'string') {
-    return {
-      dropped: true,
-      reason: 'the request_id is not a string, so no response is possible',
-    };
-  }
 
-  // A request that carries another subtype is not a can_use_tool request, and
-  // the transport dispatcher refuses it.
-  if (req.subtype !== undefined && req.subtype !== 'can_use_tool') {
-    return { dropped: true, reason: 'the control-request subtype is not can_use_tool' };
+  // The deduplication is module-global, so a second call with the same
+  // in-flight `request_id` is dropped whatever callback object it carries.
+  if (typeof requestId === 'string' && inFlightRequestIds.has(requestId)) {
+    return { dropped: true, reason: 'the request_id is already in flight' };
   }
 
   const dispatcher = cb.transportDispatcher ?? transportDispatcherFor(cb);
 
-  const result = await dispatcher.dispatch({
-    subtype: 'can_use_tool',
+  const request = {
+    // A request that carries no subtype is a `can_use_tool` request; one that
+    // carries another subtype is refused by the transport dispatcher.
+    subtype: req.subtype ?? 'can_use_tool',
     request_id: requestId,
     tool_name: req.tool_name,
     input: req.input,
     description: req.description,
     decision_reason: req.decision_reason,
-  });
+  };
 
-  if (result.kind === 'dropped') {
-    return { dropped: true, reason: result.reason };
+  if (typeof requestId === 'string') inFlightRequestIds.add(requestId);
+  try {
+    const result = await dispatcher.dispatch(request);
+
+    if (result.kind === 'dropped') {
+      return { dropped: true, reason: result.reason };
+    }
+    // The response — including the synthesized denial of a malformed request —
+    // reaches the caller.
+    return { dropped: false, response: result.response };
+  } finally {
+    if (typeof requestId === 'string') inFlightRequestIds.delete(requestId);
   }
-  return { dropped: false };
 }
