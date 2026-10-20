@@ -928,7 +928,16 @@ The target's scheduler is **per tool, not per message**:
 
 The per-tool flags the target uses: `Glob`, `Grep`, the notebook-read tool, `WebFetch`
 and `Read` are concurrency safe; the MCP-wait tool is not; `Bash` is safe only when the
-call is read-only.
+call is read-only. A tool that does **not** declare the flag is **not** concurrency
+safe — the target's own default, and it is what the read is wrapped in:
+`Boolean(n.isConcurrencySafe(r.data))` inside a `try`, and `false` in the `catch`.
+
+`Bash`'s flag is `isConcurrencySafe(e){return this.isReadOnly?.(e)??!1}`, so it needs a
+**read-only classifier**. The target has one, and it also reports a reason when a call is
+**not** read-only (`notReadOnlyReason`), and it refuses to call anything read-only when
+the session runs its shell commands only in its cloud environment. The classifier's rule
+is not established by this milestone and must be read from the source before the
+classifier is written.
 
 This implementation runs every tool call of a message **sequentially, in message
 order**, and says so in its module header. That was recorded as an implementation
@@ -954,15 +963,22 @@ the per-tool `isConcurrencySafe` implementations in `chunk-4jsg44k7.js`.
   another; the next model request is issued only after **every** call has produced its
   result.
 - [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the calls are sequential.
-- [ ] **Step 3: Add the flag** to the tool definitions and to the registry's contract —
-  the built-in tools get the flags the target uses.
-- [ ] **Step 4: Implement the scheduler** — a queue that starts the safe calls in
+- [ ] **Step 3: Read the target's read-only classifier** — the rule that decides whether
+  a shell command is read-only, and the reason it reports when it is not. It is a
+  **source reading**, and it is recorded before any code is written.
+- [ ] **Step 4: Add the flag** to the tool definitions and to the registry's contract —
+  the built-in tools get the flags the target uses, and a tool that does not declare the
+  flag is **not** concurrency safe.
+- [ ] **Step 5: Implement the classifier** and the Bash flag — a command the classifier
+  calls read-only is concurrency safe; one it does not is not, and the reason is
+  reported.
+- [ ] **Step 6: Implement the scheduler** — a queue that starts the safe calls in
   parallel, breaks at the first unsafe call, and resumes when it finishes; the turn
   waits for **all** the results before it issues the next request.
-- [ ] **Step 5: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 6: Update the module header** — the "sequential, in message order" note
+- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 8: Update the module header** — the "sequential, in message order" note
   becomes the observed rule, with the per-tool flags.
-- [ ] **Step 7: Commit.**
+- [ ] **Step 9: Commit.**
   ```bash
   git add src/agent src/tools tests/contracts/agent-loop.test.ts tests/contracts/tool-registry.test.ts
   git commit -m "fix(agent): the concurrency-safe tool calls of one message run in parallel"

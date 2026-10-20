@@ -236,7 +236,17 @@ This is a **second, locally implemented request path** in addition to the direct
 - The **SDK exposes a programmatic tool call** for plugins: `$.tool.call` runs the same runner. It may take a `consent` string, which is appended to the tool-use context as a message with `origin: {kind: "human"}`; a tool that does not accept consent (an MCP tool) is refused with the message *"does not accept 'consent' in this session. Call it without 'consent', and the normal permission check will decide."*; and an unknown tool is refused with *"no tool named \"<name>\"; the session has <the available names>"*.
 - Tool calls are tracked with a **query chain id and a depth**, which is how nested and child tool calls are identified, and the activity agent is resolved as the agent context's id, or the **background agent's** id.
 
-**Partial:** the exact **scheduling of concurrent tool calls** — whether several `tool_use` blocks in one assistant message run in parallel or in sequence, and the point at which the next model request is issued — was not traced. The runner is per-tool-use, and the ordering of several calls in one message lives in the caller, which was not resolved. `chunk-6bp7hdav.js` (the session controller) is the orchestration module, but its complete facts exceed the REA transfer byte budget and its semantic graph is therefore **bounded**, not complete (§6).
+**Observed (closed by source reading; the record is `analysis/findings-tool-scheduling.md`).** The **scheduling of concurrent tool calls** is established. It is **per tool, not per message**: a tool declares whether it is **concurrency safe**, and the scheduler in `chunk-ehmvy572.js` (class `Rs`, the streaming tool executor) decides per call.
+
+- A call that **is** concurrency safe is started and **not awaited**, so several run **in parallel**. The gate is `canExecuteTool`, which refuses to start a call while a call that is **not** concurrency safe is executing: `canExecuteTool(e){let o=this.tools.filter((n)=>n.status==="executing");return o.length===0||e&&o.every((n)=>n.isConcurrencySafe)}`.
+- A call that is **not** concurrency safe runs **alone** and is a **barrier**: the queue stops at it — `processQueue` walks the calls in order and **breaks** at the first queued call that is not concurrency safe — and nothing else starts until it has finished.
+- The **next model request is issued only after every** call of that assistant message has produced its result. The drain ends when `hasUnfinishedTools()` is false, and the round loop awaits it before it asks the model again.
+- The results are **emitted** in block order for the calls that are not concurrency safe and in **completion order** for the ones that are. Nothing sorts the result array and nothing re-keys it by `tool_use_id`: the model sees the emission order.
+- The live path has **no count limit** on concurrently executing calls. `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` (default `10`) caps only the **secondary** scheduler used for a deferred-tool resume; the live gate is count-free.
+- The per-tool flags: `Glob`, `Grep`, the notebook-read tool, `WebFetch` and `Read` are concurrency safe; the MCP-wait tool is not; `Bash` is safe only when the call is read-only.
+- One further consumer of the flag exists and is **not** a scheduling rule: a call that must run alone, queued behind an `Agent` call, **holds the subagent in the foreground** instead of letting it be moved to the background automatically.
+
+`chunk-6bp7hdav.js` (the session control
 
 **Unknown:** the retry/fallback chain between a failed turn and a re-issued turn, and the exact compaction trigger conditions.
 
@@ -351,7 +361,30 @@ A third rule applies at **block** granularity rather than key granularity: a hig
 
 **Config file security.** Sandbox configuration is written to `<configDir>/settings.json` with mode `0o600`, and path entries are canonicalized (including symlink resolution) before being written.
 
-**Partial:** the per-key merge for ordinary (non-merged, non-top-level) settings keys is not derived. The available evidence establishes the tier set, the two distinct orderings, the whole-block override rule, and the tier degradation and suppression rules.
+**Observed (closed by source reading; the record is `analysis/findings-config-merge.md`).** The **per-key merge for ordinary settings keys** is established, and it is **not** a per-leaf merge.
+
+The effective settings are built by `rUr(store)` in `chunk-c9s0jh80.js`. Each enabled source is merged into the accumulator **in the order `Ps`** — `["userSettings","projectSettings","localSettings","flagSettings","policySettings"]`, increasing priority — and the merge is **per top-level key**: the merge helper iterates the incoming object's own keys, so a later source wins for the keys it defines.
+
+The **value** rule is decided per key by one helper, and it is a small table:
+
+| the key's value | the rule |
+|---|---|
+| `modelPicker` | the higher tier **replaces** the value |
+| an **array** | the two arrays are **concatenated and de-duplicated** |
+| an array, key `fallbackModel` | the higher tier **replaces** the value |
+| an object, key `extraKnownMarketplaces` or `managedMcpServers` | a **one-level shallow merge** (`{...existing, ...incoming}`) |
+| **anything else** | the higher tier **replaces** the value **wholesale** |
+
+The last row is the load-bearing one: an ordinary object-valued setting is **not** merged key by key, and the higher tier's object wins whole. There is **no** per-leaf merge and no generic dotted-path accessor.
+
+The four orders this section lists are therefore **four different accessors**, not one rule in four spellings:
+
+- `Ps` — the tier order of the **effective settings** (above);
+- `C7s` — the accessor `Gge(key)` / `XI(key)` for a **user-scoped top-level** key, reporting the sources that define it in the order policy > flag > user; project and local are **not** in that order;
+- `Ble` — the per-key order for the **merged** keys, the first source that *defines* the key winning (the skill-override resolution is the observed instance), and also the sort order for hook sources;
+- `D_` — the **enumeration** order, and `VD` — the repo-directory tier set the personal-config restriction suppresses.
+
+And `me(source)` returns **one source's** settings, never a merge: the merge happens once, in `rUr`.
 
 ### 2.8 MCP, plugins, and hooks
 
@@ -610,9 +643,9 @@ These are gaps a reimplementation cannot close from the current evidence, listed
 1. ~~**Per-syscall seccomp policy.**~~ — **closed this phase.** The 27-record table at `0x6c749c0` is decoded: the records are `{u64 nr; u64 name_ptr; u8 meta[8]}`, the metadata bytes are argument indices (path, second path, flags/mode, dirfd, second dirfd) with `0xff` meaning "absent", and the **supervisor never denies** — `resp.error` is never written, so every intercepted syscall is permitted and only observed. See §2.9.
 2. **Whole-image native inventory.** Three whole-binary attempts timed out (330 s, 360 s, 900 s). Only the selected-function workflow is viable at present.
 3. ~~**Response-object construction for the Messages resource.**~~ — **closed this phase.** The default `parseResponse` (`ai`) is read in full, including the SSE path, the `204` and binary paths, the JSON path with its non-enumerable `_request_id` / `_workspace_id`, and the extended SSE event vocabulary the SDK accepts (§2.2).
-4. **Tool-call scheduling and continuation.** The order of concurrent tool execution and the point at which the next model request is issued are not established.
+4. ~~**Tool-call scheduling and continuation.**~~ — **closed this phase** by source reading (§2.4): the scheduling is per tool, a concurrency-safe call runs in parallel, a call that is not concurrency safe runs alone and is a barrier, and the next model request is issued only after every call has produced its result. The **continuation** half — the retry/fallback chain between a failed turn and a re-issued turn, and the exact compaction trigger conditions — remains open.
 5. ~~**Session resume algorithm.**~~ — **closed this phase.** The `--resume` selection (a session id or an exact session title, an ambiguity error that lists the candidates, the live-session attach short-circuit that `forkSession` bypasses), `--resume-session-at` with its drop guard, the structured resumed state, and the `--continue` behavior (newest session, the background-running report, the two distinct failure messages) are established. The one residual item is the store-level *ordering* rule inside the lookup.
-6. **Key-level configuration merge.** The tier set and block-level override are established; the full key-level merge is not.
+6. ~~**Key-level configuration merge.**~~ — **closed this phase** by source reading (§2.7): the merge is per top-level key, in the order user < project < local < flag < policy, and the value rule is decided per key — arrays concatenate and de-duplicate, two named object keys shallow-merge one level, `fallbackModel` and `modelPicker` replace, and everything else replaces wholesale. There is no per-leaf merge.
 7. **Plugin / skill / subagent / marketplace lifecycles.** Storage and names are observed; behavior is not.
 8. **Gateway route relationship to the local gateway.** The `gateway` catalog route returns a pinned remote URL plus a JWT; the locally implemented `cc-gateway` proxy is a separate code path. Whether they are the same system, a client and a server of the same system, or unrelated is **not established**.
 9. **Hook event matrix.** Now enumerated (§2.8): 30+ events, per-event execution classification, decision shapes, matchers. **Closed.**
