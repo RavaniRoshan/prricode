@@ -693,7 +693,9 @@ describe('the theme — the target\'s colours and the role rule', () => {
     expect(roleColor('text')).toBe('rgb(255,255,255)');
     expect(roleColor('inactive')).toBe('rgb(153,153,153)');
     expect(roleColor('userMessageBackground')).toBe('rgb(55, 55, 55)');
-    expect(roleColor('claude')).toBe('rgb(215,119,87)');
+    // The **role's name** is PRRICODE's own; its **value** is the target's,
+    // verbatim. The target's product name is not reproduced anywhere.
+    expect(roleColor('prricode')).toBe('rgb(215,119,87)');
     expect(roleColor('error')).toBe('rgb(255,107,128)');
     expect(roleColor('success')).toBe('rgb(78,186,101)');
     expect(roleColor('warning')).toBe('rgb(255,193,7)');
@@ -735,7 +737,7 @@ describe('the theme — the target\'s colours and the role rule', () => {
     expect(themeFor('dark-ansi').permission).toBe('ansi:blueBright');
     expect(themeFor('dark-ansi').text).toBe('ansi:white');
     expect(themeFor('dark-daltonized').diffAdded).toBe('rgb(0,68,102)');
-    expect(themeFor('dark-daltonized').claude).toBe('rgb(255,153,51)');
+    expect(themeFor('dark-daltonized').prricode).toBe('rgb(255,153,51)');
   });
 });
 
@@ -801,7 +803,7 @@ describe('the transcript — the target\'s rows', () => {
     const row = rows[0];
     expect(row?.kind).toBe('assistant');
     // The target's §3.3: the bullet in `text`, the body beside it.
-    expect(row?.segments[0]).toMatchObject({ text: '●', role: 'text', ariaLabel: 'claude:' });
+    expect(row?.segments[0]).toMatchObject({ text: '●', role: 'text', ariaLabel: 'prricode:' });
     expect(row?.segments[1]).toEqual({ text: ' ' });
     expect(row?.segments[2]).toMatchObject({ text: 'The ' });
     expect(row?.segments[3]).toMatchObject({ text: 'answer', bold: true });
@@ -1005,7 +1007,7 @@ describe('the approval prompt — the target\'s dialog', () => {
 
     expect(choices.map((choice) => choice.value)).toEqual(['yes', 'yes-always', 'no']);
     expect(choices[0]?.label).toBe('Yes');
-    expect(choices[2]?.label).toBe('No, and tell Claude what to do differently');
+    expect(choices[2]?.label).toBe('No, and tell PRRICODE what to do differently');
     expect(choices[2]?.suffix).toBe('(esc)');
     // The target's options carry **no** numbers at all.
     expect(Object.hasOwn(choices[0] as object, 'number')).toBe(false);
@@ -1029,7 +1031,7 @@ describe('the approval prompt — the target\'s dialog', () => {
     );
     expect(optionText(choices[0] as never)).toBe('  Yes');
     expect(optionText(choices[2] as never)).toBe(
-      '  No, and tell Claude what to do differently (esc)',
+      '  No, and tell PRRICODE what to do differently (esc)',
     );
   });
 
@@ -1053,7 +1055,7 @@ describe('the approval prompt — the target\'s dialog', () => {
         '',
         '❯ Yes ✔',
         '  Yes, and don\'t ask again for this Bash call',
-        '  No, and tell Claude what to do differently (esc)',
+        '  No, and tell PRRICODE what to do differently (esc)',
         '',
         'enter to confirm · esc to cancel',
       ].join('\n'),
@@ -1587,7 +1589,7 @@ describe('the control-sequence strip — one path at a time', () => {
         '',
         '❯ Yes ✔',
         "  Yes, and don't ask again for this Bash call",
-        '  No, and tell Claude what to do differently (esc)',
+        '  No, and tell PRRICODE what to do differently (esc)',
         '',
         'enter to confirm · esc to cancel',
       ].join('\n'),
@@ -1622,7 +1624,7 @@ describe('the control-sequence strip — one path at a time', () => {
         '',
         '❯ Yes ✔',
         "  Yes, and don't ask again for this Bash call",
-        '  No, and tell Claude what to do differently (esc)',
+        '  No, and tell PRRICODE what to do differently (esc)',
         '',
         'enter to confirm · esc to cancel',
       ].join('\n'),
@@ -1945,8 +1947,8 @@ describe('the app — the screen-reader tree', () => {
     );
 
     // The target labels its **gutters**: the assistant's bullet is announced
-    // as `claude:` and the tool call's as `tool:` (§3.3, §3.5).
-    expect(output).toContain('listitem: claude:   Hello there.');
+    // as `prricode:` and the tool call's as `tool:` (§3.3, §3.5).
+    expect(output).toContain('listitem: prricode:   Hello there.');
     expect(output).toContain('listitem: tool:   Bash (ls -la)');
   });
 
@@ -1957,7 +1959,7 @@ describe('the app — the screen-reader tree', () => {
 
     expect(output).toContain('option: Yes');
     expect(output).toContain("option: Yes, and don't ask again for this Bash call");
-    expect(output).toContain('option: No, and tell Claude what to do differently (esc)');
+    expect(output).toContain('option: No, and tell PRRICODE what to do differently (esc)');
   });
 
   it('still announces the content of the regions it labels', async () => {
@@ -2091,7 +2093,7 @@ describe('the app — the mounted view', () => {
     expect(output).toContain('Bash command');
     expect(output).toContain('Do you want to proceed?');
     expect(output).toContain('❯ Yes');
-    expect(output).toContain('No, and tell Claude what to do differently (esc)');
+    expect(output).toContain('No, and tell PRRICODE what to do differently (esc)');
     expect(output).toContain('enter to confirm · esc to cancel');
   });
 

@@ -83,6 +83,26 @@ Delegates through a `deps.delegate` seam and reports a typed `taskUnavailable` f
 - **Implementation choice (`CC-008b`).** The `Bash` output gained the sandbox members — `sandboxed`, `sandboxReason`, `sandboxEstablishmentReason`, `sandboxExemptions`, `sandboxExemptionScope`, `sandboxAvailability` — and `timedOut`. The audit records no such members; they are this implementation's, and the shape is additive.
 - `Grep`'s bounds (a 512-character pattern, a 1 MiB file, 2 000 examined files), `Glob`'s result cap, and `WebFetch`'s timeout and byte cap.
 
+
+### The one deliberate difference: the product's name
+
+The target's UI is reproduced **value for value** — the same colours, the same
+glyphs, the same order, the same keybindings, the same markdown rules, the same
+strings. The one thing that is **not** reproduced is the **product's own name**, in
+the three places it appears:
+
+| where | the target says | PRRICODE says |
+|---|---|---|
+| the approval dialog's third option | `No, and tell Claude what to do differently (esc)` | `No, and tell PRRICODE what to do differently (esc)` |
+| the assistant's screen-reader gutter | `claude:` | `prricode:` |
+| the theme's role names | `claude`, `claudeShimmer`, … | `prricode`, `prricodeShimmer`, … |
+
+The **values** of the theme roles are the target's, verbatim — `rgb(215,119,87)` and
+the rest — so the pixels are identical. Only the *name* is PRRICODE's own, and the
+divergence is recorded here rather than papered over. The target's own environment
+variables, model ids, API hosts and the MCP proxy header keep the target's names,
+because those are the data the implementation has to speak to.
+
 ## The terminal UI (F-39)
 
 **Specification:** `/home/shiva/opt/reference-agent-rea/analysis/findings-terminal-ui.md` — the surface inventory, every string, the layout of every surface, the theme's colours, the rule that maps a role to one, the keybindings, the markdown rules and the observable behaviours. Every claim in that document carries the target's own file and byte offset.
@@ -131,7 +151,7 @@ Nothing below was invented. Each is a surface the specification explicitly could
 
 These are the places where the clone differs from the target *by choice*, each one labelled in the code:
 
-- the **ARIA region labels and roles** (`Conversation`, `Message input`, the approval listbox) — the target's regions were not established; the target labels its **gutters** (`you:`, `claude:`, `tool:`, `thinking:`), and the clone does that too;
+- the **ARIA region labels and roles** (`Conversation`, `Message input`, the approval listbox) — the target's regions were not established; the target labels its **gutters** (`you:`, `prricode:`, `tool:`, `thinking:`), and the clone does that too;
 - the **denial marker** (`denied (source: …, reason type: …)`) and the **sandbox status lines** — the target reports a denial as the tool's own error result;
 - the **persistent option's label** — the target's own labels are per-tool templates, and the specification did not establish which template applies to which case;
 - the **reason line** under the question — the target's own line is the "always allow is not available" note, which this implementation has no equivalent for;

@@ -139,7 +139,7 @@ import {
  * items, a list of choices, and a line of text the user types into.
  *
  * **Implementation choice.** The target's regions were not established; the
- * target labels its **gutters** instead (`you:`, `claude:`, `tool:`,
+ * target labels its **gutters** instead (`you:`, `prricode:`, `tool:`,
  * `thinking:`), and the clone does that too.
  */
 export type AriaRole = 'list' | 'listitem' | 'listbox' | 'option' | 'textbox';

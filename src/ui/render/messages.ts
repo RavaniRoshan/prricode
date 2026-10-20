@@ -722,7 +722,7 @@ function assistantRow(text: string, env: NodeJS.ProcessEnv): TranscriptRow {
   return {
     kind: 'assistant',
     segments: [
-      { text: bullet, role: 'text', ariaLabel: 'claude:' },
+      { text: bullet, role: 'text', ariaLabel: 'prricode:' },
       { text: ' ' },
       ...indentSegments(body, '  '),
     ],

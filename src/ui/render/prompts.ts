@@ -216,7 +216,7 @@ function reasonOf(decision: PermissionDecision, toolName: string): string {
 /**
  * The choice labels.
  *
- * `Yes` and `No, and tell Claude what to do differently (esc)` are the
+ * `Yes` and `No, and tell PRRICODE what to do differently (esc)` are the
  * target's own (§4.3).
  *
  * **Implementation choice.** The label of the persistent option is this
@@ -228,7 +228,7 @@ function choiceLabels(toolName: string): readonly { label: string; suffix?: stri
   return [
     { label: 'Yes' },
     { label: `Yes, and don't ask again for this ${name} call` },
-    { label: 'No, and tell Claude what to do differently', suffix: '(esc)' },
+    { label: 'No, and tell PRRICODE what to do differently', suffix: '(esc)' },
   ];
 }
 

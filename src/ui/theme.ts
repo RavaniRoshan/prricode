@@ -99,7 +99,7 @@ export interface Segment {
    * The label the segment is announced with, when it has one.
    *
    * The target labels its **gutters** for a screen reader — `you:` for the
-   * user's pointer, `claude:` for the assistant's bullet, `tool:` for a tool
+   * user's pointer, `prricode:` for the assistant's bullet, `tool:` for a tool
    * call's bullet and `thinking:` for a thinking block (§3.1, §3.3 – §3.5) —
    * and a label replaces the segment's text in the announcement, which is
    * exactly what the target wants: the marker is decoration, the name is the
@@ -125,10 +125,10 @@ export const DARK_THEME = {
   autoAcceptShimmer: 'rgb(208,180,255)',
   skill: 'rgb(175,135,255)',
   bashBorder: 'rgb(253,93,177)',
-  claude: 'rgb(215,119,87)',
-  claudeShimmer: 'rgb(235,159,127)',
-  claudeBlue_FOR_SYSTEM_SPINNER: 'rgb(147,165,255)',
-  claudeBlueShimmer_FOR_SYSTEM_SPINNER: 'rgb(177,195,255)',
+  prricode: 'rgb(215,119,87)',
+  prricodeShimmer: 'rgb(235,159,127)',
+  prricodeBlue_FOR_SYSTEM_SPINNER: 'rgb(147,165,255)',
+  prricodeBlueShimmer_FOR_SYSTEM_SPINNER: 'rgb(177,195,255)',
   permission: 'rgb(177,185,249)',
   permissionShimmer: 'rgb(207,215,255)',
   planMode: 'rgb(72,150,140)',
@@ -178,7 +178,7 @@ export const DARK_THEME = {
   fastModeShimmer: 'rgb(255,165,70)',
   effortUltra: 'rgb(175,135,255)',
   briefLabelYou: 'rgb(122,180,232)',
-  briefLabelClaude: 'rgb(215,119,87)',
+  briefLabelPrricode: 'rgb(215,119,87)',
   rainbow_red: 'rgb(235,95,87)',
   rainbow_orange: 'rgb(245,139,87)',
   rainbow_yellow: 'rgb(250,195,95)',
@@ -241,7 +241,7 @@ export const THEME_VARIANTS: ReadonlyMap<ThemeName, ThemeVariant> = new Map<
   [
     'light',
     {
-      claude: 'rgb(215,119,87)',
+      prricode: 'rgb(215,119,87)',
       permission: 'rgb(87,105,247)',
       text: 'rgb(0,0,0)',
       promptBorder: 'rgb(138,138,138)',
@@ -257,7 +257,7 @@ export const THEME_VARIANTS: ReadonlyMap<ThemeName, ThemeVariant> = new Map<
   [
     'light-ansi',
     {
-      claude: 'ansi:redBright',
+      prricode: 'ansi:redBright',
       permission: 'ansi:blue',
       text: 'ansi:black',
       promptBorder: 'ansi:white',
@@ -269,7 +269,7 @@ export const THEME_VARIANTS: ReadonlyMap<ThemeName, ThemeVariant> = new Map<
   [
     'dark-ansi',
     {
-      claude: 'ansi:redBright',
+      prricode: 'ansi:redBright',
       permission: 'ansi:blueBright',
       text: 'ansi:white',
       promptBorder: 'ansi:white',
@@ -281,7 +281,7 @@ export const THEME_VARIANTS: ReadonlyMap<ThemeName, ThemeVariant> = new Map<
   [
     'dark-daltonized',
     {
-      claude: 'rgb(255,153,51)',
+      prricode: 'rgb(255,153,51)',
       permission: 'rgb(153,204,255)',
       text: 'rgb(255,255,255)',
       success: 'rgb(51,153,255)',
