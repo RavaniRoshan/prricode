@@ -542,6 +542,49 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Design note — this implementation's pick.** The target changed this behaviour in a later release without a deprecation warning, so the target's own behavior at `2.1.303` is ambiguous from the outside. This implementation picks the **stricter** of the two: **an `allow` never overrides a deny or an ask rule, and a `deny` holds in every mode, `bypassPermissions` included.** This is a labelled implementation choice, recorded in the module header and in `docs/compatibility/permission-matrix.md`.
 
+### CC-007c — Wire the `PreToolUse` seam into the tool runner
+
+**Why this task exists.** `CC-007b` built the permission side of the `PreToolUse` seam and `CC-012` built the hook side, but **nothing connects them**: no tool call is actually gated by a `PreToolUse` hook, and the hooks module still cannot *produce* an `ask` or a `defer` for the permission layer. The `CC-007b` review found this and the `CC-007b` fix round reported the exact diffs.
+
+**Files:** Modify `src/extensions/hooks/runner.ts`; Modify `src/tools/builtins/shared.ts`; Modify `src/tools/builtins/webfetch.ts`; Create `tests/contracts/pre-tool-use-wiring.test.ts`.
+
+**Interfaces:**
+- Consumes: `src/extensions/hooks/runner.ts` (`createPreToolUseApproval`, `mergePreToolUseApproval`, `HookDecisionValue`); `src/permissions/prompts.ts` (`createPreToolUseHook`, `verifyToolInput`); `src/permissions/decision.ts` (`PermissionDecision`, `ToolContext`, `checkPermission`).
+- Produces: a `PreToolUseHookApproval` shape the hooks module can produce with an `ask` or a `defer`; a `preToolUseHook` member on `BuiltinToolDeps`; the tool runner consulting the seam.
+
+**The hooks-side change (`src/extensions/hooks/runner.ts`).** The `PreToolUse` seam knows **four** decision values — `allow`, `ask`, `defer`, `deny` — so its approval is **not** the permission-request approval, which only ever sees `allow` and `deny`. A **new** exported interface:
+
+```ts
+export interface PreToolUseHookApproval {
+  hookEventName: 'PreToolUse';
+  decision: { behavior: HookDecisionValue; reason?: string };
+  updatedInput?: unknown;
+}
+```
+
+`mergePreToolUseApproval(results)` must return it: a **`defer` is no opinion** (the permission layer's normal path decides, so nothing is carried) and an **`ask` is carried** (the permission vocabulary has an exact word for it, and the call becomes the question the prompt asks). `createPreToolUseApproval(specs)` returns `(ctx) => Promise<PreToolUseHookApproval | undefined>`.
+
+`PreToolUseHookApproval` must be assignable to the permission layer's `HookApproval`, so `createPreToolUseHook({ approval: createPreToolUseApproval(specs) })` compiles unchanged.
+
+**The tool-runner-side change (`src/tools/builtins/shared.ts`).** `BuiltinToolDeps` gains an optional `preToolUseHook?: (ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>`, and `runToolCheck` passes it to `checkPermission` as `preToolUseHook: deps.preToolUseHook`. The tool layer's own `recheckHook` must consult **both** seams and keep only the **denial** from either — it is the second line of defence and owns the write path, so it stays stricter than the permission layer's rule.
+
+**The stale headers.** `src/tools/builtins/shared.ts` and `src/tools/builtins/webfetch.ts` both say *"The safety check runs before the rule engine. `checkPermission` runs the safety check first…"*. That is no longer true: the safety check now runs **after** the hook seams, on the **effective** input — it must, to run once on the input the tool will act on. It still holds in every mode and still precedes the mode dispatch. Correct both headers.
+
+- [ ] **Step 1: Write the failing test** — a tool call whose `PreToolUse` hook denies it is refused in every mode, `bypassPermissions` included; a hook that approves it does **not** override a deny rule or an ask rule; and a hook that rewrites the input has the rewrite carried into the tool's effective input.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, nothing consults the seam.
+- [ ] **Step 3: Implement the hooks-side change** in `src/extensions/hooks/runner.ts` — the new approval shape, the `defer`-is-no-opinion rule, and the `ask` carried through.
+- [ ] **Step 4: Implement the tool-runner-side change** in `src/tools/builtins/shared.ts` — the `preToolUseHook` member, the `checkPermission` wiring, and the two-seam `recheckHook`.
+- [ ] **Step 5: Correct the two stale headers** in `src/tools/builtins/shared.ts` and `src/tools/builtins/webfetch.ts`.
+- [ ] **Step 6: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 7: Write the failing assembly test** — a `PreToolUse` hook that returns `ask` reaches the permission layer as the pending question, carrying the hook's own reason and source; and a hook that returns `defer` reaches it as no opinion.
+- [ ] **Step 8: Implement the assembly** and confirm the hooks module's approval plugs straight into `createPreToolUseHook` with no adaptation.
+- [ ] **Step 9: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 10: Commit.**
+  ```bash
+  git add src/extensions/hooks/runner.ts src/tools tests/contracts/pre-tool-use-wiring.test.ts
+  git commit -m "feat(tools): wire the PreToolUse seam into the tool runner"
+  ```
+
 ### CC-008 — Tool registry and built-in tools
 
 **Files:** Create `src/tools/registry.ts`, `src/tools/builtins/*.ts`, `src/tools/runner.ts`; Create `tests/contracts/tool-registry.test.ts`.
