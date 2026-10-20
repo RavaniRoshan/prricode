@@ -12,7 +12,7 @@
  * replacement that is applied on resume.
  */
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -21,10 +21,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { SESSION_SCHEMA_VERSION, SessionVersionError, type SessionEvent } from '../../src/session/event.js';
 import { createSessionStore } from '../../src/session/store.js';
 import {
+  SESSION_RESUMED_TELEMETRY_EVENT,
   contextToProviderMessages,
   pairToolCalls,
+  resumeAtMessage,
   resumeEvents,
+  resumeSession,
   type ContextItem,
+  type SessionResumedTelemetry,
 } from '../../src/session/resume.js';
 import { compact } from '../../src/session/compaction.js';
 
@@ -96,6 +100,28 @@ function toolResult(id: string, toolUseId: string, content: unknown, ts: number,
   };
 }
 
+function providerEvent(id: string, ts: number, parentId?: string): SessionEvent {
+  return {
+    v: SESSION_SCHEMA_VERSION,
+    t: 'provider_event',
+    ts,
+    id,
+    event: { type: 'text_delta', text: 'partial' },
+    ...(parentId === undefined ? {} : { parentId }),
+  };
+}
+
+function permissionRequest(id: string, toolName: string, ts: number, parentId?: string): SessionEvent {
+  return {
+    v: SESSION_SCHEMA_VERSION,
+    t: 'permission_request',
+    ts,
+    id,
+    toolName,
+    ...(parentId === undefined ? {} : { parentId }),
+  };
+}
+
 function toolUseIds(context: ContextItem[]): string[] {
   const ids: string[] = [];
   for (const item of context) {
@@ -129,6 +155,22 @@ describe('the resume algorithm', () => {
 
     expect(result.branch?.eventIds).toEqual(['m0', 'm1', 'tc_later']);
     expect(toolUseIds(result.context)).toEqual(['tc_later']);
+  });
+
+  it('wins a leaf tie with the one that was written last', () => {
+    // Two leaves with the same timestamp. The tie is won by the one written
+    // **last** — the rule this implementation documents, and the rule a rewound branch
+    // depends on.
+    const events: SessionEvent[] = [
+      userMessage('m0', 'hello', 1000),
+      assistantMessage('m1', 'thinking', 1100, 'm0'),
+      toolCall('tc_first', 'Read', { path: 'a.txt' }, 1200, 'm1'),
+      toolCall('tc_last', 'Read', { path: 'b.txt' }, 1200, 'm1'),
+    ];
+
+    const result = resumeEvents(events);
+    expect(result.branch?.leafId).toBe('tc_last');
+    expect(result.branch?.eventIds).toEqual(['m0', 'm1', 'tc_last']);
   });
 
   it('pairs a tool_result with the tool_call it answers', () => {
@@ -372,6 +414,93 @@ describe('the compaction boundary', () => {
     expect(result.branch?.eventIds).toEqual(['m0', 'm1', 'm2', 'm3']);
   });
 
+  it('keeps every record the compaction kept when a non-message record sits in the compacted prefix', () => {
+    // A `provider_event` in the compacted prefix shifts every index that is
+    // counted over the *full* record list. The boundary must not drop a
+    // message the compaction never claimed to replace.
+    const events: SessionEvent[] = [
+      userMessage('m0', 'one', 1000),
+      providerEvent('p0', 1100, 'm0'),
+      assistantMessage('m1', 'two', 1200, 'p0'),
+      assistantMessage('m2', 'three', 1300, 'm1'),
+      assistantMessage('m3', 'four', 1400, 'm2'),
+    ];
+
+    const { events: compacted } = compact(events, {
+      keepLast: 2,
+      summary: 'the earlier conversation',
+      ts: 5000,
+      id: 'cmp_1',
+    });
+    const marker = compacted[0];
+    if (marker === undefined) throw new Error('expected a compaction marker');
+
+    // The marker is appended to the transcript; the prefix stays in the file.
+    const result = resumeEvents([...events, marker]);
+
+    const messages = result.context.filter((item) => item.type === 'message');
+    expect(messages.map((item) => (item.type === 'message' ? item.eventIds : []))).toEqual([
+      ['m2'],
+      ['m3'],
+    ]);
+  });
+
+  it('applies a compaction whose parent is not a message', () => {
+    // The last dropped record is a `provider_event`, so the marker's parent is
+    // not a message. The marker is still reachable from the branch's parent
+    // chain, so the compaction applies.
+    const events: SessionEvent[] = [
+      userMessage('m0', 'one', 1000),
+      assistantMessage('m1', 'two', 1100, 'm0'),
+      providerEvent('p0', 1200, 'm1'),
+      assistantMessage('m2', 'three', 1300, 'p0'),
+      assistantMessage('m3', 'four', 1400, 'm2'),
+    ];
+
+    const { events: compacted } = compact(events, {
+      keepLast: 2,
+      summary: 'the earlier conversation',
+      ts: 5000,
+      id: 'cmp_1',
+    });
+    const marker = compacted[0];
+    if (marker === undefined) throw new Error('expected a compaction marker');
+    if (marker.t !== 'compaction') throw new Error('expected a compaction marker');
+    // The marker hangs off the last dropped **record**, which is not a message.
+    expect(marker.parentId).toBe('p0');
+
+    const result = resumeEvents([...events, marker]);
+    expect(result.compaction).toBeDefined();
+    expect(result.context[0]?.type).toBe('summary');
+  });
+
+  it('applies the compaction to the effective list the compaction returned', () => {
+    const events: SessionEvent[] = [
+      userMessage('m0', 'one', 1000),
+      providerEvent('p0', 1100, 'm0'),
+      assistantMessage('m1', 'two', 1200, 'p0'),
+      assistantMessage('m2', 'three', 1300, 'm1'),
+      assistantMessage('m3', 'four', 1400, 'm2'),
+    ];
+
+    const { events: compacted } = compact(events, {
+      keepLast: 2,
+      summary: 'the earlier conversation',
+      ts: 5000,
+      id: 'cmp_1',
+    });
+
+    // The effective list carries the marker and the tail; the prefix it
+    // replaced is not in it, so nothing is skipped — the summary still leads.
+    const result = resumeEvents(compacted);
+    expect(result.context[0]?.type).toBe('summary');
+    const messages = result.context.filter((item) => item.type === 'message');
+    expect(messages.map((item) => (item.type === 'message' ? item.eventIds : []))).toEqual([
+      ['m2'],
+      ['m3'],
+    ]);
+  });
+
   it('applies the content replacement on resume so the payload does not return', async () => {
     const configDir = path.join(makeRoot(), 'config');
     const store = createSessionStore({ configDir, maxToolResultBytes: 64 });
@@ -384,6 +513,9 @@ describe('the compaction boundary', () => {
       handle,
       toolResult('res_1', 'toolu_1', payload, 1200, 'toolu_1'),
     );
+
+    // The transcript keeps the payload; the context does not.
+    expect(readFileSync(handle.path, 'utf8')).toContain(payload);
 
     const result = resumeEvents(await collect(store.read(handle)));
 
@@ -398,5 +530,419 @@ describe('the compaction boundary', () => {
     expect((block.content as { type?: string }).type).toBe('tool_result_stub');
 
     expect(result.replacements?.map((replacement) => replacement.targetId)).toEqual(['res_1']);
+  });
+});
+
+describe('the structured state of a resumed transcript', () => {
+  it('carries the state the target\'s resumed transcript carries', () => {
+    const events = [
+      userMessage('m0', 'read the file', 1000),
+      toolCall('toolu_1', 'Read', { path: 'a.txt' }, 1100, 'm0'),
+      toolResult('res_1', 'toolu_1', 'the output', 1200, 'toolu_1'),
+      toolCall('toolu_2', 'Bash', { command: 'ls' }, 1300, 'res_1'),
+    ];
+
+    const result = resumeEvents(events);
+
+    // The answered tool use agrees with the pairing rule: a tool use is
+    // answered by the tool result with the same id.
+    expect(result.answeredToolUseIds).toEqual(['toolu_1']);
+    // The call that was never answered is deferred, and the rescue of it is
+    // suppressed: the resume reports the interruption, it does not re-issue
+    // the call.
+    expect(result.deferredToolUse?.id).toBe('toolu_2');
+    expect(result.deferredToolUse?.name).toBe('Bash');
+    expect(result.deferredToolUse?.input).toEqual({ command: 'ls' });
+    expect(result.rescueSuppressed).toBe(true);
+    // The interruption state names the kind of the interruption.
+    expect(result.turnInterruptionState?.kind).toBe('pending_tool_use');
+    expect(result.turnInterruptionState?.toolUseIds).toEqual(['toolu_2']);
+    // A session that was not in plan mode, and that was not a fork.
+    expect(result.planModeOnResume).toBe(false);
+    expect(result.resumedAsFork).toBe(false);
+    expect(result.adoptedSessionId).toBeUndefined();
+  });
+
+  it('reports a superseded tool call and a turn that ended cleanly', () => {
+    const events = [
+      userMessage('m0', 'one', 1000),
+      toolCall('toolu_1', 'Read', { path: 'a.txt' }, 1100, 'm0'),
+      assistantMessage('m1', 'two', 1200, 'toolu_1'),
+    ];
+
+    const { events: compacted } = compact(events, {
+      keepLast: 1,
+      summary: 'the earlier conversation',
+      ts: 5000,
+      id: 'cmp_1',
+    });
+    const marker = compacted[0];
+    if (marker === undefined) throw new Error('expected a compaction marker');
+
+    const result = resumeEvents([...events, marker]);
+
+    // The call the compaction replaced is superseded: it is in the transcript
+    // and not in the context.
+    expect(result.supersededToolUseIds).toEqual(['toolu_1']);
+    expect(result.supersededToolNames).toEqual(['Read']);
+    expect(result.answeredToolUseIds).toEqual([]);
+    expect(result.turnInterruptionState?.kind).toBe('none');
+    expect(result.rescueSuppressed).toBe(false);
+  });
+
+  it('carries the plan mode, the fork and the adopted id into the result', () => {
+    const result = resumeEvents([userMessage('m0', 'hello', 1000)], {
+      planModeOnResume: true,
+      resumedAsFork: true,
+      adoptedSessionId: 'forked-01',
+    });
+
+    expect(result.planModeOnResume).toBe(true);
+    expect(result.resumedAsFork).toBe(true);
+    expect(result.adoptedSessionId).toBe('forked-01');
+  });
+
+  it('turns a compaction summary into a user message', () => {
+    const events: SessionEvent[] = [
+      userMessage('m0', 'one', 1000),
+      assistantMessage('m1', 'two', 1100, 'm0'),
+    ];
+    const { events: compacted } = compact(events, {
+      keepLast: 1,
+      summary: 'the earlier conversation',
+      ts: 5000,
+      id: 'cmp_1',
+    });
+    const marker = compacted[0];
+    if (marker === undefined) throw new Error('expected a compaction marker');
+
+    const messages = contextToProviderMessages(resumeEvents([...events, marker]).context);
+    // The summary of the prefix has to reach the model, and the user turn is
+    // where it belongs.
+    expect(messages[0]?.role).toBe('user');
+    expect(messages[0]?.content[0]).toEqual({ type: 'text', text: 'the earlier conversation' });
+  });
+
+  it('keeps the permission request in the context and does not send it to the provider', () => {
+    const events = [
+      userMessage('m0', 'read the file', 1000),
+      permissionRequest('perm_1', 'Read', 1100, 'm0'),
+      toolCall('toolu_1', 'Read', { path: 'a.txt' }, 1200, 'perm_1'),
+      toolResult('res_1', 'toolu_1', 'the output', 1300, 'toolu_1'),
+    ];
+
+    const result = resumeEvents(events);
+
+    // The approval is part of the transcript and is read back.
+    const requests = result.context.filter((item) => item.type === 'permission_request');
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.type === 'permission_request' ? requests[0].toolName : undefined).toBe('Read');
+
+    // The decision reaches the model through the tool result, so the
+    // permission request is not part of a provider request.
+    const messages = contextToProviderMessages(result.context);
+    expect(messages).toHaveLength(3);
+    expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user']);
+  });
+});
+
+describe('resuming at a message', () => {
+  it('refuses a message that is not in the transcript', () => {
+    const events = [userMessage('m0', 'hello', 1000)];
+
+    const result = resumeAtMessage(events, 'nope');
+
+    expect(result.kind).toBe('refused');
+    if (result.kind !== 'refused') throw new Error('expected a refusal');
+    expect(result.reason).toBe('processing_error');
+    expect(result.message).toBe('No message found with message.uuid of: nope');
+  });
+
+  it('refuses a resume that would discard part of a turn', () => {
+    const events = [
+      userMessage('m0', 'read the file', 1000),
+      toolCall('toolu_1', 'Read', { path: 'a.txt' }, 1100, 'm0'),
+      toolResult('res_1', 'toolu_1', 'the output', 1200, 'toolu_1'),
+    ];
+
+    // Resuming at the tool call would drop its answer.
+    const result = resumeAtMessage(events, 'toolu_1');
+
+    expect(result.kind).toBe('refused');
+    if (result.kind !== 'refused') throw new Error('expected a refusal');
+    expect(result.reason).toBe('drop_guard_refused');
+    expect(result.message).toContain(
+      'resuming at toolu_1 would discard entries not attributable to turn toolu_1',
+    );
+    expect(result.message).toContain('res_1');
+  });
+
+  it('allows a resume that discards a whole turn', () => {
+    const events = [
+      userMessage('m0', 'read the file', 1000),
+      toolCall('toolu_1', 'Read', { path: 'a.txt' }, 1100, 'm0'),
+      toolResult('res_1', 'toolu_1', 'the output', 1200, 'toolu_1'),
+    ];
+
+    const result = resumeAtMessage(events, 'm0');
+
+    expect(result.kind).toBe('ok');
+    if (result.kind !== 'ok') throw new Error('expected a resume');
+    expect(result.events.map((event) => event.id)).toEqual(['m0']);
+    expect(result.discardedEventIds).toEqual(['toolu_1', 'res_1']);
+  });
+});
+
+describe('resuming a session', () => {
+  it('emits the target\'s resume telemetry', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const events: SessionResumedTelemetry[] = [];
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'session-01',
+      onTelemetry: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('resumed');
+    expect(result.sessionId).toBe('session-01');
+    expect(events).toHaveLength(1);
+    const telemetry = events[0];
+    if (telemetry?.success !== true) throw new Error('expected a success');
+    expect(telemetry.name).toBe(SESSION_RESUMED_TELEMETRY_EVENT);
+    expect(telemetry.name).toBe('tengu_session_resumed');
+    expect(telemetry.entrypoint).toBe('cli_flag');
+    expect(telemetry.resume_duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it('reports a failed resume with the target\'s failure reason', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const events: SessionResumedTelemetry[] = [];
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: '123e4567-e89b-12d3-a456-426614174000',
+      onTelemetry: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('not_found_explicit_id');
+    expect(result.failure?.message).toBe(
+      'No conversation found with session ID: 123e4567-e89b-12d3-a456-426614174000',
+    );
+    const telemetry = events[0];
+    if (telemetry?.success !== false) throw new Error('expected a failure');
+    expect(telemetry.failure_reason).toBe('not_found_explicit_id');
+    expect(telemetry.error_name).toBe('SessionResumeError');
+  });
+
+  it('refuses a resume at a message that is not there', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const events: SessionResumedTelemetry[] = [];
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'session-01',
+      messageUuid: 'nope',
+      onTelemetry: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('processing_error');
+    expect(result.failure?.message).toBe('No message found with message.uuid of: nope');
+    const telemetry = events[0];
+    if (telemetry?.success !== false) throw new Error('expected a failure');
+    expect(telemetry.failure_reason).toBe('processing_error');
+  });
+
+  it('refuses a resume that the drop guard refuses', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'read the file', 1000));
+    await store.append(handle, toolCall('toolu_1', 'Read', { path: 'a.txt' }, 1100, 'm0'));
+    await store.append(handle, toolResult('res_1', 'toolu_1', 'the output', 1200, 'toolu_1'));
+
+    const events: SessionResumedTelemetry[] = [];
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'session-01',
+      messageUuid: 'toolu_1',
+      onTelemetry: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('drop_guard_refused');
+    expect(result.failure?.message).toContain(
+      'resuming at toolu_1 would discard entries not attributable to turn toolu_1',
+    );
+    const telemetry = events[0];
+    if (telemetry?.success !== false) throw new Error('expected a failure');
+    expect(telemetry.failure_reason).toBe('drop_guard_refused');
+  });
+
+  it('reports a transcript it cannot load', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    // A record of a version this build does not know: the transcript cannot be
+    // read, and the resume says so.
+    writeFileSync(
+      handle.path,
+      '{"v":2,"t":"user_message","ts":1,"id":"m1","text":"hello"}\n',
+      'utf8',
+    );
+
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'session-01',
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('load_error');
+    expect(result.failure?.message).toContain('version');
+  });
+
+  it('resumes a transcript that is named by its path', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const events: SessionResumedTelemetry[] = [];
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'file',
+      target: handle.path,
+      onTelemetry: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('resumed');
+    expect(result.sessionId).toBe('session-01');
+    const telemetry = events[0];
+    if (telemetry?.success !== true) throw new Error('expected a success');
+    expect(telemetry.entrypoint).toBe('file');
+  });
+
+  it('attaches to a live session instead of replaying it', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'session-01',
+      isLiveSession: (sessionId) => sessionId === 'session-01',
+    });
+
+    expect(result.status).toBe('attached');
+    expect(result.sessionId).toBe('session-01');
+    // The attached session can be forked.
+    expect(result.canFork).toBe(true);
+    expect(result.resume).toBeUndefined();
+  });
+
+  it('attaches to a live session named by its path', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'file',
+      target: handle.path,
+      isLiveSession: (sessionId) => sessionId === 'session-01',
+    });
+
+    expect(result.status).toBe('attached');
+    expect(result.sessionId).toBe('session-01');
+    expect(result.canFork).toBe(true);
+  });
+
+  it('loads a copy of a live session when the fork flag is set', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'session-01',
+      forkSession: true,
+      isLiveSession: () => true,
+      idFactory: () => 'forked-01',
+    });
+
+    expect(result.status).toBe('resumed');
+    expect(result.resumedAsFork).toBe(true);
+    expect(result.adoptedSessionId).toBe('forked-01');
+    expect(result.resume?.resumedAsFork).toBe(true);
+    expect(result.resume?.adoptedSessionId).toBe('forked-01');
+  });
+
+  it('reports a state the worker could not read', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'print',
+      target: 'session-01',
+      readSessionState: () => {
+        throw new Error('the state is unreadable');
+      },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('worker_state_unread');
+  });
+
+  it('carries the interruption kind on the print path', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'read the file', 1000));
+    await store.append(handle, toolCall('toolu_1', 'Read', { path: 'a.txt' }, 1100, 'm0'));
+
+    const events: SessionResumedTelemetry[] = [];
+    await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'print',
+      target: 'session-01',
+      onTelemetry: (event) => events.push(event),
+    });
+
+    const telemetry = events[0];
+    if (telemetry?.success !== true) throw new Error('expected a success');
+    expect(telemetry.interruption_kind).toBe('pending_tool_use');
   });
 });

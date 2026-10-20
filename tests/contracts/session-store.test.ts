@@ -23,15 +23,18 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   SESSION_SCHEMA_VERSION,
+  SessionFormatError,
   SessionVersionError,
   type SessionEvent,
 } from '../../src/session/event.js';
 import {
   CARRIED_PROMPT_TELEMETRY_EVENT,
   MAX_PROJECT_DIRECTORY_LENGTH,
+  RESUME_REQUIRES_TARGET_MESSAGE,
   createCarriedPromptStore,
   createSessionStore,
   projectDirectoryName,
+  resolveSessionTarget,
   type SessionHandle,
 } from '../../src/session/store.js';
 
@@ -206,6 +209,34 @@ describe('the session store', () => {
     expect(versionError).toBeInstanceOf(Error);
   });
 
+  it('raises a format error for a corrupt line in the middle of the file', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD });
+
+    writeFileSync(
+      handle.path,
+      [
+        '{"v":1,"t":"user_message","ts":1,"id":"m1","text":"hello"}',
+        'NOT JSON',
+        '{"v":1,"t":"assistant_message","ts":2,"id":"m2","text":"hi"}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    // A torn **final** line is discarded; a corrupt line in the middle is a
+    // real error, and it is raised with the place it was found.
+    const failure = await collect(store.read(handle)).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(SessionFormatError);
+    const formatError = failure as SessionFormatError;
+    expect(formatError.message).toContain(`${handle.path}:2`);
+    expect(formatError.line).toBe(2);
+  });
+
   it('sees a format change per record, not only on the first one', async () => {
     const configDir = path.join(makeRoot(), 'config');
     const store = createSessionStore({ configDir });
@@ -229,7 +260,7 @@ describe('the session store', () => {
     expect((failure as SessionVersionError).found).toBe(3);
   });
 
-  it('stores an oversized tool result as a stub plus a content-replacement entry', async () => {
+  it('stores an oversized tool result verbatim plus a content-replacement entry', async () => {
     const configDir = path.join(makeRoot(), 'config');
     const store = createSessionStore({ configDir, maxToolResultBytes: 128 });
     const handle = await store.create({ cwd: CWD });
@@ -241,7 +272,10 @@ describe('the session store', () => {
     );
 
     const raw = readFileSync(handle.path, 'utf8');
-    expect(raw).not.toContain(payload);
+    // The transcript **keeps** the payload: the replacement is applied when
+    // the session is read, so the data is not lost — it is only kept out of
+    // the context.
+    expect(raw).toContain(payload);
 
     const events = await collect(store.read(handle));
     expect(events).toHaveLength(2);
@@ -249,14 +283,14 @@ describe('the session store', () => {
     const stored = events[0];
     expect(stored?.t).toBe('tool_result');
     if (stored?.t !== 'tool_result') throw new Error('expected a tool_result record');
-    const content = stored.envelope.content as { type?: string; originalBytes?: number };
-    expect(content.type).toBe('tool_result_stub');
-    expect(content.originalBytes).toBeGreaterThan(4096);
+    expect(stored.envelope.content).toBe(payload);
 
     const replacement = events[1];
     expect(replacement?.t).toBe('content_replacement');
     if (replacement?.t !== 'content_replacement') throw new Error('expected a content_replacement record');
     expect(replacement.targetId).toBe('r1');
+    // The stub says how big the content it stands in for was.
+    expect(replacement.replacement.originalBytes).toBeGreaterThan(4096);
   });
 
   it('keeps a tool result that is under the limit verbatim', async () => {
@@ -311,6 +345,178 @@ describe('the session store', () => {
     const limited = await store.list({ cwd: CWD, limit: 1 });
     expect(limited.map((summary) => summary.sessionId)).toEqual(['newer']);
   });
+
+  it('lists a session with a limit of zero without listing any', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m1', 'hello', 1000));
+
+    expect(await store.list({ cwd: CWD, limit: 0 })).toEqual([]);
+  });
+
+  it('lists two sessions that were updated at the same time', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const first = await store.create({ cwd: CWD, sessionId: 'first' });
+    await store.append(first, userMessage('m1', 'hello', 1000));
+    const second = await store.create({ cwd: CWD, sessionId: 'second' });
+    await store.append(second, userMessage('m1', 'hello', 1000));
+
+    const summaries = await store.list({ cwd: CWD });
+    expect(summaries).toHaveLength(2);
+    expect(summaries.map((summary) => summary.sessionId).sort()).toEqual(['first', 'second']);
+    // The two sessions share the clock of their last record.
+    expect(summaries[0]?.updatedAt).toBe(summaries[1]?.updatedAt);
+  });
+
+  it('lists a transcript it cannot read with its error', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+
+    writeFileSync(handle.path, '{"v":2,"t":"user_message","ts":1,"id":"m1","text":"hello"}\n', 'utf8');
+
+    const summaries = await store.list({ cwd: CWD });
+    expect(summaries).toHaveLength(1);
+    // The session exists, so it is listed — with the error that stopped it.
+    expect(summaries[0]?.error).toBeDefined();
+    expect(summaries[0]?.error).toContain('version');
+    // The clock of the error is not the clock of the summary.
+    expect(summaries[0]?.updatedAt).toBe(0);
+    expect(summaries[0]?.messageCount).toBe(0);
+  });
+
+  it('refuses a handle that does not point at a transcript of the store', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+
+    const outside: SessionHandle = { sessionId: 'session-01', path: '/etc/passwd' };
+    await expect(store.append(outside, userMessage('m1', 'hello', 1))).rejects.toThrow();
+    await expect(collect(store.read(outside))).rejects.toThrow();
+
+    // A handle that names another session's transcript is refused as well.
+    const other: SessionHandle = {
+      sessionId: 'session-02',
+      path: handle.path,
+    };
+    await expect(store.append(other, userMessage('m1', 'hello', 1))).rejects.toThrow();
+  });
+
+  it('treats a carried-prompt id from the prototype chain as data', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const prompts = createCarriedPromptStore({ configDir, maxAgeMs: 60_000, now: () => 10_000 });
+
+    for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      await prompts.put({ id, sessionId: 's1', prompt: `carry ${id}`, createdAt: 9_500 });
+      const taken = await prompts.take({ id, sessionId: 's1', now: 10_000 });
+      expect(taken.outcome).toBe('bound');
+      expect(taken.prompt?.prompt).toBe(`carry ${id}`);
+    }
+
+    const rows = await prompts.rows();
+    expect(rows).toHaveLength(4);
+  });
+
+  it('treats a session id from the prototype chain as data', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    for (const sessionId of ['constructor', 'toString', 'hasOwnProperty']) {
+      const handle = await store.create({ cwd: CWD, sessionId });
+      expect(handle.sessionId).toBe(sessionId);
+      await store.append(handle, userMessage('m1', 'hello', 1000));
+    }
+
+    const summaries = await store.list({ cwd: CWD });
+    expect(summaries.map((summary) => summary.sessionId).sort()).toEqual([
+      'constructor',
+      'hasOwnProperty',
+      'toString',
+    ]);
+
+    // `__proto__` is refused as a file name — the id must start with a letter
+    // or a digit — and it is refused as an id, not as an inherited member.
+    await expect(store.create({ cwd: CWD, sessionId: '__proto__' })).rejects.toThrow();
+  });
+});
+
+describe('resuming a session by id or title', () => {
+  it('indexes a session by its title and reports when it was modified', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m1', 'fix the parser', 1000));
+
+    const summaries = await store.list({ cwd: CWD });
+    expect(summaries[0]?.title).toBe('fix the parser');
+    expect(summaries[0]?.modifiedAt).toBeGreaterThan(0);
+  });
+
+  it('resolves a resume target by its exact title', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m1', 'fix the parser', 1000));
+
+    const summaries = await store.list({ cwd: CWD });
+    const resolution = resolveSessionTarget(summaries, 'fix the parser');
+    expect(resolution.kind).toBe('found');
+    if (resolution.kind !== 'found') throw new Error('expected a session');
+    expect(resolution.summary.sessionId).toBe('session-01');
+
+    // A title is matched **exactly**: a prefix of it is not a match.
+    const partial = resolveSessionTarget(summaries, 'fix the');
+    expect(partial.kind).toBe('not_found');
+  });
+
+  it('refuses an ambiguous title and lists the candidates with their modification times', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const first = await store.create({ cwd: CWD, sessionId: 'first' });
+    await store.append(first, userMessage('m1', 'same title', 1000));
+    const second = await store.create({ cwd: CWD, sessionId: 'second' });
+    await store.append(second, userMessage('m1', 'same title', 2000));
+
+    const summaries = await store.list({ cwd: CWD });
+    const resolution = resolveSessionTarget(summaries, 'same title');
+    expect(resolution.kind).toBe('ambiguous');
+    if (resolution.kind !== 'ambiguous') throw new Error('expected an ambiguity');
+    expect(resolution.message).toContain('--resume "same title" matches 2 sessions');
+    expect(resolution.message).toContain('first');
+    expect(resolution.message).toContain('second');
+    expect(resolution.message).toContain('(modified ');
+    expect(resolution.candidates).toHaveLength(2);
+  });
+
+  it('refuses a value that is neither a session id nor a title', () => {
+    const resolution = resolveSessionTarget([], 'not a session');
+    expect(resolution.kind).toBe('not_found');
+    if (resolution.kind !== 'not_found') throw new Error('expected a failure');
+    expect(resolution.message).toContain(RESUME_REQUIRES_TARGET_MESSAGE);
+    expect(resolution.message).toContain(
+      'Provided value "not a session" is not a UUID and does not match any session title.',
+    );
+  });
+
+  it('refuses a session id that is not in the store', () => {
+    const resolution = resolveSessionTarget([], '123e4567-e89b-12d3-a456-426614174000');
+    expect(resolution.kind).toBe('not_found');
+    if (resolution.kind !== 'not_found') throw new Error('expected a failure');
+    expect(resolution.message).toBe(
+      'No conversation found with session ID: 123e4567-e89b-12d3-a456-426614174000',
+    );
+  });
+
+  it('refuses a resume that names no session at all', () => {
+    const resolution = resolveSessionTarget([], undefined);
+    expect(resolution.kind).toBe('not_found');
+    if (resolution.kind !== 'not_found') throw new Error('expected a failure');
+    expect(resolution.message).toBe(RESUME_REQUIRES_TARGET_MESSAGE);
+  });
 });
 
 describe('the carried prompts', () => {
@@ -353,8 +559,41 @@ describe('the carried prompts', () => {
     expect(outcomes.get('altered')).toBe('altered');
   });
 
-  it('does not deliver a prompt twice', async () => {
+  it('rewrites an altered prompt and hands out the altered text', async () => {
     const configDir = path.join(makeRoot(), 'config');
+    const prompts = createCarriedPromptStore({ configDir, maxAgeMs: 60_000, now: () => 10_000 });
+
+    await prompts.put({ id: 'p1', sessionId: 's1', prompt: 'carry me', createdAt: 9_500 });
+    const altered = await prompts.alter({
+      id: 'p1',
+      sessionId: 's1',
+      prompt: 'carry me, but differently',
+    });
+    expect(altered?.altered).toBe(true);
+    expect(altered?.prompt).toBe('carry me, but differently');
+
+    const taken = await prompts.take({ id: 'p1', sessionId: 's1', now: 10_000 });
+    expect(taken.outcome).toBe('altered');
+    // The altered text is what is returned.
+    expect(taken.prompt?.prompt).toBe('carry me, but differently');
+
+    // A row that belongs to another session is not altered through this one.
+    expect(await prompts.alter({ id: 'p1', sessionId: 's2', prompt: 'nope' })).toBeUndefined();
+  });
+
+  it('treats a prompt that carries a delivery time as delivered', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const prompts = createCarriedPromptStore({ configDir, maxAgeMs: 60_000, now: () => 10_000 });
+
+    // The row carries a delivery time but not the `perhapsDelivered` flag.
+    await prompts.put({ id: 'p1', sessionId: 's1', prompt: 'once', createdAt: 9_500, deliveredAt: 9_900 });
+
+    const taken = await prompts.take({ id: 'p1', sessionId: 's1', now: 10_000 });
+    expect(taken.outcome).toBe('sent');
+    expect(taken.prompt).toBeUndefined();
+  });
+
+  it('does not deliver a prompt twice', async () => {    const configDir = path.join(makeRoot(), 'config');
     const prompts = createCarriedPromptStore({ configDir, maxAgeMs: 60_000, now: () => 10_000 });
 
     await prompts.put({ id: 'p1', sessionId: 's1', prompt: 'once', createdAt: 9_500 });

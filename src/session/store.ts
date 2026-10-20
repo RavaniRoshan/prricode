@@ -40,6 +40,28 @@
  * record whose version this build does not know is refused with a
  * `SessionVersionError` whatever its position in the file.
  *
+ * ## The reader streams, and the index has two clocks
+ *
+ * The reader holds **one line** at a time: a transcript is never buffered, so
+ * a session that grew to a gigabyte costs a gigabyte of reading and not a
+ * gigabyte of memory. The index of a working directory is built from a
+ * streaming pass over each transcript.
+ *
+ * The summary carries **two clocks**, and they are kept apart on purpose:
+ * `updatedAt` is the timestamp of the session's last **record**, and
+ * `modifiedAt` is the **file's** modification time — the clock the target's
+ * ambiguity error reports ("modified <ISO timestamp>"). A transcript that
+ * cannot be read has no last record, so its `updatedAt` is `0`: the clock of
+ * an error never becomes the clock of the summary.
+ *
+ * ## A handle is checked where it is used
+ *
+ * A handle names a session and a path, and a caller can build one by hand. The
+ * store therefore checks the handle **where it is used**: the session id must
+ * be usable as a file name, and the path must be the transcript of that id
+ * inside a project directory this store opened. A hand-built handle therefore
+ * cannot read or write an arbitrary file.
+ *
  * ## Implementation choices
  *
  * The audit does not pin these, so they are marked here:
@@ -47,7 +69,9 @@
  *   - The **hash** in a truncated project directory name is a SHA-256 prefix.
  *   - The **oversized-tool-result limit** is 256 KiB of serialized content. The
  *     audit records that the target replaces oversized tool output with a stub
- *     and a content-replacement entry, but not the threshold.
+ *     and a content-replacement entry, but not the threshold. The limit bounds
+ *     what the **context** carries: the transcript keeps the payload, and the
+ *     replacement is applied when the session is read.
  *   - The **carried-prompt file** is `<configDir>/carried-prompts.jsonl`. The
  *     audit records that the target "reads a file, parses prompts, filters out
  *     prompts marked `perhapsDelivered`" but not where the file lives.
@@ -55,9 +79,15 @@
  *   - The carried-prompt **outcome semantics** are this implementation's reading of the
  *     vocabulary the audit records. The audit names the seven outcomes and
  *     nothing else, so the mapping is documented rather than claimed.
+ *   - A session's **title** is derived from its first user message, because
+ *     this implementation's transcript vocabulary has no title record. The target's
+ *     titles are the first prompt as well, and the derivation keeps a title
+ *     stable: the transcript is append-only, so the first message never
+ *     changes.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -182,6 +212,25 @@ export interface SessionSummary {
    * format changed.
    */
   error?: string;
+  /**
+   * The session's **title** — the exact text a `--resume <title>` matches.
+   *
+   * **Implementation choice.** This implementation's transcript vocabulary has no title record, so
+   * the title is *derived*: it is the text of the session's first user
+   * message, trimmed. The title is therefore stable — the transcript is
+   * append-only, so the first message never changes.
+   */
+  title?: string;
+  /**
+   * When the transcript was last modified, in epoch milliseconds.
+   *
+   * This is the **file's** modification time, and it is the clock the target's
+   * ambiguity error reports ("modified <ISO timestamp>"). It is a different
+   * clock from `updatedAt`, which is the timestamp of the session's last
+   * *record*: the two are kept apart on purpose, so a caller that sorts by
+   * `updatedAt` never mixes two epochs.
+   */
+  modifiedAt?: number;
 }
 
 /** The store's contract. */
@@ -201,9 +250,12 @@ export interface SessionStoreOptions {
   /** The configuration root the `projects` subtree lives in. */
   configDir: string;
   /**
-   * The largest tool-result content, in bytes, that is stored verbatim.
+   * The largest tool-result content, in bytes, that is kept **in the context**.
    *
-   * A larger content is stored as a **stub** plus a content-replacement record.
+   * A larger content is stored verbatim in the transcript, and a
+   * content-replacement record is appended beside it. The replacement is
+   * applied when the session is read, so the payload does not come back into
+   * the context.
    */
   maxToolResultBytes?: number;
   /** The clock. */
@@ -258,42 +310,77 @@ export function serializedSize(value: unknown): number {
  * that is not valid JSON, or that is not a well-formed record — is discarded;
  * a corrupt line anywhere else is raised. A record whose version this build does
  * not know is **always** raised, wherever it sits in the file.
+ *
+ * The file is **streamed**: the reader holds one line at a time and never
+ * buffers the whole transcript, so a session that grew to a gigabyte costs a
+ * gigabyte of reading and not a gigabyte of memory.
  */
 export async function* readSessionFile(
   filePath: string,
 ): AsyncGenerator<SessionEvent, void, undefined> {
-  const raw = await readFile(filePath, 'utf8');
-  const lines = raw.split('\n');
-  // A trailing newline leaves an empty last element; it is not a record.
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  let pending: { text: string; lineNumber: number } | undefined;
+  let lineNumber = 0;
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line === undefined) continue;
-    if (line.trim() === '') continue;
-
-    const isLast = index === lines.length - 1;
-    const context: SessionRecordContext = { path: filePath, line: index + 1 };
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      if (isLast) return;
-      throw new SessionFormatError('the line is not valid JSON', context);
+  for await (const text of readLines(filePath)) {
+    if (pending !== undefined) {
+      // The line before the current one was **not** the last one: a corrupt
+      // line in the middle of a file is a real error and is raised.
+      const event = parseSessionLine(pending.text, pending.lineNumber, filePath, false);
+      if (event !== undefined) yield event;
     }
+    lineNumber += 1;
+    pending = { text, lineNumber };
+  }
 
-    let event: SessionEvent;
-    try {
-      event = parseSessionEvent(parsed, context);
-    } catch (error) {
-      // A version this build does not know is refused whatever its position.
-      if (error instanceof SessionVersionError) throw error;
-      if (isLast) return;
-      throw error;
+  if (pending !== undefined) {
+    // The last line may be torn: it is discarded rather than raised.
+    const event = parseSessionLine(pending.text, pending.lineNumber, filePath, true);
+    if (event !== undefined) yield event;
+  }
+}
+
+/** Read the lines of a file, one at a time. */
+async function* readLines(filePath: string): AsyncGenerator<string, void, undefined> {
+  const stream = createReadStream(filePath, { encoding: 'utf8' });
+  let buffer = '';
+  for await (const chunk of stream) {
+    buffer += chunk;
+    let index = buffer.indexOf('\n');
+    while (index >= 0) {
+      const line = buffer.slice(0, index);
+      buffer = buffer.slice(index + 1);
+      yield line;
+      index = buffer.indexOf('\n');
     }
+  }
+  if (buffer !== '') yield buffer;
+}
 
-    yield event;
+/** Read one line of a transcript back. */
+function parseSessionLine(
+  line: string,
+  lineNumber: number,
+  filePath: string,
+  isLast: boolean,
+): SessionEvent | undefined {
+  if (line.trim() === '') return undefined;
+  const context: SessionRecordContext = { path: filePath, line: lineNumber };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    if (isLast) return undefined;
+    throw new SessionFormatError('the line is not valid JSON', context);
+  }
+
+  try {
+    return parseSessionEvent(parsed, context);
+  } catch (error) {
+    // A version this build does not know is refused whatever its position.
+    if (error instanceof SessionVersionError) throw error;
+    if (isLast) return undefined;
+    throw error;
   }
 }
 
@@ -319,10 +406,12 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
   /**
    * The records an append writes.
    *
-   * A tool result whose serialized content is over the limit is written as a
-   * **stub**, and the stub is accompanied by a **content-replacement record**:
-   * the stored record carries the stub, and the replacement record says which
-   * record was replaced and with what.
+   * A tool result whose serialized content is over the limit is written
+   * **verbatim**, and a **content-replacement record** is appended beside it:
+   * the record says which record's content is oversized and what stub stands
+   * in for it. The payload stays in the transcript — the data is not lost —
+   * and the replacement is applied when the session is **read**, so the
+   * payload does not come back into the context.
    */
   function recordsFor(event: SessionEvent): SessionEvent[] {
     if (event.t !== 'tool_result') return [event];
@@ -344,36 +433,69 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
       targetId: event.id,
       replacement: stub,
     };
-    return [
-      { ...event, envelope: { ...envelope, content: stub } },
-      replacement,
-    ];
+    return [event, replacement];
+  }
+
+  /**
+   * The project directories the store has opened.
+   *
+   * A handle is only honoured when it points at a transcript of one of them:
+   * a hand-built handle must not be able to read or write an arbitrary file.
+   */
+  const directories = new Set<string>();
+
+  /**
+   * Check a handle and return the path it may be used with.
+   *
+   * The handle's **session id** is validated as a file name, and its path must
+   * be the transcript of that id inside a project directory this store opened.
+   */
+  function assertHandle(handle: SessionHandle): string {
+    const sessionId = assertValidSessionId(handle.sessionId);
+    const resolved = path.resolve(handle.path);
+    const name = `${sessionId}.jsonl`;
+    for (const directory of directories) {
+      if (path.dirname(resolved) === directory && path.basename(resolved) === name) {
+        return resolved;
+      }
+    }
+    throw new Error(
+      `The session handle '${sessionId}' does not point at a transcript of this store.`,
+    );
   }
 
   return {
     async create(opts: { cwd: string; sessionId?: string }): Promise<SessionHandle> {
       const sessionId = assertValidSessionId(opts.sessionId ?? randomUUID());
-      const directory = projectDirectoryFor(configDir, opts.cwd);
+      const filePath = sessionFilePath(configDir, opts.cwd, sessionId);
+      const directory = path.dirname(filePath);
       await mkdir(directory, { recursive: true, mode: 0o700 });
-      const filePath = path.join(directory, `${sessionId}.jsonl`);
+      directories.add(path.resolve(directory));
       // Touch the file so that the transcript exists before the first append.
       await appendFile(filePath, '', 'utf8');
       return { sessionId, path: filePath };
     },
 
     async append(handle: SessionHandle, event: SessionEvent): Promise<void> {
+      const target = assertHandle(handle);
       const payload = recordsFor(event)
         .map((record) => `${JSON.stringify(record)}\n`)
         .join('');
-      await appendFile(handle.path, payload, 'utf8');
+      await appendFile(target, payload, 'utf8');
     },
 
     read(handle: SessionHandle): AsyncIterable<SessionEvent> {
-      return readSessionFile(handle.path);
+      // The handle is checked when the transcript is read, so a bad handle is
+      // reported through the iteration rather than at the call.
+      return (async function* read(): AsyncGenerator<SessionEvent, void, undefined> {
+        const target = assertHandle(handle);
+        yield* readSessionFile(target);
+      })();
     },
 
     async list(opts: { cwd: string; limit?: number }): Promise<SessionSummary[]> {
       const directory = projectDirectoryFor(configDir, opts.cwd);
+      directories.add(path.resolve(directory));
       let names: string[];
       try {
         names = await readdir(directory);
@@ -387,20 +509,7 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
         if (!name.endsWith('.jsonl')) continue;
         const filePath = path.join(directory, name);
         const sessionId = name.slice(0, name.length - '.jsonl'.length);
-        try {
-          const events = await readAllSessionEvents(filePath);
-          summaries.push(summarize(sessionId, filePath, events));
-        } catch (error) {
-          const details = await stat(filePath).catch(() => undefined);
-          summaries.push({
-            sessionId,
-            path: filePath,
-            startedAt: 0,
-            updatedAt: details?.mtimeMs ?? 0,
-            messageCount: 0,
-            error: messageOf(error),
-          });
-        }
+        summaries.push(await summarizeFile(sessionId, filePath));
       }
 
       summaries.sort((left, right) => right.updatedAt - left.updatedAt);
@@ -410,17 +519,144 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
   };
 }
 
-/** Summarize a transcript. */
-function summarize(sessionId: string, filePath: string, events: SessionEvent[]): SessionSummary {
+/**
+ * Summarize a transcript.
+ *
+ * The summary is built from a **streaming** pass: the transcript is never held
+ * in memory. `updatedAt` is the timestamp of the session's last **record**,
+ * and `modifiedAt` is the **file's** modification time — two clocks, kept
+ * apart on purpose.
+ */
+async function summarizeFile(sessionId: string, filePath: string): Promise<SessionSummary> {
+  const details = await stat(filePath).catch(() => undefined);
+  const modifiedAt = details?.mtimeMs ?? 0;
+
   let startedAt = 0;
   let updatedAt = 0;
   let messageCount = 0;
-  for (const event of events) {
-    if (startedAt === 0) startedAt = event.ts;
-    updatedAt = event.ts;
-    if (isMessageEvent(event)) messageCount += 1;
+  let title: string | undefined;
+  try {
+    for await (const event of readSessionFile(filePath)) {
+      if (startedAt === 0) startedAt = event.ts;
+      updatedAt = event.ts;
+      if (isMessageEvent(event)) messageCount += 1;
+      if (title === undefined && event.t === 'user_message') {
+        const trimmed = event.text.trim();
+        if (trimmed !== '') title = trimmed;
+      }
+    }
+  } catch (error) {
+    // A transcript that cannot be read is **listed with its error** rather
+    // than hidden. `updatedAt` stays on the record clock: a transcript whose
+    // records could not be read has no last record, and the clock of the
+    // error must not become the clock of the summary.
+    return {
+      sessionId,
+      path: filePath,
+      startedAt: 0,
+      updatedAt: 0,
+      messageCount: 0,
+      error: messageOf(error),
+      modifiedAt,
+    };
   }
-  return { sessionId, path: filePath, startedAt, updatedAt, messageCount };
+
+  const summary: SessionSummary = {
+    sessionId,
+    path: filePath,
+    startedAt,
+    updatedAt,
+    messageCount,
+    modifiedAt,
+  };
+  if (title !== undefined) summary.title = title;
+  return summary;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Resuming a session by id or by title                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The message the target uses when a resume names no session at all.
+ *
+ * **Observed** (audit §2.6): "`--resume` requires a valid session ID or session
+ * title when used with `--print`. Usage: `agent -p --resume <session-id|title>`".
+ */
+export const RESUME_REQUIRES_TARGET_MESSAGE =
+  'Error: --resume requires a valid session ID or session title when used with --print. Usage: agent -p --resume <session-id|title>';
+
+/** The shape of a session id the target uses. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Whether a value is shaped like a session id. */
+export function looksLikeSessionId(value: string): boolean {
+  return UUID_PATTERN.test(value);
+}
+
+/**
+ * The outcome of resolving a resume target.
+ *
+ * **Observed** (audit §2.6): "`--resume` accepts **a session id or a session
+ * title**. A title is matched **exactly**; exactly one match resolves, and
+ * **more than one is an error** that lists the candidates with their
+ * modification times."
+ */
+export type SessionTargetResolution =
+  /** Exactly one session matched. */
+  | { kind: 'found'; summary: SessionSummary }
+  /** More than one session carries the title. */
+  | { kind: 'ambiguous'; candidates: SessionSummary[]; message: string }
+  /** Nothing matched. */
+  | { kind: 'not_found'; message: string };
+
+/**
+ * The target's ambiguity error.
+ *
+ * The candidates are listed with their **modification times**, the way the
+ * target lists them.
+ */
+export function ambiguousTitleMessage(value: string, candidates: SessionSummary[]): string {
+  const lines = candidates.map((candidate) => {
+    const modified = candidate.modifiedAt === undefined ? 'unknown' : new Date(candidate.modifiedAt).toISOString();
+    return `  ${candidate.sessionId}  (modified ${modified})`;
+  });
+  return `Error: --resume "${value}" matches ${candidates.length} sessions. Pass one of these session IDs to disambiguate:\n${lines.join('\n')}`;
+}
+
+/**
+ * Resolve a resume target against the session index.
+ *
+ * A **session id** is matched exactly, and an **exact title** is matched
+ * exactly. More than one session carrying the title is an error that lists the
+ * candidates; nothing matching is an error that says what was looked for.
+ */
+export function resolveSessionTarget(
+  summaries: SessionSummary[],
+  target: string | undefined,
+): SessionTargetResolution {
+  const value = (target ?? '').trim();
+  if (value === '') {
+    return { kind: 'not_found', message: RESUME_REQUIRES_TARGET_MESSAGE };
+  }
+
+  const byId = summaries.find((summary) => summary.sessionId === value);
+  if (byId !== undefined) return { kind: 'found', summary: byId };
+
+  const byTitle = summaries.filter((summary) => summary.title !== undefined && summary.title === value);
+  const first = byTitle[0];
+  if (first !== undefined && byTitle.length === 1) return { kind: 'found', summary: first };
+  if (byTitle.length > 1) {
+    return { kind: 'ambiguous', candidates: byTitle, message: ambiguousTitleMessage(value, byTitle) };
+  }
+
+  if (looksLikeSessionId(value)) {
+    return { kind: 'not_found', message: `No conversation found with session ID: ${value}` };
+  }
+  return {
+    kind: 'not_found',
+    message: `${RESUME_REQUIRES_TARGET_MESSAGE}. Provided value "${value}" is not a UUID and does not match any session title.`,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -441,7 +677,8 @@ function summarize(sessionId: string, filePath: string, events: SessionEvent[]):
  *   - `future_dated` — the row is dated in the future;
  *   - `sent` — the prompt has already been delivered;
  *   - `altered` — the prompt was altered after it was persisted, and the
- *     altered text is what is returned;
+ *     altered text is what is returned. The store's `alter` is the path that
+ *     rewrites a row and sets the flag;
  *   - `bound` — the row is bound to this session and is taken as it stands.
  */
 export type CarriedPromptOutcome =
@@ -507,6 +744,15 @@ export interface CarriedPromptTakeResult {
 export interface CarriedPromptStore {
   /** Persist a prompt for a later process. */
   put(row: CarriedPromptRow): Promise<void>;
+  /**
+   * Rewrite a row's prompt and mark the row as **altered**.
+   *
+   * The row is rewritten by **appending** an updated row — the store is
+   * append-only — and the updated row carries the altered text and the
+   * `altered` flag. A take that finds such a row reports the `altered`
+   * outcome, and the text it returns is the altered one.
+   */
+  alter(opts: { id: string; sessionId: string; prompt: string }): Promise<CarriedPromptRow | undefined>;
   /** Take a prompt for a later process, under the binding and age policy. */
   take(opts: CarriedPromptTakeOptions): Promise<CarriedPromptTakeResult>;
   /** The rows the store holds, the last row for an id winning. */
@@ -615,6 +861,23 @@ export function createCarriedPromptStore(options: CarriedPromptStoreOptions): Ca
   return {
     async put(row: CarriedPromptRow): Promise<void> {
       await writeRow(row);
+    },
+
+    async alter(opts: {
+      id: string;
+      sessionId: string;
+      prompt: string;
+    }): Promise<CarriedPromptRow | undefined> {
+      const rows = await readRows();
+      const row = rows.find(
+        (candidate) => candidate.id === opts.id && candidate.sessionId === opts.sessionId,
+      );
+      if (row === undefined) return undefined;
+      // The row is rewritten by appending: the file is append-only, and the
+      // last row for an id wins.
+      const altered: CarriedPromptRow = { ...row, prompt: opts.prompt, altered: true };
+      await writeRow(altered);
+      return altered;
     },
 
     async take(opts: CarriedPromptTakeOptions): Promise<CarriedPromptTakeResult> {

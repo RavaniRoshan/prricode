@@ -37,6 +37,44 @@
  *   migrates it, or refuses it with the same error. Version `1` is the initial
  *   format; there is no version `0`, and there is no "unversioned" record.
  *
+ * ### The per-record version check, and what a refusal does
+ *
+ * The check runs in **two** places, and both refuse rather than repair:
+ *
+ * 1. **The reader** (`src/session/store.ts`) checks the version of every
+ *    record it reads, *before* the shape of the record is looked at, so a
+ *    record that is both the wrong version and the wrong shape is reported as
+ *    the version problem it is. The check is per record, not per file: a file
+ *    whose first record is version `1` and whose third record is version `3` is
+ *    refused at the third record. A record of an unknown version is refused
+ *    **wherever it sits** in the file — a torn *final* line is tolerated, a
+ *    record of an unknown version never is.
+ * 2. **The resume boundary** (`src/session/resume.ts`) checks the version of
+ *    every record it is handed, because a resume can be handed a list that did
+ *    not come from the store.
+ *
+ * A refusal is a raised `SessionVersionError`, never a skipped record. The
+ * error names the version that was found and the version that is supported, so
+ * the operator can tell "this file is from a newer build" from "this file is
+ * corrupt". The reader does not skip the record and carry on: a partially
+ * read transcript is worse than a refused one, because the part that was read
+ * looks complete.
+ *
+ * ### What a version covers
+ *
+ * The version covers the **record**: its members, their types, and the
+ * vocabulary of kinds. Version `1` carries the eight kinds below; the members
+ * this file adds on top of the plan's seven (`parentId` and the
+ * `content_replacement` kind) are part of version `1` as well, because they
+ * were introduced with it. A change to the vocabulary — a new kind, a new
+ * member, a member that changes its meaning — is a change of the **version**,
+ * and it is written as such: `SESSION_SCHEMA_VERSION` moves to `2`, the reader
+ * of version `1` either understands the new record or refuses it, and the
+ * migration is a rewrite of the file into the new version. The file is
+ * append-only, so a migration never edits a record in place: it writes a new
+ * file and replaces the old one, which is the only way a transcript stays
+ * consistent with itself.
+ *
  * ### What is *not* claimed here
  *
  * The **compaction boundary model** — a marker record that names the summary of
@@ -60,9 +98,10 @@
  *     written last;
  *   - a `content_replacement` member, which the plan's own Step 13 requires
  *     ("a stub **plus** a content-replacement entry"). A replacement is a
- *     *separate record*: the stored tool result already carries the stub, and
- *     the replacement record is what tells a reader that the content it is
- *     looking at is a stub rather than the tool's real output.
+ *     *separate record*: the transcript keeps the tool result's real content,
+ *     and the replacement record names the record and the stub that stands in
+ *     for it. A reader applies the replacement when it replays the transcript,
+ *     so the payload is kept in the file and kept out of the context.
  */
 
 import type { PermissionDecision } from '../permissions/decision.js';
@@ -290,16 +329,6 @@ export function ownBoolean(record: Record<string, unknown>, key: string): boolea
 /* -------------------------------------------------------------------------- */
 /* Reading a record back                                                       */
 /* -------------------------------------------------------------------------- */
-
-/** Whether a value is a record of this implementation's format. */
-export function isSessionEvent(value: unknown): value is SessionEvent {
-  try {
-    parseSessionEvent(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Read one record back.

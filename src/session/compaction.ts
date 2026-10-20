@@ -20,6 +20,22 @@
  * record the way the target's boundary line points at the last pre-compact
  * message.
  *
+ * ## The boundary is located by a link, not by a count
+ *
+ * The marker carries two things: the **summary** of the prefix it replaces,
+ * and the **number of records** that prefix held (`replacedFrom`). The number
+ * is a **count over the list the compaction ran on** — it is *not* an index
+ * into any other sequence, and no reader uses it as one.
+ *
+ * The **boundary** — the point where the summary takes over — is located by
+ * the marker's **parent link**: the marker hangs off the last record of the
+ * dropped prefix, and a reader walks the branch's parent chain to that record.
+ * A record that is not a message — a `provider_event`, a `permission_request` —
+ * sits on that chain like any other record, so the boundary moves with it. A
+ * reader that counted records instead would index a *different* sequence than
+ * the one the count was made over, and would drop a message the boundary never
+ * claimed to replace.
+ *
  * ## What is *not* claimed
  *
  * The target's boundary model is *inference*: it comes from third-party analysis
@@ -62,7 +78,11 @@ export interface CompactOptions {
    * The record the marker hangs off.
    *
    * It defaults to the last record of the dropped prefix, the way the target's
-   * boundary line points at the last pre-compact message.
+   * boundary line points at the last pre-compact message. The last dropped
+   * record is not necessarily a **message**: a transcript may hold a
+   * `provider_event` or a `permission_request` at that place, and the reader
+   * locates the boundary on the branch's parent chain, whatever the kind of
+   * the record is.
    */
   parentId?: string;
 }
@@ -75,6 +95,10 @@ export interface CompactOptions {
  * record — the tail is already in the file, and the transcript is append-only,
  * so the caller persists the marker and adopts the returned list as the
  * session's current records.
+ *
+ * The marker's `replacedFrom` is the **number of records** the dropped prefix
+ * held; the marker's `parentId` names the **record** the boundary sits on.
+ * A reader locates the boundary by the link, never by the count.
  */
 export function compact(
   events: SessionEvent[],
