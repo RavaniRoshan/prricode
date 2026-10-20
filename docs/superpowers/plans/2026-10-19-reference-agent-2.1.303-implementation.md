@@ -433,20 +433,20 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   export function retryDelayMs(attempt: number, response?: { status: number; headers: Headers }): number;
   ```
 
-- [ ] **Step 1: Write the failing transport test** — a request built by a driver is turned into a `fetch` call with the driver's URL, headers, and body; a streaming response is turned into `ProviderEvent[]` through `parseResponse`; a non-streaming JSON response is parsed and carries the non-enumerable `_request_id` / `_workspace_id`.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
-- [ ] **Step 3: Implement `src/provider/transport/http.ts`** — call `driver.buildUrl` / `buildHeaders` / `buildBody`, issue the request, and feed the response through the driver's `parseStream` / `parseNonStreaming` (or the exported `parseResponse`). The transport must **not** resolve a credential; it receives one.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing retry test** — a retryable status is retried up to the driver's `maxRetries`; a non-retryable status is returned immediately; the delay honours `retry-after` and the driver's `x-should-retry` header; a `401` with the cached-token flag triggers a token refresh and one more attempt.
-- [ ] **Step 6: Implement `src/provider/transport/retry.ts`** with the audit's rule: `408`, `409`, `429`, and any status `>= 500` are retryable; `x-should-retry` overrides in both directions; `400`, `401`, `403`, `404` are not (except the cached-token `401`).
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing signing test** — the signed request replaces the `host` header with the URL's host, **deletes** the `connection` header, preserves multi-valued query parameters byte-for-byte, and carries the service name the **driver** wrote into `req.aws.service` (not a constant the transport knows).
-- [ ] **Step 9: Implement `src/provider/transport/sigv4.ts`** — a canonical-request signer over the driver's URL, headers, and body, using the service and region from the request context.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Write the failing scope test** — a Vertex or Foundry request's `tokenScope` reaches the token acquisition callback, so the scope is a live input rather than a constant.
-- [ ] **Step 12: Implement the token-acquisition seam** in `src/provider/transport/index.ts` — an `acquireToken(scope)` callback the transport invokes when the driver declares a scope.
-- [ ] **Step 13: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 14: Commit.**
+- [x] **Step 1: Write the failing transport test** — a request built by a driver is turned into a `fetch` call with the driver's URL, headers, and body; a streaming response is turned into `ProviderEvent[]` through `parseResponse`; a non-streaming JSON response is parsed and carries the non-enumerable `_request_id` / `_workspace_id`.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
+- [x] **Step 3: Implement `src/provider/transport/http.ts`** — call `driver.buildUrl` / `buildHeaders` / `buildBody`, issue the request, and feed the response through the driver's `parseStream` / `parseNonStreaming` (or the exported `parseResponse`). The transport must **not** resolve a credential; it receives one.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing retry test** — a retryable status is retried up to the driver's `maxRetries`; a non-retryable status is returned immediately; the delay honours `retry-after` and the driver's `x-should-retry` header; a `401` with the cached-token flag triggers a token refresh and one more attempt.
+- [x] **Step 6: Implement `src/provider/transport/retry.ts`** with the audit's rule: `408`, `409`, `429`, and any status `>= 500` are retryable; `x-should-retry` overrides in both directions; `400`, `401`, `403`, `404` are not (except the cached-token `401`).
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing signing test** — the signed request replaces the `host` header with the URL's host, **deletes** the `connection` header, preserves multi-valued query parameters byte-for-byte, and carries the service name the **driver** wrote into `req.aws.service` (not a constant the transport knows).
+- [x] **Step 9: Implement `src/provider/transport/sigv4.ts`** — a canonical-request signer over the driver's URL, headers, and body, using the service and region from the request context.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Write the failing scope test** — a Vertex or Foundry request's `tokenScope` reaches the token acquisition callback, so the scope is a live input rather than a constant.
+- [x] **Step 12: Implement the token-acquisition seam** in `src/provider/transport/index.ts` — an `acquireToken(scope)` callback the transport invokes when the driver declares a scope.
+- [x] **Step 13: Run it to verify it passes** — expected: PASS.
+- [x] **Step 14: Commit.**
   ```bash
   git add src/provider/transport tests/contracts/provider-transport.test.ts
   git commit -m "feat(provider): transport, retry loop, and SigV4 signing"
