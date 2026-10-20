@@ -60,17 +60,21 @@
 | F-34 | Platform | Native sandbox helper | observed | REA observed | `ev_03f243709e8d7a715417e1b5423040b0699e83e080e8a3e34d2bab35c52b75b0` — 29 named callees, namespaces, mounts, `prctl`, seccomp filter and listener, `execvp` |  implemented | CC-017 | `tests/security/sandbox.test.ts` |
 | F-35 | Platform | Native seccomp notification supervisor | partial | REA observed | `ev_675b0f67ffcb65b3210844369bc84963d66b4e552360bc61aa68ae7987fcaf7d` (16 named callees), `ev_7f3b70f348ad82e0462ade7bb1e07dec88154d51f868884e8f809f20d40c5ef8` (27-record table at `0x6c749c0`); per-syscall policy unresolved |  implemented | CC-017 | `tests/security/sandbox.test.ts` |
 | F-36 | Platform | Whole-image native inventory | unknown | — | three timed-out attempts (330 s, 360 s, 900 s) | not started | CC-001 | — |
+| F-37 | Platform | The `Bash` tool's sandbox routing | implementation choice | **implementation choice** (the target's routing is unobserved) | the target's `sandboxOverride` decision reason kind and the `dangerouslyDisableSandbox` flag are observed; this implementation's routing, its filtered environment, its refusal shape and the rule that the flag never overrides a policy **error** are this implementation's | implemented | CC-008b | `tests/security/bash-sandbox.test.ts` |
+| F-38 | Command line | The command-line surface | observed | REA observed | the parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the session-id pattern, the cloud ref, the URI arguments, the headless rule and the validation messages in `chunk-0y0ptpy9.js` | implemented | CC-014 | `tests/contracts/cli-surface.test.ts` |
+| F-39 | Command line | The interactive terminal UI | implementation choice | **implementation choice** (the audit records no TUI drawing at all) | the block markers, the denial marker, the sandbox status lines, the tool summary, the code-block label, the ARIA labels and roles, the approval-choice wording and the frame rate are this implementation's | implemented | CC-015 | `tests/contracts/ui-render.test.ts` |
+| F-40 | Provider | The multi-provider manager surfaces | project requirement | **project requirement** (a project extension, not part of the reference agent) | the `/provider` command, the catalog browser, the picker, the credential status vocabulary (`resolved \| unresolved \| unreadable \| refused`) and the two credential columns are this implementation's | implemented | CC-016 | `tests/contracts/provider-command.test.ts` |
 
 ## Totals
 
 | Status | Count |
 |---|---|
-| observed | 25 |
+| observed | 26 |
 | partial | 10 |
 | unknown | 1 |
 | inferred | 0 |
 | not applicable (project requirement) | 2 |
-| **Total rows** | **38** |
+| **Total rows** | **42** |
 
 `F-27` is counted as partial rather than observed because the compaction *event* is observed but the boundary-and-projection *model* is inferred from the tool-result shaping code, not from a resolved relation.
 
