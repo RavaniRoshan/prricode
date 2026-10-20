@@ -22,6 +22,12 @@
  * The `Edit(...)` path rules apply to the tool, and the rule engine resolves the
  * path before the match — an allow rule requires **both** the requested path and
  * the resolved target to match, and a deny rule fires when either does.
+ *
+ * Implementation choices (the audit does not pin them, so they are marked here):
+ *
+ *   - The **output shape** — `{ type: 'text', text, filePath, replacements }` — is a
+ *     implementation choice: the audit pins the tool-result *metadata*, not the content a
+ *     tool returns.
  */
 
 import { readFile, writeFile } from 'node:fs/promises';
@@ -31,8 +37,10 @@ import type { ToolContext } from '../../permissions/decision.js';
 import {
   PathSnapshot,
   absoluteToolPath,
-  checkToolPermissions,
+  checkFileToolPermissions,
+  denyDecisionFor,
   optionalBooleanField,
+  rejectUnknownFields,
   requireStringField,
   type BuiltinToolDeps,
 } from './shared.js';
@@ -109,12 +117,20 @@ export function createEditTool(deps: BuiltinToolDeps): ToolDefinition<EditInput,
     inputSchema: EDIT_INPUT_SCHEMA,
     mutatesFiles: true,
 
-    async checkPermissions(input, ctx: ToolContext) {
-      snapshot.record(ctx.toolUseId, input.file_path);
-      return checkToolPermissions(ctx, deps);
+    async checkPermissions(_input, ctx: ToolContext) {
+      // The snapshot is of the path the call will act on, so it is taken once the
+      // check — and any rewrite it carried — is known.
+      return checkFileToolPermissions(ctx, deps, snapshot, 'file_path');
+    },
+
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a path the deny list covers.
+      return denyDecisionFor(ctx, deps);
     },
 
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, ['file_path', 'old_string', 'new_string', 'replace_all']);
+      if (!fields.ok) return fields;
       const filePath = requireStringField(input, 'file_path', {
         invalidCode: TOOL_ERROR_CODES.invalidPath,
       });
@@ -136,64 +152,70 @@ export function createEditTool(deps: BuiltinToolDeps): ToolDefinition<EditInput,
     },
 
     async execute(input, ctx) {
-      const refusal = snapshot.verify(ctx.toolUseId, input.file_path);
-      if (refusal !== undefined) {
-        throw new ToolExecutionError(refusal, TOOL_ERROR_CODES.pathChanged);
-      }
-
-      const filePath = absoluteToolPath(input.file_path, deps.cwd);
-      let content: string;
       try {
-        content = await readFile(filePath, 'utf8');
-      } catch (error) {
-        throw new ToolExecutionError(
-          `The file '${filePath}' could not be read: ${(error as NodeJS.ErrnoException).message}`,
-          TOOL_ERROR_CODES.fileNotFound,
-        );
-      }
+        const refusal = snapshot.verify(ctx.toolUseId, input.file_path);
+        if (refusal !== undefined) {
+          throw new ToolExecutionError(refusal, TOOL_ERROR_CODES.pathChanged);
+        }
 
-      const occurrences = countOccurrences(content, input.old_string);
-      if (input.old_string === input.new_string) {
-        // The write would change nothing, so it is **suppressed** rather than
-        // performed. `14` is the code the audit records for a suppressed write.
-        throw new ToolExecutionError(
-          `The replacement is the string that would be replaced, so the write to '${filePath}' was suppressed.`,
-          TOOL_ERROR_CODES.suppressedWrite,
-        );
-      }
-      if (occurrences === 0) {
-        throw new ToolExecutionError(
-          `The string to replace does not appear in '${filePath}'.`,
-          TOOL_ERROR_CODES.stringNotFound,
-        );
-      }
-      if (occurrences > 1 && input.replace_all !== true) {
-        throw new ToolExecutionError(
-          `The string to replace appears ${occurrences} times in '${filePath}'; set 'replace_all' to replace every occurrence, or make the string unique.`,
-          TOOL_ERROR_CODES.invalidInput,
-        );
-      }
+        const filePath = absoluteToolPath(input.file_path, deps.cwd);
+        let content: string;
+        try {
+          content = await readFile(filePath, 'utf8');
+        } catch (error) {
+          throw new ToolExecutionError(
+            `The file '${filePath}' could not be read: ${(error as NodeJS.ErrnoException).message}`,
+            TOOL_ERROR_CODES.fileNotFound,
+          );
+        }
 
-      const updated =
-        input.replace_all === true
-          ? content.split(input.old_string).join(input.new_string)
-          : content.replace(input.old_string, input.new_string);
+        const occurrences = countOccurrences(content, input.old_string);
+        if (input.old_string === input.new_string) {
+          // The write would change nothing, so it is **suppressed** rather than
+          // performed. `14` is the code the audit records for a suppressed write.
+          throw new ToolExecutionError(
+            `The replacement is the string that would be replaced, so the write to '${filePath}' was suppressed.`,
+            TOOL_ERROR_CODES.suppressedWrite,
+          );
+        }
+        if (occurrences === 0) {
+          throw new ToolExecutionError(
+            `The string to replace does not appear in '${filePath}'.`,
+            TOOL_ERROR_CODES.stringNotFound,
+          );
+        }
+        if (occurrences > 1 && input.replace_all !== true) {
+          throw new ToolExecutionError(
+            `The string to replace appears ${occurrences} times in '${filePath}'; set 'replace_all' to replace every occurrence, or make the string unique.`,
+            TOOL_ERROR_CODES.invalidInput,
+          );
+        }
 
-      try {
-        await writeFile(filePath, updated, 'utf8');
-      } catch (error) {
-        throw new ToolExecutionError(
-          `The file '${filePath}' could not be written: ${(error as NodeJS.ErrnoException).message}`,
-          TOOL_ERROR_CODES.executionFailed,
-        );
+        const updated =
+          input.replace_all === true
+            ? content.split(input.old_string).join(input.new_string)
+            : content.replace(input.old_string, input.new_string);
+
+        try {
+          await writeFile(filePath, updated, 'utf8');
+        } catch (error) {
+          throw new ToolExecutionError(
+            `The file '${filePath}' could not be written: ${(error as NodeJS.ErrnoException).message}`,
+            TOOL_ERROR_CODES.executionFailed,
+          );
+        }
+
+        return {
+          type: 'text' as const,
+          text: `Replaced ${occurrences} occurrence${occurrences === 1 ? '' : 's'} in ${filePath}.`,
+          filePath,
+          replacements: occurrences,
+        };
+      } finally {
+        // The snapshot has served its purpose: the call is over, and the map must
+        // not grow one entry per call for the life of the tool.
+        snapshot.forget(ctx.toolUseId);
       }
-
-      return {
-        type: 'text' as const,
-        text: `Replaced ${occurrences} occurrence${occurrences === 1 ? '' : 's'} in ${filePath}.`,
-        filePath,
-        replacements: occurrences,
-      };
     },
   };
 }

@@ -21,12 +21,21 @@
  *     optional `subagent_type`.
  *   - The delegate is supplied by the session. The `CC-010` milestone owns the
  *     runtime that provides it.
+ *   - The **output shape** — `{ type: 'text', text, description }` — is a reimplementation
+ *     choice: the audit pins the tool-result *metadata*, not the content a tool
+ *     returns.
  */
 
 import { ToolExecutionError, TOOL_ERROR_CODES, type ToolDefinition } from '../registry.js';
 import type { ToolContext } from '../../permissions/decision.js';
 
-import { checkToolPermissions, requireStringField, type BuiltinToolDeps } from './shared.js';
+import {
+  checkToolPermissions,
+  denyDecisionFor,
+  rejectUnknownFields,
+  requireStringField,
+  type BuiltinToolDeps,
+} from './shared.js';
 
 /** The input of the `Task` tool. */
 export interface TaskInput {
@@ -82,7 +91,14 @@ export function createTaskTool(deps: BuiltinToolDeps): ToolDefinition<TaskInput,
       return checkToolPermissions(ctx, deps);
     },
 
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a command the deny list covers.
+      return denyDecisionFor(ctx, deps);
+    },
+
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, ['description', 'prompt', 'subagent_type']);
+      if (!fields.ok) return fields;
       const description = requireStringField(input, 'description', {
         invalidCode: TOOL_ERROR_CODES.invalidInput,
       });

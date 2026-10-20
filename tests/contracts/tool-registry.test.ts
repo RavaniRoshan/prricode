@@ -14,7 +14,16 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -34,21 +43,25 @@ import {
   createBuiltinTools,
   registerBuiltinTools,
 } from '../../src/tools/builtins/index.js';
-import { createBashTool } from '../../src/tools/builtins/bash.js';
+import { createBashTool, resolveBashTimeout, DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS } from '../../src/tools/builtins/bash.js';
 import { createEditTool } from '../../src/tools/builtins/edit.js';
-import { createGlobTool } from '../../src/tools/builtins/glob.js';
-import { createGrepTool } from '../../src/tools/builtins/grep.js';
+import { createGlobTool, MAX_GLOB_RESULTS } from '../../src/tools/builtins/glob.js';
+import { createGrepTool, MAX_GREP_FILES } from '../../src/tools/builtins/grep.js';
 import { createNotebookEditTool } from '../../src/tools/builtins/notebookedit.js';
 import { createReadTool } from '../../src/tools/builtins/read.js';
 import { createTaskTool } from '../../src/tools/builtins/task.js';
 import { createTodoWriteTool } from '../../src/tools/builtins/todowrite.js';
 import type { TodoWriteInput } from '../../src/tools/builtins/todowrite.js';
-import { createWebFetchTool } from '../../src/tools/builtins/webfetch.js';
+import { createWebFetchTool, MAX_WEBFETCH_BYTES } from '../../src/tools/builtins/webfetch.js';
 import { createWriteTool } from '../../src/tools/builtins/write.js';
-import type { BuiltinToolDeps } from '../../src/tools/builtins/shared.js';
+import { PathSnapshot, type BuiltinToolDeps } from '../../src/tools/builtins/shared.js';
 import { buildApprovalPrompt } from '../../src/permissions/prompts.js';
-import { FILE_MUTATING_TOOL_NAMES, type RuleSet } from '../../src/permissions/rules.js';
-import type { PermissionDecision, ToolContext } from '../../src/permissions/decision.js';
+import {
+  FILE_MUTATING_TOOL_NAMES,
+  type RuleDecision,
+  type RuleSet,
+} from '../../src/permissions/rules.js';
+import { evaluateRules, type PermissionDecision, type ToolContext } from '../../src/permissions/decision.js';
 
 const WORKDIR = '/work';
 
@@ -121,6 +134,9 @@ function stubTool(overrides: Partial<ToolDefinition> = {}): ToolDefinition {
     },
     async validateInput() {
       return { ok: true };
+    },
+    async recheckDeny() {
+      return undefined;
     },
     async execute() {
       return 'done';
@@ -344,6 +360,20 @@ describe('the tool runner', () => {
             updatedInput: { file_path: '/work/rewritten.txt' },
           };
         },
+        // The validator **rejects** the original input, so the test fails when
+        // the runner executes what the call named instead of what the hook
+        // rewrote it to.
+        async validateInput(input) {
+          const value = (input as { file_path?: unknown }).file_path;
+          if (value !== '/work/rewritten.txt') {
+            return {
+              ok: false,
+              message: `The tool was given '${String(value)}' and not the rewritten input.`,
+              errorCode: TOOL_ERROR_CODES.invalidPath,
+            };
+          }
+          return { ok: true };
+        },
         async execute(input) {
           seen.push(input);
           return 'done';
@@ -491,6 +521,199 @@ describe('the tool runner', () => {
       errorCode: TOOL_ERROR_CODES.fileNotFound,
     });
   });
+
+  it('tells the caller what to do about every failure', async () => {
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        async checkPermissions() {
+          return { behavior: 'deny', source: 'user_reject', reasonType: 'other', reason: 'no' };
+        },
+      }),
+    );
+
+    const envelope = await runTool(registry, 'Stub', {}, toolContext('Stub', {}));
+
+    expect(envelope.isError).toBe(true);
+    expect(envelope.remedy).toBeTypeOf('string');
+    expect(envelope.remedy?.length).toBeGreaterThan(0);
+  });
+
+  it('tells the caller what to do about every way a call can fail', async () => {
+    const denying = createToolRegistry();
+    denying.register(
+      stubTool({
+        async checkPermissions() {
+          return { behavior: 'deny', source: 'user_reject', reasonType: 'other', reason: 'no' };
+        },
+      }),
+    );
+
+    const failing = createToolRegistry();
+    failing.register(
+      stubTool({
+        async checkPermissions() {
+          throw new Error('the rules could not be read');
+        },
+      }),
+    );
+
+    const invalid = createToolRegistry();
+    invalid.register(
+      stubTool({
+        async checkPermissions() {
+          return { behavior: 'allow', source: 'user_permanent', reasonType: 'other' };
+        },
+        async validateInput() {
+          return { ok: false, message: 'no', errorCode: TOOL_ERROR_CODES.invalidInput };
+        },
+      }),
+    );
+
+    const failingExecution = createToolRegistry();
+    failingExecution.register(
+      stubTool({
+        async checkPermissions() {
+          return { behavior: 'allow', source: 'user_permanent', reasonType: 'other' };
+        },
+        async execute() {
+          throw new Error('it broke');
+        },
+      }),
+    );
+
+    const silent = createToolRegistry();
+    silent.register(stubTool());
+
+    const envelopes = [
+      await runTool(denying, 'Stub', {}, toolContext('Stub', {})),
+      await runTool(failing, 'Stub', {}, toolContext('Stub', {})),
+      await runTool(invalid, 'Stub', {}, toolContext('Stub', {})),
+      await runTool(failingExecution, 'Stub', {}, toolContext('Stub', {})),
+      await runTool(silent, 'Stub', {}, toolContext('Stub', {})),
+      await runTool(createToolRegistry(), 'NoSuchTool', {}, toolContext('NoSuchTool', {})),
+    ];
+
+    for (const envelope of envelopes) {
+      expect(envelope.isError).toBe(true);
+      expect(envelope.remedy).toBeTypeOf('string');
+      expect(envelope.remedy?.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('runs a call the approval allowed', async () => {
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        async checkPermissions() {
+          return { behavior: 'ask', source: 'unknown', reasonType: 'other' };
+        },
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(registry, 'Stub', {}, toolContext('Stub', {}), {
+      approveAsk: async () => ({ behavior: 'allow', source: 'user_temporary', reasonType: 'other' }),
+    });
+
+    expect(envelope.isError).toBe(false);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(envelope.permissionDecision?.decision).toBe('allow');
+    expect(envelope.permissionDecision?.source).toBe('user_temporary');
+  });
+
+  it('refuses a call whose approval asked again', async () => {
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        async checkPermissions() {
+          return { behavior: 'ask', source: 'unknown', reasonType: 'other' };
+        },
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(registry, 'Stub', {}, toolContext('Stub', {}), {
+      approveAsk: async () => ({ behavior: 'ask', source: 'unknown', reasonType: 'other' }),
+    });
+
+    expect(envelope.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(envelope.nonExecutionKind).toBe('permission_unresolved');
+    expect(envelope.permissionDecision?.decision).toBe('ask');
+  });
+
+  it('reports a permission check that failed', async () => {
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        async checkPermissions() {
+          throw new Error('the rules could not be read');
+        },
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(registry, 'Stub', {}, toolContext('Stub', {}));
+
+    expect(envelope.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(envelope.nonExecutionKind).toBe('permission_check_failed');
+    expect(envelope.content).toMatchObject({ errorCode: TOOL_ERROR_CODES.executionFailed });
+    expect(String((envelope.content as { message: string }).message)).toContain(
+      'the rules could not be read',
+    );
+  });
+
+  it('reports a permission service that failed', async () => {
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(stubTool({ execute }));
+
+    const envelope = await runTool(registry, 'Stub', {}, toolContext('Stub', {}), {
+      checkPermission: async () => {
+        throw new Error('the service is down');
+      },
+    });
+
+    expect(envelope.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(envelope.nonExecutionKind).toBe('permission_check_failed');
+    expect(String((envelope.content as { message: string }).message)).toContain(
+      'the service is down',
+    );
+  });
+
+  it('uses the name of the tool itself for the rules and the path of an aliased registration', async () => {
+    const root = makeDirectory();
+    const file = path.join(root, 'a.txt');
+    writeFileSync(file, 'x');
+
+    const tool = createWriteTool(
+      builtinDeps({ rules: ruleSet({ deny: ['Write(a.txt)'], cwd: root }), cwd: root }),
+    );
+    const registry: ToolRegistry = {
+      register: () => {},
+      get: (name) => (name === 'Writer' ? tool : undefined),
+      list: () => [tool],
+    };
+
+    const input = { file_path: file, content: 'y' };
+    const envelope = await runTool(
+      registry,
+      'Writer',
+      input,
+      toolContext('Writer', input),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(true);
+    expect(envelope.permissionDecision?.decision).toBe('deny');
+    expect(readFileSync(file, 'utf8')).toBe('x');
+  });
 });
 
 // --- the post-check re-resolution -------------------------------------------------
@@ -595,6 +818,209 @@ describe('the write path', () => {
 
     await expect(tool.execute(input, ctx)).rejects.toThrow(/resolved to/);
     expect(readFileSync(path.join(second, 'file.txt'), 'utf8')).toBe('second');
+  });
+
+  it('refuses a write to a symlink a hook rewrote to when the symlink is swapped after the check', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(path.join(first, 'file.txt'), 'first');
+    writeFileSync(path.join(second, 'file.txt'), 'second');
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+
+    const tool = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Write'], cwd: root }),
+        cwd: root,
+        hook: () => ({
+          behavior: 'allow',
+          source: 'hook',
+          reasonType: 'other',
+          updatedInput: { file_path: path.join(link, 'file.txt'), content: 'rewritten' },
+        }),
+      }),
+    );
+
+    const original = { file_path: path.join(root, 'ok.txt'), content: 'x' };
+    const ctx = toolContext('Write', original);
+    const decision = await tool.checkPermissions(original, ctx);
+
+    // The hook rewrote the path, so the path that will be written is the one the
+    // symlink names.
+    expect(decision?.updatedInput).toBeDefined();
+    const rewritten = decision?.updatedInput as { file_path: string; content: string };
+    expect(rewritten.file_path).toBe(path.join(link, 'file.txt'));
+
+    // The symlink is swapped **after** the check and before the write.
+    unlinkSync(link);
+    symlinkSync(second, link);
+
+    await expect(tool.execute(rewritten, ctx)).rejects.toThrow(/resolved to/);
+    expect(readFileSync(path.join(second, 'file.txt'), 'utf8')).toBe('second');
+    expect(readFileSync(path.join(first, 'file.txt'), 'utf8')).toBe('first');
+  });
+
+  it('re-resolves the path a hook rewrote to before the write', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(path.join(first, 'file.txt'), 'first');
+    writeFileSync(path.join(second, 'file.txt'), 'second');
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        name: 'Write',
+        mutatesFiles: true,
+        async checkPermissions() {
+          return {
+            behavior: 'allow',
+            source: 'hook',
+            reasonType: 'other',
+            updatedInput: { file_path: path.join(link, 'file.txt') },
+          };
+        },
+        async validateInput() {
+          // The symlink is swapped **after** the check and before the write.
+          unlinkSync(link);
+          symlinkSync(second, link);
+          return { ok: true };
+        },
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(
+      registry,
+      'Write',
+      { file_path: path.join(root, 'ok.txt') },
+      toolContext('Write', { file_path: path.join(root, 'ok.txt') }),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(true);
+    expect(envelope.nonExecutionKind).toBe('path_changed');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not re-resolve the path of a tool that does not mutate files', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(path.join(first, 'file.txt'), 'first');
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        name: 'Read',
+        mutatesFiles: false,
+        async checkPermissions() {
+          // The symlink is swapped while the permission check runs.
+          unlinkSync(link);
+          symlinkSync(second, link);
+          return { behavior: 'allow', source: 'user_permanent', reasonType: 'other' };
+        },
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(
+      registry,
+      'Read',
+      { file_path: path.join(link, 'file.txt') },
+      toolContext('Read', { file_path: path.join(link, 'file.txt') }),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(false);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a hook rewrite and the deny list', () => {
+  it('denies a call a hook rewrote to a path the deny list covers', async () => {
+    const root = makeDirectory();
+    const secret = path.join(root, 'secret.txt');
+    writeFileSync(secret, 'the secret');
+
+    const tool = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ deny: ['Write(secret.txt)'], allow: ['Write'], cwd: root }),
+        cwd: root,
+        hook: () => ({
+          behavior: 'allow',
+          source: 'hook',
+          reasonType: 'other',
+          updatedInput: { file_path: secret, content: 'overwritten' },
+        }),
+      }),
+    );
+
+    const registry = createToolRegistry();
+    registry.register(tool);
+
+    const input = { file_path: path.join(root, 'ok.txt'), content: 'fine' };
+    const envelope = await runTool(
+      registry,
+      'Write',
+      input,
+      toolContext('Write', input),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(true);
+    expect(envelope.permissionDecision?.decision).toBe('deny');
+    expect(envelope.permissionDecision?.source).toBe('unknown');
+    expect(envelope.nonExecutionKind).toBe('permission_denied');
+    expect(envelope.content).toMatchObject({ errorCode: TOOL_ERROR_CODES.permissionDenied });
+    // The denied file is untouched.
+    expect(readFileSync(secret, 'utf8')).toBe('the secret');
+  });
+
+  it('runs a call a hook rewrote to a path the deny list does not cover', async () => {
+    const root = makeDirectory();
+    const other = path.join(root, 'other.txt');
+
+    const tool = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ deny: ['Write(secret.txt)'], allow: ['Write'], cwd: root }),
+        cwd: root,
+        hook: () => ({
+          behavior: 'allow',
+          source: 'hook',
+          reasonType: 'other',
+          updatedInput: { file_path: other, content: 'written' },
+        }),
+      }),
+    );
+
+    const registry = createToolRegistry();
+    registry.register(tool);
+
+    const input = { file_path: path.join(root, 'ok.txt'), content: 'fine' };
+    const envelope = await runTool(
+      registry,
+      'Write',
+      input,
+      toolContext('Write', input),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(false);
+    expect(readFileSync(other, 'utf8')).toBe('written');
   });
 });
 
@@ -709,6 +1135,59 @@ describe('the Write tool', () => {
     await tool.execute(input, toolContext('Write', input));
     expect(readFileSync(file, 'utf8')).toBe('');
   });
+
+  it('rejects an argument the schema does not declare', async () => {
+    const tool = createWriteTool(builtinDeps());
+    const input = raw({ file_path: '/work/a.txt', content: 'x', surprise: 'extra' });
+
+    const validation = await tool.validateInput(input, toolContext('Write', input));
+
+    expect(validation.ok).toBe(false);
+    expect(validation.ok ? '' : validation.errorCode).toBe(TOOL_ERROR_CODES.invalidInput);
+    expect(validation.ok ? '' : validation.message).toContain('surprise');
+  });
+
+  it('refuses a write to a path the permission check did not approve', async () => {
+    const root = makeDirectory();
+    const approved = path.join(root, 'approved.txt');
+    const other = path.join(root, 'other.txt');
+    writeFileSync(approved, 'x');
+
+    const tool = createWriteTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Write'], cwd: root }), cwd: root }),
+    );
+    const ctx = toolContext('Write', { file_path: approved });
+
+    await tool.checkPermissions({ file_path: approved, content: 'x' }, ctx);
+
+    // The write is to another path than the one the check approved.
+    await expect(tool.execute({ file_path: other, content: 'y' }, ctx)).rejects.toThrow(
+      /approved/,
+    );
+    expect(existsSync(other)).toBe(false);
+  });
+
+  it('forgets the path snapshot once the write is over', async () => {
+    const root = makeDirectory();
+    const file = path.join(root, 'a.txt');
+    writeFileSync(file, 'x');
+
+    const tool = createWriteTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Write'], cwd: root }), cwd: root }),
+    );
+    const ctx = toolContext('Write', { file_path: file });
+
+    await tool.checkPermissions({ file_path: file, content: 'y' }, ctx);
+    await tool.execute({ file_path: file, content: 'y' }, ctx);
+
+    // The snapshot of the finished call is gone, so a later call with the same
+    // tool-use id is not refused by the snapshot of the earlier one.
+    const other = path.join(root, 'b.txt');
+    await expect(
+      tool.execute({ file_path: other, content: 'z' }, ctx),
+    ).resolves.toBeDefined();
+    expect(readFileSync(other, 'utf8')).toBe('z');
+  });
 });
 
 describe('the Edit tool', () => {
@@ -809,6 +1288,33 @@ describe('the Edit tool', () => {
     await expect(tool.execute(input, toolContext('Edit', input))).rejects.toThrow(/appears 2 times/);
     expect(readFileSync(file, 'utf8')).toBe('one two one\n');
   });
+
+  it('re-resolves the path of the file before the edit', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(path.join(first, 'file.txt'), 'first');
+    writeFileSync(path.join(second, 'file.txt'), 'second');
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+
+    const tool = createEditTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Edit'], cwd: root }), cwd: root }),
+    );
+    const input = { file_path: path.join(link, 'file.txt'), old_string: 'first', new_string: 'edited' };
+    const ctx = toolContext('Edit', input);
+
+    await tool.checkPermissions(input, ctx);
+
+    // The symlink is swapped **after** the check and before the edit.
+    unlinkSync(link);
+    symlinkSync(second, link);
+
+    await expect(tool.execute(input, ctx)).rejects.toThrow(/resolved to/);
+    expect(readFileSync(path.join(second, 'file.txt'), 'utf8')).toBe('second');
+  });
 });
 
 describe('the Bash tool', () => {
@@ -851,6 +1357,59 @@ describe('the Bash tool', () => {
     expect(output.stdout).toBe('hello');
     expect(output.exitCode).toBe(0);
   });
+
+  it('rejects a timeout of zero', async () => {
+    const tool = createBashTool(builtinDeps());
+    const input = raw({ command: 'true', timeout: 0 });
+
+    const validation = await tool.validateInput(input, toolContext('Bash', input));
+
+    expect(validation.ok).toBe(false);
+    expect(validation.ok ? '' : validation.errorCode).toBe(TOOL_ERROR_CODES.invalidInput);
+    expect(validation.ok ? '' : validation.message).toContain('timeout');
+  });
+
+  it('bounds the timeout of a command', () => {
+    expect(resolveBashTimeout(undefined)).toBe(DEFAULT_BASH_TIMEOUT_MS);
+    expect(resolveBashTimeout(0)).toBe(DEFAULT_BASH_TIMEOUT_MS);
+    expect(resolveBashTimeout(5_000)).toBe(5_000);
+    expect(resolveBashTimeout(DEFAULT_BASH_TIMEOUT_MS)).toBe(DEFAULT_BASH_TIMEOUT_MS);
+    expect(resolveBashTimeout(MAX_BASH_TIMEOUT_MS)).toBe(MAX_BASH_TIMEOUT_MS);
+    expect(resolveBashTimeout(MAX_BASH_TIMEOUT_MS + 1)).toBe(MAX_BASH_TIMEOUT_MS);
+    expect(resolveBashTimeout(10_000_000)).toBe(MAX_BASH_TIMEOUT_MS);
+  });
+
+  it('runs the command in the environment of the session', async () => {
+    const root = makeDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        env: { ...process.env, PRRICHECK_ENV: 'from the session' },
+      }),
+    );
+    const input = { command: 'printf %s "$PRRICHECK_ENV"' };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    expect(output.stdout).toBe('from the session');
+  });
+
+  it('does not let the sandbox flag past a deny rule', async () => {
+    const root = makeDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ deny: ['Bash(curl *)'], allow: ['Bash'], cwd: root }),
+        cwd: root,
+      }),
+    );
+    const input = { command: 'curl https://example.com', dangerouslyDisableSandbox: true };
+
+    const decision = await tool.checkPermissions(input, toolContext('Bash', input));
+
+    expect(decision?.behavior).toBe('deny');
+    expect(decision?.reasonType).toBe('rule');
+  });
 });
 
 describe('the Glob tool', () => {
@@ -887,6 +1446,23 @@ describe('the Glob tool', () => {
       [path.join(root, 'c.ts'), path.join(root, 'src', 'a.ts')].sort(),
     );
   });
+
+  it('caps the number of files it reports', async () => {
+    const root = makeDirectory();
+    for (let index = 0; index < MAX_GLOB_RESULTS + 1; index += 1) {
+      writeFileSync(path.join(root, `file-${index}.txt`), 'x');
+    }
+
+    const tool = createGlobTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Glob'], cwd: root }), cwd: root }),
+    );
+    const input = { pattern: '*.txt' };
+
+    const output = await tool.execute(input, toolContext('Glob', input));
+
+    expect(output.files).toHaveLength(MAX_GLOB_RESULTS);
+    expect(output.truncated).toBe(true);
+  });
 });
 
 describe('the Grep tool', () => {
@@ -921,6 +1497,72 @@ describe('the Grep tool', () => {
 
     const output = await tool.execute(input, ctx);
     expect(output.files).toEqual([path.join(root, 'a.txt')]);
+  });
+
+  it('reports the matches of a search in content mode', async () => {
+    const root = makeDirectory();
+    writeFileSync(path.join(root, 'a.txt'), 'alpha\nbeta\n');
+
+    const tool = createGrepTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Grep'], cwd: root }), cwd: root }),
+    );
+    const input = { pattern: 'alpha', output_mode: 'content' as const };
+
+    const output = await tool.execute(input, toolContext('Grep', input));
+
+    expect(output.matches).toEqual([
+      { file: path.join(root, 'a.txt'), line: 1, text: 'alpha' },
+    ]);
+    expect(output.text).toContain('alpha');
+  });
+
+  it('counts the matches of a search in count mode', async () => {
+    const root = makeDirectory();
+    writeFileSync(path.join(root, 'a.txt'), 'alpha\nalpha\nbeta\n');
+
+    const tool = createGrepTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Grep'], cwd: root }), cwd: root }),
+    );
+    const input = { pattern: 'alpha', output_mode: 'count' as const };
+
+    const output = await tool.execute(input, toolContext('Grep', input));
+
+    expect(output.counts).toEqual({ [path.join(root, 'a.txt')]: 2 });
+    expect(output.text).toContain('2');
+  });
+
+  it('reports only the files the glob filter matches', async () => {
+    const root = makeDirectory();
+    writeFileSync(path.join(root, 'a.txt'), 'alpha\n');
+    writeFileSync(path.join(root, 'b.md'), 'alpha\n');
+
+    const tool = createGrepTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Grep'], cwd: root }), cwd: root }),
+    );
+    const input = { pattern: 'alpha', glob: '*.txt' };
+
+    const output = await tool.execute(input, toolContext('Grep', input));
+
+    expect(output.files).toEqual([path.join(root, 'a.txt')]);
+  });
+
+  it('stops after the bound of files it has examined', async () => {
+    const root = makeDirectory();
+    for (let index = 0; index < MAX_GREP_FILES + 1; index += 1) {
+      writeFileSync(path.join(root, `file-${index}.txt`), 'nothing to see here\n');
+    }
+
+    const tool = createGrepTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Grep'], cwd: root }), cwd: root }),
+    );
+    const input = { pattern: 'needle' };
+
+    const output = await tool.execute(input, toolContext('Grep', input));
+
+    // No file matches, so the bound cannot be reached by the number of matches:
+    // it is the number of files **examined** that is bounded.
+    expect(output.files).toEqual([]);
+    expect(output.truncated).toBe(true);
   });
 });
 
@@ -990,6 +1632,64 @@ describe('the WebFetch tool', () => {
     expect(decision?.source).not.toBe('user_abort');
     expect(decision?.reason).toMatch(/nothing was fetched/);
   });
+
+  it('stops reading the body at the byte cap', async () => {
+    const chunk = Buffer.alloc(64 * 1024, 'a');
+    let stopped = false;
+    const server = createServer((_request, response) => {
+      response.on('error', () => {
+        // The client stops reading at the cap: the rest of the body is refused.
+      });
+      response.on('close', () => {
+        stopped = true;
+      });
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      // The body never ends: only the cap can stop the reading.
+      const timer = setInterval(() => {
+        if (stopped) {
+          clearInterval(timer);
+          return;
+        }
+        response.write(chunk);
+      }, 1);
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no address');
+    const url = `http://127.0.0.1:${address.port}/endless`;
+
+    const tool = createWebFetchTool(
+      builtinDeps({ rules: ruleSet({ allow: ['WebFetch'] }) }),
+      { timeoutMs: 5_000 },
+    );
+    const input = { url };
+
+    const output = await tool.execute(input, toolContext('WebFetch', input));
+
+    // The reading stopped at the cap: the body was never buffered in full.
+    expect(output.truncated).toBe(true);
+    expect(output.text.length).toBe(MAX_WEBFETCH_BYTES);
+  });
+
+  it('gives up on a fetch that runs past its timeout', async () => {
+    const server = createServer(() => {
+      // The response is never sent: the fetch runs until its timeout.
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('no address');
+    const url = `http://127.0.0.1:${address.port}/slow`;
+
+    const tool = createWebFetchTool(
+      builtinDeps({ rules: ruleSet({ allow: ['WebFetch'] }) }),
+      { timeoutMs: 50 },
+    );
+    const input = { url };
+
+    await expect(tool.execute(input, toolContext('WebFetch', input))).rejects.toThrow();
+  });
 });
 
 describe('the TodoWrite tool', () => {
@@ -1033,6 +1733,33 @@ describe('the TodoWrite tool', () => {
     const output = await tool.execute(input, ctx);
     expect(output.todos).toHaveLength(1);
     expect(output.todos[0]?.content).toBe('write the tool');
+  });
+
+  it('accepts a list with two items in progress', async () => {
+    const tool = createTodoWriteTool(builtinDeps());
+    const input = raw({
+      todos: [
+        { content: 'a', status: 'in_progress', activeForm: 'doing a' },
+        { content: 'b', status: 'in_progress', activeForm: 'doing b' },
+      ],
+    });
+
+    const validation = await tool.validateInput(input, toolContext('TodoWrite', input));
+
+    expect(validation.ok).toBe(true);
+  });
+
+  it('rejects an item with a field the schema does not declare', async () => {
+    const tool = createTodoWriteTool(builtinDeps());
+    const input = raw({
+      todos: [{ content: 'a', status: 'pending', activeForm: 'doing a', extra: 'no' }],
+    });
+
+    const validation = await tool.validateInput(input, toolContext('TodoWrite', input));
+
+    expect(validation.ok).toBe(false);
+    expect(validation.ok ? '' : validation.errorCode).toBe(TOOL_ERROR_CODES.invalidInput);
+    expect(validation.ok ? '' : validation.message).toContain('extra');
   });
 });
 
@@ -1093,6 +1820,121 @@ describe('the NotebookEdit tool', () => {
       /has no cell/,
     );
   });
+
+  it('deletes the cell it was given when the mode is delete', async () => {
+    const root = makeDirectory();
+    const notebook = path.join(root, 'a.ipynb');
+    writeFileSync(
+      notebook,
+      JSON.stringify({
+        cells: [
+          { id: 'c1', cell_type: 'code', source: 'x' },
+          { id: 'c2', cell_type: 'code', source: 'y' },
+        ],
+      }),
+    );
+
+    const tool = createNotebookEditTool(
+      builtinDeps({ rules: ruleSet({ allow: ['NotebookEdit'], cwd: root }), cwd: root }),
+    );
+    const input = {
+      notebook_path: notebook,
+      cell_id: 'c1',
+      new_source: '',
+      edit_mode: 'delete' as const,
+    };
+
+    await tool.execute(input, toolContext('NotebookEdit', input));
+
+    const written = JSON.parse(readFileSync(notebook, 'utf8')) as {
+      cells: { id: string; source: string | string[] }[];
+    };
+    expect(written.cells).toHaveLength(1);
+    expect(written.cells[0]?.id).toBe('c2');
+  });
+
+  it('inserts a cell after the cell it was given when the mode is insert', async () => {
+    const root = makeDirectory();
+    const notebook = path.join(root, 'a.ipynb');
+    writeFileSync(
+      notebook,
+      JSON.stringify({
+        cells: [
+          { id: 'c1', cell_type: 'code', source: 'x' },
+          { id: 'c2', cell_type: 'code', source: 'y' },
+        ],
+      }),
+    );
+
+    const tool = createNotebookEditTool(
+      builtinDeps({ rules: ruleSet({ allow: ['NotebookEdit'], cwd: root }), cwd: root }),
+    );
+    const input = {
+      notebook_path: notebook,
+      cell_id: 'c1',
+      new_source: 'inserted\n',
+      edit_mode: 'insert' as const,
+    };
+
+    await tool.execute(input, toolContext('NotebookEdit', input));
+
+    const written = JSON.parse(readFileSync(notebook, 'utf8')) as {
+      cells: { id: string; cell_type?: string; source: string | string[] }[];
+    };
+    expect(written.cells).toHaveLength(3);
+    expect(written.cells[0]?.id).toBe('c1');
+    expect(written.cells[1]?.source).toBe('inserted\n');
+    expect(written.cells[1]?.cell_type).toBe('code');
+    expect(written.cells[2]?.id).toBe('c2');
+  });
+
+  it('rejects an edit mode the tool does not implement', async () => {
+    const tool = createNotebookEditTool(builtinDeps());
+    const input = raw({
+      notebook_path: '/work/a.ipynb',
+      cell_id: 'c1',
+      new_source: 'x',
+      edit_mode: 'append',
+    });
+
+    const validation = await tool.validateInput(input, toolContext('NotebookEdit', input));
+
+    expect(validation.ok).toBe(false);
+    expect(validation.ok ? '' : validation.errorCode).toBe(TOOL_ERROR_CODES.invalidInput);
+  });
+
+  it('re-resolves the path of the notebook before the edit', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(path.join(first, 'a.ipynb'), JSON.stringify({ cells: [] }));
+    writeFileSync(path.join(second, 'a.ipynb'), JSON.stringify({ cells: [] }));
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+
+    const tool = createNotebookEditTool(
+      builtinDeps({ rules: ruleSet({ allow: ['NotebookEdit'], cwd: root }), cwd: root }),
+    );
+    const input = {
+      notebook_path: path.join(link, 'a.ipynb'),
+      cell_id: 'c1',
+      new_source: 'x',
+    };
+    const ctx = toolContext('NotebookEdit', input);
+
+    await tool.checkPermissions(input, ctx);
+
+    // The symlink is swapped **after** the check and before the edit.
+    unlinkSync(link);
+    symlinkSync(second, link);
+
+    await expect(tool.execute(input, ctx)).rejects.toThrow(/resolved to/);
+    expect(readFileSync(path.join(second, 'a.ipynb'), 'utf8')).toBe(
+      JSON.stringify({ cells: [] }),
+    );
+  });
 });
 
 describe('the Task tool', () => {
@@ -1130,6 +1972,29 @@ describe('the Task tool', () => {
     expect(seen).toHaveLength(1);
   });
 
+  it('hands the kind of sub-agent to the delegate', async () => {
+    const seen: unknown[] = [];
+    const tool = createTaskTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Task'] }),
+        delegate: async (input) => {
+          seen.push(input);
+          return 'done';
+        },
+      }),
+    );
+    const input = {
+      description: 'do the thing',
+      prompt: 'do the thing',
+      subagent_type: 'explore',
+    };
+
+    await tool.execute(input, toolContext('Task', input));
+
+    expect(seen).toEqual([input]);
+    expect((seen[0] as { subagent_type?: string }).subagent_type).toBe('explore');
+  });
+
   it('reports a typed failure when no task runner is available', async () => {
     const tool = createTaskTool(builtinDeps({ rules: ruleSet({ allow: ['Task'] }) }));
     const input = { description: 'do the thing', prompt: 'do the thing' };
@@ -1138,6 +2003,91 @@ describe('the Task tool', () => {
       errorCode: TOOL_ERROR_CODES.taskUnavailable,
     });
   });
+});
+
+// --- the file-mutating tools, end to end ------------------------------------------
+
+describe('a malformed call to a file-mutating tool', () => {
+  /**
+   * A malformed call, run through the runner.
+   *
+   * The runner's order is **check → validate → execute**, so the check runs on an
+   * input the validator has not seen yet: the check must not crash on it, and the
+   * model must see the **validator's** typed error rather than an internal
+   * `TypeError`.
+   */
+  const cases: {
+    name: string;
+    input: unknown;
+    field: string;
+    errorCode: number;
+  }[] = [
+    {
+      name: 'Write',
+      input: { file_path: 42, content: 'x' },
+      field: 'file_path',
+      errorCode: TOOL_ERROR_CODES.invalidPath,
+    },
+    {
+      name: 'Write',
+      input: { content: 'x' },
+      field: 'file_path',
+      errorCode: TOOL_ERROR_CODES.missingField,
+    },
+    {
+      name: 'Edit',
+      input: { file_path: 42, old_string: 'a', new_string: 'b' },
+      field: 'file_path',
+      errorCode: TOOL_ERROR_CODES.invalidPath,
+    },
+    {
+      name: 'Edit',
+      input: { file_path: '/work/a.txt', old_string: 'a' },
+      field: 'new_string',
+      errorCode: TOOL_ERROR_CODES.missingField,
+    },
+    {
+      name: 'NotebookEdit',
+      input: { notebook_path: 42, cell_id: 'c1', new_source: 'x' },
+      field: 'notebook_path',
+      errorCode: TOOL_ERROR_CODES.invalidPath,
+    },
+    {
+      name: 'NotebookEdit',
+      input: { notebook_path: '/work/a.ipynb', new_source: 'x' },
+      field: 'cell_id',
+      errorCode: TOOL_ERROR_CODES.missingField,
+    },
+  ];
+
+  for (const testCase of cases) {
+    it(`reports the typed error of a malformed ${testCase.name} call`, async () => {
+      const root = makeDirectory();
+      const registry = createToolRegistry();
+      registerBuiltinTools(
+        registry,
+        builtinDeps({
+          rules: ruleSet({ allow: ['Write', 'Edit', 'NotebookEdit'], cwd: root }),
+          cwd: root,
+        }),
+      );
+
+      const envelope = await runTool(
+        registry,
+        testCase.name,
+        testCase.input,
+        toolContext(testCase.name, testCase.input),
+        { cwd: root },
+      );
+
+      expect(envelope.isError).toBe(true);
+      expect(envelope.nonExecutionKind).toBe('validation_error');
+      const content = envelope.content as { errorCode: number; message: string };
+      expect(content.errorCode).toBe(testCase.errorCode);
+      expect(content.message).toContain(testCase.field);
+      expect(content.message).not.toMatch(/TypeError|Cannot read properties/);
+    });
+  }
 });
 
 // --- the built-in tools and the rule engine ---------------------------------------
@@ -1163,13 +2113,37 @@ describe('the built-in tools and the rule engine', () => {
     const file = path.join(root, 'a.txt');
     writeFileSync(file, 'x');
 
-    const tool = createReadTool(
-      builtinDeps({ rules: ruleSet({ allow: ['Read'], cwd: root }), cwd: root }),
+    const tool = createWriteTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Write'], cwd: root }), cwd: root }),
     );
-    const input = { file_path: file };
-    const decision = await tool.checkPermissions(input, toolContext('Read', input));
+    const input = { file_path: file, content: 'x' };
+    const decision = await tool.checkPermissions(input, toolContext('Write', input));
 
+    // The tool rewrote nothing: the decision carries no rewritten input, and the
+    // input the call carries is untouched.
     expect(decision?.updatedInput).toBeUndefined();
+    expect(input).toEqual({ file_path: file, content: 'x' });
+
+    // The contrast: a **hook** that rewrites the input does carry one, so the
+    // assertion above is about the tool and not about the shape of the decision.
+    const hooked = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Write'], cwd: root }),
+        cwd: root,
+        hook: () => ({
+          behavior: 'allow',
+          source: 'hook',
+          reasonType: 'other',
+          updatedInput: { file_path: path.join(root, 'b.txt'), content: 'x' },
+        }),
+      }),
+    );
+    const hookedDecision = await hooked.checkPermissions(input, toolContext('Write', input));
+
+    expect(hookedDecision?.updatedInput).toEqual({
+      file_path: path.join(root, 'b.txt'),
+      content: 'x',
+    });
   });
 
   it('shows the resolved destination in the approval prompt, not the literal path', async () => {
@@ -1352,17 +2326,38 @@ describe('a tool call through the registry', () => {
  * A compile-time pin on the permission decision's `updatedInput`.
  *
  * The rule engine's decision type carries `updatedInput?: never`, so a **rule** can
- * never rewrite the input: only the hook path uses the member.
+ * never rewrite the input: only the hook path uses the member. The pin is a
+ * `@ts-expect-error`, so it bites under `tsc --noEmit` — a runtime assertion cannot
+ * stand in for it, because it would pass whatever the runtime did.
  */
-type RuleDecision = NonNullable<ReturnType<typeof import('../../src/permissions/decision.js').evaluateRules>>;
-type RuleDecisionInput = RuleDecision extends { updatedInput?: infer T } ? T : 'absent';
-type RulesNeverRewriteInput = [unknown] extends [RuleDecisionInput] ? true : false;
-type AssertFalse<T extends boolean> = [T] extends [true] ? never : false;
-const RULES_NEVER_REWRITE_INPUT: AssertFalse<RulesNeverRewriteInput> = false;
+function ruleDecisionMayNotCarryARewrittenInput(): void {
+  const decision: RuleDecision = {
+    behavior: 'allow',
+    source: 'unknown',
+    reasonType: 'other',
+    // @ts-expect-error — a rule decision cannot carry a rewritten tool input.
+    updatedInput: { file_path: '/work/rewritten.txt' },
+  };
+  void decision;
+}
 
 describe('the permission decision the tools carry', () => {
   it('keeps the rewritten input out of a rule decision', () => {
-    expect(RULES_NEVER_REWRITE_INPUT).toBe(false);
+    const decision = evaluateRules(
+      ruleSet({ deny: ['Read(a.txt)'] }),
+      {
+        toolName: 'Read',
+        input: { file_path: '/work/a.txt' },
+        toolUseId: '',
+        sessionId: '',
+      },
+    );
+
+    expect(decision?.behavior).toBe('deny');
+    expect(decision?.updatedInput).toBeUndefined();
+
+    // The compile-time pin is exercised here, so that it is not dead code.
+    ruleDecisionMayNotCarryARewrittenInput();
   });
 
   it('carries a hook rewrite in the decision it returns', async () => {

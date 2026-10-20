@@ -16,8 +16,11 @@
  *
  *   - The statuses are exactly `pending`, `in_progress` and `completed`. The audit
  *     does not name them, so this implementation does not claim them.
- *   - Exactly one item may be `in_progress`: a list with two items in progress
- *     describes two agents, and the tool is one.
+ *   - The list is a **recorder**, not a scheduler: a list with two items in
+ *     progress is recorded, not refused. The target accepts it, and a stricter
+ *     tool would be a false refusal.
+ *   - The **output shape** — `{ type: 'text', text, todos }` — is a implementation choice:
+ *     the audit pins the tool-result *metadata*, not the content a tool returns.
  */
 
 import { TOOL_ERROR_CODES, type ToolDefinition } from '../registry.js';
@@ -25,7 +28,9 @@ import type { ToolContext } from '../../permissions/decision.js';
 
 import {
   checkToolPermissions,
+  denyDecisionFor,
   readInputField,
+  rejectUnknownFields,
   type BuiltinToolDeps,
 } from './shared.js';
 
@@ -93,8 +98,6 @@ const TODO_STATUSES: ReadonlySet<string> = new Set<TodoStatus>([
 export function createTodoWriteTool(
   deps: BuiltinToolDeps,
 ): ToolDefinition<TodoWriteInput, TodoWriteOutput> {
-  let current: Todo[] = [];
-
   return {
     name: 'TodoWrite',
     description: 'Record the list of the tasks that are being worked on.',
@@ -105,7 +108,14 @@ export function createTodoWriteTool(
       return checkToolPermissions(ctx, deps);
     },
 
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a call the deny list covers.
+      return denyDecisionFor(ctx, deps);
+    },
+
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, ['todos']);
+      if (!fields.ok) return fields;
       const todos = readInputField(input, 'todos');
       if (todos === undefined || todos === null) {
         return {
@@ -129,7 +139,6 @@ export function createTodoWriteTool(
         };
       }
 
-      let inProgress = 0;
       for (const entry of todos) {
         if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
           return {
@@ -138,6 +147,8 @@ export function createTodoWriteTool(
             errorCode: TOOL_ERROR_CODES.invalidInput,
           };
         }
+        const itemFields = rejectUnknownFields(entry, ['content', 'status', 'activeForm']);
+        if (!itemFields.ok) return itemFields;
         const content = readInputField(entry, 'content');
         const status = readInputField(entry, 'status');
         const activeForm = readInputField(entry, 'activeForm');
@@ -162,29 +173,21 @@ export function createTodoWriteTool(
             errorCode: TOOL_ERROR_CODES.invalidInput,
           };
         }
-        if (status === 'in_progress') inProgress += 1;
       }
 
-      if (inProgress > 1) {
-        return {
-          ok: false,
-          message: 'At most one item of the todo list may be in_progress.',
-          errorCode: TOOL_ERROR_CODES.invalidInput,
-        };
-      }
       return { ok: true };
     },
 
     async execute(input) {
-      current = input.todos.map((todo) => ({
+      const todos = input.todos.map((todo) => ({
         content: todo.content,
         status: todo.status,
         activeForm: todo.activeForm,
       }));
       return {
         type: 'text' as const,
-        text: `Recorded ${current.length} todo${current.length === 1 ? '' : 's'}.`,
-        todos: current,
+        text: `Recorded ${todos.length} todo${todos.length === 1 ? '' : 's'}.`,
+        todos,
       };
     },
   };

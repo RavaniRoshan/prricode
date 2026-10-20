@@ -23,9 +23,15 @@
  *   - The pattern, the file size and the number of files are **bounded**: the
  *     pattern comes from the model and the content comes from the disk, so an
  *     unbounded regular expression over an unbounded file is a denial-of-service
- *     waiting to happen. The bounds are this implementation's, not the target's.
+ *     waiting to happen. The bounds are this implementation's, not the target's. The bound
+ *     on the number of files is on the files the search **reads**, not on the
+ *     files that match: a tree of files that do not match is read in full
+ *     otherwise.
  *   - The output modes are `files_with_matches` (the default), `content` and
  *     `count`.
+ *   - The **output shape** — `{ type: 'text', text, files, matches, counts,
+ *     truncated }` — is a implementation choice: the audit pins the tool-result *metadata*,
+ *     not the content a tool returns.
  */
 
 import { readFile, stat } from 'node:fs/promises';
@@ -38,8 +44,10 @@ import type { ToolContext } from '../../permissions/decision.js';
 import {
   absoluteToolPath,
   checkToolPermissions,
+  denyDecisionFor,
   isDeniedByReadRule,
   optionalStringField,
+  rejectUnknownFields,
   requireStringField,
   walkFiles,
   type BuiltinToolDeps,
@@ -156,7 +164,14 @@ export function createGrepTool(deps: BuiltinToolDeps): ToolDefinition<GrepInput,
       return checkToolPermissions(ctx, deps);
     },
 
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a path the deny list covers.
+      return denyDecisionFor(ctx, deps);
+    },
+
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, ['pattern', 'path', 'glob', 'output_mode']);
+      if (!fields.ok) return fields;
       const pattern = requireStringField(input, 'pattern', {
         invalidCode: TOOL_ERROR_CODES.invalidInput,
       });
@@ -212,9 +227,13 @@ export function createGrepTool(deps: BuiltinToolDeps): ToolDefinition<GrepInput,
       const matches: GrepMatch[] = [];
       const counts: Record<string, number> = {};
       let truncated = false;
+      // The number of files the search **read**. The bound is on the files that
+      // are read, not on the files that match: a tree of files that do not
+      // match would otherwise be read in full.
+      let examined = 0;
 
       for (const candidate of candidates) {
-        if (files.length >= MAX_GREP_FILES) {
+        if (examined >= MAX_GREP_FILES) {
           truncated = true;
           break;
         }
@@ -237,6 +256,7 @@ export function createGrepTool(deps: BuiltinToolDeps): ToolDefinition<GrepInput,
         } catch {
           continue;
         }
+        examined += 1;
         // A file with a NUL byte in it is a binary file, not text.
         if (content.includes('\u0000')) continue;
 

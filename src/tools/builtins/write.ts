@@ -11,7 +11,8 @@
  * validation"; the re-resolution the `CC-007` review found was never called belongs
  * here. The snapshot is taken while the check runs, and the write re-resolves it:
  * a symlink swapped in between would otherwise redirect the write, which is the
- * "Symlink TOCTOU" failure the target fixed in `2.1.251`.
+ * "Symlink TOCTOU" failure the target fixed in `2.1.251`. The snapshot is of the
+ * path the call will act on, so a hook that rewrote the path is covered too.
  *
  * **The write is refused when the path changed.** The refusal is a typed failure
  * with the `pathChanged` code, not a silent success.
@@ -19,6 +20,12 @@
  * The tool never widens its own permission: it consults the rule engine through the
  * session's rules and mode, and the `Write(...)` path rules apply to it — an allow
  * rule requires **both** the requested path and the resolved target to match.
+ *
+ * Implementation choices (the audit does not pin them, so they are marked here):
+ *
+ *   - The **output shape** — `{ type: 'text', text, filePath, bytes }` — is a reimplementation
+ *     choice: the audit pins the tool-result *metadata*, not the content a tool
+ *     returns.
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -30,7 +37,9 @@ import type { ToolContext } from '../../permissions/decision.js';
 import {
   PathSnapshot,
   absoluteToolPath,
-  checkToolPermissions,
+  checkFileToolPermissions,
+  denyDecisionFor,
+  rejectUnknownFields,
   requireStringField,
   type BuiltinToolDeps,
 } from './shared.js';
@@ -84,13 +93,19 @@ export function createWriteTool(deps: BuiltinToolDeps): ToolDefinition<WriteInpu
     mutatesFiles: true,
 
     async checkPermissions(input, ctx: ToolContext) {
-      // The snapshot is taken **before** the rules are evaluated, so the check and
-      // the write are compared against the same resolution.
-      snapshot.record(ctx.toolUseId, input.file_path);
-      return checkToolPermissions(ctx, deps);
+      // The snapshot is of the path the call will act on, so it is taken once the
+      // check — and any rewrite it carried — is known.
+      return checkFileToolPermissions(ctx, deps, snapshot, 'file_path');
+    },
+
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a path the deny list covers.
+      return denyDecisionFor(ctx, deps);
     },
 
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, ['file_path', 'content']);
+      if (!fields.ok) return fields;
       const filePath = requireStringField(input, 'file_path', {
         invalidCode: TOOL_ERROR_CODES.invalidPath,
       });
@@ -104,29 +119,35 @@ export function createWriteTool(deps: BuiltinToolDeps): ToolDefinition<WriteInpu
     },
 
     async execute(input, ctx) {
-      const refusal = snapshot.verify(ctx.toolUseId, input.file_path);
-      if (refusal !== undefined) {
-        throw new ToolExecutionError(refusal, TOOL_ERROR_CODES.pathChanged);
-      }
-
-      const filePath = absoluteToolPath(input.file_path, deps.cwd);
       try {
-        await mkdir(path.dirname(filePath), { recursive: true });
-        await writeFile(filePath, input.content, 'utf8');
-      } catch (error) {
-        throw new ToolExecutionError(
-          `The file '${filePath}' could not be written: ${(error as NodeJS.ErrnoException).message}`,
-          TOOL_ERROR_CODES.executionFailed,
-        );
-      }
+        const refusal = snapshot.verify(ctx.toolUseId, input.file_path);
+        if (refusal !== undefined) {
+          throw new ToolExecutionError(refusal, TOOL_ERROR_CODES.pathChanged);
+        }
 
-      const bytes = Buffer.byteLength(input.content, 'utf8');
-      return {
-        type: 'text' as const,
-        text: `Wrote ${input.content.length === 0 ? 0 : input.content.split('\n').length} lines to ${filePath}.`,
-        filePath,
-        bytes,
-      };
+        const filePath = absoluteToolPath(input.file_path, deps.cwd);
+        try {
+          await mkdir(path.dirname(filePath), { recursive: true });
+          await writeFile(filePath, input.content, 'utf8');
+        } catch (error) {
+          throw new ToolExecutionError(
+            `The file '${filePath}' could not be written: ${(error as NodeJS.ErrnoException).message}`,
+            TOOL_ERROR_CODES.executionFailed,
+          );
+        }
+
+        const bytes = Buffer.byteLength(input.content, 'utf8');
+        return {
+          type: 'text' as const,
+          text: `Wrote ${input.content.length === 0 ? 0 : input.content.split('\n').length} lines to ${filePath}.`,
+          filePath,
+          bytes,
+        };
+      } finally {
+        // The snapshot has served its purpose: the call is over, and the map must
+        // not grow one entry per call for the life of the tool.
+        snapshot.forget(ctx.toolUseId);
+      }
     },
   };
 }

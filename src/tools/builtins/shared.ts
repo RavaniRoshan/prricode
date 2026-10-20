@@ -22,11 +22,21 @@
  *   - The dependencies are a **factory argument** rather than a field on the tool
  *     context: the permission module's `ToolContext` is a fixed four-member shape,
  *     and the rules, the mode and the prompt are session state, not per-call state.
+ *   - The **environment** a shell command runs in is a dependency as well: the
+ *     process environment by default, and the session's own environment when the
+ *     session supplies one.
  *   - The file tools keep their path snapshot **per tool instance**, keyed by the
  *     tool-use id, exactly as the audit describes the file-write tool ("stash the
- *     permission decision keyed by `toolUseId`"). The snapshot is what the write
- *     path re-resolves against, so a symlink swapped between the check and the
- *     write is refused.
+ *     permission decision keyed by `toolUseId`"). The snapshot is of the path the
+ *     call will act on — the rewritten path when a hook rewrote the input — and it
+ *     is what the write path re-resolves against, so a symlink swapped between the
+ *     check and the write is refused.
+ *   - A malformed path is a **validation** failure and not a permission refusal:
+ *     the file tools' safety check steps aside for it, so the model sees the
+ *     validator's typed code (`7` for an invalid path, `3` for a missing field)
+ *     rather than a refusal it cannot act on.
+ *   - The **output shape** of a tool — `{ type: 'text', … }` — is a implementation choice.
+ *     The audit pins the tool-result *metadata*, not the content a tool returns.
  */
 
 import path from 'node:path';
@@ -35,6 +45,7 @@ import { readdir, stat } from 'node:fs/promises';
 
 import {
   checkPermission,
+  describeReason,
   evaluateRules,
   type AutoModeVerdict,
   type PermissionDecision,
@@ -43,7 +54,7 @@ import {
 } from '../../permissions/decision.js';
 import { safetyCheckForTool } from '../../permissions/prompts.js';
 import { reResolvePath, resolvePathTargets, type PathTargets } from '../../permissions/paths.js';
-import type { RuleSet } from '../../permissions/rules.js';
+import { evaluateRuleList, type RuleSet } from '../../permissions/rules.js';
 
 import { TOOL_ERROR_CODES } from '../registry.js';
 
@@ -57,6 +68,13 @@ export interface BuiltinToolDeps {
   cwd?: string;
   /** Extra directories `acceptEdits` may write inside. */
   additionalDirs?: string[];
+  /**
+   * The environment a shell command runs in.
+   *
+   * The process environment by default: the session's own environment is what a
+   * command inherits, and a session that wants a different one supplies it here.
+   */
+  env?: NodeJS.ProcessEnv;
   /** The prompt. Consulted for a decision that would prompt. */
   canUseTool?: (
     ctx: ToolContext,
@@ -89,7 +107,17 @@ export type ToolValidation =
 export async function checkToolPermissions(
   ctx: ToolContext,
   deps: BuiltinToolDeps,
+  options: {
+    /**
+     * The tool's own safety check, used when the session supplies none.
+     *
+     * The file tools supply one that steps aside for a malformed path, because a
+     * malformed path is a **validation** failure and not a permission refusal.
+     */
+    safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
+  } = {},
 ): Promise<PermissionDecision> {
+  const fallback = options.safetyCheck ?? safetyCheckForTool;
   return checkPermission(ctx, {
     rules: deps.rules,
     mode: deps.mode,
@@ -97,9 +125,82 @@ export async function checkToolPermissions(
     additionalDirs: deps.additionalDirs,
     canUseTool: deps.canUseTool,
     hook: deps.hook,
-    safetyCheck: (candidate) => deps.safetyCheck?.(candidate) ?? safetyCheckForTool(candidate),
+    safetyCheck: (candidate) => deps.safetyCheck?.(candidate) ?? fallback(candidate),
     classifier: deps.classifier,
   });
+}
+
+/**
+ * The **deny** decision the rule engine produces for a call, when there is one.
+ *
+ * It is the part of the check that a **hook rewrite** has to be re-evaluated
+ * against: the rule engine evaluated the original input, and the deny list is
+ * the boundary that holds in every mode.
+ */
+export function denyDecisionFor(
+  ctx: ToolContext,
+  deps: BuiltinToolDeps,
+): PermissionDecision | undefined {
+  const decision = evaluateRuleList(deps.rules, deps.rules.deny, 'deny', ctx);
+  if (!decision) return undefined;
+  return { ...decision, reason: describeReason(decision, ctx.toolName) };
+}
+
+/**
+ * The safety check a **file** tool runs.
+ *
+ * A path that is missing or is not a string is a **validation** failure, not a
+ * permission refusal: the tool's own validator reports it with the typed code
+ * the audit records (`7` for an invalid path, `3` for a missing field), and the
+ * call does not run either way. The safety check therefore steps aside for it
+ * and refuses everything else it cannot verify.
+ */
+export function fileToolSafetyCheck(
+  field: string,
+): (ctx: ToolContext) => PermissionDecision | undefined {
+  return (ctx: ToolContext) => {
+    const value = readInputField(ctx.input, field);
+    if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
+      return undefined;
+    }
+    return safetyCheckForTool(ctx);
+  };
+}
+
+/**
+ * The path a file-mutating tool acts on, when the input carries a usable one.
+ *
+ * The input is **unvalidated** at the time the permission check runs, so the
+ * path may be missing or of the wrong type: the check must not crash on it, and
+ * the tool's own validator is the one that reports it.
+ */
+export function inputPath(input: unknown, field: string): string | undefined {
+  const value = readInputField(input, field);
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  return value;
+}
+
+/**
+ * Reject an input that carries a field the tool's schema does not declare.
+ *
+ * The schemas declare `additionalProperties: false`, so the validator enforces
+ * it: a schema that says "no other field" and a validator that accepts one are
+ * two different contracts, and the model is told which one holds.
+ */
+export function rejectUnknownFields(
+  input: unknown,
+  allowed: readonly string[],
+): { ok: true } | { ok: false; message: string; errorCode: number } {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return { ok: true };
+  for (const key of Object.keys(input)) {
+    if (allowed.includes(key)) continue;
+    return {
+      ok: false,
+      message: `The '${key}' argument is not accepted by this tool.`,
+      errorCode: TOOL_ERROR_CODES.invalidInput,
+    };
+  }
+  return { ok: true };
 }
 
 /**
@@ -237,10 +338,23 @@ interface PathSnapshotEntry {
 }
 
 /**
+ * The number of snapshots a tool instance keeps.
+ *
+ * The snapshot is taken while the permission check runs and forgotten when the
+ * write is over, so the map holds one entry per call in flight. The bound is a
+ * safety net for the calls that never reach the write.
+ */
+export const MAX_PATH_SNAPSHOTS = 64;
+
+/**
  * The path bookkeeping of a file-mutating tool.
  *
  * The snapshot is taken while the permission check runs, and the write path
  * re-resolves it before the write. A symlink swapped in between is refused.
+ *
+ * **The snapshot is of the path the call will act on.** A hook may rewrite the
+ * input, and the rewritten path is the one that is written, so the snapshot is
+ * taken once the rewrite is known.
  */
 export class PathSnapshot {
   /** The snapshots, keyed by the tool-use id. */
@@ -249,10 +363,21 @@ export class PathSnapshot {
   /** The working directory the paths resolve against. */
   constructor(private readonly cwd: string | undefined) {}
 
-  /** Take the snapshot of a path for a call. */
+  /**
+   * Take the snapshot of a path for a call.
+   *
+   * The oldest snapshot is dropped when the map is full: a call that never
+   * reaches its write must not grow the map for the life of the tool.
+   */
   record(toolUseId: string, inputPath: string): PathTargets {
     const targets = resolvePathTargets(inputPath, this.cwd === undefined ? {} : { cwd: this.cwd });
+    this.snapshots.delete(toolUseId);
     this.snapshots.set(toolUseId, { inputPath, targets });
+    while (this.snapshots.size > MAX_PATH_SNAPSHOTS) {
+      const oldest = this.snapshots.keys().next().value;
+      if (oldest === undefined) break;
+      this.snapshots.delete(oldest);
+    }
     return targets;
   }
 
@@ -277,9 +402,9 @@ export class PathSnapshot {
     if (!entry) return undefined;
 
     if (entry.inputPath !== inputPath) {
-      // The hook rewrote the path: the snapshot belongs to the original path, so
-      // there is nothing to compare against.
-      return undefined;
+      // The write is to a path the permission check did not approve: the check
+      // approved the path of the snapshot, and this is another one.
+      return `The path '${entry.inputPath}' was the path the permission check approved, but the write was to '${inputPath}', so the write was refused.`;
     }
 
     const after = reResolvePath(entry.targets, this.cwd === undefined ? {} : { cwd: this.cwd });
@@ -287,6 +412,29 @@ export class PathSnapshot {
 
     return `The path '${entry.targets.requested}' resolved to '${entry.targets.resolved}' when the permission check ran and to '${after.resolved}' when the write was about to happen, so the write was refused.`;
   }
+}
+
+/**
+ * The permission check a **file-mutating** tool runs.
+ *
+ * The snapshot is taken **after** the check, on the path the call will act on: a
+ * hook may rewrite the input, and the rewritten path is the one that is written.
+ * The write path re-resolves that snapshot, so a symlink swapped between the
+ * check and the write is refused — on the rewritten path too.
+ */
+export async function checkFileToolPermissions(
+  ctx: ToolContext,
+  deps: BuiltinToolDeps,
+  snapshot: PathSnapshot,
+  field: string,
+): Promise<PermissionDecision> {
+  const decision = await checkToolPermissions(ctx, deps, {
+    safetyCheck: fileToolSafetyCheck(field),
+  });
+  const effective = decision.updatedInput ?? ctx.input;
+  const path = inputPath(effective, field);
+  if (path !== undefined) snapshot.record(ctx.toolUseId, path);
+  return decision;
 }
 
 /**

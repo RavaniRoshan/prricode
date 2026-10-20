@@ -15,17 +15,30 @@
  * it and holds in every mode, including `bypassPermissions`. The tool's own check
  * is `safetyCheckForTool`, which refuses a URL that is not an http(s) URL.
  *
+ * **The body is read under a byte cap.** The response is consumed as a stream and
+ * the reading stops at the cap, so a body of any size costs at most the cap: a
+ * buffer that is truncated after the fact does not bound the memory.
+ *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
  *   - The fetch has a timeout and a response-size cap, so a fetch cannot hang the
  *     session or fill the context window.
  *   - The tool reports the response's status and its body as text.
+ *   - The **output shape** — `{ type: 'text', text, url, status, truncated }` — is a
+ *     implementation choice: the audit pins the tool-result *metadata*, not the content a
+ *     tool returns.
  */
 
 import { TOOL_ERROR_CODES, type ToolDefinition } from '../registry.js';
 import type { ToolContext } from '../../permissions/decision.js';
 
-import { checkToolPermissions, requireStringField, type BuiltinToolDeps } from './shared.js';
+import {
+  checkToolPermissions,
+  denyDecisionFor,
+  rejectUnknownFields,
+  requireStringField,
+  type BuiltinToolDeps,
+} from './shared.js';
 
 /** The input of the `WebFetch` tool. */
 export interface WebFetchInput {
@@ -71,12 +84,68 @@ export const WEBFETCH_TIMEOUT_MS = 30_000;
 /** The largest response body the tool reports. */
 export const MAX_WEBFETCH_BYTES = 5 * 1024 * 1024;
 
+/** The options the `WebFetch` tool is built with. */
+export interface WebFetchOptions {
+  /** The timeout of a fetch. The default is {@link WEBFETCH_TIMEOUT_MS}. */
+  timeoutMs?: number;
+}
+
+/**
+ * Read a response body under a byte cap.
+ *
+ * The body is consumed as a stream and the reading stops at the cap, so the
+ * memory a body costs is bounded by the cap and not by the size of the body.
+ */
+export async function readCappedBody(
+  response: Response,
+  cap: number,
+): Promise<{ text: string; truncated: boolean }> {
+  const body = response.body;
+  if (!body) return { text: '', truncated: false };
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let text = '';
+  let bytes = 0;
+  let truncated = false;
+
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      const value = chunk.value;
+      if (value === undefined) continue;
+      bytes += value.byteLength;
+      if (bytes > cap) {
+        // Only the part of the chunk that fits under the cap is kept.
+        const allowed = cap - (bytes - value.byteLength);
+        text += decoder.decode(value.subarray(0, Math.max(allowed, 0)), { stream: true });
+        truncated = true;
+        break;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    if (!truncated) text += decoder.decode();
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // The stream is already closed: there is nothing to cancel.
+    }
+  }
+
+  return { text, truncated };
+}
+
 /**
  * Create the `WebFetch` tool.
  */
 export function createWebFetchTool(
   deps: BuiltinToolDeps,
+  options: WebFetchOptions = {},
 ): ToolDefinition<WebFetchInput, WebFetchOutput> {
+  const timeoutMs = options.timeoutMs ?? WEBFETCH_TIMEOUT_MS;
+
   return {
     name: 'WebFetch',
     description: 'Fetch a URL and report its content.',
@@ -87,7 +156,14 @@ export function createWebFetchTool(
       return checkToolPermissions(ctx, deps);
     },
 
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a URL the deny list covers.
+      return denyDecisionFor(ctx, deps);
+    },
+
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, ['url', 'prompt']);
+      if (!fields.ok) return fields;
       const url = requireStringField(input, 'url', {
         invalidCode: TOOL_ERROR_CODES.invalidUrl,
       });
@@ -114,17 +190,16 @@ export function createWebFetchTool(
 
     async execute(input) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), WEBFETCH_TIMEOUT_MS);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetch(input.url, { signal: controller.signal });
-        const body = await response.text();
-        const truncated = body.length > MAX_WEBFETCH_BYTES;
+        const body = await readCappedBody(response, MAX_WEBFETCH_BYTES);
         return {
           type: 'text' as const,
-          text: truncated ? body.slice(0, MAX_WEBFETCH_BYTES) : body,
+          text: body.text,
           url: input.url,
           status: response.status,
-          truncated,
+          truncated: body.truncated,
         };
       } finally {
         clearTimeout(timer);

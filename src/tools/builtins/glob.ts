@@ -23,6 +23,9 @@
  *     matching one character.
  *   - The number of files a search reports is capped, so a search over a huge tree
  *     does not fill the context window.
+ *   - The **output shape** — `{ type: 'text', text, files, truncated }` — is a reimplementation
+ *     choice: the audit pins the tool-result *metadata*, not the content a tool
+ *     returns.
  */
 
 import path from 'node:path';
@@ -34,8 +37,10 @@ import type { ToolContext } from '../../permissions/decision.js';
 import {
   absoluteToolPath,
   checkToolPermissions,
+  denyDecisionFor,
   isDeniedByReadRule,
   optionalStringField,
+  rejectUnknownFields,
   requireStringField,
   walkFiles,
   type BuiltinToolDeps,
@@ -116,7 +121,14 @@ export function createGlobTool(deps: BuiltinToolDeps): ToolDefinition<GlobInput,
       return checkToolPermissions(ctx, deps);
     },
 
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a path the deny list covers.
+      return denyDecisionFor(ctx, deps);
+    },
+
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, ['pattern', 'path']);
+      if (!fields.ok) return fields;
       const pattern = requireStringField(input, 'pattern', {
         invalidCode: TOOL_ERROR_CODES.invalidInput,
       });

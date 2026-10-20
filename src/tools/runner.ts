@@ -26,12 +26,24 @@
  * tool receives. A rewritten input that the tool's **own validator** rejects **denies**
  * the call: the rewritten input is never executed.
  *
+ * **A rewrite is re-evaluated against the deny list.** The rule engine evaluated
+ * the *original* input, and the deny list is the boundary that holds in every
+ * mode. A hook that rewrites a call onto a denied path is therefore **denied**:
+ * the rewritten input is checked against the deny list before it runs, and a deny
+ * rule that covers the rewritten path stops the call.
+ *
  * **The write path re-resolves the path after the check.** The resolution taken
  * before the check is a point-in-time fact: a symlink can be swapped between the
  * check and the write. The runner therefore resolves the path **before** the check
  * and re-resolves it **after** the check, and refuses the call when the two
  * disagree. This is the seam `reResolvePath` in `src/permissions/paths.ts` exposes
  * and that the `CC-007` review found was never called.
+ *
+ * **A rewrite does not step out of the comparison.** The path that will be
+ * written is the **effective** path — the one the hook rewrote to — so the
+ * effective path is resolved as soon as the rewrite is known and re-resolved
+ * immediately before the execution. A symlink swapped in between is refused on
+ * the rewritten path too.
  *
  * The re-resolution covers the **file-mutating tools** — the observed set is
  * exactly `Edit`, `Write` and `NotebookEdit`. A shell command's redirection
@@ -45,12 +57,18 @@
  *     `permission_denied`, `permission_unresolved`, `permission_check_failed`,
  *     `validation_error`, `path_changed` and `execution_failed`. The audit names the
  *     member `non_execution_kind` but does not enumerate its values.
+ *   - The **error content** of a failed call — `{ type: 'error', message, errorCode }`
+ *     — is a implementation choice as well: the audit pins the tool-result *metadata*, not
+ *     the content the tool returns.
  *   - A tool whose `checkPermissions` expresses **no opinion** does not get to run:
  *     the runner escalates to the session's permission service and, when there is
  *     none, **refuses** the call. A tool that returns no decision is not a tool that
  *     was approved.
  *   - A decision that still needs approval and is not resolved is **refused** rather
  *     than executed. The runner fails closed.
+ *   - The runner asks the tool to **re-evaluate the deny list** itself, through the
+ *     `recheckDeny` member of the tool contract: the rules are the session's, so
+ *     only the tool can evaluate them.
  */
 
 import { reResolvePath, resolvePathTargets, type PathTargets } from '../permissions/paths.js';
@@ -234,8 +252,8 @@ function messageOf(error: unknown): string {
  *
  * The order is the whole point of this function: **check permissions → validate
  * input → execute → wrap the result**. The path of a file-mutating tool is resolved
- * before the check and **re-resolved after it**, and the call is refused when the
- * two resolutions disagree.
+ * before the check and **re-resolved before the write**, and the call is refused
+ * when the two resolutions disagree.
  */
 export async function runTool(
   registry: ToolRegistry,
@@ -254,21 +272,23 @@ export async function runTool(
     });
   }
 
-  // The caller's context, with the input the call actually carries.
-  const callCtx: ToolContext = { ...ctx, input };
+  // The caller's context, with the input the call actually carries and the name
+  // of the tool that will run: a tool that is reached under another name is still
+  // the tool whose rules and whose path fields apply.
+  const callCtx: ToolContext = { ...ctx, toolName: tool.name, input };
 
   // The path the check resolves, taken **before** the check. The observed
   // file-mutating set is `Edit`, `Write` and `NotebookEdit`, so a tool that is in
   // that set is treated as mutating whether it says so or not.
-  const mutating = tool.mutatesFiles || isFileMutatingTool(name);
-  const preCheck = mutating ? toolPathTargets(name, input, options.cwd) : undefined;
+  const mutating = tool.mutatesFiles || isFileMutatingTool(tool.name);
+  const preCheck = mutating ? toolPathTargets(tool.name, input, options.cwd) : undefined;
 
   let decision: PermissionDecision | undefined;
   try {
     decision = await tool.checkPermissions(input, callCtx);
   } catch (error) {
     return errorEnvelope(ctx, {
-      message: `The permission check for '${name}' failed: ${messageOf(error)}`,
+      message: `The permission check for '${tool.name}' failed: ${messageOf(error)}`,
       errorCode: TOOL_ERROR_CODES.executionFailed,
       nonExecutionKind: 'permission_check_failed',
       remedy: 'Fix the permission check and retry the call.',
@@ -292,7 +312,7 @@ export async function runTool(
     }
     if (!escalated) {
       return errorEnvelope(ctx, {
-        message: `The '${name}' tool returned no permission decision, so the call was refused.`,
+        message: `The '${tool.name}' tool returned no permission decision, so the call was refused.`,
         errorCode: TOOL_ERROR_CODES.permissionDenied,
         nonExecutionKind: 'permission_denied',
         remedy: 'Give the tool a permission check, or run the call through the session permission service.',
@@ -307,7 +327,7 @@ export async function runTool(
       resolved = await options.approveAsk?.(callCtx, decision);
     } catch (error) {
       return errorEnvelope(ctx, {
-        message: `The approval of the ${name} call failed: ${messageOf(error)}`,
+        message: `The approval of the ${tool.name} call failed: ${messageOf(error)}`,
         errorCode: TOOL_ERROR_CODES.executionFailed,
         nonExecutionKind: 'permission_check_failed',
         decision,
@@ -317,7 +337,7 @@ export async function runTool(
     if (!resolved) {
       return errorEnvelope(ctx, {
         message:
-          decision.reason ?? `The ${name} call still needs approval, so it was not executed.`,
+          decision.reason ?? `The ${tool.name} call still needs approval, so it was not executed.`,
         errorCode: TOOL_ERROR_CODES.approvalRequired,
         nonExecutionKind: 'permission_unresolved',
         decision,
@@ -331,7 +351,7 @@ export async function runTool(
       // closed.
       return errorEnvelope(ctx, {
         message:
-          decision.reason ?? `The ${name} call still needs approval, so it was not executed.`,
+          decision.reason ?? `The ${tool.name} call still needs approval, so it was not executed.`,
         errorCode: TOOL_ERROR_CODES.approvalRequired,
         nonExecutionKind: 'permission_unresolved',
         decision,
@@ -343,7 +363,7 @@ export async function runTool(
 
   if (decision.behavior === 'deny') {
     return errorEnvelope(ctx, {
-      message: denialMessage(decision, name),
+      message: denialMessage(decision, tool.name),
       errorCode: TOOL_ERROR_CODES.permissionDenied,
       nonExecutionKind: 'permission_denied',
       decision,
@@ -358,20 +378,52 @@ export async function runTool(
   const effectiveInput = decision.updatedInput ?? input;
   const effectiveCtx: ToolContext = { ...callCtx, input: effectiveInput };
 
-  // The post-check re-resolution. The write path must not trust the resolution the
-  // check took: a symlink can be swapped while the check runs.
-  const refused = refuseChangedPath(name, preCheck, effectiveInput, options.cwd, decision, ctx);
-  if (refused) return refused;
+  // The path the call will act on, resolved now that the effective input is
+  // known. It is re-resolved immediately before the execution, so a symlink
+  // swapped in between is caught on the rewritten path too.
+  const effectiveCheck = mutating
+    ? toolPathTargets(tool.name, effectiveInput, options.cwd)
+    : undefined;
+
+  // A rewrite is a **new** call as far as the deny list is concerned: the rule
+  // engine evaluated the original input, and the deny list is the boundary that
+  // holds in every mode. The rewritten input is therefore evaluated against the
+  // deny list before it runs.
+  if (rewritten) {
+    let recheck: PermissionDecision | undefined;
+    try {
+      recheck = await tool.recheckDeny(effectiveInput, effectiveCtx);
+    } catch (error) {
+      return errorEnvelope(ctx, {
+        message: `The permission check for '${tool.name}' failed: ${messageOf(error)}`,
+        errorCode: TOOL_ERROR_CODES.executionFailed,
+        nonExecutionKind: 'permission_check_failed',
+        decision,
+        remedy: 'Fix the permission check and retry the call.',
+      });
+    }
+    if (recheck?.behavior === 'deny') {
+      return errorEnvelope(ctx, {
+        message: denialMessage(recheck, tool.name),
+        errorCode: TOOL_ERROR_CODES.permissionDenied,
+        nonExecutionKind: 'permission_denied',
+        decision: recheck,
+        remedy: denialRemedy(recheck),
+        userFeedback: userFeedbackOf(recheck),
+      });
+    }
+  }
 
   let validation: { ok: true } | { ok: false; message: string; errorCode: number };
   try {
     validation = await tool.validateInput(effectiveInput, effectiveCtx);
   } catch (error) {
     return errorEnvelope(ctx, {
-      message: `The input of '${name}' could not be validated: ${messageOf(error)}`,
+      message: `The input of '${tool.name}' could not be validated: ${messageOf(error)}`,
       errorCode: TOOL_ERROR_CODES.invalidInput,
       nonExecutionKind: 'validation_error',
       decision,
+      remedy: 'Correct the arguments of the call and run it again.',
     });
   }
 
@@ -395,6 +447,18 @@ export async function runTool(
       userFeedback: userFeedbackOf(decision),
     });
   }
+
+  // The post-check re-resolution, immediately before the write. The write path
+  // must not trust the resolution the check took: a symlink can be swapped
+  // while the check runs.
+  const refused = refuseChangedPath(
+    preCheck,
+    effectiveCheck,
+    options.cwd,
+    decision,
+    ctx,
+  );
+  if (refused) return refused;
 
   try {
     const output = await tool.execute(effectiveInput, effectiveCtx);
@@ -421,37 +485,44 @@ export async function runTool(
 /**
  * Refuse a call whose path resolves to a different target after the check.
  *
- * The comparison is between the resolution taken **before** the check and the
- * resolution taken **after** it. When the hook rewrote the path, the rewritten path
- * is the one that is resolved twice: the original path was never the one written.
+ * Two comparisons are made, and both of them are between a resolution and a
+ * **later** resolution of the same path:
+ *
+ *   - the path the call named, resolved **before** the check and re-resolved
+ *     **after** it: a symlink swapped while the check ran is caught;
+ *   - the path the call will act on — the rewritten one, when a hook rewrote the
+ *     input — resolved as soon as the rewrite is known and re-resolved
+ *     immediately before the execution: a symlink swapped after the check is
+ *     caught on the path that is actually written.
  */
 function refuseChangedPath(
-  name: string,
   preCheck: PathTargets | undefined,
-  effectiveInput: unknown,
+  effectiveCheck: PathTargets | undefined,
   cwd: string | undefined,
   decision: PermissionDecision,
   ctx: ToolContext,
 ): ToolResultEnvelope | undefined {
-  if (!preCheck) return undefined;
+  const options = cwd === undefined ? {} : { cwd };
+  const comparisons: PathTargets[] = [];
+  if (effectiveCheck) comparisons.push(effectiveCheck);
+  // The path the call named is compared as well: the resolution the check took is
+  // the one the rules were evaluated against, so a change under it is a change
+  // the check never saw.
+  if (preCheck) comparisons.push(preCheck);
 
-  const effective = toolPathTargets(name, effectiveInput, cwd);
-  if (!effective) return undefined;
+  for (const before of comparisons) {
+    const after = reResolvePath(before, options);
+    if (after.resolved === before.resolved) continue;
 
-  const before =
-    effective.requested === preCheck.requested
-      ? preCheck
-      : resolvePathTargets(effective.requested, cwd === undefined ? {} : { cwd });
-  const after = reResolvePath(before, cwd === undefined ? {} : { cwd });
+    return errorEnvelope(ctx, {
+      message: `The path '${before.requested}' resolved to '${before.resolved}' when the permission check ran and to '${after.resolved}' afterwards, so the call was refused.`,
+      errorCode: TOOL_ERROR_CODES.pathChanged,
+      nonExecutionKind: 'path_changed',
+      decision,
+      remedy:
+        'The path changed while the permission check ran; run the check again and retry the call.',
+    });
+  }
 
-  if (after.resolved === before.resolved) return undefined;
-
-  return errorEnvelope(ctx, {
-    message: `The path '${before.requested}' resolved to '${before.resolved}' when the permission check ran and to '${after.resolved}' afterwards, so the call was refused.`,
-    errorCode: TOOL_ERROR_CODES.pathChanged,
-    nonExecutionKind: 'path_changed',
-    decision,
-    remedy:
-      'The path changed while the permission check ran; run the check again and retry the call.',
-  });
+  return undefined;
 }

@@ -32,7 +32,12 @@
  *   - The **error codes** are the target's for the two the audit names — `7` for an
  *     invalid path and `14` for a suppressed write — and **implementation choices** for the
  *     rest. The audit does not enumerate the remaining codes, so this implementation does not
- *     claim them.
+ *     claim them. **The numbering is implementation-internal**: the gaps in it are the
+ *     implementation's own and are **not** an alignment with an unstated target table, so
+ *     a code other than `7` and `14` must never be read as a compatibility claim.
+ *   - The **error content** of a failed call — `{ type: 'error', message, errorCode }`
+ *     — is a implementation choice as well. The audit pins the tool-result *metadata*, not
+ *     the content the tool returns, so the shape of the content is this implementation's.
  *   - A registry holds one definition per name: registering a name twice
  *     **replaces** the earlier definition.
  *   - The registry is a `Map`, so a tool named `constructor`, `toString` or
@@ -70,11 +75,27 @@ export interface ToolDefinition<I = unknown, O = unknown> {
    * service and, failing that, refuses the call.
    */
   checkPermissions(input: I, ctx: ToolContext): Promise<PermissionDecision | undefined>;
-  /** The tool's own input validation, with a typed failure. */
+  /**
+   * The tool's own input validation, with a typed failure.
+   */
   validateInput(
     input: I,
     ctx: ToolContext,
   ): Promise<{ ok: true } | { ok: false; message: string; errorCode: number }>;
+  /**
+   * Re-evaluate the **deny list** against a rewritten input.
+   *
+   * The runner calls this when a **hook** rewrote the input. The rule engine
+   * evaluated the *original* input, so a rewrite that moves the call to a denied
+   * path would otherwise be a permission bypass: the deny list is the boundary
+   * that holds in every mode, so it is the part that is evaluated again.
+   *
+   * It returns the decision the deny list produces, or `undefined` when the deny
+   * list does not cover the call. It is a member of the contract rather than an
+   * optional extra, because a tool that cannot re-evaluate the deny list cannot
+   * be given a rewrite.
+   */
+  recheckDeny(input: I, ctx: ToolContext): Promise<PermissionDecision | undefined>;
   /** The execution. It runs only after the permission check and the validation. */
   execute(input: I, ctx: ToolContext): Promise<O>;
 }

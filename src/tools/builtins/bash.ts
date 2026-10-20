@@ -24,11 +24,18 @@
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
  *   - The command runs through `/bin/sh -c`, with the session's working directory
- *     as its directory and the session's environment.
+ *     as its directory and the **session's environment** — the `env` the session
+ *     supplies, and the process environment when it supplies none. The target
+ *     documents a **persistent** shell session; this implementation runs a shell per call,
+ *     which is a labelled implementation choice and not a claim of equivalence.
  *   - The default timeout is `120000` ms and the maximum is `600000` ms. The audit
- *     does not pin the shell timeout.
+ *     does not pin the shell timeout. A timeout of `0` is refused: it would stop
+ *     the command before it began.
  *   - The output is capped, so a command that prints without bound does not fill
  *     the context window.
+ *   - The **output shape** — `{ type: 'text', text, stdout, stderr, exitCode,
+ *     truncated }` — is a implementation choice: the audit pins the tool-result *metadata*,
+ *     not the content a tool returns.
  */
 
 import { spawn } from 'node:child_process';
@@ -38,8 +45,10 @@ import type { ToolContext } from '../../permissions/decision.js';
 
 import {
   checkToolPermissions,
+  denyDecisionFor,
   optionalIntegerField,
   readInputField,
+  rejectUnknownFields,
   requireStringField,
   type BuiltinToolDeps,
 } from './shared.js';
@@ -85,7 +94,7 @@ export const BASH_INPUT_SCHEMA = {
     },
     timeout: {
       type: 'integer',
-      minimum: 0,
+      minimum: 1,
       description: 'The timeout in milliseconds.',
     },
     dangerouslyDisableSandbox: {
@@ -108,17 +117,31 @@ export const MAX_BASH_TIMEOUT_MS = 600_000;
 export const MAX_BASH_OUTPUT_CHARS = 200_000;
 
 /**
+ * The timeout a command runs with.
+ *
+ * A call that asks for no timeout gets the default, and a call that asks for more
+ * than the maximum gets the maximum. A timeout of zero is **not** a timeout: it
+ * would kill the command before it started, so it is refused by the validator and
+ * it never reaches here.
+ */
+export function resolveBashTimeout(timeout: number | undefined): number {
+  if (timeout === undefined || timeout <= 0) return DEFAULT_BASH_TIMEOUT_MS;
+  return Math.min(timeout, MAX_BASH_TIMEOUT_MS);
+}
+
+/**
  * Run a command through the shell and collect its output.
  */
 function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
+  env: NodeJS.ProcessEnv,
 ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean }> {
   return new Promise((resolve) => {
     const child = spawn('/bin/sh', ['-c', command], {
       cwd,
-      env: process.env,
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -186,13 +209,33 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
       return checkToolPermissions(ctx, deps);
     },
 
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a command the deny list covers.
+      return denyDecisionFor(ctx, deps);
+    },
+
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, [
+        'command',
+        'description',
+        'timeout',
+        'dangerouslyDisableSandbox',
+      ]);
+      if (!fields.ok) return fields;
       const command = requireStringField(input, 'command', {
         invalidCode: TOOL_ERROR_CODES.invalidCommand,
       });
       if (!command.ok) return command;
       const timeout = optionalIntegerField(input, 'timeout');
       if (!timeout.ok) return timeout;
+      if (timeout.value === 0) {
+        // A timeout of zero would stop the command before it began.
+        return {
+          ok: false,
+          message: "The 'timeout' argument must be greater than zero.",
+          errorCode: TOOL_ERROR_CODES.invalidInput,
+        };
+      }
       const sandbox = readInputField(input, 'dangerouslyDisableSandbox');
       if (sandbox !== undefined && sandbox !== null && typeof sandbox !== 'boolean') {
         return {
@@ -205,11 +248,12 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
     },
 
     async execute(input) {
-      const timeout = Math.min(input.timeout ?? DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS);
+      const timeout = resolveBashTimeout(input.timeout);
       const result = await runCommand(
         input.command,
         deps.cwd ?? process.cwd(),
         timeout,
+        deps.env ?? process.env,
       );
       return {
         type: 'text' as const,

@@ -14,6 +14,12 @@
  * The tool does not resolve the path itself for the permission check: the rule
  * engine does, and the tool resolves the same way when it opens the file, so the
  * path the check saw and the path the tool opens are the same path.
+ *
+ * Implementation choices (the audit does not pin them, so they are marked here):
+ *
+ *   - The **output shape** — `{ type: 'text', text, filePath, totalLines }` — is a
+ *     implementation choice: the audit pins the tool-result *metadata*, not the content a
+ *     tool returns.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -24,7 +30,9 @@ import type { ToolContext } from '../../permissions/decision.js';
 import {
   absoluteToolPath,
   checkToolPermissions,
+  denyDecisionFor,
   optionalIntegerField,
+  rejectUnknownFields,
   requireStringField,
   type BuiltinToolDeps,
 } from './shared.js';
@@ -87,7 +95,14 @@ export function createReadTool(deps: BuiltinToolDeps): ToolDefinition<ReadInput,
       return checkToolPermissions(ctx, deps);
     },
 
+    async recheckDeny(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto a path the deny list covers.
+      return denyDecisionFor(ctx, deps);
+    },
+
     async validateInput(input) {
+      const fields = rejectUnknownFields(input, ['file_path', 'offset', 'limit']);
+      if (!fields.ok) return fields;
       const path = requireStringField(input, 'file_path', {
         invalidCode: TOOL_ERROR_CODES.invalidPath,
       });
