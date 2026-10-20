@@ -27,6 +27,18 @@
  *     (`AwsRequestContext.service`), so Bedrock (`bedrock`) and Mantle
  *     (`bedrock-mantle`) are told apart by the request, not by a constant in
  *     the transport.
+ *
+ * ## The timeout the transport applies
+ *
+ * The order is the target's (audit §2.2): an **explicit** request timeout
+ * wins, then the **client-level** timeout (`TransportOptions.timeoutMs`), and
+ * only then the request's own rule — the **computed non-streaming** timeout
+ * for a non-streaming request, and the target's `600000` ms fallback for a
+ * **streaming** one. The computed timeout belongs to a non-streaming call
+ * only: the target computes it "when the call is non-streaming with no
+ * explicit timeout" and issues the request with "timeout: timeout ?? 600000".
+ * A turn is a streaming request, so a default turn is bounded by the
+ * `600000` ms fallback and not by the computed value.
  */
 
 import type { TokenAcquirer } from './http.js';

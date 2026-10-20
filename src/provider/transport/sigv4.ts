@@ -60,7 +60,24 @@
  *     `expect`, `pragma`, …) plus the SDK's `proxy-*` and `sec-*` patterns;
  *   - the **header values** are normalised the SDK's way: a CR or an LF
  *     becomes a space, a run of spaces or tabs collapses to one space, and
- *     the value is trimmed.
+ *     the value is trimmed;
+ *   - the **`x-amz-content-sha256` header is not sent**, and therefore not
+ *     signed. The SDK's `applyChecksum` defaults to **true**, so the target's
+ *     Bedrock requests carry the header and sign it: the target's
+ *     `SignedHeaders` lists `x-amz-content-sha256`, and its signature
+ *     therefore differs from this implementation's. The omission is harmless — AWS
+ *     recomputes the canonical request from what it received, and Bedrock
+ *     does not require the header — but the **signed-header set** differs
+ *     from the target's on the Bedrock route, and this implementation says so rather
+ *     than leaving the difference implicit;
+ *   - the **wire path** is escaped **per segment**, and each segment is
+ *     **decoded** before it is encoded again. The SDK escapes the **value of
+ *     a URI-template label** — so a raw `%2F` travels as `%252F` and a raw
+ *     `/` as `%2F` — while this implementation escapes the **path**, which it cannot
+ *     split into labels and literals. The decoding is what makes the
+ *     escaping idempotent, so a driver that escaped its own label is never
+ *     encoded twice. The divergence is therefore confined to a label that
+ *     carries a literal `%` or a `/`; a Bedrock model id carries neither.
  */
 
 import { createHash, createHmac } from 'node:crypto';
@@ -374,6 +391,16 @@ export function canonicalUriPath(url: URL): string {
  * The encoding is **idempotent**: a path that is already encoded is left
  * alone, so the transport may apply it to a path that came from a driver
  * without knowing whether that driver escaped its own labels.
+ *
+ * **Divergence from the SDK** (a implementation choice, and a deliberate one). The SDK
+ * escapes the **value of a label**, so a raw `%2F` travels as `%252F` and a
+ * raw `/` travels as `%2F`. This implementation escapes the **path** — a transport
+ * cannot know which parts of a path are labels and which are literals — and
+ * it **decodes** each segment first, which is what keeps the escaping
+ * idempotent. So a label that carries a literal `%` or a `/` is escaped
+ * differently: this implementation sends `%2F` where the SDK sends `%252F`, and a `/`
+ * in a label stays a separator where the SDK sends `%2F`. A Bedrock model id
+ * carries neither, so the difference never shows on the route that matters.
  */
 export function escapeUriPath(path: string): string {
   return path

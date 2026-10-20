@@ -59,7 +59,9 @@
  *     API — `agent.*`, `session.*`, `span.*`, `user.*`, plus `event_start`,
  *     `event_delta`, `system.message` and a legacy `completion` — and this implementation
  *     must **tolerate** those events rather than fail on them;
- *   - the non-streaming timeout fallback of `600000` ms.
+ *   - the non-streaming timeout fallback of `600000` ms, and the rule that the
+ *     computed timeout belongs to a **non-streaming** call only — a streaming
+ *     call keeps the `600000` ms fallback.
  *
  * Implementation choices (the audit does not pin them, so they are marked as such):
  *
@@ -130,7 +132,19 @@ export const ANTHROPIC_MESSAGE_PATHS = Object.freeze({
   betaMessages: '/v1/messages?beta=true',
 });
 
-/** The fallback non-streaming request timeout, in milliseconds. */
+/**
+ * The fallback request timeout, in milliseconds.
+ *
+ * **Observed** (audit §2.2): the request the target issues carries "timeout:
+ * timeout ?? 600000", so `600000` ms is the fallback the target falls back to
+ * whenever no timeout was resolved. It is also the cap of the **computed**
+ * non-streaming timeout.
+ *
+ * The constant's name says "non-streaming" because the audit names it that
+ * way for the *computed* timeout; the **streaming** path uses the same
+ * `600000` ms value, because the target computes no timeout at all for a
+ * streaming call.
+ */
 export const NONSTREAMING_TIMEOUT_FALLBACK_MS = 600_000;
 
 /* -------------------------------------------------------------------------- */
@@ -809,12 +823,32 @@ export function calculateNonstreamingTimeoutMs(maxTokens: number, modelLimit: nu
 /**
  * The timeout a request uses.
  *
- * **Observed** (audit §2.2): the client computes `options.timeout ?? client
- * ._options.timeout`, so an **explicit** timeout is used unchanged and is never
- * clamped by the fallback.
+ * **Observed** (audit §2.2): the client computes the timeout as `options
+ * .timeout ?? client._options.timeout`, so an **explicit** timeout is used
+ * unchanged and is never clamped by the fallback. The computed timeout is the
+ * **non-streaming** one, and the audit is explicit that it is computed "when
+ * the call is **non-streaming** with no explicit timeout" — `calculateNonstreamingTimeout(max_tokens,
+ * modelTimeoutTable[model])`.
+ *
+ * A **streaming** call therefore never gets the computed timeout: the
+ * request it issues carries "timeout: timeout ?? 600000", so a streaming call
+ * with no explicit timeout is bounded by the `600000` ms fallback. (The
+ * client-level timeout — the transport's own `TransportOptions.timeoutMs` —
+ * still wins over the fallback, exactly as it wins over the computed
+ * timeout; it is consulted before this function is asked.) That is the rule
+ * the **agent turn** lives under — a turn is a streaming request — so the
+ * implementation's streaming requests get the fallback and not the computed
+ * non-streaming value.
+ *
+ * @param req the request whose timeout is resolved.
+ * @param modelLimit the model's own timeout limit in milliseconds (the
+ *   target's `modelTimeoutTable` entry). It bounds the **computed**
+ *   non-streaming timeout from above; a streaming request ignores it, because
+ *   the target does not compute a timeout for a streaming call at all.
  */
 export function resolveRequestTimeout(req: ProviderRequest, modelLimit: number | undefined): number {
   if (req.timeout !== undefined && Number.isFinite(req.timeout) && req.timeout > 0) return req.timeout;
+  if (req.stream) return NONSTREAMING_TIMEOUT_FALLBACK_MS;
   return calculateNonstreamingTimeoutMs(req.maxTokens, modelLimit);
 }
 
@@ -965,8 +999,10 @@ export function buildAnthropicHeaders(
  * `x-stainless-timeout` header carries.
  *
  * **Observed** (audit §2.2): the header carries the timeout in seconds. The
- * timeout itself is the explicit one when there is one, and otherwise the
- * computed non-streaming timeout (the model limit is not known to the driver).
+ * timeout itself is the explicit one when there is one, and otherwise the one
+ * `resolveRequestTimeout` resolves — the computed **non-streaming** timeout
+ * for a non-streaming request, and the `600000` ms fallback for a
+ * **streaming** one (the model limit is not known to the driver).
  */
 export function timeoutSecondsFor(req: ProviderRequest): number {
   const ms = resolveRequestTimeout(req, undefined);

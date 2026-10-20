@@ -19,14 +19,18 @@
  *     thrown error or a parsed body;
  *   - the **timeout**: the request runs under an `AbortController` that is
  *     combined with the caller's own signal, a request that never answers is
- *     abandoned with a named timeout error, and the driver's own `x-amz-date`
- *     wins over the transport's clock;
+ *     abandoned with a named timeout error, the driver's own `x-amz-date`
+ *     wins over the transport's clock, a **streaming** request takes the
+ *     `600000` ms fallback and not the computed non-streaming timeout (and
+ *     says so in the `x-stainless-timeout` header), and a long stream is not
+ *     cut off by a timeout that has already been answered;
  *   - the **retry loop**: the retryable statuses, the `x-should-retry` header in
  *     **both** directions, the `retry-after` delay (the seconds form, the
  *     HTTP-date form and the cap that is its own), the retry budget (the
  *     driver's, the transport's and the default), and the cached-token `401`
  *     that triggers a token refresh and one more attempt — the refresh
- *     spending the budget like any other attempt;
+ *     spending the budget like any other attempt, and **waiting** before the
+ *     attempt the way the target's `retryRequest` does;
  *   - the **signer**: the AWS SigV4 **test-suite vectors** (`get-vanilla`,
  *     `get-space`, the repeated-parameter case, the header-value
  *     normalisation and the session token), the canonical request **string**,
@@ -42,7 +46,7 @@
  * No test here reaches the network: the transport's `fetch` is injected.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   anthropicDriver,
@@ -50,6 +54,7 @@ import {
   foundryDriver,
   mantleDriver,
   parseResponse,
+  resolveRequestTimeout,
   vertexDriver,
   type ProviderDriver,
 } from '../../src/provider/drivers/index.js';
@@ -60,6 +65,7 @@ import {
   buildSignedHeaders,
   canonicalQueryString,
   canonicalUriPath,
+  escapeUriPath,
 } from '../../src/provider/transport/sigv4.js';
 
 /* -------------------------------------------------------------------------- */
@@ -470,6 +476,153 @@ describe('the request timeout', () => {
 
     expect((error as Error).message).toContain('30');
   });
+
+  it('gives a streaming request the 600000 ms fallback, not the computed timeout', async () => {
+    // **Observed** (audit §2.2): the target computes the timeout "when the
+    // call is non-streaming with no explicit timeout", and the request it
+    // issues carries "timeout: timeout ?? 600000". A **streaming** turn —
+    // which is what the agent issues — is therefore bounded by `600000` ms,
+    // not by the computed non-streaming one.
+    //
+    // The computed value for `max_tokens: 64` is `11600` ms, so a signer that
+    // took the non-streaming timeout would cap a default turn at ~11.6 s.
+    vi.useFakeTimers();
+    try {
+      let started: (() => void) | undefined;
+      const startedPromise = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const fetchImpl: typeof fetch = () => {
+        started?.();
+        return new Promise<Response>(() => undefined);
+      };
+
+      const promise = sendProviderRequest(
+        { driver: anthropicDriver, fetchImpl },
+        request({ stream: true }),
+        'sk-test-secret',
+      );
+      // The rejection is captured as soon as the request starts, so that a
+      // timeout is never an unhandled rejection.
+      const outcome = promise.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      // The fetch has been called, so the timeout is armed.
+      await startedPromise;
+      await vi.advanceTimersByTimeAsync(600_000);
+
+      const error = (await outcome) as Error;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).toBe('ProviderTimeoutError');
+      expect(error.message).toBe('the provider request timed out after 600000 ms');
+      // The same rule, read straight off the resolver.
+      expect(resolveRequestTimeout(request({ stream: true }), undefined)).toBe(600_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the computed timeout for a non-streaming request', async () => {
+    // The computed non-streaming timeout is `max_tokens × 25 ms + 10000 ms`,
+    // so `max_tokens: 64` gives `11600` ms.
+    expect(resolveRequestTimeout(request(), undefined)).toBe(11_600);
+
+    vi.useFakeTimers();
+    try {
+      let started: (() => void) | undefined;
+      const startedPromise = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const fetchImpl: typeof fetch = () => {
+        started?.();
+        return new Promise<Response>(() => undefined);
+      };
+
+      const promise = sendProviderRequest(
+        { driver: anthropicDriver, fetchImpl },
+        request(),
+        'sk-test-secret',
+      );
+      const outcome = promise.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await startedPromise;
+      await vi.advanceTimersByTimeAsync(11_600);
+
+      const error = (await outcome) as Error;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toBe('the provider request timed out after 11600 ms');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not cut a long stream off: the timeout bounds the request, not the body', async () => {
+    // The response **headers** arrive at once and the body follows 300 ms
+    // later. The timeout is armed for the request, and the request has
+    // answered by then — so the stream is read outside the timeout's reach,
+    // and the whole turn arrives.
+    //
+    // The fake body is tied to the request's own abort signal: a transport
+    // that kept the timeout armed while it read the body would cut the
+    // stream off, and this test would see the error instead of the events.
+    const encoder = new TextEncoder();
+    let body: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        body = controller;
+      },
+    });
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      init?.signal?.addEventListener('abort', () => {
+        body?.error(new Error('the request was aborted'));
+      });
+      setTimeout(() => {
+        body?.enqueue(encoder.encode(SSE_BODY));
+        body?.close();
+      }, 300);
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+
+    const result = await sendProviderRequest(
+      { driver: anthropicDriver, fetchImpl, timeoutMs: 50 },
+      request({ stream: true }),
+      'sk-test-secret',
+    );
+
+    expect(result.events.map((event) => event.type)).toEqual(['message_start', 'text_delta', 'message_stop']);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The stainless timeout header                                                 */
+/* -------------------------------------------------------------------------- */
+
+describe('the stainless timeout header', () => {
+  it('sends 600 for a streaming request and the computed timeout for a non-streaming one', async () => {
+    // **Observed** (audit §2.2): the header carries the request's timeout in
+    // seconds, and the timeout of a streaming request is the `600000` ms
+    // fallback — so the header says `600`, not the computed `11600` ms.
+    const streaming = fakeFetch([sseResponse(SSE_BODY)]);
+    await sendProviderRequest(
+      { driver: anthropicDriver, fetchImpl: streaming.fetchImpl },
+      request({ stream: true }),
+      'sk-test-secret',
+    );
+    expect(streaming.calls[0]?.headers['x-stainless-timeout']).toBe('600');
+
+    const nonStreaming = fakeFetch([jsonResponse(messageBody())]);
+    await sendProviderRequest(
+      { driver: anthropicDriver, fetchImpl: nonStreaming.fetchImpl },
+      request(),
+      'sk-test-secret',
+    );
+    // The computed non-streaming timeout is `11600` ms, which is `12`
+    // seconds.
+    expect(nonStreaming.calls[0]?.headers['x-stainless-timeout']).toBe('12');
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -679,6 +832,41 @@ describe('the retry loop', () => {
     expect(calls[0]?.headers['x-api-key']).toBe('sk-stale-secret');
     expect(calls[1]?.headers['x-api-key']).toBe('sk-fresh-secret');
     expect(result.status).toBe(200);
+  });
+
+  it('sleeps before the cached-token refresh attempt', async () => {
+    // The target's `retryRequest` sleeps before the next attempt, and the
+    // refresh attempt is an attempt: this implementation waits the same way, with the
+    // same delay rule (the `retry-after` header, else the backoff).
+    const { fetchImpl, calls } = fakeFetch([
+      jsonResponse({ error: { message: 'token expired', cached_token_refreshed: true } }, { status: 401 }),
+      jsonResponse(messageBody()),
+    ]);
+    const delays: number[] = [];
+    const order: string[] = [];
+
+    await sendProviderRequest(
+      {
+        driver: anthropicDriver,
+        fetchImpl,
+        sleep: async (ms) => {
+          delays.push(ms);
+          order.push('slept');
+        },
+        refreshCredential: async () => {
+          order.push('refreshed');
+          return 'sk-fresh-secret';
+        },
+      },
+      request(),
+      'sk-stale-secret',
+    );
+
+    // The backoff of the first retry is `500 ms`, and the wait happens
+    // **before** the credential is refreshed.
+    expect(delays).toEqual([500]);
+    expect(order).toEqual(['slept', 'refreshed']);
+    expect(calls).toHaveLength(2);
   });
 
   it('does not refresh a cached token when the response says it must not be retried', async () => {
@@ -1001,9 +1189,9 @@ describe('the SigV4 signer', () => {
 
     // The wire path is `/example%20space/`; the canonical URI escapes it a
     // **second** time, as the AWS SDK does. The suite's `.creq` file encodes
-    // the path only once (`/example%20space/`), and the suite's own README
-    // flags the difference — this implementation follows the **SDK**, because the SDK
-    // is what the target runs.
+    // the path only once (`/example%20space/`) — the suite's README says
+    // nothing about the difference — and this implementation follows the **SDK**,
+    // because the SDK is what the target runs.
     const canonical = buildCanonicalRequest(input);
     expect(canonical.canonicalUri).toBe('/example%2520space/');
     expect(canonical.canonicalRequest).toBe(
@@ -1028,6 +1216,30 @@ describe('the SigV4 signer', () => {
     expect(signed['authorization']).not.toContain(
       'Signature=652487583200325589f1fba4c7e578f72c47cb61beeca81406b39ddec1366741',
     );
+  });
+
+  it('escapes the wire path segment by segment, and says where that differs from the SDK', () => {
+    // The AWS SDK escapes the **value of a URI-template label**, so a raw
+    // `%2F` travels as `%252F` and a raw `/` travels as `%2F`. This implementation
+    // escapes the **path** — a transport cannot know which parts of a path
+    // are labels — and it decodes first, so that the escaping is idempotent
+    // and a driver that escaped its own label is not encoded twice.
+    //
+    // The divergence is therefore confined to a label that carries a literal
+    // `%` or a `/`; a Bedrock model id carries neither.
+    expect(escapeUriPath('/model/anthropic.claude-sonnet-4-5-20250929-v1:0/invoke')).toBe(
+      '/model/anthropic.claude-sonnet-4-5-20250929-v1%3A0/invoke',
+    );
+    // The escaping is idempotent: an already-escaped path is left alone.
+    expect(escapeUriPath('/model/anthropic.claude-sonnet-4-5-20250929-v1%3A0/invoke')).toBe(
+      '/model/anthropic.claude-sonnet-4-5-20250929-v1%3A0/invoke',
+    );
+    // The divergence: a literal `%2F` in a raw label stays `%2F` here, while
+    // the SDK would send `%252F`.
+    expect(escapeUriPath('/model/a%2Fb/invoke')).toBe('/model/a%2Fb/invoke');
+    // … and a `/` in a raw label stays a separator here, while the SDK would
+    // send `a%2Fb`.
+    expect(escapeUriPath('/model/a/b/invoke')).toBe('/model/a/b/invoke');
   });
 
   it('sorts the canonical query by the encoded name, as the AWS SDK does', () => {

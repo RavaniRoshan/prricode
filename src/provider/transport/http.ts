@@ -107,8 +107,9 @@ export class ProviderAbortedError extends Error {
 /**
  * How a request is sent.
  *
- * The plan fixes the first four members. The rest are **additive optional**
- * members, so a plan-conforming consumer keeps type-checking.
+ * The plan fixes the first five members (`driver`, `fetchImpl`, `now`,
+ * `sleep` and `signal`). The rest are **additive optional** members, so a
+ * plan-conforming consumer keeps type-checking.
  */
 export interface TransportOptions {
   /** The driver whose request shape and parsers are used. */
@@ -378,6 +379,14 @@ export async function sendProviderRequest(
       // The cached-token `401`: refresh the credential and make **one** more
       // attempt. The refresh is the target's own path, but it is **an**
       // attempt, so it spends the retry budget like any other one.
+      //
+      // The target's `retryRequest` **sleeps** before the next attempt, and
+      // the refresh attempt is an attempt — so this implementation waits the same way,
+      // with the same delay rule (the `retry-after` header when there is
+      // one, else the exponential backoff). The wait itself spends
+      // **nothing**: the budget is spent by the attempt that follows it.
+      const delay = retryDelayMs(retriesUsed, { status, headers: response.headers }, currentTimeMs(opts));
+      await sleep(delay);
       refreshed = true;
       const fresh = await opts.refreshCredential?.({
         status,
@@ -390,8 +399,11 @@ export async function sendProviderRequest(
     }
 
     if (classification.retryable && retriesUsed < maxRetries) {
+      // The same wait, with the same rule: the `retry-after` header when
+      // there is one, else the exponential backoff.
+      const delay = retryDelayMs(retriesUsed, { status, headers: response.headers }, currentTimeMs(opts));
       retriesUsed += 1;
-      await sleep(retryDelayMs(retriesUsed - 1, { status, headers: response.headers }, currentTimeMs(opts)));
+      await sleep(delay);
       continue;
     }
 
@@ -419,9 +431,16 @@ export async function sendProviderRequest(
  * The timeout a request uses, in milliseconds.
  *
  * The order is the target's: an **explicit** request timeout wins, then the
- * transport's own timeout (the client-level default), then the computed
- * non-streaming timeout — which is bounded by the model's own limit and by
- * the `600000 ms` fallback (audit §2.2).
+ * transport's own timeout (the client-level default), and only then the
+ * request's own rule — which is the computed non-streaming timeout for a
+ * **non-streaming** request and the `600000` ms fallback for a **streaming**
+ * one (audit §2.2: the target computes the timeout "when the call is
+ * non-streaming with no explicit timeout", and issues the request with
+ * "timeout: timeout ?? 600000").
+ *
+ * The model limit bounds the computed non-streaming timeout from above; a
+ * streaming request ignores it, because the target does not compute a
+ * timeout for a streaming call at all.
  */
 function resolveTimeoutMs(req: ProviderRequest, opts: TransportOptions): number {
   const explicit = req.timeout;
