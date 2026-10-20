@@ -144,7 +144,7 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | `dontAsk` denies rather than prompts, never consults `canUseTool`, and denies the four always-denied categories | REA observed | same file — "modes" |
 | `plan` never auto-approves an edit, by effect not by tool name | implementation choice | same file — "modes" |
 | `acceptEdits` auto-approves inside the working directory or an added directory, and still prompts for `rm` on a critical path | REA observed + implementation choice (the critical-path list) | same file |
-| Start-mode precedence, the settings-file rule, and the three availability overrides | REA observed | same file — "start mode" |
+| Start-mode precedence, the settings-file rule, and the three availability overrides | REA observed | same file — "resolveStartMode" |
 | The start mode's flag beats `permissions.defaultMode`, which beats the built-in default | REA observed | `tests/contracts/permission-decision.test.ts` — "prefers the flag over the settings default", "prefers the settings default over the built-in default" |
 | `auto` and `bypassPermissions` written into a settings file are ignored | REA observed | same file — "ignores auto and bypassPermissions written into a settings file" |
 | The built-in default is `auto` for an interactive terminal session and `default` for a headless run | REA observed | same file — "starts in auto for an interactive session when auto mode is available", "starts in default for a headless run" |
@@ -164,8 +164,8 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | The approval prompt shows the command text and the resolved destinations | implementation choice | `tests/security/permission-rules.test.ts` — "the approval prompt" |
 | A hook rewrite triggers the **whole** permission re-check, and the stricter of the two verdicts wins | implementation choice | `tests/contracts/tool-registry.test.ts` — the rewrite tests (ask-covered path, allow scope, `acceptEdits` working directory, and the negative control) |
 | The path the check approved is the path that is re-resolved, and a swap between the two is refused | implementation choice | same file — the "path was re-resolved" and "swapped while the re-check ran" tests |
-| The transport dispatcher's shape, including the dropped non-string `request_id` | REA observed | same file — "dispatcher" |
-| The computer-folder and repository-trust names are configuration, and an unrecognised one is refused | implementation choice (unpinned) | same file — "dispatcher" |
+| The transport dispatcher's shape, including the dropped non-string `request_id` | REA observed | `tests/contracts/permission-decision.test.ts` — "the transport permission dispatcher" |
+| The computer-folder and repository-trust names are configuration, and an unrecognised one is refused | implementation choice (unpinned) | `tests/contracts/mcp-control.test.ts` — "the transport permission dispatcher" |
 | The "don't ask again" rule computation and its 5-rule cap | Documented only (the write is not implemented) | `tests/contracts/permission-decision.test.ts` |
 
 ## The `PreToolUse` seam — conformance

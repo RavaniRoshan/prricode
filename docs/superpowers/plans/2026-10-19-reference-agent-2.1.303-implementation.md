@@ -996,12 +996,12 @@ export interface PreToolUseHookApproval {
 
 **Files:** Modify `src/ui/render/messages.ts`; Modify `src/ui/render/prompts.ts`; Modify `tests/contracts/ui-render.test.ts`.
 
-- [ ] **Step 1: Write the failing test** — a hostile input that carries an **OSC** sequence (not only a CSI one) reaches each of the strip sites, and a **weaker** scanner substituted at any one of them is caught.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL for the two sites the review named.
-- [ ] **Step 3: Widen the hostile inputs** at every strip site so the OSC form is covered, and give each of the five masked sites its **own** named test.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Verify the shared scanner is still the only one** — a second, weaker scanner anywhere in the renderers must fail a test.
-- [ ] **Step 6: Commit.**
+- [x] **Step 1: Write the failing test** — a hostile input that carries an **OSC** sequence (not only a CSI one) reaches each of the strip sites, and a **weaker** scanner substituted at any one of them is caught.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL for the two sites the review named.
+- [x] **Step 3: Widen the hostile inputs** at every strip site so the OSC form is covered, and give each of the five masked sites its **own** named test.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Verify the shared scanner is still the only one** — a second, weaker scanner anywhere in the renderers must fail a test.
+- [x] **Step 6: Commit.**
   ```bash
   git add src/ui tests/contracts/ui-render.test.ts
   git commit -m "test(ui): every strip site carries a hostile input of its own"

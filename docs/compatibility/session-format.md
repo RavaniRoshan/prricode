@@ -178,10 +178,10 @@ The store is append-only, the last row per id wins, and a prompt is not delivere
 | The resume point is the last assistant message with a tool use, else the last message | REA observed | `tests/contracts/session-resume.test.ts` — the two resume-point tests |
 | A leaf tie is won by the record written last | implementation choice | same file — "wins a leaf tie with the one that was written last" |
 | `--continue` selects the newest session, reports a background-running one, and uses the target's two failure messages | REA observed (the messages and the newest-session rule) + **implementation choice** (the store-level ordering rule was not traced) | `tests/contracts/session-store.test.ts` — the continue tests |
-| The interrupted turn is detected by the backward walk | REA observed | same file — the two interrupted-turn tests |
-| A `tool_use` is answered by the `tool_result` with the same id, and the pending id is removed on arrival | REA observed | same file — "pairs a `tool_result` with the `tool_call` it answers", "keeps a tool call whose result never arrived pending" |
-| The compaction boundary skips the prefix and does not delete it, and the boundary is located by the parent link | REA observed (the mechanism) + implementation choice (the model) | same file — the compaction tests |
-| The summary is passed in, never generated locally | REA observed | same file — "never produces a summary locally" |
+| The interrupted turn is detected by the backward walk | REA observed | `tests/contracts/session-resume.test.ts` — the two interrupted-turn tests |
+| A `tool_use` is answered by the `tool_result` with the same id, and the pending id is removed on arrival | REA observed | `tests/contracts/session-resume.test.ts` — "pairs a tool_result with the tool_call it answers", "keeps a tool call whose result never arrived pending" |
+| The compaction boundary skips the prefix and does not delete it, and the boundary is located by the parent link | REA observed (the mechanism) + implementation choice (the model) | `tests/contracts/session-resume.test.ts` — the compaction tests |
+| The summary is passed in, never generated locally | REA observed | `tests/contracts/session-resume.test.ts` — "never produces a summary locally" |
 | The carried-prompt vocabulary is exactly the seven names, the bound check is enforced, and a prompt is not delivered twice | REA observed (the vocabulary) + implementation choice (the semantics) | `tests/contracts/session-store.test.ts` — the carried-prompt tests |
 | The telemetry event names are the target's | REA observed | same file — "emits the target's telemetry event with the outcome" |
 | A transcript path names a session by the **last** session-id segment it holds | implementation choice | `tests/contracts/cli-surface.test.ts` — "scans a path for a session-id segment" |
