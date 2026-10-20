@@ -444,7 +444,17 @@ Additional observed event names: `StatusLine`, `FileSuggestion`, `PermissionRequ
 
 The mode is selected as follows. A **remote call**, or a call with an `agentId`, or a file list that contains no `skill.md` (compared case-insensitively by basename), all select `report_unsaved`. Otherwise the session's tools are inspected: when the mode would be `send_file` but there is no send-capable tool, the answer is `no_save_tool`; otherwise the mode stands. The folder note is appended only for a known mode.
 
-**Partial:** the skills **discovery** registry and the subagent definition lifecycle were not traced to resolved relations. Their names and storage are observed; their behavior was not.
+**The skill override resolution is observed** (`chunk-4jsg44k7.js`). A per-session store holds `{ read, brought, skillOverrides }`: `read` is whether the skills have been read, `brought` is the set of skills that were brought in, and `skillOverrides` is the session's own overrides.
+
+A skill's **override mode** is one of exactly four:
+- `on` — fully enabled;
+- `name-only` — mentioned by name only, not auto-invoked;
+- `user-invocable-only` — only the user can invoke it;
+- `off` — disabled.
+
+The override for a skill is resolved by searching, in order: the **merged settings** `skillOverrides`, then the **session's** `skillOverrides`, and then the `skillOverrides` of the `policySettings` and `flagSettings` tiers. The first source that defines the skill wins. The lookup is **null-safe** (a missing source or skill yields no override), and the target itself **guards against `__proto__`** as a skill name — the same prototype-key hazard this implementation's permission engine had to be hardened against.
+
+**Partial:** the skills **discovery** registry — where a skill's directory is found and its `SKILL.md` is parsed — and the subagent definition lifecycle were not traced to resolved relations. Their names and storage are observed; their behavior was not.
 
 ### 2.9 Native and platform sandbox
 
