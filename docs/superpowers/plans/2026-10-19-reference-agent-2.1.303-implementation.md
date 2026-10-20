@@ -904,14 +904,14 @@ export interface PreToolUseHookApproval {
 
 **Interfaces:** Consumes: `src/tools/registry.ts`, `src/extensions/hooks/registry.ts`. Produces: `SkillRegistry`, `SubagentRegistry`, `PluginManager`, `IdeBridge` with `list()`, `resolve(name)`, and `apply()` contracts; each returns items whose `source` is the discovery origin (project, local, user, plugin, mcp).
 
-- [ ] **Step 1: Write the failing discovery test** — a skill in a project `.claude/skills` directory is discovered and its source is `project`; a skill in `~/.claude/skills` has source `user`; a plugin-provided skill has source `plugin`; an MCP-provided skill has source `mcp`.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement the four registries** with a shared `discover()` shape returning `{ name, source, path }`.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing override test** — a local skill override of a synced skill is reported with `own: false` and the sync source is preserved, matching the target's `skillOverrides` behavior.
-- [ ] **Step 6: Implement the override resolution** using `MERGED_KEY_ORDER` from `src/config/tiers.ts`.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Commit.**
+- [x] **Step 1: Write the failing discovery test** — a skill in a project `.claude/skills` directory is discovered and its source is `project`; a skill in `~/.claude/skills` has source `user`; a plugin-provided skill has source `plugin`; an MCP-provided skill has source `mcp`.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement the four registries** with a shared `discover()` shape returning `{ name, source, path }`.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing override test** — a local skill override of a synced skill is reported with `own: false` and the sync source is preserved, matching the target's `skillOverrides` behavior.
+- [x] **Step 6: Implement the override resolution** using `MERGED_KEY_ORDER` from `src/config/tiers.ts`.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Commit.**
   ```bash
   git add src/extensions src/integration tests/contracts/extensions.test.ts
   git commit -m "feat(extensions): skills, subagents, plugins, IDE bridge"
