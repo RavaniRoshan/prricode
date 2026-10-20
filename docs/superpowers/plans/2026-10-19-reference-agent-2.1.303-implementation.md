@@ -1059,14 +1059,14 @@ export interface PreToolUseHookApproval {
 
 **Interfaces:** Consumes: the whole `src/` tree. Produces: a build that emits a self-contained executable and a documented install path.
 
-- [ ] **Step 1: Write the failing packaging test** — the built executable starts, prints its version, and runs `--print` against a fake driver; the build emits a single file with no runtime dependency on the host's Node.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, no build script.
-- [ ] **Step 3: Implement the build** with `bun build --compile`, and re-validate every `node:` API the code uses under Bun — in particular `node:sqlite` is unavailable (Bun has `bun:sqlite`), which is why the session store is JSONL and not SQLite.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing install test** — the installed binary creates its configuration directory with restrictive permissions, and the first run reports the configuration directory it will use.
-- [ ] **Step 6: Implement the install path**, including a `CLAUDE_CONFIG_DIR`-style relocation and a first-run report.
-- [ ] **Step 7: Write `docs/compatibility/packaging.md`** recording the platform matrix: what is tested, what is untested, and the known limits (a Bun-built binary cannot run on Alpine by default, and the SEA alternative cannot ship on macOS x64).
-- [ ] **Step 8: Commit.**
+- [x] **Step 1: Write the failing packaging test** — the built executable starts, prints its version, and runs `--print` against a fake driver; the build emits a single file with no runtime dependency on the host's Node.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, no build script.
+- [x] **Step 3: Implement the build** with `bun build --compile`, and re-validate every `node:` API the code uses under Bun — in particular `node:sqlite` is unavailable (Bun has `bun:sqlite`), which is why the session store is JSONL and not SQLite.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing install test** — the installed binary creates its configuration directory with restrictive permissions, and the first run reports the configuration directory it will use.
+- [x] **Step 6: Implement the install path**, including a `CLAUDE_CONFIG_DIR`-style relocation and a first-run report.
+- [x] **Step 7: Write `docs/compatibility/packaging.md`** recording the platform matrix: what is tested, what is untested, and the known limits (a Bun-built binary cannot run on Alpine by default, and the SEA alternative cannot ship on macOS x64).
+- [x] **Step 8: Commit.**
   ```bash
   git add scripts package.json docs/compatibility/packaging.md tests/compatibility/packaging.test.ts
   git commit -m "build: self-contained executable and install path"
