@@ -42,6 +42,8 @@ import {
   MAX_COLLECTED_OUTPUT_CHARS,
   bubblewrapBackend,
   launchSandbox,
+  probeEnforcementBinary,
+  probeUserNamespace,
   sandboxEnvironment,
   type SandboxBackend,
   type SandboxPlan,
@@ -242,7 +244,16 @@ const throwingProbeBackend: SandboxBackend = {
 };
 
 /** Whether this host can run the bubblewrap backend the launcher uses. */
-const bubblewrapAvailable = existsSync('/usr/bin/bwrap') && process.platform === 'linux';
+// The backend must be **usable**, not merely present: a host that has the
+// binary but refuses an unprivileged user namespace cannot run a sandboxed
+// command at all, and a test that claims to exercise the real backend there
+// would be reporting a failure the host cannot produce. The probe is the same
+// one the backend itself uses.
+const bubblewrapAvailable =
+  existsSync('/usr/bin/bwrap') &&
+  process.platform === 'linux' &&
+  probeEnforcementBinary('/usr/bin/bwrap').problems.length === 0 &&
+  probeUserNamespace().available;
 
 // --- step 1: the routing -----------------------------------------------------------
 

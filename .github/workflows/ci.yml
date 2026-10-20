@@ -42,10 +42,20 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
       - name: Install bubblewrap
-        # The sandbox's real-backend tests **skip** when bubblewrap is absent,
-        # so without this the suite would pass without ever exercising the
-        # sandbox's confinement.
+        # The sandbox's real-backend tests **skip** when the backend is not
+        # usable, so without this the suite would pass without ever
+        # exercising the sandbox's confinement — on a runner that can.
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Report whether the sandbox backend can run here
+        # The tests skip when the host refuses an unprivileged user namespace.
+        # Say so in the log, so a green run is never mistaken for a run that
+        # exercised the sandbox.
+        run: |
+          if unshare -Ur true 2>/dev/null; then
+            echo "unprivileged user namespaces are available: the sandbox's real-backend tests will run"
+          else
+            echo "::warning::unprivileged user namespaces are not available on this runner: the sandbox's real-backend tests will skip, so this run does not exercise the sandbox's confinement"
+          fi
       - name: Test
         run: bun run test
 

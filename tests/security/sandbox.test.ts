@@ -127,7 +127,15 @@ afterEach(() => {
 });
 
 /** Whether this host can run the bubblewrap backend the launcher uses. */
-const bubblewrapAvailable = existsSync('/usr/bin/bwrap');
+// The backend must be **usable**, not merely present: a host that has the
+// binary but refuses an unprivileged user namespace cannot run a sandboxed
+// command at all, and a test that claims to exercise the real backend there
+// would be reporting a failure the host cannot produce. The probe is the
+// same one the backend itself uses.
+const bubblewrapAvailable =
+  existsSync('/usr/bin/bwrap') &&
+  probeEnforcementBinary('/usr/bin/bwrap').problems.length === 0 &&
+  probeUserNamespace().available;
 
 /** A backend that is never available, so the launcher's refusal path is testable. */
 const unavailableBackend: SandboxBackend = {
