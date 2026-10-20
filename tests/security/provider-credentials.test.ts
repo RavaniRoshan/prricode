@@ -226,7 +226,7 @@ describe('the keychain reference', () => {
     const backend: KeychainBackend = { name: 'spy', lookup };
     setKeychainBackend(backend);
 
-    const status = await credentialStatus({ kind: 'keychain', service: 'reference-agent', account: 'user' });
+    const status = await credentialStatus({ kind: 'keychain', service: 'prricode', account: 'user' });
     expect(status).toBe('configured');
     expect(lookup).not.toHaveBeenCalled();
   });
@@ -238,10 +238,10 @@ describe('the keychain reference', () => {
 
     const conn = connection({
       id: 'first',
-      credential: { kind: 'keychain', service: 'reference-agent', account: 'user' },
+      credential: { kind: 'keychain', service: 'prricode', account: 'user' },
     });
     const resolved = await resolveConnectionCredential(conn, {});
-    expect(lookup).toHaveBeenCalledWith('reference-agent', 'user');
+    expect(lookup).toHaveBeenCalledWith('prricode', 'user');
     expect(resolved).toEqual({ present: true, value: SECRET });
   });
 
@@ -274,7 +274,7 @@ describe('the registry listing', () => {
     setKeychainBackend({ name: 'spy', lookup });
 
     const registry = createProviderRegistry([
-      connection({ id: 'first', credential: { kind: 'keychain', service: 'reference-agent', account: 'user' } }),
+      connection({ id: 'first', credential: { kind: 'keychain', service: 'prricode', account: 'user' } }),
     ]);
     expect(registry.list()).toHaveLength(1);
     expect(registry.active()?.id).toBe('first');

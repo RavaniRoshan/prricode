@@ -1254,7 +1254,7 @@ describe('the catalog and the credential', () => {
         id: 'configured',
         name: 'Configured',
         route: 'firstParty',
-        credential: { kind: 'keychain', service: 'reference-agent', account: 'configured' },
+        credential: { kind: 'keychain', service: 'prricode', account: 'configured' },
         catalogSource: 'builtin',
         enabled: true,
       };
@@ -1262,7 +1262,7 @@ describe('the catalog and the credential', () => {
         id: 'unconfigured',
         name: 'Unconfigured',
         route: 'bedrock',
-        credential: { kind: 'keychain', service: 'reference-agent', account: 'unconfigured' },
+        credential: { kind: 'keychain', service: 'prricode', account: 'unconfigured' },
         catalogSource: 'builtin',
         enabled: false,
       };
