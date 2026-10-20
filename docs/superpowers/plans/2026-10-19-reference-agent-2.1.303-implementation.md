@@ -486,29 +486,29 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   export function describeReason(decision: PermissionDecision, toolName: string): string;
   ```
 
-- [ ] **Step 1: Write the failing decision test** — `evaluateRules` returns `deny` when a deny rule matches, `allow` when only an allow rule matches, `ask` when only an ask rule matches, and `undefined` when nothing matches so the caller can escalate.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
-- [ ] **Step 3: Implement `src/permissions/decision.ts`** with the closed vocabularies exactly as written in Global Constraints.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing input-rewrite test** — a **hook** (not a rule) that returns a modified input causes the decision to carry `updatedInput`, and the *modified* input is what the tool receives. Assert both the decision field and the tool's observed input, and assert that a rewritten input that the tool's own validator rejects **denies** the call rather than executing it.
-- [ ] **Step 6: Implement `src/permissions/rules.ts`** as a pure predicate evaluator that returns a behavior and a reason and **never rewrites input** — a rule that silently changed what runs is exactly the defect the design must avoid. The rewrite path lives in the hook layer, and routes its `updatedInput` through the same `PermissionDecision.updatedInput` field.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing multi-operation test** — a Bash command `a && b` where `b` needs approval yields a reason naming only `b` (redirections stripped), and a count of how many parts need approval.
-- [ ] **Step 9: Implement `describeReason`** with the reason kinds `rule`, `subcommandResults`, `permissionPromptTool`, `sandboxOverride`, `workingDir`, `safetyCheck`.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Write the failing safety-check test** — a `PermissionRequest` hook that approves a WebFetch with arguments the tool cannot verify yields `reasonType: 'safetyCheck'` and `behavior: 'deny'`, and the reason text states that nothing was fetched.
-- [ ] **Step 12: Implement the safety-check hook in `src/permissions/prompts.ts`** — the hook approval carries a `classifierApprovable: false` marker in that case.
-- [ ] **Step 13: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 14: Add a security test** asserting that a `bypassPermissions` mode still cannot bypass a `safetyCheck` denial.
-- [ ] **Step 15: Write the failing transport-dispatcher test** — a `can_use_tool` request whose `request_id` is **not a string** is dropped with no response, because no response is possible; a malformed `can_use_tool` is denied with a synthesized denial; a request whose `request_id` is already in flight is not dispatched a second time; a computer-folder prompt whose input is not exactly three string arguments is denied; a folder path or computer name containing a CR, LF, U+2028, or U+2029 is denied; a path that is not equal to its own normalized form is denied.
-- [ ] **Step 16: Implement the transport permission dispatcher** in `src/permissions/prompts.ts` with the target's observed validation, the in-flight deduplication map, and the repository-trust and computer-folder prompt paths.
-- [ ] **Step 17: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 18: Write the failing mode test** — in `dontAsk` mode a call that would prompt is **denied**, `canUseTool` is never consulted, and a tool marked `requiresUserInteraction`, an `AskUserQuestion` request, a network-path read, or an org-ask connector tool is denied **even if an allow rule matches**. Deny rules block in every mode including `bypassPermissions`, and allow rules have no effect in `bypassPermissions`. The `manual` alias resolves to `default`.
-- [ ] **Step 19: Implement `dontAsk`** and the `manual` alias in `src/permissions/decision.ts`.
-- [ ] **Step 20: Write the failing start-mode test** — the flag beats `permissions.defaultMode`, which beats the built-in default; `auto` and `bypassPermissions` written into a settings file are ignored; the built-in default is `auto` for an interactive terminal session and `default` for a headless run, and falls back to `default` when auto mode is disabled by policy or unavailable.
-- [ ] **Step 21: Implement `resolveStartMode`** with those three availability overrides.
-- [ ] **Step 22: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 23: Commit.**
+- [x] **Step 1: Write the failing decision test** — `evaluateRules` returns `deny` when a deny rule matches, `allow` when only an allow rule matches, `ask` when only an ask rule matches, and `undefined` when nothing matches so the caller can escalate.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, module not found.
+- [x] **Step 3: Implement `src/permissions/decision.ts`** with the closed vocabularies exactly as written in Global Constraints.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing input-rewrite test** — a **hook** (not a rule) that returns a modified input causes the decision to carry `updatedInput`, and the *modified* input is what the tool receives. Assert both the decision field and the tool's observed input, and assert that a rewritten input that the tool's own validator rejects **denies** the call rather than executing it.
+- [x] **Step 6: Implement `src/permissions/rules.ts`** as a pure predicate evaluator that returns a behavior and a reason and **never rewrites input** — a rule that silently changed what runs is exactly the defect the design must avoid. The rewrite path lives in the hook layer, and routes its `updatedInput` through the same `PermissionDecision.updatedInput` field.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing multi-operation test** — a Bash command `a && b` where `b` needs approval yields a reason naming only `b` (redirections stripped), and a count of how many parts need approval.
+- [x] **Step 9: Implement `describeReason`** with the reason kinds `rule`, `subcommandResults`, `permissionPromptTool`, `sandboxOverride`, `workingDir`, `safetyCheck`.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Write the failing safety-check test** — a `PermissionRequest` hook that approves a WebFetch with arguments the tool cannot verify yields `reasonType: 'safetyCheck'` and `behavior: 'deny'`, and the reason text states that nothing was fetched.
+- [x] **Step 12: Implement the safety-check hook in `src/permissions/prompts.ts`** — the hook approval carries a `classifierApprovable: false` marker in that case.
+- [x] **Step 13: Run it to verify it passes** — expected: PASS.
+- [x] **Step 14: Add a security test** asserting that a `bypassPermissions` mode still cannot bypass a `safetyCheck` denial.
+- [x] **Step 15: Write the failing transport-dispatcher test** — a `can_use_tool` request whose `request_id` is **not a string** is dropped with no response, because no response is possible; a malformed `can_use_tool` is denied with a synthesized denial; a request whose `request_id` is already in flight is not dispatched a second time; a computer-folder prompt whose input is not exactly three string arguments is denied; a folder path or computer name containing a CR, LF, U+2028, or U+2029 is denied; a path that is not equal to its own normalized form is denied.
+- [x] **Step 16: Implement the transport permission dispatcher** in `src/permissions/prompts.ts` with the target's observed validation, the in-flight deduplication map, and the repository-trust and computer-folder prompt paths.
+- [x] **Step 17: Run it to verify it passes** — expected: PASS.
+- [x] **Step 18: Write the failing mode test** — in `dontAsk` mode a call that would prompt is **denied**, `canUseTool` is never consulted, and a tool marked `requiresUserInteraction`, an `AskUserQuestion` request, a network-path read, or an org-ask connector tool is denied **even if an allow rule matches**. Deny rules block in every mode including `bypassPermissions`, and allow rules have no effect in `bypassPermissions`. The `manual` alias resolves to `default`.
+- [x] **Step 19: Implement `dontAsk`** and the `manual` alias in `src/permissions/decision.ts`.
+- [x] **Step 20: Write the failing start-mode test** — the flag beats `permissions.defaultMode`, which beats the built-in default; `auto` and `bypassPermissions` written into a settings file are ignored; the built-in default is `auto` for an interactive terminal session and `default` for a headless run, and falls back to `default` when auto mode is disabled by policy or unavailable.
+- [x] **Step 21: Implement `resolveStartMode`** with those three availability overrides.
+- [x] **Step 22: Run it to verify it passes** — expected: PASS.
+- [x] **Step 23: Commit.**
   ```bash
   git add src/permissions tests/contracts/permission-decision.test.ts tests/security/permission-rules.test.ts
   git commit -m "feat(permissions): rule evaluation, decision vocabulary, safety checks"
