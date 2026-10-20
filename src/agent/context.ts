@@ -39,6 +39,12 @@
  * truth, and a turn that starts in a fresh process sees the same history a turn
  * that starts in the middle of one does.
  *
+ * The projection applies the transcript's **content replacements** on the way
+ * in: an oversized tool result is replaced by its stub before anything is
+ * projected, so the payload the transcript keeps never reaches the model — not
+ * in the request a running turn builds and not in the request a later turn
+ * builds from the same transcript.
+ *
  * A tool call that was **refused** is answered with a tool result, so its
  * `tool_use` block has an answer. A call that was **interrupted** — the turn
  * was aborted while the tool ran — never produced one, so the projection drops
@@ -62,9 +68,9 @@
  *     is carried as it is, and anything else is carried as its JSON
  *     serialization, because the wire shape accepts a string or a list of
  *     content blocks and not an arbitrary value. The serialization is **not**
- *     written here: it is the session module's `toolResultContent`, and this
- *     module and the cross-turn projection both call it, so the request a turn
- *     builds and the request a resumed session builds cannot drift apart.
+ *     written here: the session module's `providerToolResultBlock` builds the
+ *     block and this module reaches it by import, so the request a turn builds
+ *     and the request a resumed session builds cannot drift apart.
  */
 
 import type { ToolContext } from '../permissions/decision.js';
@@ -77,9 +83,10 @@ import type {
   ProviderTool,
 } from '../provider/drivers/types.js';
 import {
+  applyContentReplacements,
   contextToProviderMessages,
   projectContext,
-  toolResultContent,
+  providerToolResultBlock,
   type ContextItem,
 } from '../session/resume.js';
 import type { SessionEvent } from '../session/event.js';
@@ -211,9 +218,15 @@ export function buildProviderRequest(options: ProviderRequestOptions): ProviderR
  *
  * The projection is **well formed**: no message is empty, and two user
  * messages in a row are merged into one.
+ *
+ * The **content replacement** is applied first, exactly as the cross-turn
+ * projection applies it: an oversized tool result is replaced by its stub
+ * before anything is projected, so the payload the transcript keeps never
+ * reaches the model — not in this request and not in any later one.
  */
 export function conversationFromEvents(events: SessionEvent[]): ProviderMessage[] {
-  const context = projectContext(events);
+  const { events: replaced } = applyContentReplacements(events);
+  const context = projectContext(replaced);
   dropUnansweredToolUses(context);
   dropEmptyMessages(context);
   return mergeUserMessages(contextToProviderMessages(context));
@@ -338,23 +351,12 @@ export function pushToolResults(messages: ProviderMessage[], blocks: ProviderCon
  * serialization otherwise: the wire shape accepts a string or a list of content
  * blocks, and not an arbitrary value.
  *
- * The serialization is the **session module's** (`toolResultContent`), and the
- * cross-turn projection calls the same function, so the request a turn builds
- * and the request a resumed session builds carry the same content for the same
- * transcript.
+ * The block is built by the **session module's** `providerToolResultBlock`,
+ * and the cross-turn projection calls the same function, so the request a turn
+ * builds and the request a resumed session builds carry the same content for
+ * the same transcript.
  */
-export function toolResultBlock(
-  toolUseId: string,
-  content: unknown,
-  isError: boolean,
-): ProviderContentBlock {
-  return {
-    type: 'tool_result',
-    tool_use_id: toolUseId,
-    content: toolResultContent(content),
-    is_error: isError,
-  };
-}
+export { providerToolResultBlock as toolResultBlock };
 
 /* -------------------------------------------------------------------------- */
 /* The tool context                                                            */

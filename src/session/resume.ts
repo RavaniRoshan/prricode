@@ -45,15 +45,21 @@
  *     The prefix is still in the file. The boundary is located by the marker's
  *     **parent link** on the branch's parent chain, so a record that is not a
  *     message moves it with it.
- *   - **The content replacement** is applied on resume, so the payload of an
+ *   - **The content replacement** is applied on read, so the payload of an
  *     oversized tool result does not come back into the context. The
- *     transcript keeps the payload; only the context is stubbed.
+ *     transcript keeps the payload; only the context is stubbed. Every path
+ *     that projects a transcript into a context applies it — the cross-turn
+ *     projection (`resumeEvents`) and the between-turns load
+ *     (`conversationFromEvents`, in `src/agent/context.ts`) — so the payload
+ *     never reaches the model.
  *   - **The tool-result content** is serialised into a **string** on the way
  *     out, because the observed shape of a `tool_result` block is
  *     `{tool_use_id, type:"tool_result", content:<string>}` (audit §2.4) and an
  *     envelope's content is not always a string — a failed tool leaves an
- *     **object** behind. The serialisation is **shared** with the live path
- *     (`src/agent/context.ts`), so the two cannot drift.
+ *     **object** behind. The serialisation is **shared**: the block is built
+ *     once, by `providerToolResultBlock`, and the within-turn path
+ *     (`src/agent/context.ts`) reaches it by import, so the paths cannot
+ *     drift.
  *
  * ## Resuming a *session*, not only a transcript
  *
@@ -554,15 +560,30 @@ function findCompaction(events: SessionEvent[], branch: Branch): FoundCompaction
 }
 
 /**
- * Apply the content replacements to a branch.
+ * Apply the content replacements of a transcript to its records.
  *
  * A replacement record names the record whose content it replaces, and the
  * replacement is a **stub**: the payload of an oversized tool result does not
  * come back into the context.
+ *
+ * The replacement is applied **on read**. The transcript keeps the payload —
+ * the data is not lost — and every path that projects a transcript into a
+ * context applies the replacement, so the payload never reaches the model:
+ * the **cross-turn** projection (`resumeEvents`) and the **between-turns**
+ * load (`conversationFromEvents`, in `src/agent/context.ts`) both call this
+ * function.
+ *
+ * The stub's **wire form** — the stub's own JSON, `{"type":"tool_result_stub",
+ * …}` — is a **implementation choice**: the audit pins that the oversized payload does
+ * not come back into the context, and not what the stub looks like on the
+ * wire.
+ *
+ * @param events the records whose content is replaced.
+ * @param all the records the replacement records are read from.
  */
-function applyReplacements(
+export function applyContentReplacements(
   events: SessionEvent[],
-  all: SessionEvent[],
+  all: SessionEvent[] = events,
 ): { events: SessionEvent[]; applied: AppliedReplacement[] } {
   const replacements = new Map<string, { content: unknown; originalBytes: number }>();
   for (const event of all) {
@@ -837,7 +858,7 @@ export function resumeEvents(
       ? branch.chain
       : branch.chain.slice(found.boundaryIndex + 1);
 
-  const { events: replaced, applied } = applyReplacements(effectiveRecords, events);
+  const { events: replaced, applied } = applyContentReplacements(effectiveRecords, events);
 
   const projected = projectContext(replaced);
   const context: ContextItem[] =
@@ -928,6 +949,15 @@ export function resumeEvents(
 /* -------------------------------------------------------------------------- */
 
 /**
+ * The content a tool result carries when it can be neither serialized nor
+ * stringified.
+ *
+ * **Implementation choice.** The audit does not pin a wire form for a value that has
+ * none; the placeholder is this implementation's own.
+ */
+const UNSERIALIZABLE_CONTENT = '[unserializable tool result]';
+
+/**
  * The wire form of a tool result's content.
  *
  * **Observed** (audit §2.4): "the block is `{ tool_use_id, type: "tool_result",
@@ -942,26 +972,109 @@ export function resumeEvents(
  * leaves the stub behind. Both are objects, and both have to reach the model
  * as a string.
  *
- * **This is the one serialisation.** The live path — the request a turn builds
- * while it runs, in `src/agent/context.ts` — and the cross-turn projection —
- * the request a resumed session builds, here — both call it, so the two paths
- * cannot drift. The serialisation lives in the **session** module because the
- * session module is the lower layer: the agent module imports it.
+ * The **stub's wire form** — the stub's own JSON, `{"type":"tool_result_stub",
+ * …}` — is a **implementation choice**: the audit pins that the oversized payload does
+ * not come back into the context, and not what the stub looks like on the
+ * wire.
+ *
+ * The failed tool's **text** is the **implementation's own**. The target answers a
+ * refused call and an input-validation failure with a
+ * `<tool_use_error>…</tool_use_error>` wrapper (audit §2.4), and this implementation's
+ * runtime wraps a **refusal** that way — the wrapper is labelled a reimplementation
+ * choice in `src/agent/loop.ts` — while an **execution** failure is reported
+ * with the error envelope the tool runner produces. This module does not
+ * reproduce the target's wrapper for that case; it decides that whatever the
+ * envelope holds reaches the model as a **string**.
+ *
+ * **This is the one serialisation.** The **within-turn** builder — the block a
+ * running turn pushes into its next request — and the **cross-turn**
+ * projection — the request a resumed session builds, here — both reach it
+ * through `providerToolResultBlock`, so the paths cannot drift.
+ *
+ * The serialisation stays in the **session** module: the session module is the
+ * lower layer, and the agent module imports it. A `src/provider/` home would
+ * turn the session module's dependency on the provider layer — a **type-only**
+ * one, today — into a **runtime** one, and the direction the milestone
+ * established (one shared serialisation, reached from the agent module
+ * through the session module) would be gone.
  *
  * The empty string stands for an absent content: the envelope of a call that
  * produced nothing carries `undefined`, and the wire shape wants a string.
+ *
+ * ## What the serialisation reads
+ *
+ * The serialisation **reads** the value it is given, and it reads it **through
+ * the prototype chain**: `JSON.stringify` performs a `[[Get]]` of `toJSON` —
+ * through the chain — and invokes it, and it invokes the value's own getters;
+ * and `String(value)` reads `Symbol.toPrimitive`, `toString` and `valueOf` —
+ * through the chain — and invokes them. The wire form therefore depends on
+ * the **prototype** of the caller's value: a value whose prototype carries a
+ * `toJSON` is serialized by that `toJSON`, and a polluted
+ * `Object.prototype.toJSON` would rewrite every tool result.
+ *
+ * Nothing is **written**: the serialisation sets no member and defines no
+ * property, so there is no pollution vector, and `__proto__` as an **own** key
+ * serializes as a plain key.
  */
 export function toolResultContent(content: unknown): string {
   if (typeof content === 'string') return content;
   if (content === undefined) return '';
   try {
     const serialized = JSON.stringify(content);
-    return serialized === undefined ? String(content) : serialized;
+    if (serialized !== undefined) return serialized;
+    // `JSON.stringify` returns `undefined` for a value it cannot represent —
+    // a symbol, a function. The string form is what reaches the model.
+    return stringForm(content);
   } catch {
     // A value `JSON.stringify` refuses — a circular structure, a `BigInt` —
     // still has to reach the model as a string.
-    return String(content);
+    return stringForm(content);
   }
+}
+
+/**
+ * The string form of a value, or a placeholder when it has none.
+ *
+ * `String(value)` reads `Symbol.toPrimitive`, `toString` and `valueOf` through
+ * the prototype chain and invokes them, so it can **throw**: a null-prototype
+ * value has none of them, and `String(Object.create(null))` raises a
+ * `TypeError`. The fallback therefore has a fallback of its own — a value that
+ * can be neither serialized nor stringified still has to reach the model as a
+ * string, and the exception must not escape the request build.
+ */
+function stringForm(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return UNSERIALIZABLE_CONTENT;
+  }
+}
+
+/**
+ * The provider block that carries a tool result.
+ *
+ * **This is the one builder of a `tool_result` block.** The within-turn path
+ * (`src/agent/context.ts`, `toolResultBlock`) and the cross-turn projection
+ * (`contextToProviderMessages`, here) both build the block through it, so the
+ * wire shape is written once.
+ *
+ * **Observed** (audit §2.4): the block is `{ tool_use_id, type: "tool_result",
+ * content: <string> }` with `is_error: true` added **for a failure** — a
+ * success carries **no** `is_error` member at all, and the member is
+ * therefore added only for a failure.
+ */
+export function providerToolResultBlock(
+  toolUseId: string,
+  content: unknown,
+  isError: boolean,
+): ProviderContentBlock {
+  const block: Extract<ProviderContentBlock, { type: 'tool_result' }> = {
+    type: 'tool_result',
+    tool_use_id: toolUseId,
+    content: toolResultContent(content),
+  };
+  if (isError) block.is_error = true;
+  return block;
 }
 
 /**
@@ -992,12 +1105,7 @@ export function contextToProviderMessages(context: ContextItem[]): ProviderMessa
         case 'tool_use':
           return { type: 'tool_use', id: block.id, name: block.name, input: block.input };
         case 'tool_result':
-          return {
-            type: 'tool_result',
-            tool_use_id: block.toolUseId,
-            content: toolResultContent(block.content),
-            is_error: block.isError,
-          };
+          return providerToolResultBlock(block.toolUseId, block.content, block.isError);
         default:
           return { type: 'text', text: '' };
       }
