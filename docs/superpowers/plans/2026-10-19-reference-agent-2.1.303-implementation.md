@@ -1762,6 +1762,168 @@ required"* even with the referenced environment variable set.
   git commit -m "feat(cli): a run uses the active connection"
   ```
 
+### CC-022 — The target's terminal UI, reproduced
+
+**Why this task exists.** The audit records the target's terminal UI as **never
+established** — *"the audit records no TUI drawing at all"* — so the clone's renderer is
+its own. The user wants the first layer to be a **true** clone, and the visuals are part
+of that. The target's UI is Ink-based and its strings are in the bundle, so the
+specification is now read from the source.
+
+**The specification.** `/home/shiva/opt/reference-agent-rea/analysis/findings-terminal-ui.md` —
+the surface inventory, the exact strings, the layout of each surface, the theme's colours
+and the rule that maps a role to one, the keybindings, the markdown rendering rules, the
+slash commands, and the behaviours a reader could see.
+
+**Files:** Modify `src/ui/app.ts`; Modify `src/ui/render/messages.ts`; Modify
+`src/ui/render/prompts.ts`; Modify `src/ui/render/markdown.ts`; Modify
+`src/ui/theme.ts` (or wherever the colours live); Modify `src/cli/interactive.ts`; Modify
+`tests/contracts/ui-render.test.ts`; Modify `tests/contracts/interactive-session.test.ts`;
+Modify `docs/compatibility/tool-surface.md`.
+
+**Interfaces:**
+- Consumes: the specification above; the Ink 8 and markdansi the clone already uses.
+- Produces: the clone's renderer, matching the target's surfaces, strings, colours and
+  keybindings.
+
+- [ ] **Step 1: Write the failing test** — for each surface in the specification, the
+  clone's output must equal the target's: the same strings, the same order, the same
+  colours, the same key handling.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [ ] **Step 3: Implement the surfaces** — the composer, the transcript, the approval
+  prompt, the spinner, the status line, the welcome screen, the model picker, the
+  permissions panel, the markdown rendering and the theme.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance document** — `F-39` moves from `unknown` to
+  `match`, with the surfaces it now compares named.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src/ui src/cli/interactive.ts tests/contracts docs/compatibility/tool-surface.md
+  git commit -m "feat(ui): the terminal UI is the target's"
+  ```
+
+**Note.** A surface the specification does **not** establish is left alone and named, not
+invented. The report says what was compared and what was not.
+
+---
+
+### CC-023 — The target's compaction behaviour
+
+**Why this task exists.** `F-27` is `unknown`: the audit records the compaction trigger
+conditions as **unknown** and the compaction/fallback ordering as **not resolved**, so
+nothing was compared. The compaction code is in the bundle, so the behaviour can be read
+from the source.
+
+**Files:** Modify `src/session/store.ts`; Modify `src/session/compaction.ts` (or wherever
+the compaction lives); Modify `tests/contracts/session-resume.test.ts`; Modify
+`docs/compatibility/session-format.md`.
+
+- [ ] **Step 1: Read the target's compaction behaviour from the source** — the trigger,
+  the boundary, the summary's shape, the projection, and the fallback ordering — and
+  record it in `/home/shiva/opt/reference-agent-rea/analysis/findings-compaction.md`.
+- [ ] **Step 2: Write the failing test** — the trigger, the boundary and the summary must
+  match the target's.
+- [ ] **Step 3: Implement** what the reading established.
+- [ ] **Step 4: Update the conformance document** — `F-27` moves from `unknown` to
+  `match` or `partial`, with the reading named.
+- [ ] **Step 5: Commit.**
+  ```bash
+  git add src/session tests/contracts/session-resume.test.ts docs/compatibility/session-format.md
+  git commit -m "fix(session): the compaction behaviour is the target's"
+  ```
+
+---
+
+### CC-024 — The target's sandbox routing
+
+**Why this task exists.** `F-37` is `unknown`: the target's routing is unobserved, and
+`dangerouslyDisableSandbox` is **this implementation's** flag, not the target's. The
+audit records the `sandboxOverride` reason kind; the routing rule itself was never read.
+
+**Files:** Modify `src/tools/builtins/bash.ts`; Modify `src/permissions/decision.ts`;
+Modify `tests/security/bash-sandbox.test.ts`; Modify `docs/compatibility/sandbox-surface.md`.
+
+- [ ] **Step 1: Read the target's routing from the source** — how the target decides to
+  run a command outside the sandbox, and what it reports. Record it.
+- [ ] **Step 2: Write the failing test** — the target's routing is reproduced, and the
+  flag that is **this implementation's own** is labelled as such.
+- [ ] **Step 3: Implement** what the reading established.
+- [ ] **Step 4: Update the conformance document** — `F-37` moves from `unknown` to
+  `match` or `partial`.
+- [ ] **Step 5: Commit.**
+  ```bash
+  git add src/tools src/permissions tests/security docs/compatibility/sandbox-surface.md
+  git commit -m "fix(tools): the sandbox routing is the target's"
+  ```
+
+---
+
+### CC-025 — The eight measured divergences, closed
+
+**Why this task exists.** The report measures **eight** rows as `mismatch`: a difference
+of any kind from the target's **observed** behaviour. A true clone has none of them. Each
+one is a specific, bounded change, and each is already traced to the target's own text.
+
+| Row | The divergence | The change |
+|---|---|---|
+| `F-07` | the "not served" test is an **absent key**, a superset of the target's `provider_ids[route] === null` | use the target's predicate, so an omitted key is **not** "not served" |
+| `F-18` | the tool-result envelope names its members `permissionDecision {decision, source, reasonType}` and `nonExecutionKind` | the target's names: `id`, `non_execution_kind`, `user_feedback`, `remedy`, `permission_decision {decision, source, reason_type}` |
+| `F-21` | a **seventh** reason kind, `noRuleMatch`, that the target does not have | remove it, and report the target's six |
+| `F-24` | the target's `transcriptSource` marker (`ccr-api` or `local-jsonl`) is not produced | produce it |
+| `F-25` | a live background candidate is **reported** and the lookup continues with nothing | **drop** it and carry on with the next candidate, as the target does; report only the continued-in case |
+| `F-34` | no native sandbox helper | implement the helper the target has, from the audit's §2.9 |
+| `F-35` | no seccomp-notify listener | implement the listener, from the audit's §2.9 |
+| `F-38` | the boolean-flag set is **pure**; the target's booleans consume the next token when it does not look like a flag | consume it, as the target does |
+
+**Files:** the modules each row names; the tests that pin them; the conformance documents.
+
+- [ ] **Step 1: Write the failing test** for each of the eight, in the owning task's suite.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL for each.
+- [ ] **Step 3: Implement** each change, one at a time, in the order the table gives.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS for each.
+- [ ] **Step 5: Update the conformance documents and the report** — each row becomes a
+  `match`, and the harness measures the new behaviour.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "fix: the eight measured divergences, closed"
+  ```
+
+**Note.** A row whose change would break a **different** observed row is a real conflict
+and is named in the report rather than forced. The whole point of the report is that it
+says what is true.
+
+---
+
+### CC-026 — The twelve partial rows compare the whole contract
+
+**Why this task exists.** Twelve rows are `partial` because the row's contract names
+behaviours the probe does not compare. The implementation is not in question for most of
+them — the **measurement** is. A true clone's report must compare the contract it claims.
+
+The rows and what each probe leaves uncompared are named in the report's own `partial`
+table: `F-01` (the flag surface), `F-02` (the documents a run writes), `F-13` (the 401
+cache invalidation and `x-should-retry`), `F-14` (the 204, binary, `content-length` and
+`text()` branches and the non-enumerable members), `F-16` (the turn request and the
+continuation), `F-20` (the ask-versus-allow precedence), `F-23` (the malformed-deny
+classification, the in-flight de-duplication and the trust and folder validation), `F-31`
+(the batched state list), `F-32` (the `mcp_tool` hook type and the per-model severity
+thresholds), and the three project-requirement rows, which have no target behaviour to
+compare at all.
+
+**Files:** `tests/compatibility/scenarios.ts`; the conformance documents the rows name.
+
+- [ ] **Step 1: Extend each probe** so it compares the whole contract its row names.
+- [ ] **Step 2: Run it** — a row whose implementation is right becomes a `match`; a row
+  whose implementation differs becomes a `mismatch`, and the report says so.
+- [ ] **Step 3: Update the report** — the generator writes the new outcomes and the new
+  cells.
+- [ ] **Step 4: Commit.**
+  ```bash
+  git add tests/compatibility docs/compatibility
+  git commit -m "test(compat): the partial rows compare the whole contract"
+  ```
+
 ### CC-020 — The divergence layer: PRRICODE as a product of its own
 
 **Why this task exists.** PRRICODE is built in two layers. The **first** is the parity
