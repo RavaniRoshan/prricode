@@ -659,34 +659,30 @@ The exit gate requires an evidence-backed coverage audit of CLI/configuration, p
 
 | Group | Gate state |
 |---|---|
-| CLI/configuration | **partial** — tiers, both precedence orderings, block granularity, tier degradation and suppression, and scope isolation are observed; the ordinary per-key merge is still an underived implementation choice |
+| CLI/configuration | **met** — tiers, both precedence orderings, block granularity, tier degradation and suppression, scope isolation, and the **per-top-level-key merge** with its per-key value rule are all observed |
 | Providers and model catalogs | **met** |
 | Provider request/response construction | **met** — request construction and response parsing both established |
-| Agent loop and tool dispatch | **partial** — turn request and result shaping met; scheduling partial |
+| Agent loop and tool dispatch | **met** — turn request and result shaping, and the **scheduling** of the tool calls of one message, are established |
 | Permissions | **met** (rule precedence detail is a refinement, not a gap) |
 | Sessions/resumption | **met** — `--resume` selection (id or exact title, ambiguity error, attach-versus-replay, resume-at-a-message with its drop guard, the structured resumed state) and `--continue` (newest session, the background-running report, the two distinct failure messages) |
 | MCP/plugins/hooks/extensions | **partial** — control surface and transport met; lifecycles partial |
 | Native/platform sandbox | **met** — helper structure, the 27-record table, its argument-index metadata encoding, the path resolution, and the supervisor's observe-not-deny behavior are all established |
 
-**Decision: the REA exit gate is NOT met, but the remaining gaps are now narrow and named.** Four groups are partial, and each one's gap is a specific, bounded artifact:
+**Decision: the REA exit gate is NOT met, but the remaining gaps are now narrow and named.** Two groups are partial, and each one's gap is a specific, bounded artifact:
 
 | Group | What is still open | Why it is bounded |
 |---|---|---|
-| CLI/configuration | the **ordinary** per-key merge across tiers | The target's own per-key merge is not derived; this implementation makes a labelled choice. This is a *implementation design* gap, not an evidence gap. |
-| Agent loop and tool dispatch | the **scheduling order** of concurrent tool calls and the point at which the next model request is issued | Every call in these functions is a **member call** (`this.x(...)`), which REA does not resolve into a `calls` relation. Closing it needs source reading in the 5 MB bundle, not a better tool. |
 | Sessions/resumption | the store-level *ordering* rule inside the session lookup (which candidates are skipped) | The lookup lives in a module outside the retained scope. The observable `--continue` and `--resume` behavior is established, so the residual item does not block this implementation's own session semantics. |odes; the region holding the resume algorithm may or may not be inside it. |
 | MCP/plugins/hooks/extensions | the **subagent definition lifecycle** and the **standalone (non-plugin) skill directory scan** | The MCP client lifecycle, the hook-result merge rules, the skill override resolution, the plugin manifest schema, the command discovery rules, the marketplace install flow, the skill-save protocol and the extension-point registry were all established after the table above was first written (§2.8). What remains is the two items §2.8's closing sentence names: the subagent definition lifecycle and the standalone skill scan. Their names and storage are observed; their behavior is not. |
 
-Two groups closed this phase that were previously open: **provider request/response construction** (the default `parseResponse` and the extended SSE event vocabulary) and **native/platform sandbox** (the 27-record table's metadata decoding and the supervisor's observe-not-deny behavior).
+Six groups closed over the phase. Two closed by source reading late in it: **CLI/configuration** (the per-top-level-key merge and its per-key value rule) and **agent loop and tool dispatch** (the scheduling of the tool calls of one message). The other four closed earlier: **provider request/response construction** (the default `parseResponse` and the extended SSE event vocabulary), **native/platform sandbox** (the 27-record table's metadata decoding and the supervisor's observe-not-deny behavior), **sessions/resumption** (the selection rules) and **permissions**.
 
-**The implementation is not blocked.** The three evidence gaps above were each resolved into a **bounded, named residual** that this implementation reproduces with a labelled choice, and the implementation proceeded on that basis. The residuals are carried in the compatibility matrix and measured in `docs/compatibility/results.md`; none of them is a claim that the target does something this implementation has not established.
+**The implementation is not blocked.** The two evidence gaps above were each resolved into a **bounded, named residual** that this implementation reproduces with a labelled choice, and the implementation proceeded on that basis. The residuals are carried in the compatibility matrix and measured in `docs/compatibility/results.md`; none of them is a claim that the target does something this implementation has not established.
 
 The gate's own words were that every group must be `observed` "or an accepted partial with a named artifact and a implementation-visible consequence recorded in the audit". Each of the four partial groups now names that artifact and consequence:
 
 | Group | The residual | The implementation-visible consequence |
 |---|---|---|
-| CLI/configuration | the ordinary **per-key** merge across tiers | this implementation merges per leaf, which is **labelled a divergence** from the audit's per-key order (`docs/compatibility/settings-precedence.md`) |
-| Agent loop and tool dispatch | the **scheduling order** of concurrent tool calls | this implementation runs them **sequentially, in message order** — a labelled implementation choice, because the target's concurrent order was not traced (`docs/compatibility/feature-matrix.md`, row `F-17`) |
 | Sessions/resumption | the store-level ordering rule inside the session lookup | this implementation selects the **newest** session and says so when it is already running — a labelled implementation choice (`docs/compatibility/session-format.md`) |
 | MCP/plugins/hooks/extensions | the subagent definition lifecycle and the standalone skill scan | both are **entirely this implementation's**, and are labelled as such in the source and in `docs/compatibility/extension-surface.md` |
 
