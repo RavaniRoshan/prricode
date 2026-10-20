@@ -64,4 +64,25 @@ describe('the ledger and the plan', () => {
     });
     expect(twice).toEqual([]);
   });
+
+  it('never merges two rows into one line', () => {
+    // A row that was rewritten without its newline joins the **next** row to
+    // it. The milestone is then invisible to a line-anchored reader, and the
+    // report quietly loses a milestone. This is the failure this file exists
+    // to catch, so it is checked in the shape it actually takes.
+    const ledger = read('docs/PROGRESS.md');
+    const merged = ledger
+      .split('\n')
+      .filter((line) => (line.match(/\| `CC-[0-9a-z]+`/g) ?? []).length > 1);
+    expect(merged).toEqual([]);
+  });
+
+  it('gives every row the same number of cells', () => {
+    // A table row is `| a | b | c |` — three cells. A row that lost or gained
+    // a separator would read as a row but would not be one.
+    const ledger = read('docs/PROGRESS.md');
+    const rows = ledger.split('\n').filter((line) => line.startsWith('| `CC-'));
+    const malformed = rows.filter((row) => (row.match(/\|/g) ?? []).length !== 4);
+    expect(malformed).toEqual([]);
+  });
 });
