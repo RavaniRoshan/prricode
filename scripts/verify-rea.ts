@@ -329,6 +329,32 @@ function deriveFlagSets(files: readonly string[]): Map<string, string[]> {
   return sets;
 }
 
+/**
+ * The hook-event matrix: the target's own list of the events a hook may
+ * answer to.
+ *
+ * The list is identified by its **shape** — every member is an event-shaped
+ * name — and by the two events that anchor it, `PreToolUse` and
+ * `PostToolBatch`. The largest such collection is taken, so a stray
+ * three-member list cannot be mistaken for it.
+ */
+function deriveHookEvents(files: readonly string[]): Set<string> {
+  const HOOK_SHAPED = /^[A-Z][A-Za-z]{2,24}$/;
+  let best: string[] = [];
+  for (const file of files) {
+    if (!file.endsWith('chunk-c9s0jh80.js')) continue;
+    const text = readFileSync(file, 'utf8');
+    for (const collection of collectionsIn(text, 10)) {
+      const members = collection.members;
+      if (members.length < 20) continue;
+      if (!members.every((member) => HOOK_SHAPED.test(member))) continue;
+      if (!members.includes('PreToolUse') || !members.includes('PostToolBatch')) continue;
+      if (members.length > best.length) best = members;
+    }
+  }
+  return new Set(best);
+}
+
 /** The inventory the record carries, parsed out of the markdown. */
 function recordedEntries(markdown: string, heading: string): Set<string> {
   const entries = new Set<string>();
@@ -361,6 +387,7 @@ function main(): number {
   const environment = deriveEnvironment(files);
   const settings = deriveSettings(files);
   const flagSets = deriveFlagSets(files);
+  const hookEvents = deriveHookEvents(files);
 
   if (process.argv.includes('--write')) {
     // The record is **generated from the derivation**, so it cannot drift from
@@ -385,6 +412,11 @@ function main(): number {
         heading: 'The settings document',
         note: 'Every key the target\'s settings document accepts, re-derived from the target\'s own settings factory.',
         entries: [...settings].sort(),
+      },
+      {
+        heading: 'The hook event matrix',
+        note: 'Every event a hook may answer to, re-derived from the target\'s own list.',
+        entries: [...hookEvents].sort(),
       },
       ...[...flagSets].map(([heading, members]) => ({
         heading,
@@ -495,6 +527,7 @@ function main(): number {
   for (const [heading, members] of flagSets) {
     compare(heading, new Set(members), heading);
   }
+  compare('the hook event matrix', hookEvents, 'The hook event matrix');
 
   let failed = 0;
   for (const check of checks) {

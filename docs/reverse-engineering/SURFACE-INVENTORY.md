@@ -4666,6 +4666,46 @@ Every key the target's settings document accepts, re-derived from the target's o
 | `worktree` |
 | `wslInheritsWindowsSettings` |
 
+## The hook event matrix
+
+Every event a hook may answer to, re-derived from the target's own list.
+
+| name |
+|---|
+| `ConfigChange` |
+| `CwdChanged` |
+| `DirectoryAdded` |
+| `Elicitation` |
+| `ElicitationResult` |
+| `FileChanged` |
+| `InstructionsLoaded` |
+| `MessageDisplay` |
+| `Notification` |
+| `PermissionDenied` |
+| `PermissionRequest` |
+| `PostCompact` |
+| `PostModelSwitch` |
+| `PostToolBatch` |
+| `PostToolUse` |
+| `PostToolUseFailure` |
+| `PreCompact` |
+| `PreModelSwitch` |
+| `PreToolUse` |
+| `SessionEnd` |
+| `SessionStart` |
+| `Setup` |
+| `Stop` |
+| `StopFailure` |
+| `SubagentStart` |
+| `SubagentStop` |
+| `TaskCompleted` |
+| `TaskCreated` |
+| `TeammateIdle` |
+| `UserPromptExpansion` |
+| `UserPromptSubmit` |
+| `WorktreeCreate` |
+| `WorktreeRemove` |
+
 ## The value-taking flags
 
 Re-derived from the target's own parser, and told apart by the target's own relationships.

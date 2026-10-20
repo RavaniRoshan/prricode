@@ -54,7 +54,7 @@
 | F-28 | Extensions | MCP control-request surface | observed | REA observed | 23 handled subtypes in `chunk-0j25qbd0.js`; MCP callback absence error text |  implemented | CC-011 | `tests/contracts/mcp-control.test.ts` |
 | F-29 | Extensions | Directional control-request policy | observed | REA observed | rejection table in `chunk-081t8575.js` |  implemented | CC-011 | `tests/contracts/mcp-control.test.ts` |
 | F-30 | Extensions | MCP transport and batching | observed | REA observed | stdio spawn with `shell: false`; `MCP_SERVER_CONNECTION_BATCH_SIZE` 3, `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` 20; `initialize`/`tools/list`/`tools/call` |  implemented | CC-011 | `tests/contracts/mcp-manager.test.ts` |
-| F-31 | Extensions | MCP server lifecycle | partial | REA observed | the client lifecycle is observed — the connect, the identity-epoch eviction, the negotiation, the capabilities, the calling, the auth-failure classification, the timeouts, the teardown and the reconnect; what this row's probe does not compare is the batched state list, which is this implementation's own shape |  implemented | CC-011 | `tests/contracts/mcp-manager.test.ts` |
+| F-31 | Extensions | MCP server lifecycle | observed | REA observed | the client lifecycle is observed and **compared element by element**: the negotiation point, the connect, the legacy fallback and its opt-out, the capabilities fetched separately, the listing hydration and the discover prior, the calling, the URL-elicitation retry, the auth-failure classification, the error body, the four timeouts and how they are resolved, which deadline governs, the memo, the explicit drop, the identity-epoch eviction, the stale failed memo, the state of a connection, the teardown and the reconnect. The **batched state list** is this implementation's own shape — the target has no such thing — and the row's detail says so |  implemented | CC-011 | `tests/contracts/mcp-manager.test.ts` |
 | F-32 | Extensions | Hook event matrix and handler contract | observed | REA observed | 30+ events with per-event execution classification; decision-capable subset; `mcp_tool` hook type; per-model severity thresholds |  implemented | CC-012 | `tests/contracts/hooks.test.ts` |
 | F-33 | Extensions | Skills, subagents, plugins, marketplaces, IDE | observed | REA observed | the standalone skill scan, the subagent definition lifecycle and the **tool inventory** are observed: a single depth-1 readdir for the fixed file name `SKILL.md`, a million-byte limit, the reserved names, a subagent definition whose name comes from its frontmatter, and the target's tool registry — **88 names**, its alias table (`Task`→`Agent`, `KillShell`/`KillBash`→`TaskStop`, `ListPeers`→`ListAgents`, `Brief`→`SendUserMessage`, and the MCP resource tools) — of which this implementation now carries **46** |  implemented | CC-013 | `tests/contracts/extensions.test.ts` |
 | F-34 | Platform | Native sandbox helper | observed | REA observed | `ev_03f243709e8d7a715417e1b5423040b0699e83e080e8a3e34d2bab35c52b75b0` — 29 named callees, namespaces, mounts, `prctl`, seccomp filter and listener, `execvp` |  implemented | CC-017 | `tests/security/sandbox.test.ts` |
@@ -69,8 +69,7 @@
 
 | Status | Count |
 |---|---|
-| observed | 36 |
-| partial | 1 |
+| observed | 37 |
 | unknown | 2 |
 | project requirement | 1 |
 

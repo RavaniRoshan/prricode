@@ -815,8 +815,15 @@ is produced by `scripts/verify-rea.ts --write` from the target's own source, and
 `scripts/verify-rea.ts` re-derives it and **fails** when the target has an entry the
 record does not name. It currently re-derives the **tool registry** (88 names), the
 **telemetry vocabulary** (3 084 events), the **environment-variable surface** (1 273
-names), the **settings document** (183 keys) and the **command-line flag vocabulary**
-(150 flags), and all five are fully accounted for.
+names), the **settings document** (183 keys), the **hook event matrix** (33 events) and
+the **command-line flag vocabulary** — in its **seven** sets: 85 value-taking, 45 boolean,
+14 optional-value, 11 repeatable, 10 command tokens, 6 session subcommands and 3 carve-out
+flags — and all of them are fully accounted for.
+
+The hook-event list is the fourth surface re-derived **after** its implementation was
+written, and it matched **exactly**: the same 33 events, with the target's own
+relationships holding — the decision-capable subset inside the set, and the two display
+handlers outside it.
 
 The **settings document** and the **flag vocabulary** were re-derived after the
 implementations had already been written, and each derivation matched the implementation
