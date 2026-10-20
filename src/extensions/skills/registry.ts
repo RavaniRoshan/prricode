@@ -68,6 +68,25 @@
  * declared, and the other providers are reported in `collidesWith` rather
  * than dropped silently.
  *
+ * ## The two situations a collision can be
+ *
+ * A collision is one of two things, and the resolved record tells them apart:
+ *
+ *   - **a conflict** — two *different* providers ship the name. The field
+ *     names the **other** provider, never the winner's own: the `provider`
+ *     field says who won, and `collidesWith` says who disagreed.
+ *   - **a duplication** — *one* provider ships the name twice (a plugin with
+ *     two `skills` directories that hold the same skill, say). That is a
+ *     packaging bug rather than a disagreement between two providers, so the
+ *     field names **no provider**: it is present and empty.
+ *
+ * A name that did not collide carries no field at all, so the record itself
+ * says which of the three situations it is in.
+ *
+ * A candidate that merely **lost the precedence order** — a plugin's skill
+ * against a project skill — is not a collision at all, and the field says
+ * nothing: only the losers that share the **winner's source** are considered.
+ *
  * ## The cost of a lookup (a implementation choice)
  *
  * The registry is **re-scanned** every time it is asked for its skills, so a
@@ -177,6 +196,12 @@ export interface Skill {
    * A name two **contributed** skills provide is a collision: the winner is
    * the first one declared, and the losers are reported here rather than
    * dropped silently.
+   *
+   * The field names the **other** provider — never the winner's own — so a
+   * conflict between two providers is told apart from **one** provider that
+   * ships the name twice, which is a packaging bug rather than a conflict and
+   * leaves the field present and empty. The field is absent when the name did
+   * not collide at all.
    */
   collidesWith?: string[];
 }
@@ -431,11 +456,22 @@ export function createSkillRegistry(options: SkillRegistryOptions = {}): SkillRe
 
       // A name two **contributed** skills provide is a collision: the losers
       // are reported rather than dropped silently.
-      const collidesWith = sorted
-        .slice(1)
-        .filter((candidate) => candidate.source === winner.source)
+      //
+      // The **same-source filter** is load-bearing: a candidate that merely
+      // lost the precedence order — a plugin's skill against a project skill —
+      // is not a collision, so only the losers that share the winner's source
+      // are considered.
+      const losers = sorted.slice(1).filter((candidate) => candidate.source === winner.source);
+
+      // The **other** providers, never the winner's own: one provider that
+      // ships the name twice is a packaging bug rather than a conflict
+      // between two providers, so the field names no provider there.
+      const collidesWith = losers
         .map((candidate) => candidate.provider ?? candidate.path)
-        .filter((provider, index, all) => all.indexOf(provider) === index);
+        .filter((who) => who !== winner.provider)
+        // The dedupe: a provider is named once, however many paths it shipped
+        // the name under.
+        .filter((who, index, all) => all.indexOf(who) === index);
 
       const mode =
         resolveSkillOverrideMode(name, {
@@ -452,7 +488,10 @@ export function createSkillRegistry(options: SkillRegistryOptions = {}): SkillRe
         ...(winner.description === undefined ? {} : { description: winner.description }),
         ...(winner.problem === undefined ? {} : { problem: winner.problem }),
         ...(winner.provider === undefined ? {} : { provider: winner.provider }),
-        ...(collidesWith.length === 0 ? {} : { collidesWith }),
+        // The field is present whenever the name collided — it is empty when
+        // the collision is the winner's own duplication — and absent when
+        // there was no collision at all.
+        ...(losers.length === 0 ? {} : { collidesWith }),
       });
     }
 

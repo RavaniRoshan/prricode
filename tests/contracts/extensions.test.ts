@@ -37,6 +37,16 @@
  *     subagent name: they are reported, not dropped silently — and **one**
  *     plugin that provides a name twice is reported as that, not as two
  *     plugins colliding;
+ *   - the **collision semantics of a contributed name**: a conflict between
+ *     two providers names the **other** provider in `collidesWith` and never
+ *     the winner's own, a duplication by one provider names **no** provider,
+ *     a provider that merely lost the precedence order is not a collision at
+ *     all, a provider is named once however many paths it shipped the name
+ *     under, and the `apply()` path reports the duplication and contributes
+ *     the name **once**;
+ *   - a declared path that **does not exist** is reported — in the log and in
+ *     the manifest's own problems — for every key, rather than dropped
+ *     silently;
  *   - the **discovery precedence** — `project > local > user > plugin > mcp`;
  *   - the **byte caps** on the skill and subagent definition files;
  *   - the IDE bridge's **action** validation: an action is a single path
@@ -1308,6 +1318,298 @@ describe('the plugin collision report', () => {
     expect(warning?.message).toContain('planner');
     expect(warning?.message).not.toContain('Two plugins');
     expect(warning?.message).not.toContain('demo, demo');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The collision semantics of a contributed name
+// ---------------------------------------------------------------------------
+
+describe('the collision semantics of a contributed name', () => {
+  /** A plugin root that declares two skills directories. */
+  function pluginWithTwoSkillDirectories(): string {
+    const root = tempDir();
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'demo', skills: ['skills', 'more-skills'] }),
+    );
+    writeFile(path.join(root, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeSkill(path.join(root, 'skills'), 'shared');
+    writeSkill(path.join(root, 'more-skills'), 'shared');
+    return root;
+  }
+
+  /** A plugin root that declares two agents directories. */
+  function pluginWithTwoAgentDirectories(): string {
+    const root = tempDir();
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'demo', agents: ['agents', 'more-agents'] }),
+    );
+    writeFile(path.join(root, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeFile(path.join(root, 'agents', 'planner.md'), '---\ndescription: P.\n---\n\nBody.\n');
+    writeFile(
+      path.join(root, 'more-agents', 'planner.md'),
+      '---\ndescription: P.\n---\n\nBody.\n',
+    );
+    return root;
+  }
+
+  it('reports a plugin that provides the same skill name twice, with both paths, and names no provider', () => {
+    const root = pluginWithTwoSkillDirectories();
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    const skills = manager.skills();
+    expect(skills.map((skill) => skill.provider)).toEqual(['demo', 'demo']);
+
+    // The report names the plugin and the **two paths** it shipped the name
+    // under — the situation is a packaging bug, not a conflict.
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('demo');
+    expect(warning?.message).toContain('shared');
+    expect(warning?.message).toContain(path.join(root, 'skills', 'shared', 'SKILL.md'));
+    expect(warning?.message).toContain(path.join(root, 'more-skills', 'shared', 'SKILL.md'));
+    expect(warning?.message).not.toContain('Two plugins');
+
+    // The resolved record names **no** provider: the winner's own provider is
+    // never beside itself, so a conflict and a duplication are told apart.
+    const registry = createSkillRegistry({ contributions: skills });
+    const skill = registry.resolve('shared');
+    expect(skill?.provider).toBe('demo');
+    expect(skill?.collidesWith).toEqual([]);
+  });
+
+  it('reports a plugin that provides the same subagent name twice, with both paths, and names no provider', () => {
+    const root = pluginWithTwoAgentDirectories();
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    const agents = manager.agents();
+    expect(agents.map((agent) => agent.provider)).toEqual(['demo', 'demo']);
+
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('demo');
+    expect(warning?.message).toContain('planner');
+    expect(warning?.message).toContain(path.join(root, 'agents', 'planner.md'));
+    expect(warning?.message).toContain(path.join(root, 'more-agents', 'planner.md'));
+    expect(warning?.message).not.toContain('Two plugins');
+
+    const registry = createSubagentRegistry({ contributions: agents });
+    const definition = registry.resolve('planner');
+    expect(definition?.provider).toBe('demo');
+    expect(definition?.collidesWith).toEqual([]);
+  });
+
+  it('reports a conflict between two plugins with both providers, and names the other one in the field', () => {
+    const first = tempDir();
+    const second = tempDir();
+
+    writeFile(
+      path.join(first, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'first', skills: 'skills' }),
+    );
+    writeFile(path.join(first, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeSkill(path.join(first, 'skills'), 'shared');
+
+    writeFile(
+      path.join(second, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'second', skills: 'skills' }),
+    );
+    writeFile(path.join(second, 'SKILL.md'), '---\ndescription: B.\n---\n\nBody.\n');
+    writeSkill(path.join(second, 'skills'), 'shared');
+
+    const manager = createPluginManager();
+    manager.load(first);
+    manager.load(second);
+
+    const skills = manager.skills();
+
+    // The report names **both** providers: the two plugins disagree.
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('Two plugins');
+    expect(warning?.message).toContain('first');
+    expect(warning?.message).toContain('second');
+
+    // The field names the **other** provider, and never the winner's own.
+    const registry = createSkillRegistry({ contributions: skills });
+    const skill = registry.resolve('shared');
+    expect(skill?.provider).toBe('first');
+    expect(skill?.collidesWith).toEqual(['second']);
+    expect(skill?.collidesWith).not.toContain('first');
+  });
+
+  it('reports a duplication and a conflict separately, when one plugin duplicates a name another plugin ships', () => {
+    const first = tempDir();
+    const second = tempDir();
+
+    // `first` ships the name twice …
+    writeFile(
+      path.join(first, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'demo', skills: ['skills', 'more-skills'] }),
+    );
+    writeFile(path.join(first, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeSkill(path.join(first, 'skills'), 'shared');
+    writeSkill(path.join(first, 'more-skills'), 'shared');
+
+    // … and `second` ships it once.
+    writeFile(
+      path.join(second, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'second', skills: 'skills' }),
+    );
+    writeFile(path.join(second, 'SKILL.md'), '---\ndescription: B.\n---\n\nBody.\n');
+    writeSkill(path.join(second, 'skills'), 'shared');
+
+    const manager = createPluginManager();
+    manager.load(first);
+    manager.load(second);
+
+    const skills = manager.skills();
+    expect(skills.map((skill) => skill.provider)).toEqual(['demo', 'demo', 'second']);
+
+    const warnings = manager.logs().filter((log) => log.level === 'warn');
+
+    // The duplication is reported with its two paths …
+    const duplication = warnings.find((log) => log.message.includes('more than once'));
+    expect(duplication?.message).toContain('demo');
+    expect(duplication?.message).toContain(path.join(first, 'skills', 'shared', 'SKILL.md'));
+    expect(duplication?.message).toContain(path.join(first, 'more-skills', 'shared', 'SKILL.md'));
+
+    // … and the conflict names both providers, each of them once.
+    const conflict = warnings.find((log) => log.message.includes('Two plugins'));
+    expect(conflict?.message).toContain('demo');
+    expect(conflict?.message).toContain('second');
+    expect(conflict?.message).not.toContain('demo, demo');
+
+    // The field names the **other** provider only.
+    const registry = createSkillRegistry({ contributions: skills });
+    const skill = registry.resolve('shared');
+    expect(skill?.provider).toBe('demo');
+    expect(skill?.collidesWith).toEqual(['second']);
+  });
+
+  it('does not report a provider that merely lost the precedence order as a collision', () => {
+    const root = tempDir();
+    writeSkill(root, 'shared');
+
+    const registry = createSkillRegistry({
+      roots: [{ path: root, source: 'project' }],
+      contributions: [
+        {
+          name: 'shared',
+          source: 'plugin',
+          path: '/plugins/demo/skills/shared/SKILL.md',
+          provider: 'demo',
+        },
+      ],
+    });
+
+    // The project skill wins on precedence; the plugin's skill merely lost
+    // the order, which is not a collision.
+    const skill = registry.resolve('shared');
+    expect(skill?.source).toBe('project');
+    expect(skill?.collidesWith).toBeUndefined();
+  });
+
+  it('names a provider once, however many paths it shipped the name under', () => {
+    const first = tempDir();
+    const second = tempDir();
+
+    writeFile(
+      path.join(first, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'first', skills: 'skills' }),
+    );
+    writeFile(path.join(first, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeSkill(path.join(first, 'skills'), 'shared');
+
+    writeFile(
+      path.join(second, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'second', skills: ['skills', 'more-skills'] }),
+    );
+    writeFile(path.join(second, 'SKILL.md'), '---\ndescription: B.\n---\n\nBody.\n');
+    writeSkill(path.join(second, 'skills'), 'shared');
+    writeSkill(path.join(second, 'more-skills'), 'shared');
+
+    const manager = createPluginManager();
+    manager.load(first);
+    manager.load(second);
+
+    const skills = manager.skills();
+    expect(skills.map((skill) => skill.provider)).toEqual(['first', 'second', 'second']);
+
+    // The provider that shipped the name twice is named **once**.
+    const registry = createSkillRegistry({ contributions: skills });
+    const skill = registry.resolve('shared');
+    expect(skill?.provider).toBe('first');
+    expect(skill?.collidesWith).toEqual(['second']);
+  });
+
+  it('reports the duplication and contributes the name once on the apply() path', () => {
+    const root = pluginWithTwoSkillDirectories();
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    const applied = manager.apply('demo');
+
+    // The plugin contributes the name **once** — the first path wins.
+    expect(applied.skills.map((skill) => skill.name)).toEqual(['shared']);
+    expect(applied.skills[0]?.path).toBe(path.join(root, 'skills', 'shared', 'SKILL.md'));
+
+    // … and the duplication is reported on this path too.
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('demo');
+    expect(warning?.message).toContain('shared');
+    expect(warning?.message).toContain(path.join(root, 'skills', 'shared', 'SKILL.md'));
+    expect(warning?.message).toContain(path.join(root, 'more-skills', 'shared', 'SKILL.md'));
+  });
+
+  it('reports the duplication and contributes the name once on the apply() path for a subagent', () => {
+    const root = pluginWithTwoAgentDirectories();
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    const applied = manager.apply('demo');
+
+    expect(applied.agents.map((agent) => agent.name)).toEqual(['planner']);
+    expect(applied.agents[0]?.path).toBe(path.join(root, 'agents', 'planner.md'));
+
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('demo');
+    expect(warning?.message).toContain('planner');
+    expect(warning?.message).toContain(path.join(root, 'agents', 'planner.md'));
+    expect(warning?.message).toContain(path.join(root, 'more-agents', 'planner.md'));
+  });
+
+  it('reports a declared path that does not exist, in the log and in the manifest problems', () => {
+    const root = tempDir();
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'demo', skills: 'missing-skills', agents: 'missing-agents' }),
+    );
+    writeFile(path.join(root, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+
+    const manager = createPluginManager();
+    const plugin = manager.load(root);
+
+    // The log names the paths that are not there — a missing path is never
+    // dropped silently.
+    const warnings = manager.logs().filter((log) => log.level === 'warn');
+    expect(warnings.some((log) => log.message.includes('missing-skills'))).toBe(true);
+    expect(warnings.some((log) => log.message.includes('missing-agents'))).toBe(true);
+    expect(warnings.every((log) => log.message.includes('does not exist'))).toBe(true);
+
+    // … and the manifest record is self-describing.
+    const problems = plugin.manifest?.problems ?? [];
+    expect(problems.some((entry) => entry.includes('missing-skills'))).toBe(true);
+    expect(problems.some((entry) => entry.includes('missing-agents'))).toBe(true);
+
+    // The path is kept, so a plugin that ships its content later still works.
+    expect(plugin.manifest?.directories['skills']).toEqual(['missing-skills']);
+    expect(plugin.manifest?.directories['agents']).toEqual(['missing-agents']);
   });
 });
 

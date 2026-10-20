@@ -31,6 +31,15 @@
  *     record holds, and again when a command, a skill or an agent is read.
  *     A refused path is **reported twice**: as a problem on the manifest the
  *     record holds — so the record is self-describing — and as a log record.
+ *   - A declared path that **does not exist** is **reported** the same way
+ *     for every key: a log record and a problem on the manifest the record
+ *     holds. The path itself is **kept** — a plugin may ship its content
+ *     after it is loaded — but it is never dropped **silently**: before this,
+ *     a declared `skills` or `agents` path that was not there was dropped
+ *     without a word, while the `commands` key reported *"it does not
+ *     exist"*. The `commands` key is reported **twice** now: once here, at
+ *     load time, and once by the command discovery, which names the resolved
+ *     path at the point the commands are read.
  *   - A **collision** between two plugins that provide a skill — or a
  *     subagent — under the same name is **reported**, not dropped silently:
  *     the manager logs a warning naming the providers, and the resolved
@@ -38,6 +47,19 @@
  *     **un-namespaced**: a plugin's skill is named after the skill directory
  *     inside the plugin's own skills directory (and a plugin's subagent after
  *     its file's basename), and the plugin's name does not become a prefix.
+ *
+ *     A collision is one of **two** situations, and the report says which:
+ *     two **different** plugins providing the name is a **conflict** between
+ *     them, while **one** plugin providing it twice — two `skills`
+ *     directories in one plugin, say — is a **packaging bug**, and it is
+ *     reported with the two paths rather than as a conflict. The resolved
+ *     record's `collidesWith` names the **other** provider, never the
+ *     winner's own, and is empty for the packaging bug.
+ *
+ *     The `apply()` path reports the collision too, and a plugin that
+ *     provides a name twice contributes it **once**: the first path wins,
+ *     exactly as the registry's precedence picks the first declared
+ *     contribution.
  *
  *     The justification is this implementation's **no-silent-drop** rule: nothing the
  *     extension surface resolves is dropped without a report — a malformed
@@ -120,9 +142,19 @@ export interface PluginApplication {
   plugin: string;
   /** The commands the plugin contributes. */
   commands: readonly PluginCommand[];
-  /** The skills the plugin contributes. */
+  /**
+   * The skills the plugin contributes.
+   *
+   * A plugin that provides the same skill name twice contributes it **once**
+   * — the first path wins — and the duplication is reported.
+   */
   skills: readonly SkillContribution[];
-  /** The subagents the plugin contributes. */
+  /**
+   * The subagents the plugin contributes.
+   *
+   * A plugin that provides the same subagent name twice contributes it
+   * **once** — the first path wins — and the duplication is reported.
+   */
   agents: readonly SubagentContribution[];
 }
 
@@ -142,7 +174,13 @@ export interface PluginManager {
   skills(): SkillContribution[];
   /** The subagents the plugins contribute. */
   agents(): SubagentContribution[];
-  /** Everything a plugin contributes. */
+  /**
+   * Everything a plugin contributes.
+   *
+   * A name the plugin provides twice is reported — the duplication is a
+   * packaging bug, not a conflict between two providers — and the plugin
+   * contributes it **once**: the first path wins.
+   */
   apply(plugin: string): PluginApplication;
   /** Install a plugin from a marketplace. */
   installFromMarketplace(request: PluginInstallRequest): Promise<PluginInstallResult>;
@@ -171,6 +209,25 @@ function isDirectory(candidatePath: string): boolean {
 }
 
 /**
+ * The first contribution of each name, in declaration order.
+ *
+ * A name is caller-supplied data — it is a directory name in a plugin — so
+ * the names are kept in a `Set` rather than in a plain object, and the
+ * **first** contribution of a name wins: the same precedence the registries
+ * resolve a contributed name with.
+ */
+function firstByName<T extends { name: string }>(contributions: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+  for (const contribution of contributions) {
+    if (seen.has(contribution.name)) continue;
+    seen.add(contribution.name);
+    kept.push(contribution);
+  }
+  return kept;
+}
+
+/**
  * Find the manifest a plugin presents.
  *
  * The candidates are tried in order; the first that exists is the manifest.
@@ -194,6 +251,12 @@ export function findPluginManifest(root: string): string | undefined {
  * as a **problem** on the manifest the record holds, so the record is
  * self-describing, and as a **warning** the manager logs.
  *
+ * A path that **does not exist** is not refused — the path is kept, because a
+ * plugin may ship its content after it is loaded — but it is **reported** the
+ * same way: a **problem** on the manifest and a **warning** the manager
+ * logs. Every declared path is checked the same way, whatever its key, so a
+ * missing `skills` or `agents` directory is never dropped silently.
+ *
  * Implementation choice — see the file header.
  */
 export function containPluginPaths(
@@ -216,6 +279,13 @@ export function containPluginPaths(
           `the plugin's \`${key}\` path \`${declared}\` was refused: ${resolution.reason}`,
         );
         continue;
+      }
+      // A path that is not there is reported, not dropped: the path is kept
+      // — the plugin may ship its content later — and the fact that it is
+      // missing lands in the log and in the manifest's own problems.
+      if (!existsSync(resolution.path)) {
+        warnings.push(`The plugin's \`${key}\` path \`${declared}\` does not exist`);
+        problems.push(`the plugin's \`${key}\` path \`${declared}\` does not exist`);
       }
       kept.push(declared);
     }
@@ -255,6 +325,12 @@ export function containPluginPaths(
         `the plugin's \`commands\` path \`${entry.source}\` was refused: ${resolution.reason}`,
       );
       continue;
+    }
+    // A metadata source that is not there is reported the same way a missing
+    // directory is: the entry is kept, and the fact is recorded.
+    if (!existsSync(resolution.path)) {
+      warnings.push(`The plugin's \`commands\` path \`${entry.source}\` does not exist`);
+      problems.push(`the plugin's \`commands\` path \`${entry.source}\` does not exist`);
     }
     commands.push(entry);
   }
@@ -505,7 +581,8 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
    * The report names the **situation**: two plugins that provide the same
    * name, and the different case of **one** plugin that provides it twice —
    * two `skills` directories in one plugin, say — which is a different
-   * problem and is reported as such.
+   * problem and is reported as such, with the two paths it shipped the name
+   * under.
    *
    * Implementation choice — see the file header. §2.8 says nothing about how a
    * plugin's skill is named, nor about what happens when two providers ship
@@ -523,19 +600,45 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
     }
     for (const [name, bucket] of byName) {
       if (bucket.length < 2) continue;
-      const key = `${kind}:${name}`;
+
+      // The contributions each provider shipped the name under.
+      const byProvider = new Map<string, { name: string; provider?: string; path: string }[]>();
+      for (const contribution of bucket) {
+        const provider = contribution.provider ?? contribution.path;
+        const group = byProvider.get(provider);
+        if (group) group.push(contribution);
+        else byProvider.set(provider, [contribution]);
+      }
+
+      // One provider that ships the name twice is not two providers
+      // colliding: it is a packaging bug, and it is reported with the paths
+      // it shipped the name under.
+      for (const [provider, group] of byProvider) {
+        if (group.length < 2) continue;
+        const key = `${kind}:${name}:duplicate:${provider}`;
+        if (reportedCollisions.has(key)) continue;
+        reportedCollisions.add(key);
+        record({
+          level: 'warn',
+          message: `The plugin \`${provider}\` provides the ${kind} \`${name}\` more than once (${group
+            .map((contribution) => `\`${contribution.path}\``)
+            .join(', ')}); only the first one is used.`,
+        });
+      }
+
+      // Two providers that ship the name is a conflict between them, and the
+      // report names both.
+      if (byProvider.size < 2) continue;
+      const key = `${kind}:${name}:conflict`;
       if (reportedCollisions.has(key)) continue;
       reportedCollisions.add(key);
-      const providers = bucket.map((contribution) => contribution.provider ?? contribution.path);
-      // One provider that ships the name twice is not two providers colliding.
-      const distinct = new Set(providers);
-      const message =
-        distinct.size === 1
-          ? `The plugin \`${providers[0]}\` provides the ${kind} \`${name}\` more than once (${bucket
-              .map((contribution) => `\`${contribution.path}\``)
-              .join(', ')}); only the first one is used.`
-          : `Two plugins provide the ${kind} \`${name}\` (${providers.join(', ')}); only the first one is used.`;
-      record({ level: 'warn', message });
+      const providers = [...byProvider.keys()];
+      record({
+        level: 'warn',
+        message: `Two plugins provide the ${kind} \`${name}\` (${providers.join(
+          ', ',
+        )}); only the first one is used.`,
+      });
     }
   };
 
@@ -585,11 +688,23 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
     },
     apply(plugin: string): PluginApplication {
       const found = plugins.get(plugin);
+      if (!found) {
+        return { plugin, commands: [], skills: [], agents: [] };
+      }
+      const commands = commandsOf(found);
+      const skills = skillsOf(found);
+      const agents = agentsOf(found);
+      // A plugin that provides the same name twice is a packaging bug: it is
+      // reported here as well as on the aggregate path, and the plugin
+      // contributes the name **once** — the first path wins, exactly as the
+      // registry's precedence picks the first declared contribution.
+      reportCollisions(skills, 'skill');
+      reportCollisions(agents, 'subagent');
       return {
         plugin,
-        commands: found ? commandsOf(found) : [],
-        skills: found ? skillsOf(found) : [],
-        agents: found ? agentsOf(found) : [],
+        commands,
+        skills: firstByName(skills),
+        agents: firstByName(agents),
       };
     },
     async installFromMarketplace(
