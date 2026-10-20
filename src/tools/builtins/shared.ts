@@ -80,7 +80,7 @@
  * ```
  *
  * The **agent runtime** carries the same seam: its own `permissionOptions()`
- * (`src/agent/loop.ts`) has to pass the `preToolUseHook` the same way, or a
+ * (`src/agent/loop.ts`) is supplied by whoever builds the `AgentRuntimeDeps` — it returns the caller's `permissionOptions` verbatim, so that is where the seam has to be passed, or a
  * turn that goes through the runtime's own permission service would not be
  * gated by the `PreToolUse` hooks.
  *
