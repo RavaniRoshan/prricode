@@ -42,7 +42,9 @@
  * The event name, the matcher, the tool name and the hook id are all
  * **caller-supplied data**, so every lookup is keyed by a `Map` and never
  * resolves an inherited member of `Object.prototype`: `for('constructor')` and
- * `for('__proto__')` both return an empty list.
+ * `for('__proto__')` both return an empty list. The one table that is a plain
+ * object — the execution classification — is read with `Object.hasOwn`, so
+ * `executionClass('constructor')` is `undefined` and not `Object`.
  *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
@@ -56,6 +58,10 @@
  *   - **`HookSpec.command` is the tool name for an `mcp_tool` hook**, because the
  *     plan keeps `command` a required member and the hook names the tool it
  *     calls there.
+ *   - **The blockable events are the eleven decision-capable events plus
+ *     `PermissionRequest`** — twelve in all. The audit records
+ *     `PermissionRequest` as carrying a decision of its own, so this implementation
+ *     treats an exit code of `2` there as a block.
  *   - **`HookSpec.type` stays the plan's two-member union** (`command` |
  *     `mcp_tool`) and the target's wider handler vocabulary
  *     (`command`, `http`, `mcp_tool`, `prompt`, `agent`) lives in
@@ -63,12 +69,21 @@
  *     vocabulary for a settings file that names a handler this implementation cannot
  *     execute; such a hook is registered and surfaced, but the runner does not
  *     dispatch it.
+ *   - **`handlerType` carries the handler kind when it is present**, and `type`
+ *     carries it otherwise: the two are never read for different purposes.
  *   - **`HookSpec.severity`** is the severity of a **failure** of that hook.
  *     A failure of severity `stop` denies every tool call for the session (the
  *     permission layer's host gate in `src/permissions/decision.ts`).
+ *   - **A matcher this implementation cannot compile is refused at registration.** A
+ *     matcher is configuration, and a configuration error is loud; the runner
+ *     still matches nothing for a matcher that does not compile, so a hook
+ *     built without the registry never matches a tool by accident.
  */
 
 import type { PermissionMode } from '../../permissions/decision.js';
+
+import { compileMatcher } from './matcher.js';
+import { effectiveHandlerType } from './schema.js';
 
 /**
  * The runner's public surface is re-exported here, so that a consumer of the
@@ -79,18 +94,24 @@ import type { PermissionMode } from '../../permissions/decision.js';
  * ```
  *
  * The dependency runs one way only — the registry re-exports the runner, and
- * the runner knows nothing of the registry at run time — so there is no cycle.
+ * the runner knows nothing of the registry at run time (it imports the
+ * registry's types with `import type`, which is erased) — so there is no
+ * cycle.
  */
 export {
   BLOCKED_BY_HOOK_REASON,
   DEFAULT_HOOK_TIMEOUT_MS,
+  DECISION_RANKS,
+  DECISION_STRICTNESS,
   applyUpdatedPermissions,
   createHookApproval,
+  createPreToolUseApproval,
   emptyPermissionMap,
   hookFailureFromResults,
   mergeHookResults,
   mergePermissionRequestApproval,
   mergePermissionRequestResult,
+  mergePreToolUseApproval,
   runHooks,
   type HookCommandOutcome,
   type HookDecisionValue,
@@ -201,8 +222,8 @@ export const DECISION_EVENTS = [
 /**
  * The events that carry an execution classification — the audit's `wL` table.
  *
- * The table is disjoint from `DECISION_EVENTS`, and the two together are the
- * 33 hook events.
+ * The table is disjoint from `DECISION_EVENTS`, and the two together are
+ * the 33 hook events.
  */
 export const HOOK_EXECUTION_CLASS: Readonly<Partial<Record<HookEvent, HookExecutionClass>>> = {
   SessionStart: 'runs_locally',
@@ -228,6 +249,25 @@ export const HOOK_EXECUTION_CLASS: Readonly<Partial<Record<HookEvent, HookExecut
   DirectoryAdded: 'container_internal',
   MessageDisplay: 'container_internal',
 };
+
+/**
+ * The events on which a hook's exit code `2` **blocks**.
+ *
+ * A blockable event is one where a block has a meaning: the tool call is
+ * refused, the prompt is refused, or the turn does not stop. On every other
+ * event an exit code of `2` is a non-blocking error, because there is nothing
+ * to block.
+ *
+ * The set is the decision-capable events plus `PermissionRequest`, which the
+ * audit records as carrying a decision of its own.
+ */
+export {
+  BLOCKABLE_EVENTS,
+  EVENTS_WITHOUT_MCP_SERVERS,
+  effectiveHandlerType,
+  isBlockableEvent,
+  mcpServersAvailable,
+} from './schema.js';
 
 /**
  * The severity of a hook **failure**.
@@ -271,6 +311,10 @@ export interface HookSpec {
    *
    * A hook that names a handler this implementation cannot execute (`http`, `prompt`,
    * `agent`) is registered and surfaced but not dispatched by the runner.
+   *
+   * It carries the handler kind when it is present: the runner dispatches a
+   * hook by the **effective** handler type, which is `handlerType` when it is
+   * given and `type` otherwise.
    */
   handlerType?: HookHandlerType;
   /** The severity of a **failure** of this hook. */
@@ -345,28 +389,17 @@ export function isDecisionEvent(event: HookEvent): boolean {
   return (DECISION_EVENTS as readonly string[]).includes(event);
 }
 
-/** The execution classification of an event, when it has one. */
+/**
+ * The execution classification of an event, when it has one.
+ *
+ * The table is a plain object, so the lookup is guarded: an event name that
+ * is an inherited member of `Object.prototype` — `constructor`, `__proto__`,
+ * `toString` — is **not** an event and has no classification.
+ */
 export function hookExecutionClass(event: HookEvent): HookExecutionClass | undefined {
+  if (!Object.hasOwn(HOOK_EXECUTION_CLASS, event)) return undefined;
   return HOOK_EXECUTION_CLASS[event];
 }
-
-/**
- * The events on which a hook's exit code `2` **blocks**.
- *
- * A blockable event is one where a block has a meaning: the tool call is
- * refused, the prompt is refused, or the turn does not stop. On every other
- * event an exit code of `2` is a non-blocking error, because there is nothing
- * to block.
- *
- * The set is the decision-capable events plus `PermissionRequest`, which the
- * audit records as carrying a decision of its own.
- */
-export {
-  BLOCKABLE_EVENTS,
-  EVENTS_WITHOUT_MCP_SERVERS,
-  isBlockableEvent,
-  mcpServersAvailable,
-} from './schema.js';
 
 /**
  * Create a hook registry.
@@ -392,8 +425,16 @@ export function createHookRegistry(): HookRegistry {
         `A ${spec.event} hook needs a command to run.`,
       );
     }
-    const type = spec.type ?? 'command';
-    if (type === 'mcp_tool') {
+    if (spec.matcher !== undefined) {
+      const compiled = compileMatcher(spec.matcher);
+      if (!compiled.ok) {
+        throw new HookConfigurationError(
+          `The matcher of the ${spec.event} hook is not one this implementation can compile: ${compiled.reason}.`,
+        );
+      }
+    }
+    const handler = effectiveHandlerType(spec);
+    if (handler === 'mcp_tool') {
       if (typeof spec.server !== 'string' || spec.server.length === 0) {
         throw new HookConfigurationError(
           `An mcp_tool hook needs the server it calls.`,
@@ -437,7 +478,7 @@ export function createHookRegistry(): HookRegistry {
       return [...display];
     },
     executionClass(event: HookEvent): HookExecutionClass | undefined {
-      return HOOK_EXECUTION_CLASS[event];
+      return hookExecutionClass(event);
     },
   };
 }

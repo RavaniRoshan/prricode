@@ -14,12 +14,15 @@
  * permission layer uses.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { getEventListeners } from 'node:events';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import * as matcherModule from '../../src/extensions/hooks/matcher.js';
+import * as schemaModule from '../../src/extensions/hooks/schema.js';
 import {
   BLOCKABLE_EVENTS,
   DECISION_EVENTS,
@@ -29,6 +32,7 @@ import {
   HOOK_HANDLER_TYPES,
   HookConfigurationError,
   createHookRegistry,
+  hookExecutionClass,
   isBlockableEvent,
   isHookEvent,
   mcpServersAvailable,
@@ -37,17 +41,25 @@ import {
 } from '../../src/extensions/hooks/registry.js';
 import {
   MAX_MATCH_INPUT_LENGTH,
+  MAX_MATCH_NODES,
+  MAX_MATCH_PATTERN_LENGTH,
+  buildHookPayload,
   compileMatcher,
+  isInputWithinBound,
   matchToolName,
 } from '../../src/extensions/hooks/schema.js';
 import {
   BLOCKED_BY_HOOK_REASON,
+  DECISION_RANKS,
+  DECISION_STRICTNESS,
   applyUpdatedPermissions,
   createHookApproval,
+  createPreToolUseApproval,
   hookFailureFromResults,
   mergeHookResults,
   mergePermissionRequestApproval,
   mergePermissionRequestResult,
+  mergePreToolUseApproval,
   runHooks,
   type HookCommandOutcome,
   type HookPayload,
@@ -215,6 +227,57 @@ describe('the hook registry', () => {
     }
   });
 
+  it('does not resolve an execution class from Object.prototype', () => {
+    const registry = createHookRegistry();
+
+    // The execution classification is a plain table, so the lookup is guarded:
+    // an inherited member of `Object.prototype` is not an event and has no
+    // classification.
+    for (const name of ['constructor', '__proto__', 'toString', 'valueOf']) {
+      expect(registry.executionClass(name as unknown as HookEvent)).toBeUndefined();
+      expect(hookExecutionClass(name as unknown as HookEvent)).toBeUndefined();
+    }
+  });
+
+  it('refuses a hook whose matcher this implementation cannot compile', () => {
+    const registry = createHookRegistry();
+
+    expect(() =>
+      registry.register({ event: 'PreToolUse', matcher: '(unclosed', command: 'echo pre' }),
+    ).toThrow(HookConfigurationError);
+    // A matcher this implementation can compile is registered.
+    expect(() =>
+      registry.register({ event: 'PreToolUse', matcher: 'mcp__memory__.*', command: 'echo pre' }),
+    ).not.toThrow();
+  });
+
+  it('carries the handler kind in one field', () => {
+    const registry = createHookRegistry();
+
+    // `handlerType` names the handler kind when it is present, and the plan's
+    // `type` carries it otherwise: the two are never read for different
+    // purposes.
+    const asCommand: HookSpec = {
+      event: 'PreToolUse',
+      type: 'mcp_tool',
+      handlerType: 'command',
+      command: 'echo hi',
+    };
+    const asMcpTool: HookSpec = {
+      event: 'PreToolUse',
+      type: 'mcp_tool',
+      server: 'memory',
+      command: 'recall',
+    };
+
+    registry.register(asCommand);
+    registry.register(asMcpTool);
+
+    // The wider vocabulary wins, so the first hook is not an MCP hook and
+    // contributes no server.
+    expect(registry.servers()).toEqual(['memory']);
+  });
+
   it('refuses a hook for an event that does not exist', () => {
     const registry = createHookRegistry();
 
@@ -359,16 +422,72 @@ describe('the tool-name matcher', () => {
     // `(a+)+$` against a long run of `a`s is exponential for a backtracking
     // engine. This implementation compiles the pattern to a non-backtracking program, so
     // the answer comes back immediately.
+    //
+    // The explicit timeout is the point of the test: a hang would never
+    // return, and the assertion below could never fire. The timeout turns a
+    // hang into a failure that says so.
     expect(matchToolName('(a+)+$', `${'a'.repeat(200)}!`)).toBe(false);
     expect(matchToolName('(a*)*b', `${'a'.repeat(200)}c`)).toBe(false);
     expect(matchToolName('(a|aa)+$', `${'a'.repeat(200)}!`)).toBe(false);
     expect(Date.now() - started).toBeLessThan(1000);
+  }, 2000);
+
+  it('refuses a matcher whose expansion is exponential instead of compiling it', () => {
+    // The pattern is 23 characters long and expands to 64^4 = 16,777,216 nodes
+    // when the bounded repetitions are unrolled. This implementation has a global node
+    // budget, so it refuses the matcher instead of exhausting the heap.
+    //
+    // The explicit timeout is the point of the test: a hang would never
+    // return, and the assertion below could never fire.
+    const pattern = '(((a{64}){64}){64}){64}';
+    const started = Date.now();
+    const compiled = compileMatcher(pattern);
+
+    expect(compiled.ok).toBe(false);
+    if (!compiled.ok) {
+      expect(compiled.reason).toContain(String(MAX_MATCH_NODES));
+      expect(compiled.reason).toContain('nodes');
+    }
+    expect(matchToolName(pattern, 'x')).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1000);
+  }, 2000);
+
+  it('refuses a matcher that is longer than the pattern bound', () => {
+    const compiled = compileMatcher('x'.repeat(MAX_MATCH_PATTERN_LENGTH + 1));
+
+    expect(compiled.ok).toBe(false);
+    if (!compiled.ok) {
+      expect(compiled.reason).toContain(String(MAX_MATCH_PATTERN_LENGTH));
+      expect(compiled.reason).toContain('characters');
+    }
   });
 
-  it('refuses a tool name that is longer than the bound', () => {
+  it('applies the input bound in both modes', () => {
     const long = 'x'.repeat(MAX_MATCH_INPUT_LENGTH + 1);
+
+    // The regular expression mode: without the bound `.*` would match.
     expect(matchToolName('.*', long)).toBe(false);
-    expect(matchToolName('x', long)).toBe(false);
+
+    // The exact-string mode applies the same bound.
+    const exact = compileMatcher('x');
+    expect(exact.ok).toBe(true);
+    if (exact.ok) {
+      expect(exact.matcher.test(long)).toBe(false);
+      expect(exact.matcher.test('x'.repeat(MAX_MATCH_INPUT_LENGTH))).toBe(false);
+    }
+
+    // The bound itself: a name of exactly the bound is inside it, and one
+    // character more is not.
+    expect(isInputWithinBound('x'.repeat(MAX_MATCH_INPUT_LENGTH))).toBe(true);
+    expect(isInputWithinBound(long)).toBe(false);
+  });
+
+  it('matches every character with the negated empty class', () => {
+    // `[^]` is the negated empty class: JavaScript matches every character
+    // with it, the newline included.
+    expect(matchToolName('[^]', 'Bash')).toBe(true);
+    expect(matchToolName('[^]', '\n')).toBe(true);
+    expect(new RegExp('[^]').test('\n')).toBe(true);
   });
 
   it('agrees with the JavaScript regular expression it accepts', () => {
@@ -383,8 +502,32 @@ describe('the tool-name matcher', () => {
       '[A-Z]\\w+',
       'tool.*\\.(ts|js)',
       'x?y*z+',
+      // The patterns that match the empty string: they match every text, the
+      // way JavaScript's do.
+      'a{0}',
+      'x{0,0}',
+      '()',
+      '(?:)',
+      'a|',
+      '|a',
+      'x{0,2}',
+      '(?:a|)',
+      // The whitespace classes, which are JavaScript's and not the ASCII six.
+      '\\s',
+      '\\S',
     ];
-    const names = ['Bash', 'Edit', 'MultiEdit', 'mcp__memory__recall', 'colour', 'ABC', 'tool.ts', 'xyz'];
+    const names = [
+      'Bash',
+      'Edit',
+      'MultiEdit',
+      'mcp__memory__recall',
+      'colour',
+      'ABC',
+      'tool.ts',
+      'xyz',
+      '\u00a0',
+      '\u2028',
+    ];
 
     for (const pattern of patterns) {
       const reference = new RegExp(pattern);
@@ -396,6 +539,57 @@ describe('the tool-name matcher', () => {
         });
       }
     }
+  });
+
+  it('matches JavaScript’s whitespace set, not the ASCII six', () => {
+    // JavaScript's `\s` is the ASCII whitespace characters, the no-break
+    // space, the ogham space, the en-quad … hair-space block, the line and
+    // paragraph separators, the narrow no-break space, the medium
+    // mathematical space, the ideographic space and the byte order mark.
+    for (const space of ['\u00a0', '\u2028', '\u2029', '\u3000', '\ufeff', '\u205f', '\u1680']) {
+      expect(matchToolName('\\s', space)).toBe(true);
+      expect(matchToolName('\\S', space)).toBe(false);
+    }
+    for (const space of [' ', '\t', '\n', '\r', '\f', '\v']) {
+      expect(matchToolName('\\s', space)).toBe(true);
+      expect(matchToolName('\\S', space)).toBe(false);
+    }
+    expect(matchToolName('\\S', 'Bash')).toBe(true);
+  });
+});
+
+// --- the payload -----------------------------------------------------------------
+
+describe('the hook payload', () => {
+  it('carries the normalized permission mode', () => {
+    // The payload carries one of the six modes: the `manual` alias of
+    // `default` is normalized, never carried verbatim.
+    const payload = buildHookPayload(
+      'PreToolUse',
+      { tool_name: 'Read' },
+      { permission_mode: 'manual' },
+    );
+
+    expect(payload.permission_mode).toBe('default');
+  });
+
+  it('carries one of the six modes', () => {
+    const modes = ['default', 'plan', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions'] as const;
+
+    for (const mode of modes) {
+      const payload = buildHookPayload('PreToolUse', { tool_name: 'Read' }, { permission_mode: mode });
+      expect(payload.permission_mode).toBe(mode);
+      expect(modes).toContain(payload.permission_mode as (typeof modes)[number]);
+    }
+  });
+
+  it('normalizes the alias in the caller’s input too', () => {
+    const payload = buildHookPayload('PreToolUse', {
+      tool_name: 'Read',
+      permission_mode: 'manual',
+    });
+
+    expect(payload.permission_mode).toBe('default');
   });
 });
 
@@ -629,6 +823,97 @@ describe('the hook runner', () => {
     expect(results[0]?.continue).toBe(true);
     expect(results[0]?.error).toContain('the server is unhappy');
   });
+
+  it('dispatches a hook by its effective handler kind', async () => {
+    let commands = 0;
+    let mcpCalls = 0;
+    // `handlerType` carries the handler kind when it is present, so this hook
+    // is a command hook and not an MCP hook.
+    const spec: HookSpec = {
+      event: 'PreToolUse',
+      type: 'mcp_tool',
+      handlerType: 'command',
+      command: 'echo hi',
+    };
+
+    const results = await runHooks([spec], 'PreToolUse', { tool_name: 'Read' }, undefined, {
+      runCommand: async () => {
+        commands += 1;
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+      callMcpTool: async () => {
+        mcpCalls += 1;
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+
+    expect(commands).toBe(1);
+    expect(mcpCalls).toBe(0);
+    expect(results[0]?.exitCode).toBe(0);
+  });
+
+  it('removes the abort listener when the hook has finished', async () => {
+    const controller = new AbortController();
+    const spec: HookSpec = { event: 'PreToolUse', command: 'echo hi' };
+
+    for (let round = 0; round < 5; round += 1) {
+      await runHooks([spec], 'PreToolUse', { tool_name: 'Read' }, controller.signal);
+    }
+
+    // The listener closes over the child process and its captured output, and
+    // an `AbortSignal` has no `setMaxListeners`, so a listener that stayed
+    // would leak for the life of the session.
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('names the hook that failed', async () => {
+    const first: HookSpec = { event: 'PreToolUse', id: 'first-hook', command: 'echo first' };
+    const second: HookSpec = { event: 'PreToolUse', id: 'second-hook', command: 'exit 3' };
+    const third: HookSpec = { event: 'PreToolUse', id: 'third-hook', command: 'echo third' };
+
+    const results = await runHooks([first, second, third], 'PreToolUse', { tool_name: 'Read' });
+
+    expect(results).toHaveLength(3);
+    // The message names the hook that failed, and only that one.
+    expect(results[1]?.error).toContain('second-hook');
+    expect(results[1]?.error).not.toContain('first-hook');
+    expect(results[1]?.error).not.toContain('third-hook');
+    expect(results[0]?.error).toBeUndefined();
+    expect(results[2]?.error).toBeUndefined();
+  });
+
+  it('names the hook that failed by its command when it has no id', async () => {
+    const spec: HookSpec = { event: 'PreToolUse', command: 'echo the-hook-trouble >&2; exit 1' };
+
+    const results = await runHooks([spec], 'PreToolUse', { tool_name: 'Read' });
+
+    expect(results[0]?.error).toContain('the-hook-trouble');
+    expect(results[0]?.error).toContain('exit 1');
+  });
+
+  it('marks a deny decision as blocked whether the hook exited zero or two', async () => {
+    const denied: HookSpec = {
+      event: 'PreToolUse',
+      command: `echo '{"hookSpecificOutput":{"permissionDecision":"deny"}}'`,
+    };
+    const blocked: HookSpec = { event: 'PreToolUse', command: 'exit 2' };
+    const allowed: HookSpec = {
+      event: 'PreToolUse',
+      command: `echo '{"hookSpecificOutput":{"permissionDecision":"allow"}}'`,
+    };
+
+    const deniedResults = await runHooks([denied], 'PreToolUse', { tool_name: 'Read' });
+    const blockedResults = await runHooks([blocked], 'PreToolUse', { tool_name: 'Read' });
+    const allowedResults = await runHooks([allowed], 'PreToolUse', { tool_name: 'Read' });
+
+    // Both ways of denying block the operation.
+    expect(deniedResults[0]?.permissionDecision).toBe('deny');
+    expect(deniedResults[0]?.blocked).toBe(true);
+    expect(blockedResults[0]?.permissionDecision).toBe('deny');
+    expect(blockedResults[0]?.blocked).toBe(true);
+    // And an approval does not block it.
+    expect(allowedResults[0]?.blocked).toBe(false);
+  });
 });
 
 // --- the merge rules -------------------------------------------------------------
@@ -793,6 +1078,29 @@ describe('the result merge', () => {
     expect(map.allow).toEqual(['Bash(ls)']);
     expect(map.deny).toEqual(['Bash(rm)']);
     expect(map.mode).toBe('plan');
+  });
+
+  it('can express a permission rule named mode in the map form', () => {
+    // The value decides: a mode name changes the mode, and anything else is
+    // a permission rule — so a rule literally named `mode` is expressible.
+    const rule = applyUpdatedPermissions({ allow: [], deny: [], ask: [] }, { mode: 'deny' });
+
+    expect(rule.deny).toEqual(['mode']);
+    expect(rule.allow).toEqual([]);
+    expect(rule.mode).toBeUndefined();
+
+    const removal = applyUpdatedPermissions(
+      { allow: ['mode'], deny: [], ask: [] },
+      { mode: 'remove' },
+    );
+
+    expect(removal.allow).toEqual([]);
+  });
+
+  it('keeps the audit’s strictness table', () => {
+    // The audit's table is `allow: 1`, `ask: 2`, `deny: 3`, and the ranks of
+    // the merge are derived from it.
+    expect(DECISION_STRICTNESS).toEqual({ allow: 1, ask: 2, deny: 3 });
   });
 });
 
@@ -987,6 +1295,186 @@ describe('the permission-request hook', () => {
   });
 });
 
+// --- the PreToolUse seam ---------------------------------------------------------
+
+describe('the PreToolUse seam', () => {
+  it('denies the tool call', async () => {
+    const spec = jsonHook('PreToolUse', {
+      hookSpecificOutput: {
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'the hook refuses this call',
+      },
+    });
+
+    const hook = createPermissionRequestHook({
+      approval: createPreToolUseApproval([spec]),
+    });
+
+    const decision = await checkPermission(toolContext(), {
+      rules: ruleSet(),
+      mode: 'default',
+      hook,
+    });
+
+    expect(decision.behavior).toBe('deny');
+    expect(decision.source).toBe('hook');
+    expect(decision.reason).toContain('the hook refuses this call');
+  });
+
+  it('does not override a deny rule', async () => {
+    // This implementation picks the stricter of the target's two behaviours: a
+    // `PreToolUse` hook's `allow` never overrides a deny rule.
+    const spec = jsonHook('PreToolUse', {
+      hookSpecificOutput: { permissionDecision: 'allow' },
+    });
+
+    const hook = createPermissionRequestHook({
+      approval: createPreToolUseApproval([spec]),
+    });
+
+    const decision = await checkPermission(toolContext(), {
+      rules: ruleSet({ deny: ['Bash'] }),
+      mode: 'default',
+      hook,
+    });
+
+    expect(decision.behavior).toBe('deny');
+  });
+
+  it('does not override an ask rule', async () => {
+    const spec = jsonHook('PreToolUse', {
+      hookSpecificOutput: { permissionDecision: 'allow' },
+    });
+
+    const hook = createPermissionRequestHook({
+      approval: createPreToolUseApproval([spec]),
+    });
+
+    const decision = await checkPermission(toolContext(), {
+      rules: ruleSet({ ask: ['Bash'] }),
+      mode: 'default',
+      hook,
+    });
+
+    expect(decision.behavior).toBe('ask');
+  });
+
+  it('holds a denial in bypassPermissions', async () => {
+    // This implementation picks the stricter of the target's two behaviours: a
+    // `PreToolUse` hook's `deny` holds in every mode.
+    const spec = jsonHook('PreToolUse', {
+      hookSpecificOutput: {
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'the hook refuses this call',
+      },
+    });
+
+    const hook = createPermissionRequestHook({
+      approval: createPreToolUseApproval([spec]),
+    });
+
+    const decision = await checkPermission(toolContext(), {
+      rules: ruleSet(),
+      mode: 'bypassPermissions',
+      hook,
+    });
+
+    expect(decision.behavior).toBe('deny');
+  });
+
+  it('turns a group of hook results into the approval the seam expects', () => {
+    const approval = mergePreToolUseApproval([
+      { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'no' },
+      { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+    ]);
+
+    expect(approval?.hookEventName).toBe('PreToolUse');
+    expect(approval?.decision?.behavior).toBe('deny');
+    expect(approval?.decision?.reason).toBe('no');
+  });
+
+  it('gives no approval when the PreToolUse hooks did not decide', () => {
+    const approval = mergePreToolUseApproval([
+      { hookEventName: 'PreToolUse', additionalContext: 'just a note' },
+    ]);
+
+    expect(approval).toBeUndefined();
+  });
+});
+
+// --- the documented shape of the hook surface -----------------------------------
+
+/** The source of a module of the hook surface. */
+function moduleSource(name: string): string {
+  return readFileSync(new URL(`../../src/extensions/hooks/${name}.ts`, import.meta.url), 'utf8');
+}
+
+/** The header of a module of the hook surface, with the comment markers stripped. */
+function moduleHeader(name: string): string {
+  const source = moduleSource(name);
+  return source.slice(0, source.indexOf('*/')).replace(/^\s*\*\s?/gm, '');
+}
+
+describe('the documented shape of the hook surface', () => {
+  it('labels the implementation choices in the module headers', () => {
+    const runner = moduleHeader('runner');
+    // The command shell, the default timeout, the handler types this implementation
+    // does not dispatch, the shape of a permission update, and the
+    // `PreToolUse` precedence this implementation picked.
+    expect(runner).toMatch(/\/bin\/sh -c/);
+    expect(runner).toMatch(/60 seconds/);
+    expect(runner).toMatch(/`http`[\s\S]*`prompt`[\s\S]*`agent`/);
+    expect(runner).toMatch(/`updatedPermissions`/);
+    expect(runner).toMatch(/bypassPermissions/);
+
+    const matcher = moduleHeader('matcher');
+    // The supported subset, the malformed-matcher rule and the bounds.
+    expect(matcher).toMatch(/subset/);
+    expect(matcher).toMatch(/matches nothing/);
+    expect(matcher).toMatch(/MAX_MATCH_NODES/);
+
+    // The blockable-event set is a implementation choice, and it is labelled in both
+    // modules that carry it.
+    for (const name of ['registry', 'schema']) {
+      const header = moduleHeader(name);
+      expect(header).toMatch(/blockable events are the eleven decision-capable events plus/);
+    }
+  });
+
+  it('keeps the runner free of a run-time dependency on the registry', () => {
+    const source = moduleSource('runner');
+    const imports = [...source.matchAll(/import\s+([^;]*?)\s+from\s+'\.\/registry\.js'/g)];
+
+    // The registry's types are imported with `import type`, which is erased:
+    // the emitted module never imports the registry, so the two modules do
+    // not depend on each other at run time.
+    expect(imports.length).toBeGreaterThan(0);
+    for (const entry of imports) {
+      expect(entry[1]).toMatch(/^type\s/);
+    }
+  });
+
+  it('keeps the matcher in its own module and reachable from the schema', () => {
+    // The matcher is a regular expression engine, and it is the only part of
+    // the hook surface that reasons about untrusted text: it has a module of
+    // its own. Its public surface is still reachable from the schema module,
+    // so no caller breaks.
+    expect(schemaModule.compileMatcher).toBe(matcherModule.compileMatcher);
+    expect(schemaModule.matchToolName).toBe(matcherModule.matchToolName);
+    expect(schemaModule.MAX_MATCH_NODES).toBe(matcherModule.MAX_MATCH_NODES);
+    expect(moduleHeader('schema')).toMatch(/matcher\.js/);
+  });
+
+  it('derives the decision ranks from the audit’s strictness table', () => {
+    expect(DECISION_RANKS.allow).toBe(DECISION_STRICTNESS.allow * 2);
+    expect(DECISION_RANKS.ask).toBe(DECISION_STRICTNESS.ask * 2);
+    expect(DECISION_RANKS.deny).toBe(DECISION_STRICTNESS.deny * 2);
+    // `defer` sits between `ask` and `deny`.
+    expect(DECISION_RANKS.defer).toBeGreaterThan(DECISION_RANKS.ask);
+    expect(DECISION_RANKS.defer).toBeLessThan(DECISION_RANKS.deny);
+  });
+});
+
 // --- the elicitation events ------------------------------------------------------
 
 describe('the elicitation events', () => {
@@ -1041,16 +1529,41 @@ describe('a hook that cannot run', () => {
     expect(results[0]?.continue).toBe(true);
   });
 
-  it('does not dispatch a hook of a handler type this implementation cannot execute', async () => {
+  it('reports a hook of a handler type this implementation cannot execute instead of dropping it', async () => {
     const spec: HookSpec = {
       event: 'PreToolUse',
+      id: 'the-http-hook',
       command: 'echo hi',
       handlerType: 'http',
     };
 
     const results = await runHooks([spec], 'PreToolUse', { tool_name: 'Read' });
 
-    expect(results).toEqual([]);
+    // A hook the user configured is never dropped in silence: the result
+    // names the handler type and the hook.
+    expect(results).toHaveLength(1);
+    expect(results[0]?.severity).toBe('warning');
+    expect(results[0]?.blocked).toBe(false);
+    expect(results[0]?.continue).toBe(true);
+    expect(results[0]?.error).toContain('http');
+    expect(results[0]?.error).toContain('the-http-hook');
+    expect(results[0]?.error).toContain('not dispatched by this implementation');
+  });
+
+  it('reports every handler type this implementation cannot execute', async () => {
+    for (const handler of ['http', 'prompt', 'agent'] as const) {
+      const spec: HookSpec = {
+        event: 'PreToolUse',
+        command: 'echo hi',
+        handlerType: handler,
+      };
+
+      const results = await runHooks([spec], 'PreToolUse', { tool_name: 'Read' });
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.error).toContain(handler);
+      expect(results[0]?.blocked).toBe(false);
+    }
   });
 
   it('reports a hook that could not be started as a non-blocking error', async () => {

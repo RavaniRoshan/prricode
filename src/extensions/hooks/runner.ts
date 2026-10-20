@@ -51,7 +51,9 @@
  *     is the channel the target's hook scripts read.
  *   - **The default hook timeout is 60 seconds.** The audit does not name it.
  *   - **A hook of a handler type this implementation cannot execute** (`http`, `prompt`,
- *     `agent`) is registered and surfaced but **not dispatched**.
+ *     `agent`) is registered and surfaced but **not dispatched**; the runner
+ *     reports it as a non-blocking notice that names the handler type and the
+ *     hook, so a hook the user configured is never dropped in silence.
  *   - **A command hook is run without a shell of this implementation's own making**: the
  *     command is the user's, and `/bin/sh -c` is the shell the target's hooks
  *     are written for.
@@ -60,6 +62,25 @@
  *     tool call for the session — the permission layer's host gate, which is
  *     implemented in `src/permissions/decision.ts` and is **not** duplicated
  *     here.
+ *   - **Every failure message names the hook it came from** — its `id` when
+ *     it has one, and its `command` otherwise — so a session with several
+ *     hooks of one event says which of them failed.
+ *   - **`blocked` is true exactly when the result carries a `deny` decision**,
+ *     whether the hook denied by exiting with `2` or by writing a deny
+ *     decision and exiting with `0`.
+ *   - **The `updatedPermissions` update is a map or a list.** The map form
+ *     maps a permission name to `allow`, `deny`, `ask` or `remove`; the list
+ *     form carries `{ type, rule, target }` entries and the
+ *     `{ type: 'setMode', mode }` entry. In the map form the key `mode` (or
+ *     `setMode`) changes the **mode** when its value names one of the seven
+ *     modes, and is a **permission rule named `mode`** otherwise — so a rule
+ *     literally named `mode` can be expressed.
+ *   - **A `PreToolUse` hook's `allow` never overrides a deny or an ask rule,
+ *     and a `PreToolUse` hook's `deny` holds in every mode, including
+ *     `bypassPermissions`.** The target changed this behaviour in a later
+ *     release without a deprecation warning; this implementation picks the stricter
+ *     reading and applies it to both the `PreToolUse` and the
+ *     `PermissionRequest` seam.
  */
 
 import { spawn } from 'node:child_process';
@@ -72,17 +93,14 @@ import {
 } from '../../permissions/decision.js';
 import type { PermissionRequestHookApproval } from '../../permissions/prompts.js';
 
-import {
-  type HookEvent,
-  type HookSeverity,
-  type HookSpec,
-} from './registry.js';
+import { matchToolName } from './matcher.js';
+import type { HookEvent, HookHandlerType, HookSeverity, HookSpec } from './registry.js';
 import {
   BLOCKABLE_EVENTS,
   buildHookPayload,
+  effectiveHandlerType,
   isPlainObject,
   matcherSubject,
-  matchToolName,
   mcpServersAvailable,
   parseHookOutput,
   readField,
@@ -111,13 +129,20 @@ export type HookDecisionValue = 'allow' | 'ask' | 'defer' | 'deny';
 export const DECISION_STRICTNESS = { allow: 1, ask: 2, deny: 3 } as const;
 
 /**
- * The combination order of the decision values, loosest first.
+ * The rank of every decision value; the higher the stricter.
  *
- * `defer` sits between `ask` and `deny`, which is the plan's combination
- * order (`deny > defer > ask > allow`). The relative order of the audit's
- * three values is the same as its strictness table.
+ * The ranks are **derived** from the audit's strictness table: the three
+ * values the audit names keep their strictness, and `defer` sits between
+ * `ask` and `deny` — the plan's combination order (`deny > defer > ask >
+ * allow`). The ranks are scaled by two so that `defer` has a rank of its own
+ * without changing the audit's numbers.
  */
-const DECISION_ORDER: readonly HookDecisionValue[] = ['allow', 'ask', 'defer', 'deny'];
+export const DECISION_RANKS: Readonly<Record<HookDecisionValue, number>> = {
+  allow: DECISION_STRICTNESS.allow * 2,
+  ask: DECISION_STRICTNESS.ask * 2,
+  defer: DECISION_STRICTNESS.ask * 2 + 1,
+  deny: DECISION_STRICTNESS.deny * 2,
+};
 
 /**
  * The result of one hook.
@@ -183,6 +208,8 @@ export interface HookCommandOutcome {
   timedOut?: boolean;
   /** Whether the hook could not be run at all. */
   failed?: boolean;
+  /** Whether the hook was aborted. */
+  aborted?: boolean;
   /**
    * Whether the hook reported an error.
    *
@@ -255,6 +282,10 @@ const PERMISSION_MODES: ReadonlySet<string> = new Set<PermissionMode>([
  *
  * The matching hooks run **in parallel**, and the results come back in the
  * order the hooks were given.
+ *
+ * A hook whose handler type this implementation does not dispatch is **not** dropped in
+ * silence: it produces a non-blocking result that names the handler type and
+ * the hook.
  */
 export async function runHooks(
   specs: readonly HookSpec[],
@@ -268,7 +299,6 @@ export async function runHooks(
 
   const matching = specs.filter((spec) => {
     if (spec.event !== event) return false;
-    if (!isDispatchable(spec)) return false;
     if (spec.matcher === undefined) return true;
     // A matcher needs a subject: without one there is nothing to match.
     if (subject === undefined) return false;
@@ -276,17 +306,51 @@ export async function runHooks(
   });
 
   const outcomes = await Promise.all(
-    matching.map((spec) => runOne(spec, event, payload, signal, options)),
+    matching.map((spec) => {
+      const handler = effectiveHandlerType(spec);
+      if (!isDispatchable(handler)) {
+        return Promise.resolve(undispatchedResult(event, spec, handler));
+      }
+      return runOne(spec, event, payload, signal, options);
+    }),
   );
   return outcomes.filter((result): result is HookResult => result !== undefined);
 }
 
-/** Whether this implementation can dispatch a hook. */
-function isDispatchable(spec: HookSpec): boolean {
-  const handler = spec.handlerType;
-  if (handler !== undefined && handler !== 'command' && handler !== 'mcp_tool') return false;
-  const type = spec.type ?? 'command';
-  return type === 'command' || type === 'mcp_tool';
+/** Whether this implementation can dispatch a hook of this handler type. */
+function isDispatchable(handler: HookHandlerType): boolean {
+  return handler === 'command' || handler === 'mcp_tool';
+}
+
+/**
+ * The result of a hook this implementation does not dispatch.
+ *
+ * The hook is **reported**, not dropped: the message names the handler type
+ * and the hook, so a hook the user configured is never silently ignored.
+ */
+function undispatchedResult(
+  event: HookEvent,
+  spec: HookSpec,
+  handler: HookHandlerType,
+): HookResult {
+  const result: HookResult = { hookEventName: event };
+  result.severity = 'warning';
+  result.error =
+    `The '${handler}' handler type is not dispatched by this implementation, so the hook ${hookName(spec)} did not run.`;
+  result.blocked = false;
+  result.continue = true;
+  return result;
+}
+
+/**
+ * The name of a hook, for the messages the runner writes.
+ *
+ * It is the hook's `id` when it has one, and its `command` otherwise.
+ */
+function hookName(spec: HookSpec): string {
+  const id = spec.id;
+  if (typeof id === 'string' && id.length > 0) return `'${id}'`;
+  return `'${spec.command}'`;
 }
 
 async function runOne(
@@ -296,16 +360,16 @@ async function runOne(
   signal: AbortSignal | undefined,
   options: RunHooksOptions,
 ): Promise<HookResult | undefined> {
-  const type = spec.type ?? 'command';
+  const handler = effectiveHandlerType(spec);
 
-  if (type === 'mcp_tool') {
+  if (handler === 'mcp_tool') {
     // The MCP servers are not up yet at these events, so the hook is skipped.
     if (!mcpServersAvailable(event)) return undefined;
     const runner = options.callMcpTool;
     if (!runner) {
       const result: HookResult = { hookEventName: event };
       result.severity = 'error';
-      result.error = 'The mcp_tool hook could not run: no MCP server connection is available.';
+      result.error = `The mcp_tool hook ${hookName(spec)} could not run: no MCP server connection is available.`;
       result.continue = true;
       result.blocked = false;
       return result;
@@ -338,21 +402,24 @@ function interpretOutcome(
     result.exitCode = 0;
     const json = parseHookOutput(outcome.stdout);
     if (json) applyJson(result, json);
+    // The hook blocked the operation exactly when it denied it, whichever way
+    // it denied.
+    result.blocked = effectiveDecision(result)?.value === 'deny';
     return result;
   }
 
-  const reason = failureReason(outcome);
+  const reason = failureReason(spec, outcome);
   result.exitCode = outcome.exitCode;
-  result.error = reason;
+  result.error = reason.message;
   result.severity = spec.severity ?? 'error';
 
   if (outcome.exitCode === 2 && outcome.isError !== true && BLOCKABLE_EVENTS.includes(event)) {
     // A blocking error: the operation is refused.
     result.blocked = true;
     result.continue = false;
-    result.decision = { behavior: 'deny', reason };
+    result.decision = { behavior: 'deny', reason: reason.text };
     result.permissionDecision = 'deny';
-    result.permissionDecisionReason = reason;
+    result.permissionDecisionReason = reason.text;
     return result;
   }
 
@@ -362,15 +429,63 @@ function interpretOutcome(
   return result;
 }
 
-/** The text of a failure. */
-function failureReason(outcome: HookCommandOutcome): string {
+/**
+ * The text of a failure, and the message that names the hook.
+ */
+interface FailureReason {
+  /** The hook's own text, when it wrote one. */
+  text: string;
+  /** The message, which always names the hook. */
+  message: string;
+}
+
+/**
+ * The text of a failure.
+ *
+ * The message always **names the hook**: its `id` when it has one, and its
+ * `command` otherwise. The hook's own text — what it wrote to its standard
+ * error or its standard output — is the *reason* of the failure and is kept
+ * apart from the message, because the block reason is the hook's own text.
+ */
+function failureReason(spec: HookSpec, outcome: HookCommandOutcome): FailureReason {
+  const name = hookName(spec);
   const stderr = outcome.stderr.trim();
-  if (stderr.length > 0) return stderr;
   const stdout = outcome.stdout.trim();
-  if (stdout.length > 0) return stdout;
-  if (outcome.timedOut) return 'The hook timed out.';
-  if (outcome.failed) return 'The hook could not be run.';
-  return `The hook exited with code ${outcome.exitCode}.`;
+
+  if (outcome.aborted === true) {
+    const text = 'The hook was aborted.';
+    return {
+      text,
+      message:
+        stderr.length > 0
+          ? `The hook ${name} was aborted: ${stderr}`
+          : `The hook ${name} was aborted.`,
+    };
+  }
+
+  if (outcome.timedOut === true) {
+    const text = 'The hook timed out.';
+    return {
+      text,
+      message:
+        stderr.length > 0
+          ? `The hook ${name} timed out: ${stderr}`
+          : `The hook ${name} timed out.`,
+    };
+  }
+
+  if (stderr.length > 0) {
+    return { text: stderr, message: `The hook ${name} failed: ${stderr}` };
+  }
+  if (stdout.length > 0) {
+    return { text: stdout, message: `The hook ${name} failed: ${stdout}` };
+  }
+  if (outcome.failed === true) {
+    const text = 'The hook could not be run.';
+    return { text, message: `The hook ${name} could not be run.` };
+  }
+  const text = `The hook exited with code ${outcome.exitCode}.`;
+  return { text, message: `The hook ${name} exited with code ${outcome.exitCode}.` };
 }
 
 /** Apply the JSON a hook wrote to its result. */
@@ -462,8 +577,9 @@ function applyJson(result: HookResult, json: HookJsonOutput): void {
       result.action = action;
     }
 
-    if (Object.hasOwn(specific, 'content')) {
-      result.content = specific['content'];
+    const content = readField(specific, 'content');
+    if (content !== undefined) {
+      result.content = content;
     }
   }
 }
@@ -493,11 +609,20 @@ async function spawnHookCommand(
     let stdout = '';
     let stderr = '';
     let timer: NodeJS.Timeout | undefined;
+    let abortListener: (() => void) | undefined;
 
     const finish = (outcome: HookCommandOutcome): void => {
       if (settled) return;
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
+      // The abort listener is removed when the hook finishes: it closes over
+      // the child process and its captured output, and an `AbortSignal` has no
+      // `setMaxListeners`, so a listener that stayed would leak for the life
+      // of the session.
+      if (abortListener !== undefined && signal !== undefined) {
+        signal.removeEventListener('abort', abortListener);
+        abortListener = undefined;
+      }
       resolve(outcome);
     };
 
@@ -512,7 +637,7 @@ async function spawnHookCommand(
       finish({
         exitCode: -1,
         stdout: '',
-        stderr: `The hook could not be started: ${String(error)}`,
+        stderr: `could not be started: ${String(error)}`,
         failed: true,
       });
       return;
@@ -559,7 +684,7 @@ async function spawnHookCommand(
       finish({
         exitCode: -1,
         stdout,
-        stderr: stderr.length > 0 ? `${stderr}\nThe hook timed out.` : 'The hook timed out.',
+        stderr,
         timedOut: true,
       });
     }, timeoutMs);
@@ -570,12 +695,16 @@ async function spawnHookCommand(
         finish({
           exitCode: -1,
           stdout,
-          stderr: stderr.length > 0 ? `${stderr}\nThe hook was aborted.` : 'The hook was aborted.',
+          stderr,
           failed: true,
+          aborted: true,
         });
       };
       if (signal.aborted) abort();
-      else signal.addEventListener('abort', abort, { once: true });
+      else {
+        signal.addEventListener('abort', abort, { once: true });
+        abortListener = abort;
+      }
     }
   });
 }
@@ -608,8 +737,7 @@ function effectiveDecision(result: HookResult): EffectiveDecision | undefined {
 
 /** The rank of a decision value; the higher the stricter. */
 function decisionRank(value: HookDecisionValue): number {
-  const rank = DECISION_ORDER.indexOf(value);
-  return rank < 0 ? 0 : rank;
+  return DECISION_RANKS[value];
 }
 
 /** The stricter of two decisions. */
@@ -731,6 +859,9 @@ export function mergeHookResults(
   // or several.
   merged = withDecision(merged);
 
+  // The operation is blocked exactly when the merged decision denies it.
+  merged.blocked = effectiveDecision(merged)?.value === 'deny';
+
   const decision = effectiveDecision(merged);
   if (decision?.value === 'deny') {
     // The block reason is the hook's own reason, or `Blocked by hook` when the
@@ -757,6 +888,10 @@ export function mergeHookResults(
  * a **list** of updates. A `setMode` update's mode is **normalized** before it
  * is applied, so the `manual` alias of `default` is stored as `default`; a
  * mode that is not one of the six is refused and the mode is left alone.
+ *
+ * In the **map** form the key `mode` (or `setMode`) changes the mode when its
+ * value names one of the seven modes, and is a **permission rule named
+ * `mode`** otherwise — so a rule literally named `mode` can be expressed.
  */
 export function applyUpdatedPermissions(base: HookPermissionMap, updates: unknown): HookPermissionMap {
   const map: HookPermissionMap = {
@@ -775,9 +910,13 @@ export function applyUpdatedPermissions(base: HookPermissionMap, updates: unknow
     for (const key of Object.keys(updates)) {
       if (key === '__proto__') continue;
       const value = updates[key];
-      if (key === 'mode' || key === 'setMode') {
-        if (typeof value === 'string') setMode(map, value);
-        continue;
+      if ((key === 'mode' || key === 'setMode') && typeof value === 'string') {
+        if (PERMISSION_MODES.has(value)) {
+          setMode(map, value);
+          continue;
+        }
+        // The value does not name a mode, so the key is a permission rule
+        // named `mode` — and it is handled like any other rule below.
       }
       if (value === 'remove') {
         removeRule(map, key);
@@ -828,7 +967,7 @@ function setMode(map: HookPermissionMap, mode: string): void {
   map.mode = normalizePermissionMode(mode as PermissionMode);
 }
 
-// --- the permission-request seam -------------------------------------------------
+// --- the permission seams --------------------------------------------------------
 
 /** The result of a permission request, as a hook's result is merged into it. */
 export interface PermissionRequestResult {
@@ -875,13 +1014,33 @@ export function mergePermissionRequestResult(
 }
 
 /**
- * The approval a group of `PermissionRequest` hook results carries.
+ * The approval a group of hook results carries.
  *
  * The approval is the shape `createPermissionRequestHook` expects, so the
  * permission seam is **reused** rather than duplicated.
  */
 export function mergePermissionRequestApproval(
   results: readonly HookResult[],
+): PermissionRequestHookApproval | undefined {
+  return mergeHookApproval(results, 'PermissionRequest');
+}
+
+/**
+ * The approval a group of `PreToolUse` hook results carries.
+ *
+ * The shape is the same as the permission-request approval: the seam is
+ * **reused** rather than duplicated.
+ */
+export function mergePreToolUseApproval(
+  results: readonly HookResult[],
+): PermissionRequestHookApproval | undefined {
+  return mergeHookApproval(results, 'PreToolUse');
+}
+
+/** The approval a group of hook results carries, for one event. */
+function mergeHookApproval(
+  results: readonly HookResult[],
+  event: HookEvent,
 ): PermissionRequestHookApproval | undefined {
   const merged = mergeHookResults(results);
   if (!merged) return undefined;
@@ -890,7 +1049,7 @@ export function mergePermissionRequestApproval(
   if (decision.value !== 'allow' && decision.value !== 'deny') return undefined;
 
   const approval: PermissionRequestHookApproval = {
-    hookEventName: merged.hookEventName,
+    hookEventName: event,
     decision: {
       behavior: decision.value,
       ...(decision.reason === undefined ? {} : { reason: decision.reason }),
@@ -926,6 +1085,42 @@ export function createHookApproval(
       options,
     );
     return mergePermissionRequestApproval(results);
+  };
+}
+
+/**
+ * The approval callback of the `PreToolUse` seam.
+ *
+ * The returned callback is the `approval` option of
+ * `createPermissionRequestHook` in `src/permissions/prompts.ts`: it runs the
+ * `PreToolUse` hooks for the tool call and returns the strictest decision they
+ * made.
+ *
+ * The precedence of the decision is the **permission layer's**, not this
+ * module's: the seam is wired into `checkPermission` **after the deny list**
+ * and **before the prompt**, so a `PreToolUse` hook's `allow` never overrides
+ * a deny rule or an ask rule, and a `PreToolUse` hook's `deny` holds in every
+ * mode, `bypassPermissions` included. This implementation picks the stricter of the
+ * target's two behaviours and documents the choice.
+ */
+export function createPreToolUseApproval(
+  specs: readonly HookSpec[],
+  options: RunHooksOptions = {},
+): (ctx: ToolContext) => Promise<PermissionRequestHookApproval | undefined> {
+  return async (ctx: ToolContext): Promise<PermissionRequestHookApproval | undefined> => {
+    const results = await runHooks(
+      specs,
+      'PreToolUse',
+      {
+        tool_name: ctx.toolName,
+        tool_input: ctx.input,
+        tool_use_id: ctx.toolUseId,
+        session_id: ctx.sessionId,
+      },
+      undefined,
+      options,
+    );
+    return mergePreToolUseApproval(results);
   };
 }
 
