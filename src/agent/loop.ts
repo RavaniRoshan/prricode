@@ -462,14 +462,23 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 
   /** The options the permission service is called with. */
   function permissionOptions(): CheckPermissionOptions {
-    const options: CheckPermissionOptions =
-      deps.permissionOptions ?? { rules: { allow: [], deny: [], ask: [], cwd }, mode: 'default' };
+    // The caller's options are **copied**, never mutated: the caller may hand
+    // the same object to two runtimes, and a seam applied to it here would be
+    // visible to the other.
+    const supplied = deps.permissionOptions;
+    const options: CheckPermissionOptions = {
+      ...(supplied ?? { rules: { allow: [], deny: [], ask: [], cwd }, mode: 'default' }),
+    };
     // The seams are applied on **every** path, not only on the default one: a
     // caller that supplies `permissionOptions` without them still gets them
-    // from the dependencies, and a caller that supplies them in `permissionOptions`
-    // keeps them, because the guard only fills in what is absent.
-    if (deps.preToolUseHook !== undefined) options.preToolUseHook = deps.preToolUseHook;
-    if (deps.hook !== undefined) options.hook = deps.hook;
+    // from the dependencies. A seam the caller supplied **in the options**
+    // wins over the dependency — the options are the more specific statement.
+    if (options.preToolUseHook === undefined && deps.preToolUseHook !== undefined) {
+      options.preToolUseHook = deps.preToolUseHook;
+    }
+    if (options.hook === undefined && deps.hook !== undefined) {
+      options.hook = deps.hook;
+    }
     return options;
   }
 
