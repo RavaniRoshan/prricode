@@ -102,6 +102,22 @@ The resume result carries: `turnInterruptionState` (with a `kind`), `supersededT
 
 The failure-reason vocabulary is `not_found_explicit_id`, `processing_error`, `load_error`, `drop_guard_refused`, `worker_state_unread`.
 
+## The `--continue` behavior
+
+`--continue` takes **no** session id: the store selects the **newest** session for the working directory. This implementation's two failure messages are the target's:
+
+- `No conversation found to continue` — there is nothing to continue.
+- `The agent exited: could not continue the previous session (<reason>). Run agent --resume to pick a session, or start a new one.` — the failure happened **before** the restore.
+- `The agent exited: startup failed after restoring the previous session (<reason>).` — the failure happened **after** the restore.
+
+A session that is **already running in the background** is **reported** rather than silently continued.
+
+The telemetry is the target's: `tengu_continue` with `{success}` and `resume_duration_ms`, or `{success: false, error_name}`.
+
+> **Implementation choice.** The **store-level ordering rule** inside the lookup — which candidate sessions are skipped (a live background session, a headless one, an SDK one, a slash-command one) — **was not traced**: it lives in a module outside the retained scope. This implementation selects the newest session and reports a background-running one. That is a **labelled implementation choice**, not an observed behavior.
+
+**Pinned by:** `tests/contracts/session-store.test.ts` and `tests/contracts/session-resume.test.ts` — the continue tests.
+
 ## Compaction
 
 Compaction is a **boundary marker, not a deletion**.
