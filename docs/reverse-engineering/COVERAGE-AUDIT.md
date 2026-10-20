@@ -775,6 +775,18 @@ The record is `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-s
 | 19 | **The target's own rule templates** | the built-in git and GitHub rule templates — `git checkout -b *`, `gh pr create --title * --body *`, … | §2.5 has the rule **syntax**; the target's own **templates** were never read |
 | 20 | **The on-disk surfaces outside the configuration root** | IDE lock files, the plugin zip cache, `known_marketplaces_claudeai.json` | §2.6 covers the layout **inside** the root |
 
+**The inventory is now generated and checked.** `docs/reverse-engineering/SURFACE-INVENTORY.md`
+is produced by `scripts/verify-rea.ts --write` from the target's own source, and
+`scripts/verify-rea.ts` re-derives it and **fails** when the target has an entry the
+record does not name. It currently re-derives the **tool registry** (88 names), the
+**telemetry vocabulary** (3 084 events) and the **environment-variable surface** (1 273
+names), and all three are fully accounted for.
+
+Building it found that the earlier record of the tool inventory was **incomplete**: nine
+tools the target has — `Cd`, `JavaScript`, `MultiEdit`, `NotebookRead`, `REPL`, `Task` and
+the three artifact add-ons — were not on any list. That is the shape of the problem this
+file exists to prevent: a surface that nobody wrote down, and therefore nobody checked.
+
 **What this means for the report.** The compatibility matrix in
 `docs/compatibility/feature-matrix.md` measures **42 rows**, and every row is a behaviour
 this implementation reproduces or does not. It is not a statement that the target has
