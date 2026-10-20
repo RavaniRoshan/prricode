@@ -1128,6 +1128,13 @@ describe('the shared scanner — the only escape-handling code', () => {
   ]);
 
   it('never writes the escape character down outside the shared scanner', () => {
+    // **What this covers**: a second scanner in a renderer that names the
+    // escape character **as a literal** — as `\u001b`, `\x1b`, `\033`,
+    // `\u{1b}` or `0x1b`. It does **not** cover a scanner that computes the
+    // character (`String.fromCharCode(27)`) or that embeds a raw byte; the
+    // **behavioural** per-site tests cover those, because they assert the
+    // rendered text rather than the source.
+
     for (const file of RENDERERS) {
       const source = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
 
@@ -1142,7 +1149,13 @@ describe('the shared scanner — the only escape-handling code', () => {
     }
   });
 
-  it('gives every strip site a named test, so a new site cannot be added quietly', () => {
+  it('gives every strip site in the two renderers a named test', () => {
+    // **What this covers**: the two renderer modules this task owns. It is a
+    // **count**, so a rename of the shared scanner, `lines.map(...)` in
+    // place of an arrow, or a comment mentioning `stripControlSequences(` all
+    // break it — it is a tripwire, not a proof. A site added to
+    // `src/ui/app.ts` or `src/ui/render/markdown.ts` is **not** covered by
+    // it; those two files' sites are pinned by their own behavioural tests.
     for (const [file, sites] of STRIP_SITES) {
       const source = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
       const calls = source.split('stripControlSequences(').length - 1;
