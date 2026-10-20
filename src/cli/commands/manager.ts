@@ -7,6 +7,20 @@
  * "Important negative finding"). The commands behind this module are the
  * implementation's own, and every one of them says so.
  *
+ * ## Where the commands are reached from
+ *
+ * The **in-session** dispatcher is the **registry**
+ * (`src/cli/commands/slash.ts`): `/provider` and `/catalog` are entries of
+ * that registry, and the registry's dispatch is what a typed `/provider`
+ * line runs. This module holds the two commands' own implementation, and the
+ * registry calls it.
+ *
+ * The two entry points this module keeps — `isManagerCommand` and
+ * `runManagerText` — answer the **manager's** narrower question ("is this
+ * line one of *my* two commands?"), and the manager's own contract test pins
+ * them. The registry's question is wider ("does this line name a command of
+ * the registry?"), and it is asked by the registry.
+ *
  * ## Why this module exists
  *
  * The provider manager and the catalog browser are two commands over one

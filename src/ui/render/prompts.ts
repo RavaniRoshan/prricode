@@ -58,6 +58,7 @@
  */
 
 import { describeReason, type PermissionDecision } from '../../permissions/decision.js';
+import { SLASH_COMMANDS, type SlashCommand } from '../../cli/commands/slash.js';
 import type { Segment } from '../theme.js';
 
 import { stripControlSequences } from './markdown.js';
@@ -358,4 +359,132 @@ export function renderApprovalPrompt(
   lines.push('');
   lines.push(parts.guide);
   return lines.join('\n');
+}
+
+/* -------------------------------------------------------------------------- */
+/* The autocomplete overlay                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The composer's `/`-overlay.
+ *
+ * Evidence: `findings-terminal-ui.md` §2 (the composer), §9.1 (the
+ * `Autocomplete` key map: `tab` accepts, `escape` dismisses, `up` and `down`
+ * move) and the specification's own account of the overlay's module
+ * (`chunk-v7h5cwqd.js`, "the `/`-command and `@`-file suggestion overlay").
+ *
+ * The target's overlay lists the **registry's** commands: the row is the
+ * command's name and the command's description, and the list is filtered by
+ * what has been typed. This implementation's overlay reads the same registry
+ * the commands are dispatched from, so the list is the target's list.
+ *
+ * ## The rules the target's overlay follows
+ *
+ *   - the text must **start** with a slash, or there is no overlay at all;
+ *   - a text that holds a space and does **not** end with one is a
+ *     **mid-command** text — the overlay then completes the *argument*, not
+ *     the command, and this implementation has no argument completion;
+ *   - the **query** is the text after the slash, lowercased and trimmed;
+ *   - an empty query lists **every visible command**;
+ *   - a hidden command is not listed.
+ *
+ * **Implementation choice.** The target filters with a fuzzy matcher and
+ * scores the results; this implementation matches the query against the
+ * command's name and its aliases, case-insensitively, and lists the matches in
+ * the registry's order. The rule and the shape are the target's; the
+ * matching is this implementation's own.
+ */
+
+/**
+ * One row of the overlay.
+ */
+export interface AutocompleteSuggestion {
+  /** The row's identity. */
+  readonly id: string;
+  /** The text the row shows: the command's name, with the slash. */
+  readonly displayText: string;
+  /** The command's description. */
+  readonly description: string;
+  /** The command the row names. */
+  readonly command: SlashCommand;
+}
+
+/**
+ * The separator between a row's name and its description.
+ *
+ * The target's overlay row is `<pointer> <name> – <description>` — the
+ * separator is an **en dash** (U+2013), not a hyphen.
+ */
+export const AUTOCOMPLETE_SEPARATOR = '–';
+
+/**
+ * The message the overlay shows when nothing matches.
+ *
+ * The target's own wording (`chunk-6bp7hdav.js`): `No commands match
+ * "<text>"`.
+ */
+export function noCommandsMessage(text: string): string {
+  return `No commands match "${text}"`;
+}
+
+/**
+ * The rows the overlay shows for a line of typed text.
+ *
+ * @returns the rows, in the registry's order.
+ */
+export function slashCommandSuggestions(text: string): AutocompleteSuggestion[] {
+  const typed = text.trimStart();
+  if (!typed.startsWith('/')) return [];
+  // A mid-command text completes the argument, and this implementation has no
+  // argument completion.
+  if (typed.includes(' ') && !typed.endsWith(' ')) return [];
+
+  const query = typed.slice(1).toLowerCase().trim();
+  const visible = SLASH_COMMANDS.filter((command) => !command.hidden);
+
+  if (query === '') {
+    return visible.map((command) => suggestionOf(command));
+  }
+
+  const rows: AutocompleteSuggestion[] = [];
+  for (const command of visible) {
+    const alias = command.aliases.find((name) => name.toLowerCase().startsWith(query));
+    if (alias !== undefined) {
+      rows.push(suggestionOf(command, alias));
+      continue;
+    }
+    if (command.name.toLowerCase().includes(query)) rows.push(suggestionOf(command));
+  }
+  return rows;
+}
+
+/**
+ * A row for a command.
+ *
+ * The row shows the **alias** the user typed beside the command's name, the
+ * way the target's overlay does: `/cost` reads `/usage (cost)`.
+ */
+function suggestionOf(command: SlashCommand, alias?: string): AutocompleteSuggestion {
+  const displayText = alias === undefined ? `/${command.name}` : `/${command.name} (${alias})`;
+  return {
+    id: `${command.name}:${command.type}`,
+    displayText,
+    description: command.description,
+    command,
+  };
+}
+
+/**
+ * Render one row of the overlay.
+ *
+ * The row is the pointer, the command's name and the command's description,
+ * separated by the en dash — the target's own shape.
+ */
+export function renderAutocompleteSuggestion(
+  suggestion: AutocompleteSuggestion,
+  focused = false,
+): string {
+  const pointer = focused ? CHOICE_MARKER : ' ';
+  const description = suggestion.description === '' ? '' : ` ${AUTOCOMPLETE_SEPARATOR} ${suggestion.description}`;
+  return `${pointer} ${suggestion.displayText}${description}`;
 }

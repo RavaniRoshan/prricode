@@ -38,7 +38,7 @@
  * runner rather than through a stand-in for it.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -868,12 +868,108 @@ describe('the slash command', () => {
     expect(test.app.outputs.join('\n')).toContain('prod');
     expect(test.prompts()).toEqual([]);
 
-    // Any other line is a prompt.
-    test.app.latest.onSubmit?.('/help');
+    // Any other line is a prompt. A line that names **no command of the
+    // registry** is a prompt, even when it begins with a slash: the target
+    // sends such a line to the model too.
+    test.app.latest.onSubmit?.('/not-a-command');
     await test.app.waitFor((props) =>
       props.events.some((event) => event.t === 'assistant_message'),
     );
-    expect(test.prompts()).toEqual(['/help']);
+    expect(test.prompts()).toEqual(['/not-a-command']);
+
+    controller.abort();
+    await host;
+  });
+
+  it('runs the command the registry names, and does not send it to the model', async () => {
+    const test = harness({ rounds: [[...finalTurn('Hello there.')]] });
+    const controller = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
+    await test.app.mounted();
+
+    // `/help` names a command of the registry: the command runs, and it does
+    // **not** reach the model.
+    test.app.latest.onSubmit?.('/help');
+    await test.app.waitFor(() => test.app.outputs.length > 0);
+    expect(test.app.outputs.join('\n')).toContain('/clear');
+    expect(test.prompts()).toEqual([]);
+
+    controller.abort();
+    await host;
+  });
+
+  it('refuses a command whose capability is missing, and says which one', async () => {
+    const test = harness({ rounds: [[...finalTurn('Hello there.')]] });
+    const controller = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
+    await test.app.mounted();
+
+    // `/teleport` is in the registry, and this implementation has no cloud
+    // session to send it to: the refusal says so.
+    test.app.latest.onSubmit?.('/teleport');
+    await test.app.waitFor(() => test.app.outputs.length > 0);
+    expect(test.app.outputs.join('\n')).toContain('cloud session');
+    expect(test.prompts()).toEqual([]);
+
+    controller.abort();
+    await host;
+  });
+
+  it('starts a new session when /clear runs, and keeps the previous one on disk', async () => {
+    const test = harness({
+      rounds: [[...finalTurn('Hello there.')], [...finalTurn('Again.')]],
+    });
+    const controller = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
+    await test.app.mounted();
+
+    // A turn first, so that the session has a transcript to keep.
+    test.app.latest.onSubmit?.('hello');
+    await test.app.waitFor((props) =>
+      props.events.some((event) => event.t === 'assistant_message'),
+    );
+
+    test.app.latest.onSubmit?.('/clear');
+    // The command finished: the host has rendered the frame that says so, and
+    // the host is ready for the next line.
+    await test.app.waitFor((props) => props.status === 'The command finished.');
+
+    // The previous session stays on disk: the target's `/clear` says so.
+    expect(existsSync(sessionFilePath(test.configDir, test.cwd, 'session-under-test'))).toBe(true);
+
+    // The next turn runs in a **new** session, so there are two of them.
+    test.app.latest.onSubmit?.('again');
+    await waitUntil(() => test.prompts().length === 2, 'the second turn');
+    const summaries = await test.store.list({ cwd: test.cwd });
+    expect(summaries.length).toBe(2);
+
+    controller.abort();
+    await host;
+  });
+
+  it('marks the compaction boundary when /compact runs', async () => {
+    const test = harness({ rounds: [[...finalTurn('The summary of the conversation.')]] });
+    const controller = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
+    await test.app.mounted();
+
+    test.app.latest.onSubmit?.('/compact');
+    await test.app.waitFor(() => test.app.outputs.length > 0);
+
+    // The marker is in the transcript: the prefix stays in the file and the
+    // resume skips it.
+    const records = await readAllSessionEvents(
+      sessionFilePath(test.configDir, test.cwd, 'session-under-test'),
+    );
+    const markers = records.filter((record) => record.t === 'compaction');
+    expect(markers).toHaveLength(1);
+    expect(markers[0]?.t === 'compaction' ? markers[0].summary : '').toBe(
+      'The summary of the conversation.',
+    );
 
     controller.abort();
     await host;

@@ -71,6 +71,16 @@ import {
 } from '../../src/cli/output.js';
 import { CLI_VERSION, createCommandSession, runCommand } from '../../src/cli/command.js';
 import { providerManagerCommand } from '../../src/cli/commands/manager.js';
+import { catalogStoreOfState } from '../../src/cli/commands/catalog.js';
+import {
+  SLASH_COMMAND_DEFINITIONS,
+  SLASH_COMMANDS,
+  TARGET_SLASH_COMMANDS,
+  runSlashCommand,
+  slashCommandOf,
+  type SlashCommandContext,
+} from '../../src/cli/commands/slash.js';
+import { renderAutocompleteSuggestion, slashCommandSuggestions } from '../../src/ui/render/prompts.js';
 import { createProviderRegistry } from '../../src/provider/registry.js';
 import type { CommandSession } from '../../src/cli/command.js';
 import { createSessionStore, sessionFilePath } from '../../src/session/store.js';
@@ -173,6 +183,43 @@ function runOf(parsed: ParsedArgs): ParsedRunArgs {
     throw new Error(`expected a run, got '${parsed.kind}': ${JSON.stringify(parsed)}`);
   }
   return parsed;
+}
+
+/**
+ * The target's product name, spelled in pieces.
+ *
+ * The name itself must not appear anywhere in this repository — not in a
+ * string, not in a comment — so the guard that keeps it out spells it in
+ * pieces rather than writing it down.
+ */
+const TARGET_PRODUCT_NAME = ['Cla', 'ude'].join('');
+
+/**
+ * The context a slash command runs with.
+ *
+ * The context is the **seam** the commands are handed: the store, the paths,
+ * the session's own facts, and the three session seams the session commands
+ * call. The helper builds one that touches nothing outside a temporary
+ * directory.
+ */
+function slashContext(overrides: Partial<SlashCommandContext> = {}): SlashCommandContext {
+  const configDir = makeDirectory();
+  return {
+    store: createSessionStore({ configDir }),
+    cwd: configDir,
+    configDir,
+    sessionId: 'session-under-test',
+    model: 'claude-sonnet-4-5',
+    version: '0.1.0',
+    events: [],
+    env: {},
+    managerState: async () => ({
+      registry: createProviderRegistry(),
+      catalogs: catalogStoreOfState([]),
+    }),
+    managerOptions: () => ({}),
+    ...overrides,
+  };
 }
 
 /** The message of a failed parse. */
@@ -2021,5 +2068,179 @@ describe('the telemetry', () => {
     expect(names).toContain('tengu_resume_print');
     const resumed = events.find((event) => event.name === 'tengu_session_resumed');
     expect(resumed?.entrypoint).toBe('print');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The slash-command registry                                                  */
+/* -------------------------------------------------------------------------- */
+
+describe('the slash-command registry', () => {
+  it('registers the target’s command names', () => {
+    // The registry holds the target's own commands — the ones the target
+    // registers in its registry region — and the two commands this
+    // implementation owns, which are **not** the target's.
+    expect(TARGET_SLASH_COMMANDS).toHaveLength(100);
+    expect(SLASH_COMMANDS).toHaveLength(102);
+    // The target registers a command twice when it has two forms, and the
+    // registry keeps **every** definition.
+    expect(SLASH_COMMAND_DEFINITIONS).toHaveLength(125);
+
+    const names = TARGET_SLASH_COMMANDS.map((command) => command.name);
+    for (const name of [
+      'add-dir',
+      'clear',
+      'compact',
+      'config',
+      'context',
+      'help',
+      'model',
+      'resume',
+      'status',
+      'usage',
+      'version',
+    ]) {
+      expect(names).toContain(name);
+    }
+  });
+
+  it('reproduces a command’s description, aliases and argument hint', () => {
+    const clear = slashCommandOf('clear');
+
+    // The target's own words, its own aliases and its own hint.
+    expect(clear?.description).toBe(
+      'Start a new session with empty context; previous session stays on disk (resumable with /resume)',
+    );
+    expect(clear?.aliases).toEqual(['reset', 'new']);
+    expect(clear?.argumentHint).toBe('[name]');
+  });
+
+  it('answers to an alias', () => {
+    expect(slashCommandOf('cost')?.name).toBe('usage');
+    expect(slashCommandOf('continue')?.name).toBe('resume');
+    expect(slashCommandOf('allowed-tools')?.name).toBe('permissions');
+  });
+
+  it('names no command that the registry does not hold', () => {
+    expect(slashCommandOf('not-a-command')).toBeUndefined();
+    // A name that is a member of `Object.prototype` is not a command.
+    expect(slashCommandOf('constructor')).toBeUndefined();
+    expect(slashCommandOf('__proto__')).toBeUndefined();
+  });
+
+  it('records where the target puts each command', () => {
+    // The offset is the byte offset of the command's definition in the
+    // target's own source file.
+    expect(slashCommandOf('help')?.offset).toBe(1684242);
+    expect(slashCommandOf('clear')?.offset).toBe(1674623);
+    expect(slashCommandOf('usage')?.offset).toBe(2176852);
+  });
+
+  it('never names the target’s product', () => {
+    // The target's *data* keeps the target's names — `CLAUDE.md`, `.claude`,
+    // `claude.ai` — but the target's **product name** never appears.
+    for (const command of SLASH_COMMANDS) {
+      expect(command.description).not.toContain(TARGET_PRODUCT_NAME);
+    }
+  });
+
+  it('marks the two commands this implementation owns as extensions', () => {
+    const provider = slashCommandOf('provider');
+    const catalog = slashCommandOf('catalog');
+
+    // The target registers neither, so they carry no offset.
+    expect(provider?.extension).toBe(true);
+    expect(catalog?.extension).toBe(true);
+    expect(provider?.offset).toBeUndefined();
+    expect(TARGET_SLASH_COMMANDS.map((command) => command.name)).not.toContain('provider');
+  });
+
+  it('runs the help command and lists the registry', async () => {
+    const result = await runSlashCommand('/help', slashContext());
+
+    expect(result?.exitCode).toBe(0);
+    expect(result?.stdout).toContain('/clear');
+    expect(result?.stdout).toContain('/provider');
+    // The two commands this implementation owns say that they are its own.
+    expect(result?.stdout).toMatch(/project extension/i);
+  });
+
+  it('runs a report and says what it cannot show', async () => {
+    const result = await runSlashCommand('/usage', slashContext());
+
+    expect(result?.exitCode).toBe(0);
+    expect(result?.stdout).toContain('Records');
+  });
+
+  it('refuses a command whose capability is missing, and names the capability', async () => {
+    const result = await runSlashCommand('/teleport', slashContext());
+
+    expect(result?.exitCode).not.toBe(0);
+    // The refusal names the **capability**, so the user learns what would
+    // have to exist for the command to run.
+    expect(result?.stderr).toContain('/teleport');
+    expect(result?.stderr).toContain('cloud session');
+  });
+
+  it('refuses every command it does not run, and names a capability for each', async () => {
+    const refusals = SLASH_COMMANDS.filter(
+      (command) => !['help', 'version', 'model', 'status', 'usage', 'context', 'config', 'skill-doctor', 'skills', 'clear', 'compact', 'resume', 'provider', 'catalog'].includes(command.name),
+    );
+
+    expect(refusals.length).toBeGreaterThan(80);
+    for (const command of refusals) {
+      const result = await runSlashCommand(`/${command.name}`, slashContext());
+      expect(result?.exitCode).not.toBe(0);
+      expect(result?.stderr).toContain(`'/${command.name}'`);
+      expect(result?.stderr).toContain('this implementation has no');
+    }
+  });
+
+  it('sends a line that names no command back to the caller', async () => {
+    // The caller sends such a line to the model, the way the target does.
+    expect(await runSlashCommand('/not-a-command', slashContext())).toBeUndefined();
+    expect(await runSlashCommand('hello there', slashContext())).toBeUndefined();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The autocomplete overlay                                                    */
+/* -------------------------------------------------------------------------- */
+
+describe('the autocomplete overlay', () => {
+  it('lists the registry’s commands for a bare slash', () => {
+    const rows = slashCommandSuggestions('/');
+
+    // The overlay’s list is the registry’s list.
+    expect(rows.length).toBeGreaterThan(90);
+    expect(rows.map((row) => row.displayText)).toContain('/clear');
+    expect(rows.map((row) => row.displayText)).toContain('/help');
+  });
+
+  it('filters the list by what has been typed', () => {
+    const rows = slashCommandSuggestions('/cl');
+
+    expect(rows.map((row) => row.displayText)).toContain('/clear');
+    expect(rows.map((row) => row.displayText)).not.toContain('/help');
+  });
+
+  it('shows the alias the user typed beside the command’s name', () => {
+    const rows = slashCommandSuggestions('/cost');
+
+    expect(rows.map((row) => row.displayText)).toEqual(['/usage (cost)']);
+  });
+
+  it('has no overlay outside a slash command', () => {
+    expect(slashCommandSuggestions('hello')).toEqual([]);
+    expect(slashCommandSuggestions('/clear now')).toEqual([]);
+  });
+
+  it('renders a row the way the target renders it', () => {
+    const row = slashCommandSuggestions('/help')[0];
+
+    expect(row).toBeDefined();
+    expect(renderAutocompleteSuggestion(row!, true)).toBe(
+      '❯ /help – Show help and available commands',
+    );
   });
 });

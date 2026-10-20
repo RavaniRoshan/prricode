@@ -59,11 +59,22 @@
  *
  * ## The slash command
  *
- * A line that begins with `/provider` or `/catalog` runs the **manager**
- * instead of the model. The manager's own helpers (`isManagerCommand`,
- * `runManagerText` and `loadManagerState`, in `src/cli/commands/manager.ts`)
- * already exist and are tested; the host calls them and does not re-implement
- * them. Every other line is a **prompt**.
+ * A line that names a command of the **registry** (`src/cli/commands/slash.ts`)
+ * runs that command instead of the model. The registry holds the target's own
+ * command list — its names, its descriptions, its aliases and its argument
+ * hints — and the dispatch splits the commands into the ones this
+ * implementation runs and the ones it **refuses**, each refusal naming the
+ * capability the command needs and does not have.
+ *
+ * Every other line is a **prompt**: a line that names no command is sent to
+ * the model, the way the target sends it.
+ *
+ * ## The session seams
+ *
+ * Three of the commands change the **session**: `/clear` starts a new one,
+ * `/resume` opens another, and `/compact` summarises the conversation. The
+ * host owns the session, so those three are **seams** the host supplies and
+ * the commands call — a command never reaches into the host's state.
  *
  * ## The headless path is the reference
  *
@@ -111,6 +122,7 @@
  * terminal), and it says why.
  */
 
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -119,13 +131,21 @@ import type { RenderOptions } from 'ink';
 import type { TurnResult } from '../agent/loop.js';
 import type { PermissionDecision, ToolContext } from '../permissions/decision.js';
 import { PERSISTED_RULES_SETTINGS_PATH, persistentAllowRules } from '../permissions/decision.js';
+import { compact } from '../session/compaction.js';
 import type { SessionEvent } from '../session/event.js';
 import type { AppProps, PendingApproval } from '../ui/app.js';
 import type { ApprovalChoice } from '../ui/render/prompts.js';
 
 import type { ParsedRunArgs } from './args.js';
-import { isManagerCommand, loadManagerState, runManagerText } from './commands/manager.js';
-import { resolveModel, type CommandSession, type SessionContext, type SessionFactory } from './command.js';
+import {
+  CLI_VERSION,
+  resolveModel,
+  type CommandSession,
+  type SessionContext,
+  type SessionFactory,
+} from './command.js';
+import { loadManagerState } from './commands/manager.js';
+import { isSlashCommand, runSlashCommand } from './commands/slash.js';
 import { EXIT_FAILURE, EXIT_SUCCESS, type OutputSink } from './output.js';
 
 /* -------------------------------------------------------------------------- */
@@ -299,8 +319,8 @@ export async function runInteractiveSession(
 
   const signal = context.signal;
   // The model: the **same** resolution the headless path uses, so the two
-  // cannot drift apart.
-  const model = resolveModel(parsed, context);
+  // cannot drift apart. It is a `let` because `/model` changes it.
+  let model = resolveModel(parsed, context);
   const state: HostState = {
     events: [],
     input: '',
@@ -406,7 +426,8 @@ export async function runInteractiveSession(
   /**
    * A submitted line.
    *
-   * A manager line runs the manager; every other line is a prompt.
+   * A line that names a command of the registry runs that command; every
+   * other line is a prompt.
    *
    * The line is **trimmed** before it is used. **Implementation choice**: the audit
    * records nothing about how the target reads a typed line, and a line of
@@ -427,8 +448,8 @@ export async function runInteractiveSession(
     }
     render();
     if (line === '') return;
-    if (isManagerCommand(line)) {
-      await runManager(line);
+    if (isSlashCommand(line)) {
+      await runSlash(line);
       return;
     }
     await runTurn(line);
@@ -462,20 +483,46 @@ export async function runInteractiveSession(
     render();
   }
 
-  /** Run the manager for a slash command. */
-  async function runManager(line: string): Promise<void> {
-    // The manager is work too: a line submitted while it runs is refused, the
-    // same rule the model path follows.
+  /**
+   * Run the command a slash line names.
+   *
+   * The command is work too: a line submitted while it runs is refused, the
+   * same rule the model path follows. The command's own output is written
+   * **above** the app, the way the manager's output was.
+   */
+  async function runSlash(line: string): Promise<void> {
     turning = true;
     const statePath = path.join(context.session.configDir, PROVIDER_STATE_FILE);
     try {
-      const { registry, catalogs } = await loadManagerState(statePath);
-      const result = await runManagerText(line, registry, {
+      const result = await runSlashCommand(line, {
+        store: context.session.store,
+        cwd: context.session.cwd,
+        configDir: context.session.configDir,
+        sessionId: session.sessionId,
+        model,
+        version: CLI_VERSION,
+        events: state.events,
         env: context.session.env,
-        statePath,
-        catalogs,
+        // The manager's state is a file, and it is read **only** when a
+        // command needs it.
+        managerState: async () => loadManagerState(statePath),
+        managerOptions: (state) => ({
+          env: context.session.env,
+          statePath,
+          catalogs: state.catalogs,
+        }),
+        setModel: (next: string) => {
+          model = next;
+        },
+        startSession,
+        resumeSession,
+        compactSession,
       });
-      if (result === undefined) return;
+      if (result === undefined) {
+        turning = false;
+        render();
+        return;
+      }
       if (result.stdout !== '') app?.output(withoutTrailingNewline(result.stdout));
       if (result.stderr !== '') app?.output(withoutTrailingNewline(result.stderr));
       state.status = result.exitCode === 0 ? 'The command finished.' : 'The command failed.';
@@ -484,6 +531,67 @@ export async function runInteractiveSession(
     }
     turning = false;
     render();
+  }
+
+  /**
+   * Start a new session with an empty context.
+   *
+   * The **previous** session stays on disk: the store keeps the transcript,
+   * and the new session gets its own id. The records the app shows are the
+   * new session's — which are none.
+   */
+  async function startSession(): Promise<void> {
+    session = await context.createSession({ ...context.session, sessionId: randomUUID() });
+    state.events = [];
+  }
+
+  /**
+   * Open another session.
+   *
+   * The session's records are read back through the store, so the app opens
+   * with the conversation the model will see.
+   */
+  async function resumeSession(sessionId: string): Promise<void> {
+    session = await context.createSession({ ...context.session, sessionId });
+    state.events = await readSessionRecords(context, sessionId);
+  }
+
+  /**
+   * Summarise the conversation and mark the boundary.
+   *
+   * The summary is a **model** output: this implementation asks the session
+   * for it and passes it to the compaction, which never writes one itself.
+   * The marker is appended to the transcript, so the prefix stays in the file
+   * and the resume skips it.
+   */
+  async function compactSession(instructions?: string): Promise<string | undefined> {
+    const prompt =
+      instructions === undefined
+        ? COMPACT_PROMPT
+        : `${COMPACT_PROMPT}\n\n${instructions}`;
+    const turn = await session.runtime.runTurn(
+      { prompt, sessionId: session.sessionId, model },
+      signal,
+    );
+    const summary = assistantTextOf(turn.events);
+    if (summary === '') return undefined;
+
+    const all = [...state.events, ...turn.events];
+    const { events: compacted } = compact(all, {
+      keepLast: 0,
+      summary,
+      parentId: lastMessageIdOf(all),
+    });
+    const marker = compacted[0];
+    if (marker === undefined) return undefined;
+
+    const handle = await context.session.store.create({
+      cwd: context.session.cwd,
+      sessionId: session.sessionId,
+    });
+    await context.session.store.append(handle, marker);
+    state.events = compacted;
+    return summary;
   }
 
   /**
@@ -582,12 +690,15 @@ export async function runInteractiveSession(
  * the one a `--resume` at a message builds — is honoured, so the app opens
  * with the conversation the model sees.
  */
-async function readSessionRecords(context: InteractiveContext): Promise<SessionEvent[]> {
+async function readSessionRecords(
+  context: InteractiveContext,
+  sessionId: string = context.session.sessionId,
+): Promise<SessionEvent[]> {
   const events: SessionEvent[] = [];
   try {
     const handle = await context.session.store.create({
       cwd: context.session.cwd,
-      sessionId: context.session.sessionId,
+      sessionId,
     });
     for await (const event of context.session.store.read(handle)) events.push(event);
   } catch {
@@ -595,6 +706,50 @@ async function readSessionRecords(context: InteractiveContext): Promise<SessionE
     // in its own words, and the app still mounts.
   }
   return events;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The compaction                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The prompt the compaction asks the model for a summary with.
+ *
+ * **Implementation choice** (the wording). The target's `/compact` summarises
+ * the conversation; the record does not say in what words, and the summary is
+ * a **model** output either way.
+ */
+export const COMPACT_PROMPT =
+  'Summarise the conversation so far. The summary replaces the conversation in the context, so it must carry everything that still matters: what was asked, what was decided, what was changed, and what is still open.';
+
+/**
+ * The text of the assistant's messages in a turn.
+ *
+ * The summary is what the model **said**, so it is read out of the turn's own
+ * records — the host does not keep a second copy of the answer.
+ */
+function assistantTextOf(events: readonly SessionEvent[]): string {
+  const texts = events
+    .filter((event) => event.t === 'assistant_message')
+    .map((event) => (event.t === 'assistant_message' ? event.text : ''));
+  return texts.join('\n').trim();
+}
+
+/**
+ * The id of the last **message** in a list of records.
+ *
+ * The compaction's boundary hangs off a **message**: a record that is not a
+ * message sits on the chain as well, but the leaf of the chain is a message,
+ * and a boundary that hangs off a record the chain does not carry would not
+ * apply at all.
+ */
+function lastMessageIdOf(events: readonly SessionEvent[]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event === undefined) continue;
+    if (event.t === 'user_message' || event.t === 'assistant_message') return event.id;
+  }
+  return undefined;
 }
 
 /* -------------------------------------------------------------------------- */
