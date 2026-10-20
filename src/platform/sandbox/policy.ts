@@ -55,6 +55,15 @@
  *     the `rm` on the host just as surely. The **process substitution** forms
  *     (`<( … )` and `>( … )`) are refused as well, because a shell that
  *     supports them runs the command inside the parentheses.
+ *   - **An entry of `*` exempts every command.** The entries are globs over the
+ *     whole sub-command, so an entry that consists of nothing but `*` matches
+ *     every command: with `allowUnsandboxedCommands` set, such a list switches
+ *     the sandbox off for the **whole** command space, and `git status && rm -rf
+ *     /` is exempt too. This implementation does **not** change the semantics — the
+ *     target's own glob has the same reach, and the substitution guard still
+ *     bites — but the hazard is made visible: the status reports the **scope**
+ *     of the list (`exemptionScope`), and `all` says that the sandbox is off
+ *     for everything.
  *   - `enabledPlatforms` is a **whitelist**: a platform that is not in the list is
  *     excluded. An unset list takes the default (`['linux']`, the only platform the
  *     implementation's backend implements); an explicitly empty list excludes every platform.
@@ -159,6 +168,16 @@ export const SANDBOX_REASONS = Object.freeze({
 /** What the policy decided about a command. */
 export type SandboxDecision = 'allow' | 'deny' | 'unconfined';
 
+/**
+ * The scope the `excludedCommands` list covers.
+ *
+ * `all` is the hazard: an entry that consists of nothing but `*` is a glob over
+ * the whole sub-command, so it exempts **every** command, and a policy that
+ * carries it runs the whole command space outside the sandbox. `partial` means
+ * the list names particular commands, and `none` means it exempts nothing.
+ */
+export type SandboxExemptionScope = 'none' | 'partial' | 'all';
+
 /** The result of evaluating the policy. */
 export interface SandboxEvaluation {
   /** What to do with the command. */
@@ -213,6 +232,33 @@ export function evaluateSandbox(
     return { decision: 'unconfined', reason: SANDBOX_REASONS.unavailableUnconfined };
   }
   return { decision: 'allow' };
+}
+
+/**
+ * The scope the exclusion list of a policy covers.
+ *
+ * The list is **inert** unless `allowUnsandboxedCommands` is set: a policy that
+ * does not allow unsandboxed commands never has the `all` scope, whatever its
+ * list carries. The scope is a **report**, not a decision: this implementation does not
+ * change the semantics of the target's glob, it only makes the reach of the
+ * list visible.
+ */
+export function exemptionScope(policy: SandboxPolicy): SandboxExemptionScope {
+  if (!policy.allowUnsandboxedCommands) return 'none';
+  if (policy.excludedCommands.some(coversEveryCommand)) return 'all';
+  return policy.excludedCommands.length === 0 ? 'none' : 'partial';
+}
+
+/**
+ * Whether an exclusion entry is a glob that covers every command.
+ *
+ * An entry with a `*` is a glob over the whole sub-command, and the only glob
+ * that covers every sub-command is one that consists of nothing but `*`: `*`
+ * and `**` do, `git *` does not.
+ */
+function coversEveryCommand(entry: string): boolean {
+  const trimmed = entry.trim();
+  return trimmed.length > 0 && [...trimmed].every((character) => character === '*');
 }
 
 /**

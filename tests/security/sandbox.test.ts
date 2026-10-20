@@ -40,7 +40,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { connect } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { spawn } from 'node:child_process';
@@ -52,6 +52,7 @@ import {
   DEFAULT_SANDBOX_POLICY,
   SANDBOX_REASONS,
   evaluateSandbox,
+  exemptionScope,
   matchingExclusions,
   parseSandboxPolicy,
   readSandboxPolicy,
@@ -143,20 +144,34 @@ const unavailableBackend: SandboxBackend = {
  * A backend that runs the command on the host and reports the sandbox as up.
  *
  * It carries the enforcement the test needs — a named advisory, for instance —
- * without depending on the version of bubblewrap the host happens to ship.
+ * without depending on the version of bubblewrap the host happens to ship. The
+ * availability warning and the enforcement warnings are separate options: the
+ * real backend reports the advisory's detail in **both**, and the launcher has
+ * to report it once.
  */
-function fakeBackend(options: { advisory?: SandboxAdvisory } = {}): SandboxBackend {
+function fakeBackend(
+  options: {
+    advisory?: SandboxAdvisory;
+    warnings?: readonly string[];
+    availabilityWarning?: string;
+  } = {},
+): SandboxBackend {
   return {
     name: 'test-fake',
     async isAvailable() {
-      return { available: true };
+      return {
+        available: true,
+        ...(options.availabilityWarning === undefined
+          ? {}
+          : { warning: options.availabilityWarning }),
+      };
     },
     async describe() {
       return {
         binary: '/usr/bin/bwrap',
         version: '0.9.0',
         setuid: false,
-        warnings: [],
+        warnings: [...(options.warnings ?? [])],
         problems: [],
         ...(options.advisory === undefined ? {} : { advisory: options.advisory }),
       };
@@ -473,6 +488,39 @@ describe('CC-017 step 1 — the sandbox policy', () => {
     expect(matchingExclusions('git status --short', ['git *'])).toEqual(['git *']);
     // A redirection is stripped before the comparison.
     expect(matchingExclusions('git status > out.txt', ['git status'])).toEqual(['git status']);
+  });
+
+  // --- fix round 3, finding 7: the `*` entry switches the sandbox off for everything ---
+
+  it('reports the scope the exclusion list covers', () => {
+    // A list that carries a catch-all exempts the whole command space.
+    expect(exemptionScope(policy({ allowUnsandboxedCommands: true, excludedCommands: ['*'] }))).toBe(
+      'all',
+    );
+    expect(exemptionScope(policy({ allowUnsandboxedCommands: true, excludedCommands: ['**'] }))).toBe(
+      'all',
+    );
+    // A list that names particular commands covers only part of the space.
+    expect(
+      exemptionScope(policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] })),
+    ).toBe('partial');
+    expect(
+      exemptionScope(policy({ allowUnsandboxedCommands: true, excludedCommands: ['git *'] })),
+    ).toBe('partial');
+    // An empty list exempts nothing.
+    expect(exemptionScope(policy({ allowUnsandboxedCommands: true, excludedCommands: [] }))).toBe(
+      'none',
+    );
+    // And the list is inert unless unsandboxed commands are allowed at all.
+    expect(exemptionScope(policy({ allowUnsandboxedCommands: false, excludedCommands: ['*'] }))).toBe(
+      'none',
+    );
+  });
+
+  it('names the catch-all exclusion in the policy header', () => {
+    const header = moduleHeader('policy');
+    expect(header).toMatch(/excludedCommands/);
+    expect(header).toMatch(/every command/);
   });
 
   // --- review finding 18: the policy is exported three ways ---
@@ -1424,6 +1472,271 @@ describe('CC-017 step 5 — the launcher', () => {
 
     expect(result.stdout).toContain('hello');
   });
+
+  // --- fix round 3, finding 1: the unconfined path ran with the sandbox's HOME=/tmp ---
+
+  it('gives the unconfined path the real home, never the sandbox’s /tmp', async () => {
+    const root = temporaryDirectory();
+    const command = 'echo "home=[$HOME]"';
+    const launched = await launchSandbox({
+      command,
+      cwd: root,
+      policy: policy({ allowUnsandboxedCommands: true, excludedCommands: [command] }),
+    });
+
+    expect(launched.status.sandboxed).toBe(false);
+    const result = await launched.wait();
+    await launched.cleanup();
+
+    // The unconfined path runs on the host, where `/tmp` is world-writable: a
+    // shared home is a config-injection vector, so it gets the caller's own.
+    expect(result.stdout).not.toContain('home=[/tmp]');
+    expect(result.stdout).toContain(`home=[${process.env['HOME'] ?? homedir()}]`);
+  });
+
+  it('keeps the sandboxed home on the sandbox’s own tmpfs', () => {
+    const spec = { command: 'true', cwd: '/tmp' };
+
+    // Inside the sandbox, `/tmp` is the sandbox’s own tmpfs, never the host’s.
+    expect(sandboxEnvironment(spec)['HOME']).toBe('/tmp');
+    // The unconfined path runs on the host, where `/tmp` is shared.
+    const unconfined = sandboxEnvironment(spec, 'unconfined');
+    expect(unconfined['HOME']).toBe(process.env['HOME'] ?? homedir());
+    expect(unconfined['HOME']).not.toBe('/tmp');
+  });
+
+  it('never lets either path see the agent’s API key', async () => {
+    const root = temporaryDirectory();
+    const command = 'echo "key=[$ANTHROPIC_API_KEY]"';
+
+    const unconfined = await launchSandbox({
+      command,
+      cwd: root,
+      env: { PATH: '/usr/bin:/bin', ANTHROPIC_API_KEY: 'sk-s3cret' },
+      policy: policy({ allowUnsandboxedCommands: true, excludedCommands: [command] }),
+    });
+    const unconfinedResult = await unconfined.wait();
+    await unconfined.cleanup();
+    expect(unconfinedResult.stdout).toContain('key=[]');
+    expect(unconfinedResult.stdout).not.toContain('sk-s3cret');
+
+    const sandboxed = await launchSandbox({
+      command,
+      cwd: root,
+      env: { PATH: '/usr/bin:/bin', ANTHROPIC_API_KEY: 'sk-s3cret' },
+    });
+    const sandboxedResult = await sandboxed.wait();
+    await sandboxed.cleanup();
+    expect(sandboxedResult.stdout).toContain('key=[]');
+    expect(sandboxedResult.stdout).not.toContain('sk-s3cret');
+  });
+
+  // --- fix round 3, finding 2: a mask target could shadow a policy bind ---
+
+  it('refuses the launch when a mask would shadow a policy bind', async () => {
+    const root = temporaryDirectory();
+    const grantedDirectory = path.join(root, '.claude');
+    mkdirSync(grantedDirectory);
+    const granted = path.join(grantedDirectory, 'secret');
+    writeFileSync(granted, 'granted');
+    const protectedPath = path.join(grantedDirectory, 'settings.json');
+    writeFileSync(protectedPath, '{}');
+
+    const plan = buildSandboxPlan({
+      command: 'true',
+      cwd: root,
+      readWritePaths: [granted],
+      protectedPaths: [protectedPath],
+    });
+
+    // The mask would be a tmpfs on the directory that holds the granted bind,
+    // and the masks are applied after the binds: the bind would disappear.
+    expect(plan.refusals).toHaveLength(1);
+    expect(plan.refusals[0]).toContain(grantedDirectory);
+    expect(plan.refusals[0]).toContain(granted);
+    expect(plan.refusals[0]).toMatch(/shadow/);
+    expect(plan.masks).toHaveLength(0);
+
+    await expect(
+      launchSandbox({
+        command: 'echo RAN',
+        cwd: root,
+        readWritePaths: [granted],
+        protectedPaths: [protectedPath],
+      }),
+    ).rejects.toBeInstanceOf(SandboxRefusedError);
+  });
+
+  it('refuses only when the mask really would shadow a bind', () => {
+    const root = temporaryDirectory();
+    const writable = path.join(root, 'work');
+    const configDirectory = path.join(root, '.claude');
+    mkdirSync(writable);
+    mkdirSync(configDirectory);
+    const protectedPath = path.join(configDirectory, 'settings.json');
+    writeFileSync(protectedPath, '{}');
+
+    // The granted bind is a sibling of the masked directory, not under it.
+    const plan = buildSandboxPlan({
+      command: 'true',
+      cwd: root,
+      readWritePaths: [writable],
+      protectedPaths: [protectedPath],
+    });
+    expect(plan.refusals).toHaveLength(0);
+    expect(plan.masks).toHaveLength(1);
+    expect(plan.masks[0]?.target).toBe(configDirectory);
+  });
+
+  it.skipIf(!bubblewrapAvailable)(
+    'never lets a mask swallow a path the policy granted',
+    async () => {
+      const root = temporaryDirectory();
+      const grantedDirectory = path.join(root, '.claude');
+      mkdirSync(grantedDirectory);
+      const granted = path.join(grantedDirectory, 'secret');
+      writeFileSync(granted, 'granted');
+      const protectedPath = path.join(grantedDirectory, 'settings.json');
+      writeFileSync(protectedPath, '{"token":"s3cret"}');
+
+      // The launch is refused, so neither the granted path nor the protected
+      // one is reachable — and the host is untouched.
+      await expect(
+        launchSandbox({
+          command: `cat ${JSON.stringify(granted)}`,
+          cwd: root,
+          readWritePaths: [granted],
+          protectedPaths: [protectedPath],
+        }),
+      ).rejects.toBeInstanceOf(SandboxRefusedError);
+      expect(readFileSync(granted, 'utf8')).toBe('granted');
+      expect(readFileSync(protectedPath, 'utf8')).toBe('{"token":"s3cret"}');
+    },
+  );
+
+  // --- fix round 3, finding 3: the advisory detail was emitted twice in the notes ---
+
+  it('reports the advisory detail once in the notes', async () => {
+    const root = temporaryDirectory();
+    const detail = 'bubblewrap 0.9.0 predates 0.12.0, which fixes CVE-2026-87766';
+    const advisory: SandboxAdvisory = {
+      id: BUBBLEWRAP_ADVISORY,
+      fixedIn: BUBBLEWRAP_MINIMUM_VERSION,
+      version: '0.9.0',
+      detail,
+    };
+
+    const launched = await launchSandbox({
+      command: 'echo advisory',
+      cwd: root,
+      // The real backend reports the detail in the availability warning **and**
+      // in the enforcement warnings.
+      backend: fakeBackend({
+        advisory,
+        warnings: [detail],
+        availabilityWarning: detail,
+      }),
+    });
+
+    const notes = launched.status.notes.filter((note) => note.includes(BUBBLEWRAP_ADVISORY));
+    expect(notes).toHaveLength(1);
+    // The machine-readable condition and the reduced-protection line stay.
+    expect(launched.status.advisory?.id).toBe(BUBBLEWRAP_ADVISORY);
+    expect(launched.status.reducedProtection.join(' ')).toMatch(/CVE-2026-87766/);
+    await launched.cleanup();
+  });
+
+  // --- fix round 3, finding 4: the unconfined path was handed the proxy socket ---
+
+  it('does not hand the proxy socket to the unconfined path', async () => {
+    const root = temporaryDirectory();
+    const proxy = await createSandboxProxy({
+      socketPath: path.join(root, 'proxy.sock'),
+      policy: { allowedDomains: ['*'] },
+    });
+    try {
+      const command = 'echo "socket=[$SANDBOX_PROXY_SOCKET]"';
+      const launched = await launchSandbox({
+        command,
+        cwd: root,
+        proxy,
+        policy: policy({ allowUnsandboxedCommands: true, excludedCommands: [command] }),
+      });
+
+      expect(launched.status.sandboxed).toBe(false);
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      // The socket is only bind-mounted into the sandbox, so the unconfined path
+      // must not be told about a path that does not exist for it.
+      expect(result.stdout).toContain('socket=[]');
+      expect(result.stdout).not.toContain(SANDBOX_PROXY_SOCKET_PATH);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it('keeps the proxy socket in the environment of the sandboxed path', () => {
+    const proxy = { socketPath: '/tmp/proxy.sock', requests: [], close: async () => undefined };
+    const environment = sandboxEnvironment({ command: 'true', cwd: '/tmp', proxy });
+    expect(environment[SANDBOX_PROXY_SOCKET_VARIABLE]).toBe(SANDBOX_PROXY_SOCKET_PATH);
+    // The unconfined path does not get it at all.
+    const unconfined = sandboxEnvironment({ command: 'true', cwd: '/tmp', proxy }, 'unconfined');
+    expect(unconfined[SANDBOX_PROXY_SOCKET_VARIABLE]).toBeUndefined();
+  });
+
+  // --- fix round 3, finding 5: the unconfined path ignored the plan refusals ---
+
+  it('surfaces the plan refusals on the unconfined path', async () => {
+    const root = temporaryDirectory();
+    const protectedPath = path.join(root, 'config', 'settings.json');
+    const command = 'echo unconfined';
+    const launched = await launchSandbox({
+      command,
+      cwd: root,
+      // A read-write bind: masking the missing parent would create it on the host.
+      readWritePaths: [root],
+      protectedPaths: [protectedPath],
+      policy: policy({ allowUnsandboxedCommands: true, excludedCommands: [command] }),
+    });
+
+    expect(launched.status.sandboxed).toBe(false);
+    // The refusal is in the plan, and it is said out loud: it was never acted on.
+    expect(launched.status.plan.refusals).toHaveLength(1);
+    const refusal = launched.status.plan.refusals[0] ?? '';
+    expect(launched.status.notes.join(' ')).toContain(refusal);
+    await launched.cleanup();
+  });
+
+  // --- fix round 3, finding 7: the catch-all exemption is now visible ---
+
+  it('reports that the exclusion list exempts every command', async () => {
+    const root = temporaryDirectory();
+    const command = 'echo everything';
+    const launched = await launchSandbox({
+      command,
+      cwd: root,
+      policy: policy({ allowUnsandboxedCommands: true, excludedCommands: ['*'] }),
+    });
+
+    expect(launched.status.sandboxed).toBe(false);
+    expect(launched.status.exemptionScope).toBe('all');
+    expect(launched.status.notes.join(' ')).toMatch(/every command/);
+    await launched.cleanup();
+  });
+
+  it('reports the scope of an exclusion list that exempts only some commands', async () => {
+    const root = temporaryDirectory();
+    const command = 'git status';
+    const launched = await launchSandbox({
+      command,
+      cwd: root,
+      policy: policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] }),
+    });
+
+    expect(launched.status.exemptionScope).toBe('partial');
+    await launched.cleanup();
+  });
 });
 
 // --- step 8: Landlock ---------------------------------------------------------
@@ -1957,6 +2270,37 @@ describe('CC-017 — the documented shape of the sandbox', () => {
     for (const name of ['policy', 'launcher', 'landlock', 'seccomp', 'proxy']) {
       expect(moduleSource(name)).not.toContain('}export');
     }
+  });
+
+  // --- fix round 3, finding 6: the advisory over-stated itself ---
+
+  it('does not over-state the advisory in the module header', () => {
+    // The header is read with its line breaks flattened: the wording is the
+    // point, not where the lines happen to break.
+    const header = moduleHeader('launcher').replace(/\s+/g, ' ');
+    // "Strictly less safe" is not what the argument says: running inside a
+    // sandbox that carries a known advisory is weaker *in expectation*.
+    expect(header).not.toMatch(/strictly less safe/);
+    // The setuid clause does not apply to this implementation: it refuses a setuid
+    // bubblewrap outright.
+    expect(header).not.toMatch(/backported/);
+    expect(header).toMatch(/refuses a setuid bubblewrap outright/);
+  });
+
+  it('names the setuid refusal in the advisory detail', () => {
+    const root = temporaryDirectory();
+    const fake = path.join(root, 'bwrap');
+    writeFileSync(fake, '#!/bin/sh\necho "bubblewrap 0.9.0"\n');
+    chmodSync(fake, 0o755);
+
+    const enforcement = probeEnforcementBinary(fake);
+    const detail = enforcement.advisory?.detail ?? '';
+    expect(detail).toMatch(/CVE-2026-87766/);
+    expect(detail).not.toMatch(/backported/);
+    // This implementation drives the unprivileged build, and there the version does
+    // decide whether the fix is present.
+    expect(detail).toMatch(/setuid/);
+    expect(detail).toMatch(/unprivileged/);
   });
 });
 

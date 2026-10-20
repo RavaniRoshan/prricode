@@ -34,20 +34,21 @@
  *      layer is reported as *not* in force. See `src/platform/sandbox/seccomp.ts`.
  *
  * **The launcher never needs root.** The design is unprivileged: user namespaces
- * plus `PR_SET_NO_NEW_PRIVS`, never a setuid helper. A **setuid** bubblewrap is
- * refused for exactly that reason, and the version of the binary is probed and
- * reported: CVE-2026-87766 (a symlink traversal through bubblewrap's `/oldroot`
- * staging mount) is fixed in 0.12.0, the fix is not backported to the
- * setuid-capable builds, and a distribution's version alone does not prove that
- * the fix is present.
+ * plus `PR_SET_NO_NEW_PRIVS`, never a setuid helper. This implementation **refuses a
+ * setuid bubblewrap outright** — the setuid build is not used at all — and the
+ * version of the binary is probed and reported: CVE-2026-87766 (a symlink
+ * traversal through bubblewrap's `/oldroot` staging mount) is fixed in 0.12.0.
+ * Since this implementation only ever drives the **unprivileged** build, a version at or
+ * above 0.12.0 does prove that the fix is present, and a version below it does
+ * prove that the fix is missing.
  *
  * **The version policy: an old bubblewrap stays available.** The advisory is
  * promoted to a **named condition** — the status carries it as `advisory` and
  * repeats it in `reducedProtection` — so the caller can branch on it rather
  * than discover it in a log line. Refusing the backend would be *worse*: the
  * implementation's `failIfUnavailable` default refuses the command outright, and the
- * target's own default runs it **unconfined**, which is strictly less safe than
- * running it inside a sandbox whose backend may carry a known advisory. The
+ * target's own default runs it **unconfined**, which is weaker in expectation
+ * than running it inside a sandbox whose backend may carry a known advisory. The
  * implementation therefore keeps the isolation and makes the risk visible.
  *
  * **The backend.** The mount namespace, the namespaces and the seccomp filter are
@@ -71,6 +72,17 @@
  *   - when neither is possible, the launch is **refused with a named reason**:
  *     this implementation never creates a directory on the host to make a mask fit.
  *
+ * **A mask never shadows a bind.** The masks are applied **after** the binds,
+ * so a mask always wins over the bind it covers — and a tmpfs on a directory
+ * therefore hides every bind **beneath** it. A policy that grants a path inside
+ * a directory it also protects is contradictory: the mask would take the granted
+ * path away, and the protected path is unreadable either way. This implementation does
+ * not pick a side: the launch is **refused with a named reason**, so the
+ * conflict is loud instead of silent. The trade-off is deliberate — a mask that
+ * is placed so the bind survives would give the granted path back at the cost of
+ * the "the mask always wins" rule, which is the rule that keeps a protected
+ * path unreadable.
+ *
  * **A mask never lands on a symbolic link.** A mask is a mount, and a mount
  * lands on a **name**: a name that resolves through a link is mounted on the
  * link rather than on the object it names, so the backend either fails the
@@ -83,8 +95,26 @@
  * host's environment: `PATH`, `HOME`, `LANG`, `TERM` and the proxy-socket
  * variable, whatever the caller passes. The agent's API key therefore never
  * enters the sandbox, and the status does not echo the environment at all. The
- * **unconfined** path gets the same filtered environment: an exempt command is
- * still the agent's command, so it must not see the host's environment either.
+ * **unconfined** path gets the same **filtered** environment — an exempt command
+ * is still the agent's command, so it must not see the host's environment
+ * either — with two differences that the host makes necessary:
+ *
+ *   - its `HOME` is the **caller's own**, not the sandbox's `/tmp`. The
+ *     sandbox's `/tmp` is a private tmpfs, but the unconfined path runs on the
+ *     host, where `/tmp` is world-writable and shared: a command that reads
+ *     `$HOME/.gitconfig` out of it reads a file any local user can write.
+ *   - it gets **no proxy-socket variable**. The socket is bind-mounted into the
+ *     sandbox only, so the variable would name a path that does not exist for
+ *     the unconfined process.
+ *
+ * The API key is filtered out of **both** paths: that is the property the
+ * filtered environment exists for.
+ *
+ * **The status names the hazards it cannot fix.** The `excludedCommands` list is
+ * the target's, and an entry of `*` in it is a glob over the whole sub-command,
+ * so it exempts **every** command: this implementation does not change the semantics, but
+ * the status reports the **scope** of the list (`exemptionScope`), and `all`
+ * says in as many words that the sandbox is off for the whole command space.
  *
  * Implementation choices (the plan does not pin them, so they are marked here):
  *
@@ -113,14 +143,16 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
   DEFAULT_SANDBOX_POLICY,
   evaluateSandbox,
+  exemptionScope,
   type SandboxAvailability,
   type SandboxEvaluation,
+  type SandboxExemptionScope,
   type SandboxFilesystemPolicy,
   type SandboxPolicy,
 } from './policy.js';
@@ -178,8 +210,9 @@ const BUBBLEWRAP_BINARY = '/usr/bin/bwrap';
 /**
  * The bubblewrap version that carries the CVE-2026-87766 fix.
  *
- * The fix is **not** backported to the setuid-capable builds, so the version
- * alone does not prove that the fix is present: the launcher reports the
+ * This implementation **refuses a setuid bubblewrap outright**, so it only ever drives the
+ * unprivileged build, and for that build the version does decide whether the
+ * fix is present. An older binary stays available: the launcher reports the
  * version, promotes the advisory to a named condition, and warns.
  */
 export const BUBBLEWRAP_MINIMUM_VERSION = '0.12.0';
@@ -202,6 +235,16 @@ const DEFAULT_SANDBOX_ENVIRONMENT: Readonly<Record<string, string>> = Object.fre
   LANG: 'C',
   TERM: 'dumb',
 });
+
+/**
+ * Which path the environment is built for.
+ *
+ * The two paths differ in two ways, and only in ways the host makes necessary:
+ * the unconfined path runs on the host, where the sandbox's own `/tmp` is a
+ * shared, world-writable directory, and the proxy socket is bind-mounted into
+ * the sandbox only.
+ */
+export type SandboxEnvironmentMode = 'sandboxed' | 'unconfined';
 
 /** How long the launcher waits for the backend to confirm that the sandbox came up. */
 const ESTABLISHMENT_TIMEOUT_MS = 15_000;
@@ -550,18 +593,30 @@ function planMask(protectedPath: string, binds: readonly PlanBind[]): MaskPlan {
   const stats = statOrUndefined(protectedPath);
   if (stats !== undefined && stats.isDirectory()) {
     // A directory carries a tmpfs directly: the mount point is a directory.
-    return { mask: { path: protectedPath, target: protectedPath, kind: 'tmpfs' } };
+    return maskOrRefusal(
+      { path: protectedPath, target: protectedPath, kind: 'tmpfs' },
+      protectedPath,
+      binds,
+    );
   }
 
   const parent = maskTargetFor(protectedPath, containing, binds);
   if (parent !== undefined) {
-    return { mask: { path: protectedPath, target: parent, kind: 'tmpfs' } };
+    return maskOrRefusal(
+      { path: protectedPath, target: parent, kind: 'tmpfs' },
+      protectedPath,
+      binds,
+    );
   }
 
   if (stats !== undefined && stats.isFile()) {
     // The parent cannot carry the mask, but the path exists: an empty file is
     // bound over it, so neither its contents nor its mode are reachable.
-    return { mask: { path: protectedPath, target: protectedPath, kind: 'empty-file' } };
+    return maskOrRefusal(
+      { path: protectedPath, target: protectedPath, kind: 'empty-file' },
+      protectedPath,
+      binds,
+    );
   }
 
   if (containing.writable) {
@@ -575,6 +630,40 @@ function planMask(protectedPath: string, binds: readonly PlanBind[]): MaskPlan {
   // The bind that holds the path is read-only, so the sandbox can neither create
   // the path nor write to it. There is nothing to mask.
   return {};
+}
+
+/**
+ * The mask, unless it would shadow a bind of the plan.
+ *
+ * The masks are applied **after** the binds, so a mask always wins over the bind
+ * it covers — and a tmpfs on a directory hides every bind **beneath** it. A
+ * policy that grants a path inside a directory it also protects is
+ * contradictory: the protected path is unreadable either way, and the mask
+ * would take the granted path away as well. The launch is therefore **refused
+ * with a named reason** rather than silently dropping the grant: the trade-off
+ * is between "the protected path is unreadable" and "the granted path stays
+ * readable", and this implementation refuses instead of picking a side.
+ */
+function maskOrRefusal(
+  mask: SandboxMask,
+  protectedPath: string,
+  binds: readonly PlanBind[],
+): MaskPlan {
+  const shadowed = binds.find((bind) => isUnder(bind.target, mask.target));
+  if (shadowed !== undefined) {
+    return {
+      refusal:
+        `the protected path ${protectedPath} cannot be masked: the mask would be a tmpfs on ` +
+        `${mask.target}, which contains the bind the plan grants at ${shadowed.target}, so the ` +
+        'mask would shadow the bind',
+    };
+  }
+  return { mask };
+}
+
+/** Whether a path lies below another one. */
+function isUnder(candidate: string, root: string): boolean {
+  return candidate.startsWith(`${root}${path.sep}`);
 }
 
 /**
@@ -785,6 +874,15 @@ export interface SandboxStatus {
   reason?: string;
   /** The `excludedCommands` entries that exempt the command. */
   exemptions?: readonly string[];
+  /**
+   * The scope the `excludedCommands` list covers.
+   *
+   * `all` means the list carries an entry that matches **every** command: with
+   * `allowUnsandboxedCommands` set, the sandbox is then switched off for the
+   * whole command space. The semantics are the target's; this implementation only
+   * reports the reach of the list, so the hazard is visible.
+   */
+  exemptionScope: SandboxExemptionScope;
   /** What the launcher knows about the enforcement the backend depends on. */
   enforcement?: BackendEnforcement;
   /**
@@ -869,6 +967,7 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
       backend.name,
       evaluation,
       landlock,
+      policy,
       availabilityReason,
       availabilityWarning,
       enforcement,
@@ -888,7 +987,7 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
   const notes: string[] = [];
   if (availabilityWarning !== undefined) notes.push(availabilityWarning);
   if (enforcement !== undefined) {
-    for (const warning of enforcement.warnings) notes.push(warning);
+    for (const warning of enforcement.warnings) pushNote(notes, warning);
   }
   const advisory = enforcement?.advisory;
   if (advisory !== undefined) {
@@ -896,6 +995,8 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
     // protection, so it cannot be missed by a reader of the status alone.
     reducedProtection.push(advisoryCondition(backend.name, advisory));
   }
+  const scopeNote = exemptionScopeNote(exemptionScope(policy));
+  if (scopeNote !== undefined) notes.push(scopeNote);
   notes.push(
     'the seccomp-notification supervisor is not attached: it needs a native listener, so the sandbox observes nothing.',
   );
@@ -928,6 +1029,7 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
     ...(establishment.reason === undefined ? {} : { reason: establishment.reason }),
     ...(advisory === undefined ? {} : { advisory }),
     ...(enforcement === undefined ? {} : { enforcement }),
+    exemptionScope: exemptionScope(policy),
     plan,
   };
 
@@ -955,6 +1057,37 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
  */
 function advisoryCondition(backendName: string, advisory: SandboxAdvisory): string {
   return `the ${backendName} backend carries ${advisory.id}: ${advisory.detail}`;
+}
+
+/**
+ * Add a note to the list, unless the list already carries it.
+ *
+ * The availability probe and the enforcement probe report the same facts: the
+ * advisory's detail is one of them, and the real backend puts it in both. A
+ * note that is already there is therefore not repeated — the detail is reported
+ * once, and the machine-readable `advisory` and the `reducedProtection` line
+ * carry it as well.
+ */
+function pushNote(notes: string[], note: string): void {
+  if (notes.some((existing) => existing.includes(note))) return;
+  notes.push(note);
+}
+
+/**
+ * The note that names the catch-all exclusion.
+ *
+ * The semantics are the target's: an entry of `*` is a glob over the whole
+ * sub-command, so it exempts every command. This implementation does not change that; it
+ * makes the hazard visible, because a list that exempts everything switches
+ * the sandbox off for the whole command space and nothing else in the status
+ * says so.
+ */
+function exemptionScopeNote(scope: SandboxExemptionScope): string | undefined {
+  if (scope !== 'all') return undefined;
+  return (
+    'the excludedCommands list carries an entry that matches every command, so every command ' +
+    'runs outside the sandbox (a command that carries a command substitution is still sandboxed)'
+  );
 }
 
 /**
@@ -996,6 +1129,7 @@ async function runUnconfined(
   backendName: string,
   evaluation: SandboxEvaluation,
   landlock: LandlockStatus,
+  policy: SandboxPolicy,
   availabilityReason?: string,
   availabilityWarning?: string,
   enforcement?: BackendEnforcement,
@@ -1004,8 +1138,12 @@ async function runUnconfined(
     cwd: spec.cwd,
     // The **same filtered environment** the sandboxed path uses: an exempt
     // command is still the agent's command, so it must not see the host's
-    // environment — the agent's API key is in it.
-    env: sandboxEnvironment(spec),
+    // environment — the agent's API key is in it. The two paths differ only
+    // where the host makes it necessary: the unconfined path runs on the host,
+    // where the sandbox's own `/tmp` is a shared, world-writable directory, so
+    // its home is the caller's own; and the proxy socket is bind-mounted into
+    // the sandbox only, so the unconfined path is not handed the variable.
+    env: sandboxEnvironment(spec, 'unconfined'),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const sandboxProcess = collect(child);
@@ -1017,13 +1155,26 @@ async function runUnconfined(
   }
   if (availabilityWarning !== undefined) notes.push(availabilityWarning);
   if (enforcement !== undefined) {
-    for (const warning of enforcement.warnings) notes.push(warning);
+    for (const warning of enforcement.warnings) pushNote(notes, warning);
   }
 
   const advisory = enforcement?.advisory;
   const reducedProtection = [...landlock.reducedProtection];
   if (advisory !== undefined) {
     reducedProtection.push(advisoryCondition(backendName, advisory));
+  }
+  const scopeNote = exemptionScopeNote(exemptionScope(policy));
+  if (scopeNote !== undefined) notes.push(scopeNote);
+
+  const plan = buildSandboxPlan(spec);
+  if (plan.refusals.length > 0) {
+    // The plan was never established, so its refusals were never acted on. They
+    // are said out loud rather than left in the plan alone: a reader of the
+    // status has to be able to tell that the refusals were not enforced.
+    notes.push(
+      'the sandbox plan was never established, so the refusals it carries were never acted on: ' +
+        plan.refusals.join('; '),
+    );
   }
 
   const status: SandboxStatus = {
@@ -1037,7 +1188,8 @@ async function runUnconfined(
     ...(evaluation.exemptions === undefined ? {} : { exemptions: evaluation.exemptions }),
     ...(advisory === undefined ? {} : { advisory }),
     ...(enforcement === undefined ? {} : { enforcement }),
-    plan: buildSandboxPlan(spec),
+    exemptionScope: exemptionScope(policy),
+    plan,
   };
 
   return {
@@ -1202,7 +1354,7 @@ export function bubblewrapBackend(): SandboxBackend {
       }
       // The version never makes the backend unavailable: the advisory is a
       // named condition on the status, and a refusal would run the command
-      // unconfined, which is strictly less safe.
+      // unconfined, which is weaker in expectation.
       const warnings = [
         ...(info.advisory === undefined ? [] : [info.advisory.detail]),
         ...(probe.warning === undefined ? [] : [probe.warning]),
@@ -1284,10 +1436,12 @@ function bubblewrapLayers(): SandboxLayers {
  *
  * The **version** and the **setuid bit** are both read: a setuid bubblewrap is a
  * problem, because this design never uses a setuid helper, and a version below
- * the one that carries the CVE-2026-87766 fix is an **advisory**, because the
- * fix is not backported to the setuid-capable builds. The advisory is a named
- * condition on the status, not a warning that scrolls past: the backend stays
- * available, and the caller is told which advisory applies.
+ * the one that carries the CVE-2026-87766 fix is an **advisory**. This implementation
+ * refuses a setuid bubblewrap outright, so it only drives the unprivileged
+ * build, and for that build the version does decide whether the fix is present.
+ * The advisory is a named condition on the status, not a warning that scrolls
+ * past: the backend stays available, and the caller is told which advisory
+ * applies.
  */
 export function probeEnforcementBinary(binary: string): BackendEnforcement {
   const problems: string[] = [];
@@ -1317,8 +1471,9 @@ export function probeEnforcementBinary(binary: string): BackendEnforcement {
   } else if (compareVersions(version, BUBBLEWRAP_MINIMUM_VERSION) < 0) {
     const detail =
       `bubblewrap ${version} predates ${BUBBLEWRAP_MINIMUM_VERSION}, which fixes ${BUBBLEWRAP_ADVISORY} ` +
-      '(a symlink traversal through bubblewrap’s /oldroot staging mount); the fix is not ' +
-      'backported to the setuid-capable builds, so the version alone does not prove that it is present';
+      '(a symlink traversal through bubblewrap’s /oldroot staging mount); this implementation refuses a ' +
+      'setuid bubblewrap outright and drives the unprivileged build, and there this version ' +
+      'carries the vulnerability';
     warnings.push(detail);
     advisory = {
       id: BUBBLEWRAP_ADVISORY,
@@ -1411,18 +1566,43 @@ function compareVersions(left: string, right: string): number {
  * The environment is an **allowlist**: the caller's environment is filtered
  * against it, and the defaults fill in what the caller did not supply. The
  * proxy-socket variable is always the sandbox's own socket path.
+ *
+ * The **unconfined** path gets the same filtered environment, with two
+ * differences: its home is the caller's own — the sandbox's `/tmp` is a private
+ * tmpfs, but on the host it is a shared, world-writable directory — and it gets
+ * no proxy-socket variable, because the socket is bind-mounted into the sandbox
+ * only. The API key is filtered out of both.
  */
-export function sandboxEnvironment(spec: SandboxSpec): Record<string, string> {
+export function sandboxEnvironment(
+  spec: SandboxSpec,
+  mode: SandboxEnvironmentMode = 'sandboxed',
+): Record<string, string> {
   const environment: Record<string, string> = { ...DEFAULT_SANDBOX_ENVIRONMENT };
+  if (mode === 'unconfined') {
+    environment['HOME'] = hostHome();
+  }
   for (const [name, value] of Object.entries(spec.env ?? {})) {
     if (value === undefined) continue;
     if (!SANDBOX_ENVIRONMENT_ALLOWLIST.includes(name)) continue;
+    if (mode === 'unconfined' && name === SANDBOX_PROXY_SOCKET_VARIABLE) continue;
     environment[name] = value;
   }
-  if (spec.proxy !== undefined) {
+  if (mode === 'sandboxed' && spec.proxy !== undefined) {
     environment[SANDBOX_PROXY_SOCKET_VARIABLE] = SANDBOX_PROXY_SOCKET_PATH;
   }
   return environment;
+}
+
+/**
+ * The home directory of the unconfined path.
+ *
+ * It is the caller's own: the unconfined command runs on the host, where the
+ * sandbox's `/tmp` is a shared, world-writable directory, and a command that
+ * reads `$HOME/.gitconfig` out of a shared directory reads a file any local
+ * user can write.
+ */
+function hostHome(): string {
+  return process.env['HOME'] ?? homedir();
 }
 
 /**
