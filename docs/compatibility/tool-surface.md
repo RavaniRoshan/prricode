@@ -61,7 +61,9 @@ This is the property the `CC-007` review found missing: the seam existed but was
 
 ## The `Bash` tool
 
-Runs through `/bin/sh -c` with the session environment from `BuiltinToolDeps.env`, a 120 s default and 600 s maximum timeout, and `timeout: 0` refused by the validator.
+Runs through `/bin/sh -c` with the **filtered** environment — the session's own environment from `BuiltinToolDeps.env`, filtered against the sandbox's allowlist, so a command never sees the agent's credentials — a 120 s default and 600 s maximum timeout, and `timeout: 0` refused by the validator.
+
+The command runs **inside the sandbox** when the session carries a sandbox policy, and **unconfined** when the policy says so — an excluded platform, a switched-off sandbox, an excluded command, or a missing backend with `failIfUnavailable` off. The result says which: `sandboxed`, `sandboxReason`, `sandboxEstablishmentReason`, `sandboxExemptions`, `sandboxExemptionScope` and `sandboxAvailability`. See [`sandbox-surface.md`](sandbox-surface.md).
 
 **Two things are implementation choices and are labelled as such:** the shell is `sh` per call rather than the target's persistent shell session, and the timeout values are unpinned by the audit. `dangerouslyDisableSandbox` is accepted but never skips a rule check.
 
@@ -75,7 +77,8 @@ Delegates through a `deps.delegate` seam and reports a typed `taskUnavailable` f
 
 - The `nonExecutionKind` vocabulary: `unknown_tool`, `permission_denied`, `permission_unresolved`, `permission_check_failed`, `validation_error`, `path_changed`, `execution_failed`. The audit pins the *field*, not the values.
 - The error codes, **except** `7` (invalid path) and `14` (a suppressed write), which the audit names. The numbering is implementation-internal; its gaps are not an alignment with any target table.
-- The tool **output** shapes — `{type:'text', text, files, truncated}` for `Glob`, `{text, stdout, stderr, exitCode, truncated}` for `Bash`, and the `ToolErrorContent` `{type:'error', message, errorCode}`. These reach the model and the session log, and the audit pins only the tool-result *metadata*.
+- The tool **output** shapes — `{type:'text', text, files, truncated}` for `Glob`, `{text, stdout, stderr, exitCode, truncated}` for `Bash` — and the `ToolErrorContent` `{type:'error', message, errorCode}`. These reach the model and the session log, and the audit pins only the tool-result *metadata*.
+- **Implementation choice (`CC-008b`).** The `Bash` output gained the sandbox members — `sandboxed`, `sandboxReason`, `sandboxEstablishmentReason`, `sandboxExemptions`, `sandboxExemptionScope`, `sandboxAvailability` — and `timedOut`. The audit records no such members; they are this implementation's, and the shape is additive.
 - `Grep`'s bounds (a 512-character pattern, a 1 MiB file, 2 000 examined files), `Glob`'s result cap, and `WebFetch`'s timeout and byte cap.
 
 ## Conformance table
