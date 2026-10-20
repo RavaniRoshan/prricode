@@ -25,16 +25,20 @@
  * removes the directory. A test that builds per case would take minutes; a
  * test that takes minutes is a test nobody runs.
  *
+ * The one exception is the **build script**'s own test: it needs **two**
+ * builds — one into an empty directory and a second into the same directory
+ * under another name — because that pair is what proves the documented usage
+ * works. Two builds cost about a second.
+ *
  * ## The fake driver
  *
  * The `--print` assertion must not touch the network, and this implementation's own
  * route policy gives the first-party route **no** base-URL environment
  * variable — so the packaged binary is pointed at a **loopback** fake provider
- * through its own documented test seam
- * (`CLAUDE_CODE_FAKE_PROVIDER_URL`, see `scripts/entry.ts`). The fake answers
- * with an Anthropic-shaped SSE stream, so the run exercises the **real**
- * driver, the **real** transport, the **real** SSE parser and the **real**
- * agent loop; only the endpoint is fake.
+ * through its own documented test seam (the `--fake-provider` option, see
+ * `scripts/entry.ts`). The fake answers with an Anthropic-shaped SSE stream, so
+ * the run exercises the **real** driver, the **real** transport, the **real**
+ * SSE parser and the **real** agent loop; only the endpoint is fake.
  *
  * The fake carries **no credential**: the CLI never resolves a secret by
  * itself, so the request the fake receives carries no `x-api-key` and no
@@ -48,12 +52,28 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+import { parseOptions } from '../../scripts/build.js';
+import { extractFakeProvider, isLoopbackUrl, resolveConfigDir } from '../../scripts/entry.js';
+import { readEnvValue } from '../../src/provider/routes.js';
 
 /* -------------------------------------------------------------------------- */
 /* The paths                                                                   */
@@ -84,7 +104,8 @@ let binary: string;
 /**
  * The build.
  *
- * It runs once, and it is the only `bun build --compile` the suite performs.
+ * It runs once, and it is the only `bun build --compile` the suite performs
+ * outside the build script's own test.
  */
 beforeAll(() => {
   workDir = mkdtempSync(path.join(tmpdir(), 'prricode-packaging-'));
@@ -190,6 +211,39 @@ function packageVersion(): string {
   return version;
 }
 
+/**
+ * Whether a file carries a text.
+ *
+ * The file is read in **chunks**: the artifact is ninety megabytes, and the
+ * suite runs beside three other ones on a small host.
+ */
+function fileCarries(file: string, needle: string): boolean {
+  const wanted = Buffer.from(needle, 'utf8');
+  const handle = openSync(file, 'r');
+  const chunk = Buffer.alloc(1024 * 1024);
+  let carry = Buffer.alloc(0);
+  try {
+    for (;;) {
+      const read = readSync(handle, chunk, 0, chunk.length, null);
+      if (read === 0) break;
+      const window = Buffer.concat([carry, chunk.subarray(0, read)]);
+      if (window.includes(wanted)) return true;
+      carry = window.subarray(Math.max(0, window.length - wanted.length));
+    }
+  } finally {
+    closeSync(handle);
+  }
+  return false;
+}
+
+/** The files under a directory, recursively, relative to it. */
+function filesUnder(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { recursive: true })
+    .map((entry) => entry.toString())
+    .filter((entry) => entry.endsWith('.jsonl'));
+}
+
 /* -------------------------------------------------------------------------- */
 /* The fake provider                                                           */
 /* -------------------------------------------------------------------------- */
@@ -271,9 +325,9 @@ describe('the packaged executable', () => {
   it('is a single file that needs no runtime dependency on the host Node', () => {
     expect(existsSync(binary)).toBe(true);
 
-    // **One file.** The build emits the executable and nothing else: a bundle
-    // that left a `node_modules` tree or a second artifact beside it would not
-    // be self-contained.
+    // **One file.** In an empty output directory the build emits the
+    // executable and nothing else: a bundle that left a `node_modules` tree
+    // or a second artifact beside it would not be self-contained.
     const entries = readdirSync(outDir);
     expect(entries).toEqual([binaryName]);
 
@@ -312,12 +366,38 @@ describe('the packaged executable', () => {
     expect(result.stdout.trim()).toBe(packageVersion());
   });
 
+  it('needs neither the host Node nor the host node_modules', async () => {
+    // A working directory **outside** the repository: a run that resolved a
+    // dependency through the repository's `node_modules` would have to reach
+    // it from the working directory, and this one cannot.
+    const outside = mkdtempSync(path.join(tmpdir(), 'prricode-outside-'));
+    expect(outside.startsWith(repoRoot)).toBe(false);
+
+    try {
+      const emptyPath = path.join(workDir, 'empty-path');
+      const result = await runBinary(['--version'], {
+        cwd: outside,
+        env: { PATH: emptyPath, NODE_PATH: undefined, NODE_OPTIONS: undefined },
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe(packageVersion());
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+
+    // And the artifact does not carry the repository's path **at all**: the
+    // bundle is closed over its own contents, so there is nothing to resolve
+    // and nothing that points back at the tree it was built from.
+    expect(fileCarries(binary, repoRoot)).toBe(false);
+    // The search itself works: the artifact is linked against the C library,
+    // so its name is in the binary.
+    expect(fileCarries(binary, 'libc.so.6')).toBe(true);
+  });
+
   it('runs --print against a fake driver', async () => {
     const provider = await startFakeProvider('the packaged binary answered');
     try {
-      const result = await runBinary(['--print', 'hello'], {
-        env: { CLAUDE_CODE_FAKE_PROVIDER_URL: provider.url },
-      });
+      const result = await runBinary(['--print', '--fake-provider', provider.url, 'hello']);
 
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('the packaged binary answered');
@@ -347,8 +427,13 @@ describe('the packaged executable', () => {
   it('labels the multi-provider manager as a project extension in its --help', async () => {
     const result = await runBinary(['--help']);
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('multi-provider manager');
-    expect(result.stdout).toContain('an extension, not part of the reference agent');
+
+    // The **sentence**, not a fragment of it: the help wraps the line, so the
+    // whitespace is flattened before the sentence is looked for.
+    const help = result.stdout.replace(/\s+/g, ' ');
+    expect(help).toContain(
+      'The multi-provider manager (an extension, not part of the reference agent) is reached through the /provider command.',
+    );
   });
 
   it('labels the multi-provider manager as a project extension where it surfaces', async () => {
@@ -359,6 +444,111 @@ describe('the packaged executable', () => {
     expect(result.stdout).toContain(
       'The multi-provider manager is a project extension, not part of the reference agent.',
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The build script                                                            */
+/* -------------------------------------------------------------------------- */
+
+describe('the build script', () => {
+  it('builds again into a directory that already holds an artifact', () => {
+    // The directory the build runs in: a **relative** `--outdir` is resolved
+    // against it, and not against the repository's root.
+    const cwd = path.join(workDir, 'build-cwd');
+    mkdirSync(cwd, { recursive: true });
+
+    const first = spawnSync('bun', ['run', buildScript, '--outdir', 'out', '--name', 'first'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 600_000,
+    });
+    expect(first.status).toBe(0);
+
+    // The **second** build, into the same directory and under another name.
+    // The first build's artifact is still there, and it is **not** the second
+    // build's doing: a build that failed on a file a previous build left
+    // behind would break the documented usage.
+    const second = spawnSync('bun', ['run', buildScript, '--outdir', 'out', '--name', 'second'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 600_000,
+    });
+    if (second.status !== 0) {
+      throw new Error(
+        `The second build failed.\nstdout:\n${second.stdout ?? ''}\nstderr:\n${second.stderr ?? ''}`,
+      );
+    }
+    expect(second.stdout).toContain('Built ');
+
+    // Both artifacts are there, and they are under the **caller's** directory.
+    const out = path.join(cwd, 'out');
+    expect(existsSync(path.join(out, 'first'))).toBe(true);
+    expect(existsSync(path.join(out, 'second'))).toBe(true);
+    expect(existsSync(path.join(repoRoot, 'out'))).toBe(false);
+  });
+
+  it('refuses to build without Bun', () => {
+    // The build needs Bun: under Node the script says so and stops, and it
+    // says so **before** it touches the output directory. The script loads
+    // under Node at all — it depends on nothing but the `node:` built-ins.
+    const outDir = path.join(workDir, 'no-bun');
+    const result = spawnSync(process.execPath, [buildScript, '--outdir', outDir], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('the build needs Bun');
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('resolves a relative output directory against the caller\'s directory', () => {
+    const parsed = parseOptions(['--outdir', 'out'], path.join('/tmp', 'caller'));
+    expect(parsed).toEqual({
+      kind: 'options',
+      options: { outDir: path.join('/tmp', 'caller', 'out'), name: 'agent' },
+    });
+
+    const defaulted = parseOptions([], path.join('/tmp', 'caller'));
+    expect(defaulted).toEqual({
+      kind: 'options',
+      options: { outDir: path.join('/tmp', 'caller', 'dist'), name: 'agent' },
+    });
+  });
+
+  it('takes an option\'s value in either form', () => {
+    const inline = parseOptions(
+      ['--outdir=out', '--name=other', '--target=bun-linux-arm64'],
+      path.join('/tmp', 'caller'),
+    );
+    expect(inline).toEqual({
+      kind: 'options',
+      options: {
+        outDir: path.join('/tmp', 'caller', 'out'),
+        name: 'other',
+        target: 'bun-linux-arm64',
+      },
+    });
+
+    const separate = parseOptions(
+      ['--outdir', 'out', '--name', 'other', '--target', 'bun-linux-arm64'],
+      path.join('/tmp', 'caller'),
+    );
+    expect(separate).toEqual(inline);
+  });
+
+  it('refuses a command line it does not understand', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      expect(parseOptions(['--outdir'], '/tmp/caller')).toEqual({ kind: 'error' });
+      expect(parseOptions(['--name'], '/tmp/caller')).toEqual({ kind: 'error' });
+      expect(parseOptions(['--target'], '/tmp/caller')).toEqual({ kind: 'error' });
+      expect(parseOptions(['--unknown'], '/tmp/caller')).toEqual({ kind: 'error' });
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
 
@@ -384,6 +574,41 @@ describe('the installed binary', () => {
     // because the directory is what decides who may read the files in it.
     const mode = statSync(configDir).mode & 0o777;
     expect(mode).toBe(0o700);
+  });
+
+  it('tightens a configuration directory that already existed', async () => {
+    // A directory that is **wider** than the rule: the run must narrow it,
+    // because the configuration directory must not be world-readable either
+    // way.
+    const configDir = path.join(workDir, 'wide', 'config');
+    mkdirSync(configDir, { recursive: true });
+    chmodSync(configDir, 0o755);
+    expect(statSync(configDir).mode & 0o777).toBe(0o755);
+
+    const result = await runBinary(['--version'], {
+      env: { CLAUDE_CONFIG_DIR: configDir },
+    });
+
+    expect(result.status).toBe(0);
+    expect(statSync(configDir).mode & 0o777).toBe(0o700);
+  });
+
+  it('uses ~/.claude when no relocation is named', async () => {
+    // A home of its own: the run must fall back to the **default** storage
+    // root, and it must not touch the real one.
+    const home = path.join(workDir, 'default-home');
+    mkdirSync(home, { recursive: true });
+
+    const result = await runBinary(['--version'], {
+      env: { CLAUDE_CONFIG_DIR: undefined, HOME: home },
+    });
+
+    expect(result.status).toBe(0);
+    const configDir = path.join(home, '.claude');
+    expect(existsSync(configDir)).toBe(true);
+    expect(statSync(configDir).mode & 0o777).toBe(0o700);
+    // And the first run **reports** the directory it fell back to.
+    expect(result.stderr).toContain(configDir);
   });
 
   it('reports the configuration directory it will use on the first run', async () => {
@@ -419,16 +644,133 @@ describe('the installed binary', () => {
     expect(existsSync(path.join(home, '.claude'))).toBe(false);
   });
 
+  it('relocates the session state with the configuration directory', async () => {
+    const configDir = path.join(workDir, 'relocated-state', 'config');
+    const home = path.join(workDir, 'relocated-state', 'home');
+    const cwd = path.join(workDir, 'relocated-state', 'project');
+    mkdirSync(cwd, { recursive: true });
+
+    const provider = await startFakeProvider('the packaged binary answered');
+    try {
+      const result = await runBinary(['--print', '--fake-provider', provider.url, 'hello'], {
+        cwd,
+        env: { CLAUDE_CONFIG_DIR: configDir, HOME: home },
+      });
+      expect(result.status).toBe(0);
+
+      // The **transcript** is under the relocated directory: the relocation
+      // moves the state, not only the directory that is created.
+      const transcripts = filesUnder(path.join(configDir, 'projects'));
+      expect(transcripts.length).toBeGreaterThan(0);
+
+      // And the default storage root was not touched.
+      expect(existsSync(path.join(home, '.claude'))).toBe(false);
+    } finally {
+      await provider.close();
+    }
+  });
+
   it('refuses a fake provider that is not a loopback endpoint', async () => {
     // The seam is loopback-only, so a value that names any other host is
     // refused — the seam can never become a way to send a request (and a
     // credential) somewhere it does not belong.
-    const result = await runBinary(['--print', 'hello'], {
-      env: { CLAUDE_CODE_FAKE_PROVIDER_URL: 'http://example.invalid' },
-    });
+    const result = await runBinary(['--print', '--fake-provider', 'http://example.invalid', 'hello']);
 
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('must name a loopback endpoint');
     expect(result.stdout).toBe('');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The loopback check                                                          */
+/* -------------------------------------------------------------------------- */
+
+describe('the loopback check', () => {
+  it('accepts a loopback endpoint', () => {
+    expect(isLoopbackUrl('http://127.0.0.1:8080')).toBe(true);
+    // The whole of `127.0.0/8` is loopback.
+    expect(isLoopbackUrl('http://127.0.0.2:8080')).toBe(true);
+    expect(isLoopbackUrl('http://localhost:8080')).toBe(true);
+    expect(isLoopbackUrl('http://[::1]:8080')).toBe(true);
+    expect(isLoopbackUrl('https://127.0.0.1')).toBe(true);
+  });
+
+  it('refuses everything that is not a loopback endpoint', () => {
+    // A host that merely **starts** with a loopback address.
+    expect(isLoopbackUrl('http://127.0.0.1.evil.com')).toBe(false);
+    // A loopback address in the **user information** of another host.
+    expect(isLoopbackUrl('http://127.0.0.1@evil.com')).toBe(false);
+    expect(isLoopbackUrl('http://user:127.0.0.1@evil.com')).toBe(false);
+    // Another host, a private address, and a link-local one.
+    expect(isLoopbackUrl('http://evil.com')).toBe(false);
+    expect(isLoopbackUrl('http://10.0.0.1')).toBe(false);
+    expect(isLoopbackUrl('http://169.254.169.254')).toBe(false);
+    // A scheme that is not HTTP.
+    expect(isLoopbackUrl('ftp://127.0.0.1')).toBe(false);
+    expect(isLoopbackUrl('file:///tmp/x')).toBe(false);
+    // And a value that is not a URL at all.
+    expect(isLoopbackUrl('not a url')).toBe(false);
+    expect(isLoopbackUrl('')).toBe(false);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The environment reader                                                      */
+/* -------------------------------------------------------------------------- */
+
+describe('the environment reader', () => {
+  it('reports an inherited name as unset', () => {
+    // This implementation's own rule: a name that collides with an inherited member is
+    // **not** a value the run may use.
+    const inherited = Object.create({
+      CLAUDE_CONFIG_DIR: '/inherited',
+    }) as NodeJS.ProcessEnv;
+
+    expect(readEnvValue(inherited, 'CLAUDE_CONFIG_DIR')).toBeUndefined();
+    expect(readEnvValue(inherited, 'constructor')).toBeUndefined();
+    expect(readEnvValue(inherited, 'toString')).toBeUndefined();
+
+    // And the configuration directory falls back to the default one rather
+    // than to the inherited value.
+    expect(resolveConfigDir(inherited)).not.toBe('/inherited');
+  });
+
+  it('reports a value that carries only whitespace as unset', () => {
+    expect(readEnvValue({ CLAUDE_CONFIG_DIR: '   ' }, 'CLAUDE_CONFIG_DIR')).toBeUndefined();
+    expect(readEnvValue({ CLAUDE_CONFIG_DIR: ' /tmp/x ' }, 'CLAUDE_CONFIG_DIR')).toBe('/tmp/x');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The fake-provider option                                                    */
+/* -------------------------------------------------------------------------- */
+
+describe('the fake-provider option', () => {
+  it('takes the option out of the command line', () => {
+    const named = extractFakeProvider(['--print', '--fake-provider', 'http://127.0.0.1:1', 'hello']);
+    expect(named).toEqual({
+      kind: 'named',
+      url: 'http://127.0.0.1:1',
+      rest: ['--print', 'hello'],
+    });
+
+    const inline = extractFakeProvider(['--fake-provider=http://127.0.0.1:1']);
+    expect(inline).toEqual({
+      kind: 'named',
+      url: 'http://127.0.0.1:1',
+      rest: [],
+    });
+
+    const absent = extractFakeProvider(['--print', 'hello']);
+    expect(absent).toEqual({ kind: 'absent', rest: ['--print', 'hello'] });
+  });
+
+  it('refuses an option that names nothing', () => {
+    const missing = extractFakeProvider(['--fake-provider']);
+    expect(missing.kind).toBe('invalid');
+
+    const empty = extractFakeProvider(['--fake-provider=']);
+    expect(empty.kind).toBe('invalid');
   });
 });

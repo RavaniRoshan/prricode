@@ -33,22 +33,30 @@
  *
  * The packaged binary must be able to run `--print` **without a network and
  * without a credential** — that is what the packaging test does, and it is
- * the only way to observe a packaged turn at all. The seam is an environment
- * variable that names a **loopback** endpoint:
+ * the only way to observe a packaged turn at all. The seam is a **command
+ * line option** that names a **loopback** endpoint:
  *
- * - `CLAUDE_CODE_FAKE_PROVIDER_URL` — the base URL of a fake provider. The
- *   packaged run sends its request there instead of to the route's own base
- *   URL. **Only a loopback host is accepted**: a value that names any other
- *   host is **refused**, so the seam can never become a way to send a
- *   credential somewhere it does not belong.
+ * - `--fake-provider <url>` — the base URL of a fake provider. The packaged
+ *   run sends its request there instead of to the route's own base URL.
+ *   **Only a loopback host is accepted**: a value that names any other host
+ *   is **refused**, so the seam can never become a way to send a credential
+ *   somewhere it does not belong.
  * - The seam **resolves no credential**. The command only ever uses a
  *   credential a caller hands it, and this entry hands it none, so a request
  *   that leaves through the seam carries no `x-api-key` and no `authorization`
  *   header.
  *
- * **Implementation choice.** The target has no such seam, and this one is a packaging
+ * **Implementation choice.** The target has no such option, and this one is a packaging
  * convenience rather than a product feature. It is **loopback-only** and it
  * carries no secret, and it is documented in `docs/compatibility/packaging.md`.
+ *
+ * ## The guard
+ *
+ * The file is **also a module**: its functions are exported, and the
+ * packaging test imports them. The run itself therefore happens only when the
+ * file is the **program** — `import.meta.main` is true for the module the
+ * process was started with, under Bun and under Node, and false for a module
+ * that was imported. Importing the file runs **nothing**.
  */
 
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
@@ -56,9 +64,11 @@ import path from 'node:path';
 
 import { parseArgs } from '../src/cli/args.js';
 import { runCommand } from '../src/cli/command.js';
+import { errorMessageOf } from '../src/cli/commands/shared.js';
 import { anthropicDriver } from '../src/provider/drivers/anthropic.js';
 import { anthropicPathFor, joinUrl } from '../src/provider/drivers/types.js';
 import type { ProviderDriver, ProviderRequest } from '../src/provider/drivers/types.js';
+import { readEnvValue } from '../src/provider/routes.js';
 import { defaultConfigDir } from '../src/session/store.js';
 
 /* -------------------------------------------------------------------------- */
@@ -68,8 +78,15 @@ import { defaultConfigDir } from '../src/session/store.js';
 /** The environment variable that **relocates** the configuration directory. */
 export const CONFIG_DIR_ENV = 'CLAUDE_CONFIG_DIR';
 
-/** The environment variable that names a **loopback fake provider**. */
-export const FAKE_PROVIDER_ENV = 'CLAUDE_CODE_FAKE_PROVIDER_URL';
+/**
+ * The option that names a **loopback** fake provider.
+ *
+ * **Implementation choice.** An **option** and not an environment variable: an ambient
+ * variable is something a caller may set without meaning to, and this one
+ * rewrites where the provider request goes. A caller that asks for the seam
+ * asks for it on the command line, where it is visible.
+ */
+export const FAKE_PROVIDER_OPTION = '--fake-provider';
 
 /* -------------------------------------------------------------------------- */
 /* The configuration directory                                                 */
@@ -82,8 +99,8 @@ export const FAKE_PROVIDER_ENV = 'CLAUDE_CODE_FAKE_PROVIDER_URL';
  * The configuration directory holds the settings, the session transcripts and
  * the multi-provider manager's state, so a directory another user could read
  * would leak every one of them. The audit records `0o600` for the settings
- * file the directory holds; the directory itself is tighter still, because the
- * directory is what decides who may read the files in it.
+ * file the directory holds (audit §2.7); the directory itself is tighter
+ * still, because the directory is what decides who may read the files in it.
  */
 export const CONFIG_DIR_MODE = 0o700;
 
@@ -120,7 +137,8 @@ export interface PreparedConfigDir {
  * The directory is created with the restrictive mode, and the mode is then set
  * **explicitly**: `mkdir`'s mode is filtered through the process's umask, and
  * a directory that already existed may carry a wider one — and the
- * configuration directory must not be world-readable either way.
+ * configuration directory must not be world-readable either way. A directory
+ * that already existed is therefore **narrowed**, not left as it is.
  */
 export function prepareConfigDir(dir: string): PreparedConfigDir {
   const existed = existsSync(dir);
@@ -162,7 +180,7 @@ export function isLoopbackUrl(value: string): boolean {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
   const host = url.hostname.toLowerCase();
   if (host === 'localhost' || host === '::1' || host === '[::1]') return true;
-  // The whole of `127.0.0.0/8` is loopback.
+  // The whole of `127.0.0/8` is loopback.
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
@@ -185,16 +203,69 @@ export function fakeProviderDriver(baseUrl: string): ProviderDriver {
   };
 }
 
+/**
+ * What the fake-provider option asked for.
+ *
+ * - `absent` — the option was not used;
+ * - `named` — it named a URL, and `rest` is the command line without it;
+ * - `invalid` — it was used wrongly, and `message` says how.
+ */
+export type FakeProviderOption =
+  /** The option was not used. */
+  | { kind: 'absent'; rest: string[] }
+  /** The option named a URL. */
+  | { kind: 'named'; url: string; rest: string[] }
+  /** The option was used wrongly. */
+  | { kind: 'invalid'; message: string; rest: string[] };
+
+/**
+ * Take the fake-provider option out of the command line.
+ *
+ * The option is **removed** before the rest of the command line is parsed, so
+ * this implementation's own argument parser never sees it: the seam belongs to the
+ * packaging, not to the CLI.
+ */
+export function extractFakeProvider(argv: readonly string[]): FakeProviderOption {
+  const rest: string[] = [];
+  let url: string | undefined;
+  let message: string | undefined;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === undefined) continue;
+
+    if (token === FAKE_PROVIDER_OPTION) {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith('-')) {
+        message = `the '${FAKE_PROVIDER_OPTION}' option needs a URL.`;
+        continue;
+      }
+      url = value;
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith(`${FAKE_PROVIDER_OPTION}=`)) {
+      const value = token.slice(FAKE_PROVIDER_OPTION.length + 1);
+      if (value === '') {
+        message = `the '${FAKE_PROVIDER_OPTION}' option needs a URL.`;
+        continue;
+      }
+      url = value;
+      continue;
+    }
+
+    rest.push(token);
+  }
+
+  if (message !== undefined) return { kind: 'invalid', message, rest };
+  if (url !== undefined) return { kind: 'named', url, rest };
+  return { kind: 'absent', rest };
+}
+
 /* -------------------------------------------------------------------------- */
 /* The run                                                                     */
 /* -------------------------------------------------------------------------- */
-
-/** The message of a thrown value. */
-function messageOf(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  return 'an unknown error';
-}
 
 /**
  * Run the command line.
@@ -215,7 +286,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     prepared = prepareConfigDir(configDir);
   } catch (error) {
     process.stderr.write(
-      `Error: the configuration directory '${configDir}' could not be created: ${messageOf(error)}\n`,
+      `Error: the configuration directory '${configDir}' could not be created: ${errorMessageOf(error)}\n`,
     );
     return 1;
   }
@@ -223,40 +294,29 @@ export async function main(argv: readonly string[]): Promise<number> {
 
   // The fake provider is resolved **before** the command runs, so that a value
   // the seam refuses is refused before anything is set up.
-  const fakeProvider = readEnvValue(env, FAKE_PROVIDER_ENV);
+  const option = extractFakeProvider(argv);
+  if (option.kind === 'invalid') {
+    process.stderr.write(`Error: ${option.message}\n`);
+    return 2;
+  }
+
   let driver: ProviderDriver | undefined;
-  if (fakeProvider !== undefined) {
-    if (!isLoopbackUrl(fakeProvider)) {
+  if (option.kind === 'named') {
+    if (!isLoopbackUrl(option.url)) {
       process.stderr.write(
-        `Error: the '${FAKE_PROVIDER_ENV}' variable must name a loopback endpoint (127.0.0.1, ::1 or localhost).\n`,
+        `Error: the '${FAKE_PROVIDER_OPTION}' option must name a loopback endpoint (127.0.0.1, ::1 or localhost).\n`,
       );
       return 2;
     }
-    driver = fakeProviderDriver(fakeProvider);
+    driver = fakeProviderDriver(option.url);
   }
 
-  const parsed = parseArgs([...argv], { isTTY: process.stdout.isTTY === true });
+  const parsed = parseArgs([...option.rest], { isTTY: process.stdout.isTTY === true });
   return runCommand(parsed, {
     configDir,
     env,
     ...(driver === undefined ? {} : { driver }),
   });
-}
-
-/**
- * Read an environment variable.
- *
- * The read is an **own-property** check, so a name that collides with an
- * inherited member of `Object.prototype` is reported as unset rather than
- * resolving to the inherited member. A value that carries only whitespace
- * counts as unset.
- */
-function readEnvValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  if (!Object.hasOwn(env, name)) return undefined;
-  const value = env[name];
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed === '' ? undefined : trimmed;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -273,9 +333,19 @@ async function entry(): Promise<void> {
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (error) {
-    process.stderr.write(`Error: ${messageOf(error)}\n`);
+    process.stderr.write(`Error: ${errorMessageOf(error)}\n`);
     process.exitCode = 1;
   }
 }
 
-await entry();
+/**
+ * The guard.
+ *
+ * `import.meta.main` is **true** for the module the process was started with
+ * — under Bun and under Node — and **false** for a module that was imported.
+ * The CLI therefore runs when this file is the program and **not at all** when
+ * it is imported, so the functions above can be tested.
+ */
+if (import.meta.main === true) {
+  await entry();
+}
