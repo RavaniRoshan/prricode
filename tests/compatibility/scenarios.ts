@@ -73,6 +73,7 @@ import {
   VALUE_FLAG_NAMES,
   type ParsedRunArgs,
 } from '../../src/cli/args.js';
+import { ZERO_USAGE, buildResultDocument } from '../../src/cli/headless.js';
 import { providerCommand } from '../../src/cli/commands/provider.js';
 import { catalogCommand } from '../../src/cli/commands/catalog.js';
 import { groupToolCalls, toolCallsFrom, scheduleToolCalls, scheduleToolCallsWithRegistry} from '../../src/agent/dispatch.js';
@@ -424,6 +425,8 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   parseResponse,
   readHeader,
   signingScope,
+  buildResultDocument,
+  ZERO_USAGE,
   // The configuration.
   SETTINGS_SOURCES,
   TOP_LEVEL_KEY_ORDER,
@@ -1289,9 +1292,66 @@ export const SCENARIOS: readonly Scenario[] = [
         ]);
         expect(formats).toMatchObject({ kind: 'run', outputFormat: format });
       }
+      // The **result document** — the `json` format's one document and the
+      // `stream-json` format's last — is the target's own, with the target's
+      // member **order**: the common members, then the variant's, then `type`,
+      // `duration_ms` and `uuid`.
+      const document = observe(
+        'the result document',
+        buildResultDocument({
+          isError: false,
+          result: 'the answer',
+          stopReason: 'end_turn',
+          sessionId: 's1',
+          durationMs: 12,
+          numTurns: 2,
+          usage: ZERO_USAGE,
+          permissionDenials: [
+            { tool_name: 'Bash', tool_use_id: 't1', tool_input: { command: 'ls' } },
+          ],
+          uuid: 'uuid-1',
+        }),
+      );
+      expect(Object.keys(document)).toEqual([
+        'is_error',
+        'duration_api_ms',
+        'num_turns',
+        'stop_reason',
+        'session_id',
+        'total_cost_usd',
+        'usage',
+        'modelUsage',
+        'permission_denials',
+        'subtype',
+        'result',
+        'type',
+        'duration_ms',
+        'uuid',
+      ]);
+      expect(document).toMatchObject({
+        is_error: false,
+        subtype: 'success',
+        result: 'the answer',
+        stop_reason: 'end_turn',
+        session_id: 's1',
+        num_turns: 2,
+        duration_ms: 12,
+        type: 'result',
+        uuid: 'uuid-1',
+      });
+      // The usage object is the target's **zeroed** one.
+      expect(Object.keys(document.usage)).toEqual(Object.keys(ZERO_USAGE));
+      expect(document.usage.input_tokens).toBe(0);
+      expect(document.usage.service_tier).toBe('standard');
+      // A denial entry is the target's shape.
+      expect(document.permission_denials[0]).toEqual({
+        tool_name: 'Bash',
+        tool_use_id: 't1',
+        tool_input: { command: 'ls' },
+      });
       return measured(
-        'partial',
-        'The headless rule and the three output formats are reproduced; the audit pins the formats and not the documents a run writes.',
+        'mismatch',
+        "The headless rule and the three output formats are reproduced, and so is what a run **writes**: the `json` format writes **exactly one** document — the target's own **result document**, with its member order (*common → variant → `type`, `duration_ms`, `uuid`*) and its nested shapes — the `stream-json` format writes one document per line with the result last, the `text` format writes the result's text, and a `--print` run **is** a session. Four differences remain and they are named: the error variant's `subtype` is `error` here and `error_during_execution` in the target; a run with no result document writes a document here, while the target writes nothing to stdout and the error to stderr; the `text` format writes the assistant's text as it arrives and nothing on stdout for a failure, while the target writes the result's text at the end of the turn and its own failure line; and the `stream-json` documents are this implementation's events, while the target's are the SDK message kinds.",
       );
     },
   },
@@ -2530,9 +2590,8 @@ export const SCENARIOS: readonly Scenario[] = [
         );
         expect(decision).toMatchObject({ behavior: 'deny' });
       }
-      // This implementation's own order — deny, then ask, then allow — is measured too,
-      // and it is this implementation's: the audit records the precedence between the
-      // lists as unknown.
+      // The target's own order — deny, then ask, then allow — is measured, and it
+      // is the target's: a command in two lists is decided by the **earlier** one.
       const asked = observe(
         'the ask-over-allow decision',
         await checkPermission(ctx, {
@@ -2541,9 +2600,48 @@ export const SCENARIOS: readonly Scenario[] = [
         }),
       );
       expect(asked).toMatchObject({ behavior: 'ask' });
+      // A deny beats an ask, in **every** mode: the mode does not change the order.
+      for (const mode of [
+        'default',
+        'acceptEdits',
+        'plan',
+        'auto',
+        'dontAsk',
+        'bypassPermissions',
+      ] as const) {
+        const decision = observe(
+          `the ${mode} deny-over-ask decision`,
+          await checkPermission(ctx, {
+            rules: rulesOf({ deny: ['Bash'], ask: ['Bash'] }),
+            mode,
+          }),
+        );
+        expect(decision).toMatchObject({ behavior: 'deny' });
+      }
+      // An ask rule holds where the mode would otherwise allow.
+      expect(
+        observe(
+          'the ask under bypass',
+          await checkPermission(ctx, { rules: rulesOf({ ask: ['Bash'] }), mode: 'bypassPermissions' }),
+        ),
+      ).toMatchObject({ behavior: 'ask' });
+      expect(
+        observe(
+          'the ask under acceptEdits',
+          await checkPermission(ctx, { rules: rulesOf({ ask: ['Bash'] }), mode: 'acceptEdits' }),
+        ),
+      ).toMatchObject({ behavior: 'ask' });
+      // And in `auto` it is a **denial**, because the check is one only a person
+      // may answer, and the auto mode asks no one.
+      expect(
+        observe(
+          'the ask under auto',
+          await checkPermission(ctx, { rules: rulesOf({ ask: ['Bash'] }), mode: 'auto' }),
+        ),
+      ).toMatchObject({ behavior: 'deny' });
       return measured(
-        'partial',
-        "Deny wins over allow, and a deny blocks in every mode this implementation has, the five the audit names and a sixth of its own. The precedence between the ask and allow lists — deny, then ask, then allow — is this implementation's own, because the audit records that rule as unknown.",
+        'match',
+        "The precedence is the target's, and it is compared: the lists are consulted deny, then ask, then allow, so a command in two lists is decided by the earlier one, and the mode does not change the order — a deny beats an ask in every mode. An ask rule holds where the mode would otherwise allow, and in `auto` it is a **denial**, because the check is one only a person may answer. Deny wins over allow, and a deny blocks in every mode this implementation has, the five the audit names and a sixth of its own.",
       );
     },
   },
