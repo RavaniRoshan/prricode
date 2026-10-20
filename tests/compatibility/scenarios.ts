@@ -1044,9 +1044,20 @@ export const SCENARIOS: readonly Scenario[] = [
       ]);
       const block = observe('the whole-block override', resolveBlock(blocked, 'permissions'));
       expect(block).toMatchObject({ value: { deny: ['Bash(rm *)'] } });
+      // The target merges the tiers **per top-level key**, and the value rule
+      // is decided per key: an object is replaced whole, an array is
+      // concatenated, and the two named object keys shallow-merge one level.
+      const ordinary = new Map<SettingsSource, unknown>([
+        ['userSettings', { thing: { fromUser: true }, list: ['a'] }],
+        ['projectSettings', { thing: { fromProject: true }, list: ['b'] }],
+      ]);
+      const object = observe('the object rule', resolveBlock(ordinary, 'thing'));
+      expect(object).toMatchObject({ value: { fromProject: true } });
+      const list = observe('the array rule', resolveBlock(ordinary, 'list'));
+      expect(list).toMatchObject({ value: ['a', 'b'] });
       return measured(
-        'partial',
-        "Both observed precedence orderings and the whole-block override are reproduced; the audit does not derive the target's per-key merge for ordinary keys.",
+        'match',
+        "Both observed precedence orderings, the whole-block override and the per-top-level-key merge are reproduced; an object a higher tier defines replaces the lower tier's whole, and an array two tiers define is the concatenation of both.",
       );
     },
   },
