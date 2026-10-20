@@ -1724,6 +1724,44 @@ that **does** carry the terminal UI.
   git commit -m "build: self-contained executable and install path"
   ```
 
+### CC-021 — A run uses the active connection
+
+**Why this task exists.** The provider manager can register a connection, make it
+active, and resolve its credential — and then a **run ignores all of it**. The run path
+builds its driver from `driverFor(selectRoute(env))` and takes its credential from
+`context.credential`, a member only a **programmatic** caller can supply. From the command
+line there is no way to give a run a credential, so the manager's connections are inert
+for the thing the manager exists for.
+
+This was found by **running** the built artifact, not by reading it: `--provider add` and
+`--provider use` both succeed, and `--print` then fails with *"x-api-key header is
+required"* even with the referenced environment variable set.
+
+**Files:** Modify `src/cli/command.ts`; Modify `src/provider/registry.ts`; Modify
+`tests/contracts/cli-surface.test.ts`; Modify `tests/contracts/provider-command.test.ts`.
+
+**Interfaces:**
+- Consumes: `src/provider/registry.ts` (`resolveConnectionCredential`, the registry's
+  `active()`), `src/cli/commands/provider.ts` (`loadManagerState`).
+- Produces: the run path's credential and base URL, taken from the **active** connection
+  when there is one.
+
+- [ ] **Step 1: Write the failing test** — with a connection registered, made active, and
+  its referenced environment variable set, a run sends the connection's credential and
+  reaches the connection's base URL; with **no** connection, the run is exactly as it is
+  today.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [ ] **Step 3: Implement it** — the run resolves the active connection's credential
+  through `resolveConnectionCredential` — the **only** path to a secret — and uses the
+  connection's route and base URL. A connection that cannot be resolved is **reported**,
+  not silently ignored.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Commit.**
+  ```bash
+  git add src/cli/command.ts src/provider/registry.ts tests/contracts
+  git commit -m "feat(cli): a run uses the active connection"
+  ```
+
 ### CC-020 — The divergence layer: PRRICODE as a product of its own
 
 **Why this task exists.** PRRICODE is built in two layers. The **first** is the parity
