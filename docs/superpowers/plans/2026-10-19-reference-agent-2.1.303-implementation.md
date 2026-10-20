@@ -1197,19 +1197,58 @@ Modify `docs/compatibility/session-format.md`.
 - Produces: `isResumableCandidate(summary, options): boolean` — the target's skip rules —
   and the **file mtime, then creation time** ordering.
 
-- [ ] **Step 1: Write the failing test** — a bookkeeping-only, a sidechain, a team, a
+- [x] **Step 1: Write the failing test** — a bookkeeping-only, a sidechain, a team, a
   `daemon`, an SDK-entrypoint and a `/loop` session are **not** candidates; a live
   background session is **reported** rather than continued; and two sessions are ordered
   by the file's modification time, then its creation time.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement the skip rules** and the ordering.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Update the conformance document** — the row's outcome and the text.
-- [ ] **Step 6: Commit.**
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement the skip rules** and the ordering.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Update the conformance document** — the row's outcome and the text.
+- [x] **Step 6: Commit.**
   ```bash
   git add src/session tests/contracts/session-store.test.ts tests/contracts/session-resume.test.ts docs/compatibility/session-format.md
   git commit -m "fix(session): the session lookup skips what the target skips"
   ```
+
+
+**Result:** the session lookup now applies the target's **skip rules** and the target's
+**ordering**. `compareSessionSummaries` orders by the file's **modification time**,
+then its **creation time** — not by the last record's timestamp — and `list()` uses it.
+`isResumableCandidate` implements the target's per-candidate filter, and
+`selectResumableCandidate` takes the **first survivor** of the ordered list.
+
+**Which rules can fire.** Each rule fires only when the member it needs is **present**
+on the summary — the summary is derived, never persisted, so the members are optional
+index-row fields and the JSONL record vocabulary is untouched:
+
+| the rule | implemented | can it fire? |
+|---|---|---|
+| a `/loop` session | yes | **yes** — the store derives it the way the target does, by scanning the transcript for the loop command marker |
+| a **live background** session | yes | **yes** — the caller supplies the live list |
+| bookkeeping-only | yes | no — the record format has no such member |
+| sidechain | yes | no — no such member |
+| team | yes | no — no such member |
+| `daemon` / `daemon-worker` | yes | no — no session kind. `bg` is **not** excluded by kind |
+| an **SDK** entrypoint | yes | no — no entrypoint. `print` is **never** excluded |
+| a different directory with the same project slug | yes | no — no recorded project path |
+| superseded / continued-in | yes | no — no continued-in id |
+
+**The live list's fallback.** When the live list cannot be read, the rule changes shape:
+every candidate carrying a session kind **or** a continued-in id is skipped, and no live
+check fires. A readable but empty list skips nothing.
+
+**One deliberate difference, recorded in the code and the conformance document.** The
+target *drops* a candidate that is itself live and lets the walk continue, and reports
+only the continued-in case. This implementation **reports** a live candidate in both
+cases and continues with nothing, because the `--continue` path has to name the session
+that is running. The compatibility report names the difference and the row stays
+`partial` because of it.
+
+**Verified.** The suite is green at **1860 tests** and `npx tsc --noEmit` is clean. The
+nineteen new tests are in two describes — *"the session lookup's ordering"* and *"the
+session lookup's skip rules"* — and they pin the order, the tie-break, the `/loop`
+derivation, and every skip rule, including the ones that cannot fire today.
 
 ### CC-011b — The subagent definition lifecycle and the standalone skill scan
 

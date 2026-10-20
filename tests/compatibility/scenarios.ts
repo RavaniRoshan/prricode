@@ -108,9 +108,16 @@ import {
 } from '../../src/provider/drivers/types.js';
 import { signingScope } from '../../src/provider/transport/sigv4.js';
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../../src/session/event.js';
-import { providerToolResultBlock, resumeAtMessage, resumeSession, toolResultContent } from '../../src/session/resume.js';
+import {
+  isResumableCandidate,
+  providerToolResultBlock,
+  resumeAtMessage,
+  resumeSession,
+  toolResultContent,
+} from '../../src/session/resume.js';
 import {
   RESUME_REQUIRES_TARGET_MESSAGE,
+  compareSessionSummaries,
   createCarriedPromptStore,
   createSessionStore,
   readAllSessionEvents,
@@ -2171,9 +2178,48 @@ export const SCENARIOS: readonly Scenario[] = [
         ),
       );
       expect(interrupted).toMatchObject({ kind: 'ok' });
+
+      // The lookup's **ordering**: the file's modification time, then its
+      // creation time — not the last record's timestamp.
+      const ordered = [
+        {
+          sessionId: 'older',
+          path: '/tmp/older.jsonl',
+          startedAt: 1,
+          updatedAt: 9,
+          modifiedAt: 5,
+          createdAt: 1,
+          messageCount: 1,
+        },
+        {
+          sessionId: 'newer',
+          path: '/tmp/newer.jsonl',
+          startedAt: 1,
+          updatedAt: 1,
+          modifiedAt: 7,
+          createdAt: 1,
+          messageCount: 1,
+        },
+      ];
+      const byModification = [...ordered].sort(compareSessionSummaries);
+      expect(byModification.map((summary) => summary.sessionId)).toEqual(['newer', 'older']);
+
+      // The lookup's **skip rules**: a `/loop` session is skipped, and a
+      // **print** session is not — the target has no headless filter.
+      const loop = observe(
+        'the loop session',
+        isResumableCandidate({ ...ordered[0]!, isLoopSession: true }),
+      );
+      expect(loop).toBe(false);
+      const print = observe(
+        'the print session',
+        isResumableCandidate({ ...ordered[0]!, entrypoint: 'print' }),
+      );
+      expect(print).toBe(true);
+
       return measured(
         'partial',
-        "The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; the store-level ordering inside the session lookup is not resolved by the audit.",
+        "The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; so are the lookup's ordering — the file's modification time, then its creation time — and its skip rules, where a /loop session is skipped and a print session is not. One difference remains: a candidate that is live in the background is reported and the lookup continues with nothing, where the target drops it and carries on with the next candidate.",
       );
     },
   },
