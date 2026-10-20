@@ -2091,18 +2091,60 @@ documents.
 
 **Files:** Modify `src/cli/commands/manager.ts`; Create `src/cli/commands/slash.ts`; Modify `src/cli/interactive.ts`; Modify `tests/contracts/cli-surface.test.ts`; Modify `docs/compatibility/command-surface.md`.
 
-- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+- [x] **Step 1: Read the surface from the source** and record it — the names, the shape,
   the behaviour, the file and the offset for every claim.
-- [ ] **Step 2: Write the failing test** for what the reading established.
-- [ ] **Step 3: Implement** it, and the rules that govern it.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+- [x] **Step 2: Write the failing test** for what the reading established.
+- [x] **Step 3: Implement** it, and the rules that govern it.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Update the conformance documents and the report** — the surface is named,
   and the report says what was compared.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
   ```bash
   git add src tests/contracts docs/compatibility
   git commit -m "feat: the slash-command registry: 92 commands"
   ```
+
+
+**Result:** the target's slash-command registry is here — **100 command names**, read with
+a TypeScript parser rather than a pattern, each with the target's description, its aliases
+and its argument hint.
+
+**A discrepancy, resolved and written down.** The record says *122 command objects, 92
+distinct names*. The parsed reading says **123 definitions with a literal name** (118
+`local`/`local-jsx` and 5 `prompt`) and **100 distinct names**. The record's table omits
+eleven of the target's commands — the five `prompt`-type ones, and six whose description
+the target computes or whose `type` member it writes last — counts three **template**
+names as commands, and keeps the target's **minified** names `xEe`/`vZ`/`oRs`, which are
+resolved here to `low-priority`/`limit-reset`/`claim-credit`. 86 names are common to both
+readings. The templates are recorded in `TEMPLATE_COMMAND_NAMES`, not as commands.
+
+**Twelve commands are implemented**: `/clear`, `/compact`, `/config`, `/context`, `/help`,
+`/model`, `/resume`, `/skills`, `/skill-doctor`, `/status`, `/usage` (with its `cost` and
+`stats` aliases) and `/version` — plus `/provider` and `/catalog`, this implementation's own
+**project extensions**, which the target registers no such command for and which say so.
+
+**Eighty-eight are refused, and each refusal names the capability it needs**: *"The
+'/<name>' command is not implemented here: this implementation has no <capability>."*
+None of them is faked. The big capabilities they need are a browser, a worktree manager,
+a scheduler, the agent teams, the MCP marketplace, the cloud modes, the checkpoints, the
+permission-panel editor, a session-title store, a cost account, a token counter and a
+theme picker.
+
+**The product's own name appears nowhere** — not in a string, not in a comment. Where the
+target's own text names its product the registry says PRRICODE; the target's environment
+variables, model ids, API hosts and file names (`CLAUDE.md`, `.claude`, `claude.ai`) keep
+the target's names, because those are the data the implementation has to speak to. Even
+the guard test spells the forbidden name in pieces.
+
+**The overlay.** The composer's `/`-overlay reads the registry, so the list it offers is
+the target's list. The overlay's **list** is wired; the widget itself belongs to the
+milestone that owns the composer.
+
+**Verified.** The suite is green at **2 030 tests** and `npx tsc --noEmit` is clean. The
+new tests cover the registry's names, a command's description, aliases and argument hint,
+the alias lookup, the "names no command the registry does not hold" check, the two
+extensions marked as such, the `/help` output, a report that says what it cannot show, a
+refusal that names the capability, and the overlay's filtering.
 
 ### CC-031 — The CLI surface: the complete flag list and the subcommand tree
 
