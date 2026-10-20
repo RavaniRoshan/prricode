@@ -122,10 +122,15 @@ import {
   NONSTREAMING_TIMEOUT_FALLBACK_MS,
   RETRYABLE_STATUSES,
   calculateNonstreamingTimeoutMs,
+  cachedTokenRefreshed,
   classifyErrorStatus,
+  isJsonContentType,
   isRetryableStatus,
+  parseResponse,
+  readHeader,
   type ProviderContentBlock,
   type ProviderRequest,
+  type ProviderResponseLike,
 } from '../../src/provider/drivers/types.js';
 import { signingScope } from '../../src/provider/transport/sigv4.js';
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../../src/session/event.js';
@@ -366,8 +371,12 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   NONSTREAMING_TIMEOUT_FALLBACK_MS,
   RETRYABLE_STATUSES,
   calculateNonstreamingTimeoutMs,
+  cachedTokenRefreshed,
   classifyErrorStatus,
+  isJsonContentType,
   isRetryableStatus,
+  parseResponse,
+  readHeader,
   signingScope,
   // The configuration.
   SETTINGS_SOURCES,
@@ -1637,9 +1646,39 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(timeout).toBeGreaterThan(0);
       const classified = await observeCall('the classified error', classifyErrorStatus, [500, {}]);
       expect(classified).toMatchObject({ retryable: true });
+      // The target's `shouldRetry` honours the `x-should-retry` header in
+      // **both** directions, so the header overrides the status rules.
+      const headerForces = observe(
+        'the header-forced retry',
+        classifyErrorStatus(500, {}, { headers: { 'x-should-retry': 'true' } }),
+      );
+      expect(headerForces.retryable).toBe(true);
+      const headerRefuses = observe(
+        'the header-forced refusal',
+        classifyErrorStatus(429, {}, { headers: { 'x-should-retry': 'false' } }),
+      );
+      expect(headerRefuses.retryable).toBe(false);
+      expect(
+        observe('the header read', readHeader({ 'X-Should-Retry': 'false' }, 'x-should-retry')),
+      ).toBe('false');
+      // The target retries a `401` when the response used a **cached token**,
+      // and the marker lives in the response body or in the error.
+      expect(observe('the cached-token marker', cachedTokenRefreshed({ cached_token_refreshed: true }))).toBe(
+        true,
+      );
+      expect(observe('the plain 401', classifyErrorStatus(401, {}).retryable)).toBe(false);
+      expect(
+        observe('the cached-token 401', classifyErrorStatus(401, { cached_token_refreshed: true }).retryable),
+      ).toBe(true);
+      expect(
+        observe(
+          'the cached-token 401 through the option',
+          classifyErrorStatus(401, {}, { cachedTokenRefreshed: true }).retryable,
+        ),
+      ).toBe(true);
       return measured(
-        'partial',
-        "The retry set, the 600000 ms fallback and the error classification are the target's observed rules. Measured: the retry set, the fallback and the classification. The 401 cache invalidation and the x-should-retry header are established by the audit and implemented here, but this probe does not compare them.",
+        'match',
+        "The retry set, the 600000 ms fallback and the error classification are the target's observed rules, and so are the two the probe previously left uncompared: the `x-should-retry` response header is honoured in **both** directions and overrides the status rules, and a `401` is retried when the response used a cached token, the marker being read from the response body or from the error.",
       );
     },
   },
@@ -1667,14 +1706,70 @@ export const SCENARIOS: readonly Scenario[] = [
       });
       // The SSE vocabulary the audit names: the core events, and the extended
       // `agent.*` / `session.*` / `span.*` / `user.*` ones the SDK tolerates.
+      // The SDK's default `parseResponse`, in full: its branch set is exactly
+      // a `204`, the binary response, the JSON body with its empty-body
+      // branch, and the text fallback.
+      const responseOf = (
+        status: number,
+        headers: Record<string, string>,
+        body: unknown,
+      ): ProviderResponseLike => ({
+        status,
+        headers: { get: (name: string) => headers[name.toLowerCase()] },
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      });
+      const noContent = await observeCall('the 204 response', parseResponse, [
+        responseOf(204, {}, {}),
+      ]);
+      expect(noContent).toBeNull();
+      const binary = responseOf(200, { 'content-type': 'application/octet-stream' }, {});
+      expect(
+        await observeCall('the binary response', parseResponse, [binary, { binaryResponse: true }]),
+      ).toBe(binary);
+      const empty = await observeCall('the empty JSON body', parseResponse, [
+        responseOf(200, { 'content-type': 'application/json', 'content-length': '0' }, {}),
+      ]);
+      expect(empty).toBeUndefined();
+      const message = await observeCall('the JSON body', parseResponse, [
+        responseOf(200, { 'content-type': 'application/json' }, { id: 'msg_1', content: [] }),
+      ]);
+      expect(message).toMatchObject({ id: 'msg_1' });
+      // The two **non-enumerable** members `buildMessage` attaches.
+      const attached = message as { _request_id?: string; _workspace_id?: string };
+      expect(Object.keys(attached)).not.toContain('_request_id');
+      expect(Object.keys(attached)).not.toContain('_workspace_id');
+      const withIds = (await observeCall('the JSON body with identifiers', parseResponse, [
+        responseOf(
+          200,
+          {
+            'content-type': 'application/json',
+            'request-id': 'req_1',
+            'anthropic-workspace-id': 'ws_1',
+          },
+          { id: 'msg_1', content: [] },
+        ),
+      ])) as { _request_id?: string; _workspace_id?: string };
+      expect(withIds._request_id).toBe('req_1');
+      expect(withIds._workspace_id).toBe('ws_1');
+      expect(Object.keys(withIds)).not.toContain('_request_id');
+      // The content-type test: `application/json` or `*+json`, the parameters
+      // stripped.
+      expect(observe('the JSON content type', isJsonContentType('application/json'))).toBe(true);
+      expect(observe('the JSON suffix content type', isJsonContentType('application/vnd+json'))).toBe(true);
+      expect(observe('the parameterised content type', isJsonContentType('application/json; charset=utf-8'))).toBe(
+        true,
+      );
+      expect(observe('the plain content type', isJsonContentType('text/plain'))).toBe(false);
+
       const streamed = await observeCall('the streamed events', driver.parseStream, [
         'event: agent.tool_use\ndata: {"type":"agent.tool_use","id":"toolu_1","name":"Echo","input":{}}\n\n',
         {},
       ]);
       expect(streamed).toMatchObject({ events: [{ type: 'tool_use', id: 'toolu_1' }] });
       return measured(
-        'partial',
-        "The non-streaming body and the SSE stream parse into the same events, and the SDK's extended agent.* vocabulary is tolerated. Measured: the non-streaming body, one SSE frame, and the extended vocabulary. The audit also records the 204 and binary paths, the content-length branch, the text() helper and the non-enumerable request and workspace members, which are implemented but not compared here.",
+        'match',
+        "The non-streaming body and the SSE stream parse into the same events, the SDK's extended agent.* vocabulary is tolerated, and the SDK's default `parseResponse` is reproduced in full: a `204` is null, a binary response is the raw response, a JSON body with a `content-length` of zero is undefined, a JSON body is the built message with the two non-enumerable identifiers attached, and anything else is the text. The content-type test is `application/json` or `*+json`, the parameters stripped.",
       );
     },
   },
