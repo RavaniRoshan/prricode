@@ -20,10 +20,13 @@
  *   5. Symlink semantics are **asymmetric**: an allow rule requires both the
  *      requested path and the resolved target to match; a deny rule fires if either
  *      matches. The path must be re-resolved after the check.
- *   6. The approval prompt shows the **resolved** destination, not the literal
- *      command string.
+ *   6. The approval prompt shows the **command text** as well as the **resolved**
+ *      destinations: the resolved destination is what the kernel will act on, and
+ *      the command text is what the user is being asked about.
  *   7. `Tool(param:value)` matching cannot apply to a tool's primary content field
- *      (`command`, `file_path`, `path`, `url`): such a rule is ignored and warns.
+ *      (`command`, `file_path`, `path`, `url`): such a rule is ignored and warns,
+ *      and a **deny** rule in that position is **degraded to an ask** rather than
+ *      dropped, because a deny rule that silently does not apply protects nothing.
  *   8. Deny rules block in every mode, including `bypassPermissions`; allow rules have
  *      no effect in `bypassPermissions`; `dontAsk` denies rather than prompts; and a
  *      safety-check denial cannot be bypassed.
@@ -60,6 +63,7 @@ import {
   resolvePathTargets,
   shellRedirects,
 } from '../../src/permissions/rules.js';
+import { buildApprovalPrompt } from '../../src/permissions/prompts.js';
 
 const tempDirs: string[] = [];
 
@@ -682,6 +686,29 @@ describe('acceptEdits writes inside the allowed directories only', () => {
       });
       expect(decision.behavior, command).toBe('allow');
     }
+  });
+});
+
+describe('the approval prompt', () => {
+  it('shows the command text as well as the resolved destination', () => {
+    const decision: PermissionDecision = {
+      behavior: 'ask',
+      source: 'unknown',
+      reasonType: 'other',
+      reasonKind: 'permissionPromptTool',
+    };
+
+    const prompt = buildApprovalPrompt({
+      toolName: 'Bash',
+      input: { command: 'cp /work/link.txt /work/out.txt' },
+      decision,
+      cwd: '/work',
+    });
+
+    // The resolved destination is what the kernel will act on, and the command
+    // text is what the user is being asked about: the prompt shows **both**.
+    expect(prompt).toContain('cp /work/link.txt /work/out.txt');
+    expect(prompt).toContain('out.txt');
   });
 });
 

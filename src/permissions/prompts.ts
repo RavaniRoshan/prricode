@@ -25,12 +25,13 @@
  *
  * **The computer-folder and repository-trust tool names are configuration, not
  * constants.** The audit names neither tool, so the names come from the transport
- * layer that knows them. A request whose input *looks* like a computer-folder
- * prompt but whose tool name is not the configured one is **refused**, not
- * forwarded: an unrecognised prompt must never be forwarded unvalidated. The
- * computer-folder prompt is validated strictly: exactly three string arguments, no
- * CR, LF, U+2028 or U+2029 in the folder path or the computer name, and a path **and
- * a computer name** that must equal their own normalized form.
+ * layer that knows them. A request that carries a **folder path** where a
+ * computer-folder prompt would carry one, but whose tool name is not the
+ * configured one, is **refused**, not forwarded: an unrecognised prompt must never
+ * be forwarded unvalidated. The computer-folder prompt is validated strictly:
+ * exactly three string arguments, no CR, LF, U+2028 or U+2029 in the folder path or
+ * the computer name, and a path **and a computer name** that must equal their own
+ * normalized form.
  *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
@@ -39,6 +40,16 @@
  *     a prompt-shaped request whose name it does not know.
  *   - The three arguments of the computer-folder prompt are taken to be the folder
  *     path, the computer name and an opaque identifier.
+ *   - **The narrowing of that refusal is a implementation choice, and it names a residual
+ *     risk.** This implementation refuses a request only when it carries a **folder path**
+ *     where a computer-folder prompt would carry one — three string arguments
+ *     whose first is a path — so that a legitimate peer tool that happens to take
+ *     three plain strings is not denied. The **residual risk**: a peer tool that
+ *     takes a path and two more strings is still refused, and a computer-folder
+ *     prompt whose folder path is a bare relative name (no separator, no drive
+ *     letter) is not recognised as one and would be forwarded unvalidated. The
+ *     implementation keeps the fail-closed behaviour for every request that carries a
+ *     path, which is the case the rule exists for.
  *   - The approval prompt shows the **command text** as well as the resolved
  *     destinations: the resolved destination is what the kernel will act on, and
  *     the command text is what the user asked about. A prompt that shows only
@@ -236,7 +247,8 @@ export function applyPermissionRequestHook(
  *
  * The returned callback is the `hook` option of a permission check: it runs
  * **after** the deny list, so a hook approval can never override a deny rule, and
- * the check refuses a hook approval that would override an ask rule as well.
+ * the check refuses a hook approval that would override an ask rule — or the
+ * escalation of a compound command an allow rule covered only in part — as well.
  */
 export function createPermissionRequestHook(opts: {
   /** The hook's own approval, or `undefined` when the hook did not decide. */
@@ -537,13 +549,35 @@ export function validateComputerFolderInput(
 /**
  * Whether an input looks like a computer-folder prompt.
  *
- * The computer-folder prompt carries exactly three string arguments, so an input
- * of that shape is a computer-folder prompt whose tool name the dispatcher did not
- * recognise. Such a request is **refused** rather than forwarded unvalidated.
+ * The computer-folder prompt carries exactly three string arguments: the folder
+ * path, the computer name and an opaque identifier. A request that carries a
+ * **folder path** in that first position — three string arguments whose first one
+ * is a path — is a computer-folder prompt whose tool name the dispatcher did not
+ * recognise, and such a request is **refused** rather than forwarded unvalidated.
+ *
+ * The narrowing is the **path**: the folder path is the one field the kernel
+ * would act on, so a request that carries no path has nothing to validate and is
+ * not refused. That is what keeps the rule from denying a legitimate peer tool
+ * that happens to take three plain strings.
  */
 export function looksLikeComputerFolderInput(input: unknown): boolean {
   if (!Array.isArray(input) || input.length !== 3) return false;
-  return input.every((value) => typeof value === 'string');
+  if (!input.every((value) => typeof value === 'string')) return false;
+  const folderPath = input[0] ?? '';
+  return isPathLike(folderPath);
+}
+
+/**
+ * Whether a string is a **path**.
+ *
+ * A path is absolute, home-relative, a Windows drive path, or carries a path
+ * separator.
+ */
+function isPathLike(value: string): boolean {
+  if (value.length === 0) return false;
+  if (value.startsWith('/') || value.startsWith('~')) return true;
+  if (/^[A-Za-z]:[\\/]/.test(value)) return true;
+  return value.includes('/') || value.includes('\\');
 }
 
 /**

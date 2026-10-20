@@ -18,7 +18,6 @@ import {
   MAX_PERSISTED_RULES,
   PERSISTED_RULES_SETTINGS_PATH,
   checkPermission,
-  collectRuleWarnings,
   describeReason,
   evaluateRules,
   normalizePermissionMode,
@@ -590,6 +589,42 @@ describe('the permission modes', () => {
     expect(decision.behavior).toBe('deny');
     expect(decision.source).toBe('classifier');
   });
+
+  it('labels the acceptEdits no-rule-matched case as noRuleMatch', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules(),
+      mode: 'acceptEdits',
+    });
+
+    // The case is "no rule matched", not "a named tool requires approval": the
+    // `noRuleMatch` kind is the one the hook may replace.
+    expect(decision.behavior).toBe('ask');
+    expect(decision.reasonKind).toBe('noRuleMatch');
+  });
+
+  it('lets a hook approval replace the no-rule-matched prompt in acceptEdits as in default', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const } }),
+    });
+
+    const inAcceptEdits = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules(),
+      mode: 'acceptEdits',
+      hook,
+    });
+    const inDefault = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules(),
+      mode: 'default',
+      hook,
+    });
+
+    // The generic prompt is replaced in both modes: the hook's behaviour does not
+    // depend on the mode.
+    expect(inAcceptEdits.behavior).toBe('allow');
+    expect(inAcceptEdits.source).toBe('hook');
+    expect(inDefault.behavior).toBe('allow');
+    expect(inDefault.source).toBe('hook');
+  });
 });
 
 describe('resolveStartMode', () => {
@@ -840,6 +875,194 @@ describe('the settings adapter', () => {
       tool({ toolName: 'Read', input: { file_path: '/work/.claude/secrets/key' } }),
     );
     expect(decision?.behavior).toBe('deny');
+  });
+
+  it('resolves the default mode through the observed top-level key order', () => {
+    const loaded: SettingsLoadResult = {
+      tiers: new Map<SettingsSource, SettingsTier>([
+        [
+          'policySettings',
+          {
+            source: 'policySettings',
+            value: { permissions: { defaultMode: 'plan' } },
+          },
+        ],
+        [
+          'flagSettings',
+          {
+            source: 'flagSettings',
+            value: { permissions: { defaultMode: 'acceptEdits' } },
+          },
+        ],
+        [
+          'userSettings',
+          {
+            source: 'userSettings',
+            value: { permissions: { defaultMode: 'dontAsk' } },
+          },
+        ],
+        [
+          'projectSettings',
+          {
+            source: 'projectSettings',
+            value: { permissions: { defaultMode: 'plan' } },
+          },
+        ],
+        [
+          'localSettings',
+          {
+            source: 'localSettings',
+            value: { permissions: { defaultMode: 'acceptEdits' } },
+          },
+        ],
+      ]),
+      errors: [],
+      readMode: new Map(),
+      linkedAway: [],
+    };
+
+    const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
+
+    // The machine policy wins: `permissions.defaultMode` is a scalar under a
+    // top-level settings key, so it follows the observed `TOP_LEVEL_KEY_ORDER`
+    // (`policySettings`, `flagSettings`, `userSettings`).
+    expect(permissions.defaultMode).toBe('plan');
+  });
+
+  it('lets the user tier beat the project-side tiers for the default mode', () => {
+    const loaded: SettingsLoadResult = {
+      tiers: new Map<SettingsSource, SettingsTier>([
+        [
+          'userSettings',
+          {
+            source: 'userSettings',
+            value: { permissions: { defaultMode: 'dontAsk' } },
+          },
+        ],
+        [
+          'projectSettings',
+          {
+            source: 'projectSettings',
+            value: { permissions: { defaultMode: 'plan' } },
+          },
+        ],
+        [
+          'localSettings',
+          {
+            source: 'localSettings',
+            value: { permissions: { defaultMode: 'acceptEdits' } },
+          },
+        ],
+      ]),
+      errors: [],
+      readMode: new Map(),
+      linkedAway: [],
+    };
+
+    const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
+
+    // The top-level order names the user tier, and the project-side tiers are not
+    // part of it: the user's default mode is the one that applies.
+    expect(permissions.defaultMode).toBe('dontAsk');
+  });
+
+  it('does not let a project-side default mode define the mode', () => {
+    const loaded: SettingsLoadResult = {
+      tiers: new Map<SettingsSource, SettingsTier>([
+        [
+          'projectSettings',
+          {
+            source: 'projectSettings',
+            value: { permissions: { defaultMode: 'plan' } },
+          },
+        ],
+        [
+          'localSettings',
+          {
+            source: 'localSettings',
+            value: { permissions: { defaultMode: 'acceptEdits' } },
+          },
+        ],
+      ]),
+      errors: [],
+      readMode: new Map(),
+      linkedAway: [],
+    };
+
+    const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
+
+    // The project-side tiers are not in the observed top-level order, so they do
+    // not define a top-level key.
+    expect(permissions.defaultMode).toBeUndefined();
+  });
+
+  it('concatenates the rule lists of every tier in the tier order', () => {
+    const loaded: SettingsLoadResult = {
+      tiers: new Map<SettingsSource, SettingsTier>([
+        [
+          'userSettings',
+          { source: 'userSettings', value: { permissions: { allow: ['Bash(user *)'] } } },
+        ],
+        [
+          'projectSettings',
+          { source: 'projectSettings', value: { permissions: { allow: ['Bash(project *)'] } } },
+        ],
+        [
+          'localSettings',
+          { source: 'localSettings', value: { permissions: { allow: ['Bash(local *)'] } } },
+        ],
+        [
+          'flagSettings',
+          { source: 'flagSettings', value: { permissions: { allow: ['Bash(flag *)'] } } },
+        ],
+        [
+          'policySettings',
+          { source: 'policySettings', value: { permissions: { allow: ['Bash(policy *)'] } } },
+        ],
+      ]),
+      errors: [],
+      readMode: new Map(),
+      linkedAway: [],
+    };
+
+    const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
+
+    // The lists of every tier are **concatenated** — a implementation choice, not the
+    // observed "first source that defines the key wins" merge — in the tier
+    // order: the machine policy and the feature flags first, then the merged-key
+    // order of the project-side tiers.
+    expect(permissions.rules.allow).toEqual([
+      'Bash(policy *)',
+      'Bash(flag *)',
+      'Bash(local *)',
+      'Bash(project *)',
+      'Bash(user *)',
+    ]);
+  });
+
+  it('lets a machine-policy deny beat a user allow', () => {
+    const loaded: SettingsLoadResult = {
+      tiers: new Map<SettingsSource, SettingsTier>([
+        [
+          'policySettings',
+          { source: 'policySettings', value: { permissions: { deny: ['Bash(ls *)'] } } },
+        ],
+        [
+          'userSettings',
+          { source: 'userSettings', value: { permissions: { allow: ['Bash(ls *)'] } } },
+        ],
+      ]),
+      errors: [],
+      readMode: new Map(),
+      linkedAway: [],
+    };
+
+    const permissions = permissionsFromSettings(loaded, { cwd: '/work', configDir: '/config' });
+
+    const decision = evaluateRules(permissions.rules, tool({ input: { command: 'ls -l' } }));
+
+    expect(decision?.behavior).toBe('deny');
+    expect(decision?.rule?.source).toBe('policySettings');
   });
 });
 
@@ -1132,6 +1355,24 @@ describe('the auto-mode review', () => {
 
     expect(decision.behavior).toBe('allow');
   });
+
+  it('keeps the ask rule attribution when the hook approval cannot be classified', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const }, classifierApprovable: false }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules({ ask: ['Bash(git push *)'] }),
+      mode: 'auto',
+      hook,
+      classifier: async () => ({ verdict: 'allow' as const }),
+    });
+
+    // The ask rule still speaks for the call: its attribution is not dropped by
+    // the branch that refuses to let the classifier launder the approval.
+    expect(decision.behavior).toBe('ask');
+    expect(decision.rule?.content).toBe('Bash(git push *)');
+  });
 });
 
 describe('the hook seam of the permission check', () => {
@@ -1209,6 +1450,43 @@ describe('the hook seam of the permission check', () => {
 
     expect(decision.behavior).toBe('ask');
     expect(decision.rule?.content).toBe('Bash(command:rm *)');
+  });
+
+  it('does not let an approval replace the escalation of a partially covered chain', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const } }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'echo hello && rm -rf /' } }), {
+      rules: rules({ allow: ['Bash(echo *)'] }),
+      mode: 'default',
+      hook,
+    });
+
+    // The allow rule covered `echo hello` but not `rm -rf /`. The hook's approval
+    // must not approve the sub-commands the allow rule did not cover: the
+    // escalation stands.
+    expect(decision.behavior).not.toBe('allow');
+    expect(decision.behavior).toBe('ask');
+    expect(decision.reasonKind).toBe('subcommandResults');
+    expect(decision.subcommandResults?.commands).toEqual(['rm -rf /']);
+  });
+
+  it('does not let an approval replace the escalation in acceptEdits either', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const } }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'echo hello && rm -rf /' } }), {
+      rules: rules({ allow: ['Bash(echo *)'] }),
+      mode: 'acceptEdits',
+      hook,
+    });
+
+    expect(decision.behavior).not.toBe('allow');
+    expect(decision.behavior).toBe('ask');
+    expect(decision.reasonKind).toBe('subcommandResults');
+    expect(decision.subcommandResults?.commands).toEqual(['rm -rf /']);
   });
 });
 
@@ -1382,5 +1660,81 @@ describe('the uncovered behaviours', () => {
     expect(looksLikeComputerFolderInput(['/work/folder', 'host', 'id'])).toBe(true);
     expect(looksLikeComputerFolderInput(['/work/folder'])).toBe(false);
     expect(looksLikeComputerFolderInput({ path: '/work' })).toBe(false);
+  });
+
+  it('does not refuse a peer tool that takes three plain strings', async () => {
+    let forwarded = false;
+    const dispatcher = createTransportPermissionDispatcher({
+      requestDecision: async () => {
+        forwarded = true;
+        return { behavior: 'allow' as const };
+      },
+    });
+
+    const result = await dispatcher.dispatch({
+      subtype: 'can_use_tool',
+      request_id: 'peer-1',
+      tool_name: 'some_other_tool',
+      input: ['alpha', 'beta', 'gamma'],
+    });
+
+    // Three plain strings are not a computer-folder prompt: the first argument of
+    // that prompt is a folder path, so a request that carries no path is not
+    // refused.
+    expect(looksLikeComputerFolderInput(['alpha', 'beta', 'gamma'])).toBe(false);
+    expect(result.kind).toBe('response');
+    if (result.kind === 'response') {
+      expect(result.response.response.behavior).toBe('allow');
+    }
+    expect(forwarded).toBe(true);
+  });
+
+  it('still refuses a request that carries a path where a computer-folder prompt would', async () => {
+    let forwarded = false;
+    const dispatcher = createTransportPermissionDispatcher({
+      requestDecision: async () => {
+        forwarded = true;
+        return { behavior: 'allow' as const };
+      },
+    });
+
+    const result = await dispatcher.dispatch({
+      subtype: 'can_use_tool',
+      request_id: 'peer-2',
+      tool_name: 'some_other_tool',
+      input: ['/work/folder', 'host', 'id'],
+    });
+
+    expect(result.kind).toBe('response');
+    if (result.kind === 'response') {
+      expect(result.response.response.behavior).toBe('deny');
+    }
+    expect(forwarded).toBe(false);
+  });
+
+  it('still refuses a peer request that carries a path and two more strings', async () => {
+    let forwarded = false;
+    const dispatcher = createTransportPermissionDispatcher({
+      requestDecision: async () => {
+        forwarded = true;
+        return { behavior: 'allow' as const };
+      },
+    });
+
+    const result = await dispatcher.dispatch({
+      subtype: 'can_use_tool',
+      request_id: 'peer-3',
+      tool_name: 'some_other_tool',
+      input: ['/work/a.txt', 'utf-8', 'r'],
+    });
+
+    // The narrowing is the **path**: a request that carries one is still refused,
+    // because the folder path is the field the kernel would act on.
+    expect(looksLikeComputerFolderInput(['/work/a.txt', 'utf-8', 'r'])).toBe(true);
+    expect(result.kind).toBe('response');
+    if (result.kind === 'response') {
+      expect(result.response.response.behavior).toBe('deny');
+    }
+    expect(forwarded).toBe(false);
   });
 });

@@ -53,6 +53,12 @@
  * approval. A hook approval that carries `classifierApprovable: false` cannot be
  * laundered into an approval by the auto-mode review.
  *
+ * **A hook approval replaces only the generic prompt.** The case where no rule
+ * matched at all (`noRuleMatch`) is the one the hook's approval replaces; the
+ * **escalation** of a compound command an allow rule covered only in part
+ * (`subcommandResults`) stands, because the hook's approval must not approve the
+ * sub-commands the allow rule did not cover.
+ *
  * **The host-level gates** are the two the audit names: the
  * `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` restriction, which blocks every prompt and
  * tool call when the personal configuration has problems, and a hook failure of
@@ -83,14 +89,21 @@
  *   - The "don't ask again" affordance **computes** the rules to persist and the
  *     five-rule cap, but **does not write them**: the write to
  *     `.claude/settings.local.json` is not implemented in this module.
- *   - The permission **rule lists** are merged keys, so they follow the **observed**
- *     `MERGED_KEY_ORDER` (`localSettings`, `projectSettings`, `userSettings`).
- *     `permissions.defaultMode` is a scalar under a top-level key, so it follows the
- *     **observed** `TOP_LEVEL_KEY_ORDER`. The two tiers that neither observed
- *     ordering names — the machine policy and the feature flags — are placed first
- *     in the rule lists, because a machine policy rule must win the first-match
- *     scan; that placement is a **implementation choice**, not an observed ordering, and the
- *     project-side tiers' placement for `defaultMode` is a implementation choice too.
+ *   - The permission **rule lists** of **every** tier are **concatenated** in the
+ *     tier order `policySettings`, `flagSettings`, `localSettings`,
+ *     `projectSettings`, `userSettings`. The **order** of the three project-side
+ *     tiers is the **observed** `MERGED_KEY_ORDER` (`localSettings`,
+ *     `projectSettings`, `userSettings`); the two tiers that ordering does not
+ *     name — the machine policy and the feature flags — are placed first, because
+ *     a machine policy rule must win the first-match scan; that placement is a
+ *     **implementation choice**, not an observed ordering. The **concatenation** itself is
+ *     a **implementation choice** too: the observed "first source that defines the key
+ *     wins" rule for a merged key would drop the rules of every lower tier, and
+ *     concatenating is the fail-safe choice — a rule of any tier is in force.
+ *   - `permissions.defaultMode` is a scalar under the **top-level** `permissions`
+ *     key, so it is resolved through the **observed** `TOP_LEVEL_KEY_ORDER`
+ *     (`policySettings`, `flagSettings`, `userSettings`). The project-side tiers
+ *     are not part of that observed order, so they do not define a `defaultMode`.
  */
 
 import path from 'node:path';
@@ -255,9 +268,10 @@ export interface CheckPermissionOptions {
    * The `PermissionRequest` hook, run **after** the deny list.
    *
    * The hook may deny the call, approve it, and rewrite the tool input. An
-   * approval never overrides a deny rule or an ask rule, and an approval that
-   * carries `classifierApprovable: false` cannot be turned into an approval by
-   * the auto-mode review.
+   * approval never overrides a deny rule or an ask rule, and never replaces the
+   * escalation of a compound command an allow rule covered only in part; an
+   * approval that carries `classifierApprovable: false` cannot be turned into an
+   * approval by the auto-mode review.
    */
   hook?: (ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
   /**
@@ -571,10 +585,14 @@ export async function checkPermission(
  * Apply a hook's approval to the decision the mode produced.
  *
  * An approval replaces a **generic** prompt — the case where no rule matched and
- * nothing else forced a prompt. It never replaces a denial, never replaces a
- * mode-level refusal (`permissionPromptTool`), and never replaces the ask of an
- * ask rule. A hook that rewrote the input keeps its rewrite on every decision the
- * call ends up with, because the rewritten input is what the tool receives.
+ * nothing else forced a prompt (`noRuleMatch`). It never replaces a denial, never
+ * replaces a mode-level refusal (`permissionPromptTool`), never replaces the ask
+ * of an ask rule, and never replaces the **escalation** of a partially covered
+ * compound command (`subcommandResults`): the hook's approval must not approve
+ * the sub-commands an allow rule did not cover.
+ *
+ * A hook that rewrote the input keeps its rewrite on every decision the call can
+ * still end up with, because the rewritten input is what the tool receives.
  */
 function applyHookApproval(
   decision: PermissionDecision,
@@ -584,22 +602,32 @@ function applyHookApproval(
   const hook = hookApproval.decision;
 
   if (decision.behavior === 'allow') {
-    return hook.updatedInput !== undefined ? { ...decision, updatedInput: hook.updatedInput } : decision;
+    return withHookInput(decision, hook);
   }
   if (decision.behavior === 'deny') return decision;
 
   // The call would prompt.
-  if (hookApproval.overridden) {
-    // An ask rule matched: the ask stands.
-    return hook.updatedInput !== undefined ? { ...decision, updatedInput: hook.updatedInput } : decision;
+  if (decision.reasonKind === 'noRuleMatch' && !hookApproval.overridden) {
+    // The **generic** prompt — the case where no rule matched — is the only one
+    // the hook's approval replaces.
+    return { ...hook, reason: hook.reason ?? 'A PermissionRequest hook approved this call.' };
   }
-  if (decision.reasonKind !== 'noRuleMatch' && decision.reasonKind !== 'subcommandResults') {
-    // A mode-level refusal, a degraded deny rule and a safety check all stand:
-    // only the **generic** prompt — the case where no rule matched — is replaced by
-    // the hook's approval.
-    return decision;
-  }
-  return { ...hook, reason: hook.reason ?? 'A PermissionRequest hook approved this call.' };
+  // Everything else stands: the ask of an ask rule, the escalation of a partially
+  // covered chain, a mode-level refusal and a degraded deny rule. The hook's
+  // rewrite still rides along, because it is the input the tool would receive.
+  return withHookInput(decision, hook);
+}
+
+/**
+ * A decision with the hook's rewritten input attached.
+ *
+ * The rewrite is what the tool receives, so it rides along on every decision the
+ * call can still end up with — the hook's approval may not replace the decision,
+ * but the input it rewrote is still the input that would run.
+ */
+function withHookInput(decision: PermissionDecision, hook: PermissionDecision): PermissionDecision {
+  if (hook.updatedInput === undefined) return decision;
+  return { ...decision, updatedInput: hook.updatedInput };
 }
 
 async function decideForMode(
@@ -612,7 +640,7 @@ async function decideForMode(
 ): Promise<PermissionDecision> {
   switch (mode) {
     case 'bypassPermissions':
-      return decideBypassPermissions(ctx, rules, asked, hookApproval);
+      return decideBypassPermissions(asked, hookApproval);
     case 'dontAsk':
       return decideDontAsk(ctx, rules, asked);
     case 'plan':
@@ -634,8 +662,6 @@ async function decideForMode(
  * prompts, and an allow rule has **no effect** — it is not consulted at all.
  */
 function decideBypassPermissions(
-  ctx: ToolContext,
-  rules: RuleSet,
   asked: RuleDecision | undefined,
   hookApproval: HookApproval | undefined,
 ): PermissionDecision {
@@ -851,7 +877,9 @@ function decideAcceptEdits(
   if (approved) return approved;
 
   if (allowed.unmatched.length > 0) return allowFailureEscalation(ctx, allowed);
-  return askDecision(ctx.toolName, undefined, 'permissionPromptTool');
+  // No rule matched: the case is the **generic** prompt, the same one the
+  // `default` mode produces, so the hook's approval replaces it here as well.
+  return askDecision(ctx.toolName);
 }
 
 /**
@@ -1035,6 +1063,9 @@ async function decideAuto(
       reason:
         'The auto-mode review approved this call, but the hook approval cannot be approved by a classifier, so it requires approval.',
     };
+    // The ask rule still speaks for the call: its attribution is not dropped by
+    // the branch that refuses to let the classifier launder the approval.
+    if (asked?.rule) decision.rule = asked.rule;
     if (hookApproval.decision.updatedInput !== undefined) {
       decision.updatedInput = hookApproval.decision.updatedInput;
     }
@@ -1175,14 +1206,14 @@ export interface SettingsPermissions {
 /**
  * The tiers the rule lists are collected from, highest first.
  *
- * `MERGED_KEY_ORDER` is the **observed** per-key merge order for merged settings
- * (`localSettings`, `projectSettings`, `userSettings`), and the permission rule
- * lists are merged keys, so the rule lists follow it.
+ * The **observed** `MERGED_KEY_ORDER` is the per-key merge order for merged
+ * settings (`localSettings`, `projectSettings`, `userSettings`), and the three
+ * project-side tiers are collected in that order.
  *
- * `policySettings` and `flagSettings` are **not** named by that ordering: the audit
- * does not derive a per-key merge for them, so their placement here is a **implementation
- * choice**. They are listed first, because a machine policy rule must win the
- * first-match scan of a list. This implementation does not claim this ordering is
+ * `policySettings` and `flagSettings` are **not** named by that ordering: the
+ * audit does not derive a per-key merge for them, so their placement here is a
+ * **implementation choice**. They are listed first, because a machine policy rule must
+ * win the first-match scan of a list. This implementation does not claim this ordering is
  * target-verified.
  */
 const RULE_TIER_ORDER: readonly SettingsSource[] = [
@@ -1194,27 +1225,40 @@ const RULE_TIER_ORDER: readonly SettingsSource[] = [
 /**
  * The tiers `permissions.defaultMode` is resolved from, highest first.
  *
- * `TOP_LEVEL_KEY_ORDER` is the **observed** order for a top-level settings key
- * (`policySettings`, `flagSettings`, `userSettings`), and `permissions` is a
- * top-level key. The project-side tiers are consulted afterwards: the audit does
- * not derive a per-key merge for them, so their placement is a **implementation choice**
- * (they keep the `MERGED_KEY_ORDER` relation to each other).
+ * `permissions.defaultMode` is a scalar under the **top-level** `permissions`
+ * key, so it is resolved through the **observed** `TOP_LEVEL_KEY_ORDER`
+ * (`policySettings`, `flagSettings`, `userSettings`) — the order the settings
+ * module applies to every other top-level key.
+ *
+ * The project-side tiers are **not** part of that observed order, so they do not
+ * define a `defaultMode`: the same rule the settings module states for a
+ * top-level key ("tiers outside `TOP_LEVEL_KEY_ORDER` never take part in a
+ * top-level resolution"). A user-level `defaultMode` therefore beats a
+ * project-level one, because the project-level one does not define the key.
  */
-const DEFAULT_MODE_TIER_ORDER: readonly SettingsSource[] = [
-  ...TOP_LEVEL_KEY_ORDER,
-  'localSettings',
-  'projectSettings',
-];
+const DEFAULT_MODE_TIER_ORDER: readonly SettingsSource[] = [...TOP_LEVEL_KEY_ORDER];
 
 /**
  * Build the rule lists from the loaded settings tiers.
  *
- * The rule lists of **every** tier are combined: a deny rule in the project
- * settings blocks a call that the user settings allow, and the precedence
- * (`deny` → `ask` → `allow`) decides the outcome. Each rule keeps the tier it came
- * from, so a `!` negation only cancels a rule from the **same** settings file.
+ * The rule lists of **every** tier are **concatenated** in the tier order
+ * (`policySettings`, `flagSettings`, `localSettings`, `projectSettings`,
+ * `userSettings`): a deny rule in the project settings blocks a call that the
+ * user settings allow, and the precedence (`deny` → `ask` → `allow`) decides the
+ * outcome. Each rule keeps the tier it came from, so a `!` negation only
+ * cancels a rule from the **same** settings file.
  *
- * `permissions.defaultMode` is taken from the highest tier that defines one.
+ * **The concatenation is a implementation choice.** The audit derives the *order* of the
+ * project-side tiers (`MERGED_KEY_ORDER`) but not a per-key merge for the
+ * permission lists, and the observed "first source that defines the key wins"
+ * rule for a merged key would **drop** the rules of every lower tier — a rule a
+ * user wrote could then be undone by a project settings file. Concatenating the
+ * lists is the fail-safe choice: a rule of **any** tier is in force, and the
+ * precedence decides the outcome. This implementation does not claim this is the target's
+ * behaviour.
+ *
+ * `permissions.defaultMode` is taken from the highest tier of the **observed**
+ * top-level order that defines one (`DEFAULT_MODE_TIER_ORDER`).
  * `auto` and `bypassPermissions` are **not** filtered here: `resolveStartMode`
  * ignores them when they come from a settings file.
  *

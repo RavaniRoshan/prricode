@@ -90,26 +90,13 @@
 
 import type { PermissionDecision, ToolContext } from './decision.js';
 import {
-  anchorPathPattern,
   commandGlobMatch,
-  isCriticalPath,
-  isInsideDirectory,
   pathPatternMatches,
   resolvePathTargets,
   type PathContext,
   type PathMatchKind,
-  type PathTargets,
 } from './paths.js';
-import {
-  shellRedirects,
-  shellSubCommandParts,
-  shellSubCommands,
-  shellInvocation,
-  stripRedirections,
-  stripWrappers,
-  splitShellCommand,
-  type ShellRedirect,
-} from './shell.js';
+import { shellSubCommandParts, shellSubCommands } from './shell.js';
 
 /**
  * The rule lists a settings document exposes.
@@ -190,17 +177,6 @@ function readInputField(input: unknown, field: string): unknown {
   if (!isPlainObject(input)) return undefined;
   if (!Object.hasOwn(input, field)) return undefined;
   return input[field];
-}
-
-/**
- * Read one field of a tool's input.
- *
- * The lookup is an **own-property** check: the input is caller-supplied data, and a
- * field named `constructor` or `toString` must read as absent rather than resolve
- * to an inherited member.
- */
-export function readToolField(input: unknown, field: string): unknown {
-  return readInputField(input, field);
 }
 
 /**
