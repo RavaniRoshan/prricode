@@ -266,7 +266,7 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 **Entirely a implementation choice.** §2.8 observes only the two `mcp__ide__executeCode` / `mcp__ide__getDiagnostics` tools; there is no observed lock-file, port or discovery mechanism to copy. Two rules are this implementation's:
 
 - an **action is validated as a single path segment** — no empty, `.`, `..`, `/`, `\` or NUL — before anything is sent;
-- a **skill file or a subagent definition file over 1 MiB** is surfaced with a problem and **never read**.
+- the default transport **refuses a host that is not a loopback address**.
 
 **Pinned by:** `tests/contracts/extensions.test.ts` — the IDE action and byte-cap tests.
 
@@ -307,6 +307,17 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 | A command hook runs through `/bin/sh -c` with the payload on stdin and a 60 s timeout | **implementation choice** | same file |
 | A malformed matcher matches nothing rather than being treated as a literal | **implementation choice** | same file |
 | `updatedPermissions` accepts both a map and a list of typed updates | **implementation choice** | same file |
+| A manifest-declared path is used only when it is inside the plugin root — lexically and through `realpath` — and a refusal carries one of two named reasons, reported both as a `manifest.problems` entry and as a log record | **implementation choice** (the target's behavior is unobserved; the plan's Global Constraint requires implementation-owned path boundaries) | `tests/contracts/extensions.test.ts` — the path-boundary tests, one per check |
+| The standalone (non-plugin) skill directory scan — `SKILL.md` per subdirectory, the frontmatter `description`, the `own` flag, the precedence and the byte limit — is this implementation's | **implementation choice** (§2.8 marks that scan "not traced to resolved relations") | same file — the discovery and override tests |
+| The precedence order `project > local > user > plugin > mcp`, and the meaning of `local`. The five **names** are the plan's | **implementation choice** (the order and `local`'s meaning) | same file — the precedence test |
+| Two plugins that provide the same skill or subagent name collide; the collision is **reported** and the names are **not** namespaced. One plugin providing a name twice is reported as a different situation | **implementation choice** | same file — the collision tests |
+| The merged settings' `skillOverrides` block merges **per leaf**, so a user tier survives a local tier | **implementation choice — a documented divergence** from the audit's per-key order | same file — the per-leaf merge test |
+| A frontmatter field that is present but `undefined` is treated as absent | **implementation choice — a documented divergence** from the audit's literal reading | same file — the undefined-field test |
+| An IDE action is validated as a single path segment (no empty, `.`, `..`, `/`, `\`, NUL) before anything is sent, in `apply()` and in the transport | **implementation choice** | same file — the IDE action tests |
+| The default IDE transport refuses a host that is not a loopback address | **implementation choice** | same file — the IDE transport tests |
+| A skill file or a subagent definition file over 1 MiB is surfaced with a problem and **never read** | **implementation choice** | same file — the byte-cap tests |
+| A `telemetry.log` destination other than `collector` is normalized to `anthropic` | **implementation choice** (the **default** is REA observed; the **rewriting** is this implementation's reading and a behavior change) | same file — the telemetry tests |
+| A subagent's name is its file's basename, overridden by the frontmatter's `name`; a name two contributors provide is a reported collision | **implementation choice** (the subagent lifecycle is unobserved) | same file — the subagent tests |
 | The skill override modes are exactly four, and the resolution order is settings → session → policy/flag | REA observed | `tests/contracts/extensions.test.ts` (the `CC-013` task) |
 | The skill-save protocol selects its mode by the target's rule and uses the target's wording | REA observed | same file |
 | The marketplace install reports the disable reason, the enable hint, and distinguishes refused from failed | REA observed | same file |
