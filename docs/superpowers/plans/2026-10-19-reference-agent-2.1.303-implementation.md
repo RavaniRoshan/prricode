@@ -1222,36 +1222,51 @@ diverge.
 
 *The subagent definition lifecycle.*
 
-- A subagent is a **markdown file with YAML frontmatter**, named `<name>.md`, inside an
-  **`agents/` directory**. The target states the two user-facing locations itself:
-  `.claude/agents/` for the project, and `~/.claude/agents/` for all projects; the
-  managed and the plugin `agents/` directories are read too.
+- A subagent is a **markdown file with YAML frontmatter** inside an **`agents/`**
+  directory. The **file name is free-form** — the agent's name comes from the
+  frontmatter, not from the file's name. The target states the two user-facing
+  locations itself: `.claude/agents/` for the project, and `~/.claude/agents/` for all
+  projects; the managed directory, each **ancestor of the working directory** up to the
+  project root (excluding the home directory itself), each additional working
+  directory's, and the plugin `agents/` directories are read too.
 - Discovery is a **recursive `*.md` scan** of each `agents/` directory, with a bounded
   timeout, following symlinks and skipping a directory it has already visited.
 - Parsing requires a `name` **and** a `description`; a file without the description is
   refused by name.
-- **Nothing is persisted.** The raw scan and the parsed catalogue are memoised per
-  process and dropped on a file-watch event, on the `/agents` command and on a plugin
-  reload. Across a **restart** everything is re-read from disk, and a resumed session's
+- **Nothing is persisted.** The raw scan and the parsed catalogue live in an
+  **in-memory, weakly-keyed per-host cache**, and are dropped on a file-watch event, on
+  the `/agents` command and on a plugin reload. Across a **restart** everything is re-read from disk, and a resumed session's
   main-thread agent is **reconstructed by name** against the freshly read catalogue — the
   target says so when the agent is no longer available.
-- Invocation is the `Task` tool: it resolves the requested type against the active agent
-  list and calls the definition's system prompt.
+- When two sources define the same name, the later one wins, in the order **built-in,
+  plugin, user settings, project settings, feature flags, machine policy**.
+- Invocation is the **`Agent`** tool, whose alias is **`Task`**: it resolves the
+  requested type against the active agent list and calls the definition's system prompt.
+  A definition may also be supplied as **JSON** — but only through the `--agents` flag
+  and the programmatic registration hook, never as a file on disk.
 
 *The standalone skill directory scan.*
 
-- Five roots are read: the **managed** directory, the **user** directory
-  (`~/.claude/skills`), the **synced** subtree beneath it, every **project** ancestor's
-  `.claude/skills`, and each **additional working directory**'s `.claude/skills`.
+- The sources are read separately and **merged later**: the **managed** directory, the
+  **user** directory (`~/.claude/skills`), the **synced** subtree beneath it, the **host
+  catalog**, every **project** ancestor's `.claude/skills`, each **additional working
+  directory**'s `.claude/skills`, and the **plugin** skills. The standalone list and the
+  plugin list are two separate lists, and the standalone skills come **first** in the
+  merge.
 - The scan of a root is a **single `readdir`** — **depth 1, not recursive**. Each entry
-  must be a directory or a symlink, and the skill file is the **fixed name `SKILL.md`**
-  directly inside it.
-- **Skipped:** an entry that is not a directory; the reserved entry name `synced`; an
-  entry whose name contains `:` in the synced scan; an entry whose plugin is disabled; a
-  `SKILL.md` that is not a regular file; a `SKILL.md` over **1 000 000 bytes**; and any
-  file that fails to read or parse.
+  must be a directory or a symlink, and the skill file is the **fixed name `SKILL.md`**,
+  with that exact case, directly inside it.
+- **Skipped:** an entry that is not a directory or a symlink; the reserved entry name
+  `synced`; an entry whose name contains `:` in the synced scan; an entry whose plugin
+  is disabled; a `SKILL.md` that is not a regular file; a `SKILL.md` over
+  **1 000 000 bytes**; a skill whose own name is reserved; and a directory that cannot
+  be read.
+- **A frontmatter parse failure is not a skip:** it is reported at error level and the
+  frontmatter is **ignored** — the skill still loads, without its frontmatter. Any other
+  failure while building a skill skips **that one skill**, and the scan continues.
 - The result is cached per process and invalidated by the same reload path the agent
   catalogue uses.
+
 
 **Files:** Modify `src/extensions/skills/registry.ts`; Modify
 `src/extensions/agents/` (or wherever the subagent definitions are read); Modify
