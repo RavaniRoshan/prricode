@@ -106,6 +106,55 @@ function lookupKey(tiers: SettingsTierMap, source: SettingsSource, key: string):
 }
 
 /**
+ * The scope the two **sibling** configuration documents belong to.
+ *
+ * The settings document is the five-tier document: the user, project, local,
+ * policy and flag tiers. The **flat managed config** and the **workspace
+ * config** are not: the target reads them from the managed-settings sources —
+ * the server-managed settings, the MDM profile, the `managed-settings.json`
+ * file and the Windows `HKCU` policy key — and never from a checked-in
+ * project file or a user's local settings.
+ *
+ * In this implementation's tier model that is the **policy** tier: the
+ * machine-administered one, read as `machine_admin`. The two documents are
+ * therefore *separate documents with their own keys* (`schema.ts` holds their
+ * schemas), and this module owns the question of **which tier may supply
+ * them**.
+ */
+export const MANAGED_CONFIG_SOURCES: readonly SettingsSource[] = ['policySettings'];
+
+/**
+ * Whether a source may supply a managed-config section.
+ *
+ * The answer is the **membership** of {@link MANAGED_CONFIG_SOURCES}: only the
+ * machine-administered tier may, so a project or a local settings file cannot
+ * deliver a managed configuration.
+ */
+export function isManagedConfigSource(source: SettingsSource): boolean {
+  return MANAGED_CONFIG_SOURCES.includes(source);
+}
+
+/**
+ * Read a section of the managed configuration out of the admin-controlled tier.
+ *
+ * The section is a **flat** managed-config section — `workspace`, `inference`,
+ * `mcp` and the rest of the twenty-two — and it is read out of the tier the
+ * managed configuration belongs to. A section a tier does not carry is
+ * `undefined`, never a value from a tier that may not supply one.
+ */
+export function readManagedConfigSection(
+  tiers: SettingsTierMap,
+  section: string,
+): SettingsTier | undefined {
+  for (const source of TIER_PRECEDENCE) {
+    if (!isManagedConfigSource(source)) continue;
+    const tier = lookupKey(tiers, source, section);
+    if (tier) return tier;
+  }
+  return undefined;
+}
+
+/**
  * Read a key that is scoped to **user settings only** (for example `spellcheck`).
  * A project or local definition of the same key is ignored, exactly as the target
  * ignores a spellcheck block in project or local settings.

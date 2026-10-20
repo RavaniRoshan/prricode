@@ -52,14 +52,16 @@ import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import path from 'node:path';
 
-import { parseSettingsDocument } from './schema.js';
+import { parseFlatManagedConfig, parseSettingsDocument } from './schema.js';
 import { isSuppressed } from './scope.js';
 import {
   SETTINGS_SOURCES,
   TIER_PRECEDENCE,
   SettingsTierEntry,
+  documentOf,
   mergeBlockwise,
   resolveBlock,
+  unknownDocumentKeys,
   type SettingsSource,
   type SettingsTier,
 } from './tiers.js';
@@ -83,6 +85,16 @@ export interface SettingsLoadOptions {
   legacyLocalSettingsPath?: string;
   /** The feature-flag tier, applied as an overlay of settings keys. */
   flagSettings?: Record<string, unknown>;
+  /**
+   * The **flat managed config** document, when the host supplies one.
+   *
+   * The flat managed config is a **separate document** from the settings
+   * document, with its own keys; the target reads it from the
+   * managed-settings sources rather than from a `settings.json`. A caller that
+   * has one — the desktop host, or a third-party distribution — hands it over
+   * here, and the loader validates it and reports what was wrong with it.
+   */
+  managedConfig?: unknown;
 }
 
 export interface SettingsLoadError {
@@ -112,6 +124,29 @@ export interface SettingsLoadResult {
    * means, because the loader never produces one.
    */
   readonly sandboxPolicy: SandboxPolicy;
+  /**
+   * The flat managed config the caller supplied, when it parsed.
+   *
+   * `null` when the caller supplied none. The managed config is a **separate
+   * document** from the settings document: it has its own keys, and it is not
+   * merged into the settings.
+   */
+  readonly managedConfig?: Record<string, unknown> | null;
+  /**
+   * The issues a malformed managed config produced.
+   *
+   * A malformed managed config does **not** stop the settings from loading: it
+   * is reported here, and the managed config itself is `null`.
+   */
+  readonly managedConfigIssues?: string[];
+  /**
+   * The keys a tier carried that the settings document does not name.
+   *
+   * The target **preserves** the keys it does not know, so these are not
+   * errors; they are reported so that a key this implementation does not
+   * understand is visible rather than silently dropped.
+   */
+  readonly unknownKeys?: Map<SettingsSource, string[]>;
 }
 
 type ReadStatus = 'missing' | 'ok' | 'invalid';
@@ -378,5 +413,26 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
   // block, so the block applies as a whole.
   const sandboxPolicy = sandboxPolicyOfTiers(tiers);
 
-  return { tiers, errors, readMode, linkedAway, sandboxPolicy };
+  // The flat managed config is a separate document: it is validated on its own
+  // and never merged into the settings.
+  let managedConfig: Record<string, unknown> | null = null;
+  const managedConfigIssues: string[] = [];
+  if (opts.managedConfig !== undefined) {
+    const parsed = parseFlatManagedConfig(opts.managedConfig);
+    if (parsed.ok) {
+      managedConfig = parsed.value;
+    } else {
+      managedConfigIssues.push(...parsed.issues);
+    }
+  }
+
+  // The keys a tier carried that the settings document does not name. They are
+  // preserved, not dropped; this makes them visible.
+  const unknownKeys = new Map<SettingsSource, string[]>();
+  for (const [source, tier] of tiers) {
+    const unknown = unknownDocumentKeys(documentOf(tier));
+    if (unknown.length > 0) unknownKeys.set(source, unknown);
+  }
+
+  return { tiers, errors, readMode, linkedAway, sandboxPolicy, managedConfig, managedConfigIssues, unknownKeys };
 }

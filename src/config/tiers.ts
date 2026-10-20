@@ -68,6 +68,8 @@
  *     `Object.prototype` member); such a key is simply unrestricted, never a crash.
  */
 
+import { SETTINGS_DOCUMENT_KEYS } from './schema.js';
+
 /** The five settings sources the target names. */
 export type SettingsSource =
   | 'policySettings'
@@ -178,6 +180,34 @@ export function isSourceAllowedForKey(key: string, source: SettingsSource): bool
   const allowed = keyScopeRestriction(key);
   if (!allowed) return true;
   return allowed.includes(source);
+}
+
+/** The settings document's own keys, as a set. */
+const DOCUMENT_KEYS: ReadonlySet<string> = new Set<string>(SETTINGS_DOCUMENT_KEYS);
+
+/**
+ * Whether a key is one of the settings document's own keys.
+ *
+ * The target **preserves** the keys it does not know, so an unknown key is
+ * never an error and never restricted. The check is a set membership, and the
+ * set holds the document's own keys — a key that names an `Object.prototype`
+ * member is simply not one of them.
+ */
+export function isDocumentKey(key: string): boolean {
+  return DOCUMENT_KEYS.has(key);
+}
+
+/**
+ * The keys a tier's document carries that the settings document does not name.
+ *
+ * The target preserves them, so they are not errors: a settings file written
+ * by a newer release keeps its extra keys, and a clone that dropped them would
+ * lose a setting the target still honours. This function makes them **visible**
+ * without changing them.
+ */
+export function unknownDocumentKeys(document: unknown): string[] {
+  if (!isPlainObject(document)) return [];
+  return Object.keys(document).filter((key) => !isDocumentKey(key));
 }
 
 /** A single tier's contribution for a key. */
