@@ -58,6 +58,7 @@ import {
   type CatalogModel,
   type ModelCatalog,
 } from '../../src/provider/catalog.js';
+import { enabledRoutes } from '../../src/provider/routes.js';
 import { createProviderRegistry, type Connection } from '../../src/provider/registry.js';
 import { setKeychainBackend, type KeychainBackend } from '../../src/provider/credentials.js';
 import { ROUTE_NAMES, type ProviderRoute } from '../../src/provider/routes.js';
@@ -1091,28 +1092,33 @@ describe('the target\'s per-model route override', () => {
     expect(extra).toEqual(['claude-haiku-5-5@gateway']);
   });
 
-  it('does not implement the Bedrock+Mantle anthropic.* override, and says so', () => {
+  it('implements the Bedrock+Mantle anthropic.* override, and says so', () => {
     // The target's rule has two halves (audit §2.1). The second half is the
     // mantle fallback above. The FIRST half — "with Bedrock and Mantle both
-    // enabled, an `anthropic.*` model resolves to `mantle`" — is **not
-    // implemented**: it needs the enabled-flag set, which this API does not
-    // take.
+    // enabled, an `anthropic.*` model resolves to `mantle`" — is implemented
+    // through the **enabled-flag set** the route layer hands in.
     const header = moduleHeader('catalog.ts');
 
-    // The **module header** must say so, and must name where the rule is
-    // wired in.
+    // The **module header** must say so, and must name the wiring.
     expect(header).toContain('Bedrock and Mantle');
     expect(header).toContain('anthropic.*');
-    expect(header).toContain('not implemented');
     expect(header).toContain('enabled-flag set');
     expect(header).toContain('resolveRouteForModel');
 
-    // And this implementation does not redirect: an `anthropic.*` model on the bedrock
-    // route stays on bedrock, because this implementation has no enabled-flag set to
-    // consult.
+    // And this implementation does redirect: an `anthropic.*` model on the bedrock
+    // route goes to `mantle` when **both** routes are enabled — and stays on
+    // bedrock when the enabled-flag set is absent, so the two-argument
+    // callers keep their behavior.
     const row = builtinCatalog.models.find((model) => model.id === 'claude-haiku-5-5') as CatalogModel;
     expect(providerIdFor(row, 'mantle')).toBe('anthropic.claude-haiku-5-5');
     expect(resolveRouteForModel(row, 'bedrock')).toBe('bedrock');
+    expect(
+      resolveRouteForModel(
+        row,
+        'bedrock',
+        enabledRoutes({ CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_MANTLE: '1' }),
+      ),
+    ).toBe('mantle');
     expect(resolveModel(builtinCatalog, 'claude-haiku-5-5', 'bedrock')).toBe('us.anthropic.claude-haiku-5-5');
   });
 });
