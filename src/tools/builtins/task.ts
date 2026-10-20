@@ -31,7 +31,7 @@ import type { ToolContext } from '../../permissions/decision.js';
 
 import {
   checkToolPermissions,
-  denyDecisionFor,
+  recheckToolPermissions,
   rejectUnknownFields,
   requireStringField,
   type BuiltinToolDeps,
@@ -91,9 +91,11 @@ export function createTaskTool(deps: BuiltinToolDeps): ToolDefinition<TaskInput,
       return checkToolPermissions(ctx, deps);
     },
 
-    async recheckDeny(_input, ctx: ToolContext) {
-      // A hook may have rewritten the input onto a command the deny list covers.
-      return denyDecisionFor(ctx, deps);
+    async recheckPermission(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input: the **whole** check runs again on the
+      // rewritten input, so the rewrite cannot escape the ask list, the allow
+      // scope or the mode.
+      return recheckToolPermissions(ctx, deps);
     },
 
     async validateInput(input) {

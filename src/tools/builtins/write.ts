@@ -9,10 +9,11 @@
  * write.** The audit's file-write tool "normalizes the path, stashes the permission
  * decision keyed by `toolUseId`, evaluates the rules, ... then runs the input
  * validation"; the re-resolution the `CC-007` review found was never called belongs
- * here. The snapshot is taken while the check runs, and the write re-resolves it:
- * a symlink swapped in between would otherwise redirect the write, which is the
- * "Symlink TOCTOU" failure the target fixed in `2.1.251`. The snapshot is of the
- * path the call will act on, so a hook that rewrote the path is covered too.
+ * here. The snapshot is taken **after** the check returns, on the path the call will
+ * act on, and the write re-resolves it **immediately before** the write: a symlink
+ * swapped in between would otherwise redirect the write, which is the "Symlink
+ * TOCTOU" failure the target fixed in `2.1.251`. The snapshot is of the path the
+ * call will act on, so a hook that rewrote the path is covered too.
  *
  * **The write is refused when the path changed.** The refusal is a typed failure
  * with the `pathChanged` code, not a silent success.
@@ -38,7 +39,8 @@ import {
   PathSnapshot,
   absoluteToolPath,
   checkFileToolPermissions,
-  denyDecisionFor,
+  fileToolSafetyCheck,
+  recheckToolPermissions,
   rejectUnknownFields,
   requireStringField,
   type BuiltinToolDeps,
@@ -98,9 +100,14 @@ export function createWriteTool(deps: BuiltinToolDeps): ToolDefinition<WriteInpu
       return checkFileToolPermissions(ctx, deps, snapshot, 'file_path');
     },
 
-    async recheckDeny(_input, ctx: ToolContext) {
-      // A hook may have rewritten the input onto a path the deny list covers.
-      return denyDecisionFor(ctx, deps);
+    async recheckPermission(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto another path: the **whole** check
+      // runs again on the rewritten input, so the rewrite cannot escape the ask
+      // list, the allow scope or the mode.
+      return recheckToolPermissions(ctx, deps, {
+        safetyCheck: fileToolSafetyCheck('file_path'),
+        pathField: 'file_path',
+      });
     },
 
     async validateInput(input) {
@@ -120,6 +127,10 @@ export function createWriteTool(deps: BuiltinToolDeps): ToolDefinition<WriteInpu
 
     async execute(input, ctx) {
       try {
+        // The path is resolved twice: once here, so the write does not follow a
+        // symlink that was swapped after the check, and once **immediately before**
+        // the write, so the window between the last resolution and the write is
+        // as small as it can be.
         const refusal = snapshot.verify(ctx.toolUseId, input.file_path);
         if (refusal !== undefined) {
           throw new ToolExecutionError(refusal, TOOL_ERROR_CODES.pathChanged);
@@ -128,6 +139,23 @@ export function createWriteTool(deps: BuiltinToolDeps): ToolDefinition<WriteInpu
         const filePath = absoluteToolPath(input.file_path, deps.cwd);
         try {
           await mkdir(path.dirname(filePath), { recursive: true });
+        } catch (error) {
+          throw new ToolExecutionError(
+            `The directory of '${filePath}' could not be created: ${(error as NodeJS.ErrnoException).message}`,
+            TOOL_ERROR_CODES.executionFailed,
+          );
+        }
+
+        // The re-resolution, **immediately before** the write. The write path must
+        // not trust the resolution the check took: a symlink can be swapped while
+        // the check runs, and the window between the check and the write is
+        // exactly where it is swapped.
+        const finalRefusal = snapshot.verify(ctx.toolUseId, input.file_path);
+        if (finalRefusal !== undefined) {
+          throw new ToolExecutionError(finalRefusal, TOOL_ERROR_CODES.pathChanged);
+        }
+
+        try {
           await writeFile(filePath, input.content, 'utf8');
         } catch (error) {
           throw new ToolExecutionError(

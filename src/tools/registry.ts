@@ -55,8 +55,9 @@ export type { PermissionDecision, ToolContext } from '../permissions/decision.js
 /**
  * A tool definition.
  *
- * The three members that matter for the boundary are `checkPermissions`,
- * `validateInput` and `execute`; the runner calls them in that order.
+ * The members that matter for the boundary are `checkPermissions`,
+ * `recheckPermission`, `validateInput` and `execute`; the runner calls them in
+ * that order.
  */
 export interface ToolDefinition<I = unknown, O = unknown> {
   /** The tool's name, as the model calls it. */
@@ -83,19 +84,20 @@ export interface ToolDefinition<I = unknown, O = unknown> {
     ctx: ToolContext,
   ): Promise<{ ok: true } | { ok: false; message: string; errorCode: number }>;
   /**
-   * Re-evaluate the **deny list** against a rewritten input.
+   * Re-evaluate the **whole** permission check against a rewritten input.
    *
-   * The runner calls this when a **hook** rewrote the input. The rule engine
-   * evaluated the *original* input, so a rewrite that moves the call to a denied
-   * path would otherwise be a permission bypass: the deny list is the boundary
-   * that holds in every mode, so it is the part that is evaluated again.
+   * The runner calls this when a **hook** rewrote the input. The check evaluated
+   * the *original* input, so a rewrite that moves the call to another path, to
+   * another command or to another mode's scope would otherwise be a permission
+   * bypass. The re-check is therefore **the same check** — the same rules, the
+   * same mode, the same safety check and the same hook semantics — run with the
+   * **effective** (rewritten) input, and the runner honours its verdict exactly
+   * as it honours the first one.
    *
-   * It returns the decision the deny list produces, or `undefined` when the deny
-   * list does not cover the call. It is a member of the contract rather than an
-   * optional extra, because a tool that cannot re-evaluate the deny list cannot
-   * be given a rewrite.
+   * It is a member of the contract rather than an optional extra, because a tool
+   * that cannot re-evaluate its own check cannot be given a rewrite.
    */
-  recheckDeny(input: I, ctx: ToolContext): Promise<PermissionDecision | undefined>;
+  recheckPermission(input: I, ctx: ToolContext): Promise<ToolRecheck>;
   /** The execution. It runs only after the permission check and the validation. */
   execute(input: I, ctx: ToolContext): Promise<O>;
 }
@@ -108,6 +110,34 @@ export interface ToolRegistry {
   get(name: string): ToolDefinition | undefined;
   /** The registered tools, in registration order. */
   list(): readonly ToolDefinition[];
+}
+
+/**
+ * The result of re-checking a rewritten input.
+ *
+ * The re-check is the **whole** permission check, run again with the effective
+ * (rewritten) input, so a hook rewrite cannot escape the ask list, the allow
+ * scope or the mode dispatch.
+ */
+export interface ToolRecheck {
+  /**
+   * The decision the check produced for the effective input.
+   *
+   * `undefined` means the tool expressed **no opinion** about the effective
+   * input: the runner then escalates to the session's permission service and,
+   * failing that, refuses the call — exactly as it does for a first check that
+   * expressed no opinion.
+   */
+  decision: PermissionDecision | undefined;
+  /**
+   * The path the check approved, when the check approved one.
+   *
+   * It is the path **as the call named it**. The runner compares the path's
+   * resolution after the check with the one it took before it, so a symlink
+   * swapped while the check ran is refused — and it refuses a call whose check
+   * approved **another** path than the one the call will act on.
+   */
+  approvedPath?: string;
 }
 
 /**

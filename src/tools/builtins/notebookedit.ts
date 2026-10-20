@@ -46,7 +46,8 @@ import {
   PathSnapshot,
   absoluteToolPath,
   checkFileToolPermissions,
-  denyDecisionFor,
+  fileToolSafetyCheck,
+  recheckToolPermissions,
   optionalStringField,
   rejectUnknownFields,
   requireStringField,
@@ -188,9 +189,14 @@ export function createNotebookEditTool(
       return checkFileToolPermissions(ctx, deps, snapshot, 'notebook_path');
     },
 
-    async recheckDeny(_input, ctx: ToolContext) {
-      // A hook may have rewritten the input onto a path the deny list covers.
-      return denyDecisionFor(ctx, deps);
+    async recheckPermission(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto another path: the **whole** check
+      // runs again on the rewritten input, so the rewrite cannot escape the ask
+      // list, the allow scope or the mode.
+      return recheckToolPermissions(ctx, deps, {
+        safetyCheck: fileToolSafetyCheck('notebook_path'),
+        pathField: 'notebook_path',
+      });
     },
 
     async validateInput(input) {
@@ -231,6 +237,10 @@ export function createNotebookEditTool(
 
     async execute(input, ctx) {
       try {
+        // The path is resolved twice: once here, so the read does not follow a
+        // symlink that was swapped after the check, and once **immediately before**
+        // the write, so the window between the last resolution and the write is
+        // as small as it can be.
         const refusal = snapshot.verify(ctx.toolUseId, input.notebook_path);
         if (refusal !== undefined) {
           throw new ToolExecutionError(refusal, TOOL_ERROR_CODES.pathChanged);
@@ -290,6 +300,14 @@ export function createNotebookEditTool(
           cell.source = sourceInShape(cell.source, input.new_source);
           if (input.cell_type !== undefined) cell.cell_type = input.cell_type;
           text = `Edited the cell '${input.cell_id}' of ${notebookPath}.`;
+        }
+
+        // The re-resolution, **immediately before** the write. The read above sits
+        // between the check and the write, and a symlink can be swapped in that
+        // window, so the path is resolved again right here.
+        const finalRefusal = snapshot.verify(ctx.toolUseId, input.notebook_path);
+        if (finalRefusal !== undefined) {
+          throw new ToolExecutionError(finalRefusal, TOOL_ERROR_CODES.pathChanged);
         }
 
         try {

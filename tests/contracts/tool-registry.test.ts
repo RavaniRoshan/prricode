@@ -19,6 +19,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -36,6 +37,7 @@ import {
   createToolRegistry,
   type ToolDefinition,
   type ToolRegistry,
+  type ToolRecheck,
 } from '../../src/tools/registry.js';
 import { runTool, type ToolResultEnvelope } from '../../src/tools/runner.js';
 import {
@@ -108,6 +110,19 @@ function makeDirectory(): string {
   return directory;
 }
 
+/**
+ * Point a symlink at another target, **atomically**.
+ *
+ * `unlink` followed by `symlink` leaves a window in which the path does not
+ * exist at all, and a read that lands in that window fails with `ENOENT`
+ * instead of following the new link. A `rename` over the old link does not.
+ */
+function swapSymlink(link: string, target: string): void {
+  const temporary = `${link}.swap`;
+  symlinkSync(target, temporary);
+  renameSync(temporary, link);
+}
+
 /** The servers the test starts. */
 const servers: Server[] = [];
 
@@ -135,8 +150,12 @@ function stubTool(overrides: Partial<ToolDefinition> = {}): ToolDefinition {
     async validateInput() {
       return { ok: true };
     },
-    async recheckDeny() {
-      return undefined;
+    async recheckPermission() {
+      // The re-check approves the rewritten input by default; a test that cares
+      // about the re-check overrides it.
+      return {
+        decision: { behavior: 'allow', source: 'unknown', reasonType: 'other' },
+      };
     },
     async execute() {
       return 'done';
@@ -948,6 +967,170 @@ describe('the write path', () => {
     expect(envelope.isError).toBe(false);
     expect(execute).toHaveBeenCalledTimes(1);
   });
+
+  it('refuses a write whose rewritten path was swapped while the re-check ran', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(path.join(first, 'file.txt'), 'first');
+    writeFileSync(path.join(second, 'file.txt'), 'second');
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        name: 'Write',
+        mutatesFiles: true,
+        async checkPermissions() {
+          return {
+            behavior: 'allow',
+            source: 'hook',
+            reasonType: 'other',
+            updatedInput: { file_path: path.join(link, 'file.txt') },
+          };
+        },
+        async recheckPermission() {
+          // The symlink is swapped **while the re-check that approves the
+          // rewritten path runs**.
+          swapSymlink(link, second);
+          return {
+            decision: { behavior: 'allow', source: 'unknown', reasonType: 'other' },
+          };
+        },
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(
+      registry,
+      'Write',
+      { file_path: path.join(root, 'ok.txt') },
+      toolContext('Write', { file_path: path.join(root, 'ok.txt') }),
+      { cwd: root },
+    );
+
+    // The rewritten path is resolved **before** the check that approves it, so
+    // the swap is caught on the path that is actually written.
+    expect(envelope.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(envelope.nonExecutionKind).toBe('path_changed');
+    expect(envelope.content).toMatchObject({ errorCode: TOOL_ERROR_CODES.pathChanged });
+  });
+
+  it('refuses a write whose rewritten path was swapped while the hook saw it again', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(path.join(first, 'file.txt'), 'first');
+    writeFileSync(path.join(second, 'file.txt'), 'second');
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+    const rewritten = path.join(link, 'file.txt');
+
+    const tool = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Write'], cwd: root }),
+        cwd: root,
+        hook: (ctx) => {
+          const input = ctx.input as { file_path?: string };
+          if (input.file_path === rewritten) {
+            // The re-check consults the hook with the **rewritten** input: the
+            // symlink is swapped there.
+            swapSymlink(link, second);
+            return undefined;
+          }
+          return {
+            behavior: 'allow',
+            source: 'hook',
+            reasonType: 'other',
+            updatedInput: { file_path: rewritten, content: 'written' },
+          };
+        },
+      }),
+    );
+
+    const registry = createToolRegistry();
+    registry.register(tool);
+
+    const input = { file_path: path.join(root, 'ok.txt'), content: 'fine' };
+    const envelope = await runTool(
+      registry,
+      'Write',
+      input,
+      toolContext('Write', input),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(true);
+    expect(envelope.nonExecutionKind).toBe('path_changed');
+    expect(readFileSync(path.join(second, 'file.txt'), 'utf8')).toBe('second');
+  });
+
+  it('re-resolves the path of a built-in write tool immediately before the write', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    writeFileSync(path.join(first, 'file.txt'), 'first');
+    writeFileSync(path.join(second, 'file.txt'), 'second');
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+
+    const tool = createWriteTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Write'], cwd: root }), cwd: root }),
+    );
+    const input = { file_path: path.join(link, 'file.txt'), content: 'written' };
+    const ctx = toolContext('Write', input);
+
+    await tool.checkPermissions(input, ctx);
+
+    // The symlink is swapped **after the write path started** and before the
+    // write, so only the re-resolution that guards the write can catch it.
+    const writing = tool.execute(input, ctx);
+    swapSymlink(link, second);
+
+    await expect(writing).rejects.toThrow(/resolved to/);
+    expect(readFileSync(path.join(first, 'file.txt'), 'utf8')).toBe('first');
+    expect(readFileSync(path.join(second, 'file.txt'), 'utf8')).toBe('second');
+  });
+
+  it('re-resolves the path of a built-in edit tool immediately before the edit', async () => {
+    const root = makeDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    // The two files hold the same text, so the read that sits between the check
+    // and the write still finds the string to replace.
+    writeFileSync(path.join(first, 'file.txt'), 'same');
+    writeFileSync(path.join(second, 'file.txt'), 'same');
+    const link = path.join(root, 'link');
+    symlinkSync(first, link);
+
+    const tool = createEditTool(
+      builtinDeps({ rules: ruleSet({ allow: ['Edit'], cwd: root }), cwd: root }),
+    );
+    const input = { file_path: path.join(link, 'file.txt'), old_string: 'same', new_string: 'edited' };
+    const ctx = toolContext('Edit', input);
+
+    await tool.checkPermissions(input, ctx);
+
+    // The symlink is swapped **after the write path started** and before the
+    // write, so only the re-resolution that guards the write can catch it.
+    const editing = tool.execute(input, ctx);
+    swapSymlink(link, second);
+
+    await expect(editing).rejects.toThrow(/resolved to/);
+    expect(readFileSync(path.join(first, 'file.txt'), 'utf8')).toBe('same');
+    expect(readFileSync(path.join(second, 'file.txt'), 'utf8')).toBe('same');
+  });
 });
 
 describe('a hook rewrite and the deny list', () => {
@@ -1021,6 +1204,352 @@ describe('a hook rewrite and the deny list', () => {
 
     expect(envelope.isError).toBe(false);
     expect(readFileSync(other, 'utf8')).toBe('written');
+  });
+});
+
+// --- a hook rewrite and the whole permission check --------------------------------
+
+/**
+ * A hook rewrite and the **whole** permission check.
+ *
+ * The check evaluated the original input, so a rewrite that moves the call to
+ * another path, to another command or to another mode's scope is a permission
+ * bypass unless the rewritten input is checked again. The re-check is the same
+ * check — the same rules, the same mode, the same safety check — and the runner
+ * honours its verdict as it honours the first one.
+ */
+describe('a hook rewrite and the whole permission check', () => {
+  it('refuses a rewrite onto a path an ask rule covers, with the shape of the no-hook refusal', async () => {
+    const root = makeDirectory();
+    const secret = path.join(root, 'secret.txt');
+    writeFileSync(secret, 'the secret');
+    const rules = ruleSet({ ask: ['Write(secret.txt)'], allow: ['Write'], cwd: root });
+
+    // The same call **without** a hook: the ask rule covers it, so the call is
+    // refused for the same reason a rewrite is refused for.
+    const plain = createToolRegistry();
+    plain.register(createWriteTool(builtinDeps({ rules, cwd: root })));
+    const secretInput = { file_path: secret, content: 'overwritten' };
+    const plainEnvelope = await runTool(
+      plain,
+      'Write',
+      secretInput,
+      toolContext('Write', secretInput),
+      { cwd: root },
+    );
+
+    // The hook sends the call to the ask-covered path.
+    const hooked = createToolRegistry();
+    hooked.register(
+      createWriteTool(
+        builtinDeps({
+          rules,
+          cwd: root,
+          hook: () => ({
+            behavior: 'allow',
+            source: 'hook',
+            reasonType: 'other',
+            updatedInput: { file_path: secret, content: 'overwritten' },
+          }),
+        }),
+      ),
+    );
+    const input = { file_path: path.join(root, 'ok.txt'), content: 'fine' };
+    const envelope = await runTool(
+      hooked,
+      'Write',
+      input,
+      toolContext('Write', input),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(true);
+    // The refusal is the **same shape** as the no-hook refusal.
+    expect(envelope.content).toEqual(plainEnvelope.content);
+    expect(envelope.nonExecutionKind).toBe(plainEnvelope.nonExecutionKind);
+    expect(envelope.permissionDecision).toEqual(plainEnvelope.permissionDecision);
+    // The ask-covered file is untouched.
+    expect(readFileSync(secret, 'utf8')).toBe('the secret');
+  });
+
+  it('refuses a rewrite outside the allow scope', async () => {
+    const root = makeDirectory();
+    const inside = path.join(root, 'safe', 'a.txt');
+    const outside = path.join(root, 'outside.txt');
+    mkdirSync(path.join(root, 'safe'));
+
+    const tool = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Write(safe/*.txt)'], cwd: root }),
+        cwd: root,
+        hook: () => ({
+          behavior: 'allow',
+          source: 'hook',
+          reasonType: 'other',
+          updatedInput: { file_path: outside, content: 'written' },
+        }),
+      }),
+    );
+
+    const registry = createToolRegistry();
+    registry.register(tool);
+
+    const input = { file_path: inside, content: 'fine' };
+    const envelope = await runTool(
+      registry,
+      'Write',
+      input,
+      toolContext('Write', input),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(true);
+    expect(envelope.permissionDecision?.decision).toBe('ask');
+    // The allow rule never covered the rewritten path, so nothing was written.
+    expect(existsSync(outside)).toBe(false);
+  });
+
+  it('refuses a rewrite outside the working directory in acceptEdits mode', async () => {
+    const root = makeDirectory();
+    const outside = makeDirectory();
+
+    const tool = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ cwd: root }),
+        mode: 'acceptEdits',
+        cwd: root,
+        hook: () => ({
+          behavior: 'allow',
+          source: 'hook',
+          reasonType: 'other',
+          updatedInput: { file_path: path.join(outside, 'x.txt'), content: 'written' },
+        }),
+      }),
+    );
+
+    const registry = createToolRegistry();
+    registry.register(tool);
+
+    const input = { file_path: path.join(root, 'ok.txt'), content: 'fine' };
+    const envelope = await runTool(
+      registry,
+      'Write',
+      input,
+      toolContext('Write', input),
+      { cwd: root },
+    );
+
+    expect(envelope.isError).toBe(true);
+    expect(envelope.permissionDecision?.decision).toBe('ask');
+    // `acceptEdits` approves a write inside the working directory only.
+    expect(existsSync(path.join(outside, 'x.txt'))).toBe(false);
+  });
+
+  it('runs a rewrite that stays inside the allow scope', async () => {
+    const root = makeDirectory();
+    const inside = path.join(root, 'safe', 'a.txt');
+    const rewritten = path.join(root, 'safe', 'b.txt');
+    mkdirSync(path.join(root, 'safe'));
+
+    const tool = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Write(safe/*.txt)'], cwd: root }),
+        cwd: root,
+        hook: () => ({
+          behavior: 'allow',
+          source: 'hook',
+          reasonType: 'other',
+          updatedInput: { file_path: rewritten, content: 'written' },
+        }),
+      }),
+    );
+
+    const registry = createToolRegistry();
+    registry.register(tool);
+
+    const input = { file_path: inside, content: 'fine' };
+    const envelope = await runTool(
+      registry,
+      'Write',
+      input,
+      toolContext('Write', input),
+      { cwd: root },
+    );
+
+    // The negative control: the re-check is not over-broad, so a rewrite that
+    // stays inside the allow scope still runs.
+    expect(envelope.isError).toBe(false);
+    expect(readFileSync(rewritten, 'utf8')).toBe('written');
+  });
+
+  it('does not run a call whose check asked and whose re-check allowed', async () => {
+    const recheck = vi.fn(async (): Promise<ToolRecheck> => ({
+      decision: { behavior: 'allow', source: 'unknown', reasonType: 'other' },
+    }));
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        async checkPermissions() {
+          // The call needed the user's approval, and a hook rewrote it.
+          return {
+            behavior: 'ask',
+            source: 'unknown',
+            reasonType: 'other',
+            reason: 'The call needs approval.',
+            updatedInput: { file_path: '/work/rewritten.txt' },
+          };
+        },
+        recheckPermission: recheck,
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(
+      registry,
+      'Stub',
+      { file_path: '/work/original.txt' },
+      toolContext('Stub', { file_path: '/work/original.txt' }),
+      {
+        // The approval of the original call is not the approval of the rewritten
+        // one, and the re-check's `allow` does not settle the ask either.
+        approveAsk: async () => undefined,
+      },
+    );
+
+    // The re-check ran, and it may only restrict the call: it never widens what
+    // the first check allowed, so the `ask` stands and the call is not executed.
+    expect(recheck).toHaveBeenCalledTimes(1);
+    expect(envelope.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(envelope.permissionDecision?.decision).toBe('ask');
+    expect(envelope.nonExecutionKind).toBe('permission_unresolved');
+  });
+
+  it('stops the call when the hook denies the rewritten path', async () => {
+    const root = makeDirectory();
+    const secret = path.join(root, 'secret.txt');
+    writeFileSync(secret, 'the secret');
+
+    const tool = createWriteTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Write'], cwd: root }),
+        cwd: root,
+        hook: (ctx) => {
+          const input = ctx.input as { file_path?: string };
+          if (input.file_path === secret) {
+            // The re-check consults the hook with the **rewritten** input, and the
+            // hook denies that path.
+            return {
+              behavior: 'deny',
+              source: 'hook',
+              reasonType: 'other',
+              reason: 'The hook denied this path.',
+            };
+          }
+          return {
+            behavior: 'allow',
+            source: 'hook',
+            reasonType: 'other',
+            updatedInput: { file_path: secret, content: 'overwritten' },
+          };
+        },
+      }),
+    );
+
+    const registry = createToolRegistry();
+    registry.register(tool);
+
+    const input = { file_path: path.join(root, 'ok.txt'), content: 'fine' };
+    const envelope = await runTool(
+      registry,
+      'Write',
+      input,
+      toolContext('Write', input),
+      { cwd: root },
+    );
+
+    // The hook's **denial** still speaks in the re-check: a rewrite onto a denied
+    // path does not get past it.
+    expect(envelope.isError).toBe(true);
+    expect(envelope.permissionDecision?.decision).toBe('deny');
+    expect(readFileSync(secret, 'utf8')).toBe('the secret');
+  });
+
+  it('stops the call when the re-check asks, and carries the reason', async () => {
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        async checkPermissions() {
+          return {
+            behavior: 'allow',
+            source: 'hook',
+            reasonType: 'other',
+            updatedInput: { file_path: '/work/rewritten.txt' },
+          };
+        },
+        async recheckPermission() {
+          return {
+            decision: {
+              behavior: 'ask',
+              source: 'unknown',
+              reasonType: 'other',
+              reason: 'The rewritten call needs approval.',
+            },
+          };
+        },
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(
+      registry,
+      'Stub',
+      { file_path: '/work/original.txt' },
+      toolContext('Stub', { file_path: '/work/original.txt' }),
+    );
+
+    // Every verdict but `allow` stops the call, and the refusal carries the
+    // reason of the verdict.
+    expect(envelope.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(envelope.permissionDecision?.decision).toBe('ask');
+    expect(String((envelope.content as { message: string }).message)).toContain(
+      'The rewritten call needs approval.',
+    );
+  });
+
+  it('refuses a call whose re-check expressed no opinion', async () => {
+    const execute = vi.fn(async () => 'done');
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        async checkPermissions() {
+          return {
+            behavior: 'allow',
+            source: 'hook',
+            reasonType: 'other',
+            updatedInput: { file_path: '/work/rewritten.txt' },
+          };
+        },
+        async recheckPermission() {
+          return { decision: undefined };
+        },
+        execute,
+      }),
+    );
+
+    const envelope = await runTool(
+      registry,
+      'Stub',
+      { file_path: '/work/original.txt' },
+      toolContext('Stub', { file_path: '/work/original.txt' }),
+    );
+
+    expect(envelope.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(envelope.nonExecutionKind).toBe('permission_denied');
   });
 });
 

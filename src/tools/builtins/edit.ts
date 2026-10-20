@@ -38,7 +38,8 @@ import {
   PathSnapshot,
   absoluteToolPath,
   checkFileToolPermissions,
-  denyDecisionFor,
+  fileToolSafetyCheck,
+  recheckToolPermissions,
   optionalBooleanField,
   rejectUnknownFields,
   requireStringField,
@@ -123,9 +124,14 @@ export function createEditTool(deps: BuiltinToolDeps): ToolDefinition<EditInput,
       return checkFileToolPermissions(ctx, deps, snapshot, 'file_path');
     },
 
-    async recheckDeny(_input, ctx: ToolContext) {
-      // A hook may have rewritten the input onto a path the deny list covers.
-      return denyDecisionFor(ctx, deps);
+    async recheckPermission(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input onto another path: the **whole** check
+      // runs again on the rewritten input, so the rewrite cannot escape the ask
+      // list, the allow scope or the mode.
+      return recheckToolPermissions(ctx, deps, {
+        safetyCheck: fileToolSafetyCheck('file_path'),
+        pathField: 'file_path',
+      });
     },
 
     async validateInput(input) {
@@ -153,6 +159,10 @@ export function createEditTool(deps: BuiltinToolDeps): ToolDefinition<EditInput,
 
     async execute(input, ctx) {
       try {
+        // The path is resolved twice: once here, so the read does not follow a
+        // symlink that was swapped after the check, and once **immediately before**
+        // the write, so the window between the last resolution and the write is
+        // as small as it can be.
         const refusal = snapshot.verify(ctx.toolUseId, input.file_path);
         if (refusal !== undefined) {
           throw new ToolExecutionError(refusal, TOOL_ERROR_CODES.pathChanged);
@@ -195,6 +205,14 @@ export function createEditTool(deps: BuiltinToolDeps): ToolDefinition<EditInput,
           input.replace_all === true
             ? content.split(input.old_string).join(input.new_string)
             : content.replace(input.old_string, input.new_string);
+
+        // The re-resolution, **immediately before** the write. The read above sits
+        // between the check and the write, and a symlink can be swapped in that
+        // window, so the path is resolved again right here.
+        const finalRefusal = snapshot.verify(ctx.toolUseId, input.file_path);
+        if (finalRefusal !== undefined) {
+          throw new ToolExecutionError(finalRefusal, TOOL_ERROR_CODES.pathChanged);
+        }
 
         try {
           await writeFile(filePath, updated, 'utf8');

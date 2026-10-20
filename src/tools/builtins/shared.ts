@@ -17,6 +17,12 @@
  * safety check first, and it holds in every mode — including `bypassPermissions`.
  * The tool's own `safetyCheckForTool` refuses arguments the tool cannot verify.
  *
+ * **A rewritten input is checked again, in full.** A **hook** may rewrite the
+ * input, and the rewritten input is what the tool receives. The check evaluated
+ * the *original* input, so the tool runs the **same** check again with the
+ * effective one: the ask list, the allow scope and the mode dispatch apply to the
+ * path the call will really act on. The re-check may only restrict the call.
+ *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
  *   - The dependencies are a **factory argument** rather than a field on the tool
@@ -45,7 +51,6 @@ import { readdir, stat } from 'node:fs/promises';
 
 import {
   checkPermission,
-  describeReason,
   evaluateRules,
   type AutoModeVerdict,
   type PermissionDecision,
@@ -54,9 +59,9 @@ import {
 } from '../../permissions/decision.js';
 import { safetyCheckForTool } from '../../permissions/prompts.js';
 import { reResolvePath, resolvePathTargets, type PathTargets } from '../../permissions/paths.js';
-import { evaluateRuleList, type RuleSet } from '../../permissions/rules.js';
+import { type RuleSet } from '../../permissions/rules.js';
 
-import { TOOL_ERROR_CODES } from '../registry.js';
+import { TOOL_ERROR_CODES, type ToolRecheck } from '../registry.js';
 
 /** The dependencies every built-in tool is built with. */
 export interface BuiltinToolDeps {
@@ -117,6 +122,59 @@ export async function checkToolPermissions(
     safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
   } = {},
 ): Promise<PermissionDecision> {
+  return runToolCheck(ctx, deps, options, deps.hook);
+}
+
+/**
+ * The **whole** permission check, run again for a rewritten input.
+ *
+ * It is the same check the original input received — the same rules, the same
+ * mode, the same safety check, the same prompt and the same classifier — with
+ * the **effective** (rewritten) input, so a hook rewrite cannot escape the ask
+ * list, the allow scope or the mode dispatch.
+ *
+ * The **hook** is the one difference: see `recheckHook`.
+ */
+export async function recheckToolPermissions(
+  ctx: ToolContext,
+  deps: BuiltinToolDeps,
+  options: {
+    /**
+     * The tool's own safety check, used when the session supplies none.
+     */
+    safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
+    /**
+     * The field the tool's path is in, when it has one.
+     *
+     * The path is reported as the **approved** path of the re-check, so the
+     * runner can compare the path the check approved with the path the call
+     * will act on.
+     */
+    pathField?: string;
+  } = {},
+): Promise<ToolRecheck> {
+  const decision = await runToolCheck(ctx, deps, options, recheckHook(deps));
+  const approvedPath =
+    options.pathField === undefined ? undefined : inputPath(ctx.input, options.pathField);
+  return { decision, approvedPath };
+}
+
+/**
+ * The hook a check runs with.
+ */
+type ToolHook = (
+  ctx: ToolContext,
+) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
+
+/**
+ * Run the session's check with a hook.
+ */
+async function runToolCheck(
+  ctx: ToolContext,
+  deps: BuiltinToolDeps,
+  options: { safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined },
+  hook: ToolHook | undefined,
+): Promise<PermissionDecision> {
   const fallback = options.safetyCheck ?? safetyCheckForTool;
   return checkPermission(ctx, {
     rules: deps.rules,
@@ -124,26 +182,30 @@ export async function checkToolPermissions(
     cwd: deps.cwd ?? deps.rules.cwd,
     additionalDirs: deps.additionalDirs,
     canUseTool: deps.canUseTool,
-    hook: deps.hook,
+    hook,
     safetyCheck: (candidate) => deps.safetyCheck?.(candidate) ?? fallback(candidate),
     classifier: deps.classifier,
   });
 }
 
 /**
- * The **deny** decision the rule engine produces for a call, when there is one.
+ * The hook as a **re-check** sees it.
  *
- * It is the part of the check that a **hook rewrite** has to be re-evaluated
- * against: the rule engine evaluated the original input, and the deny list is
- * the boundary that holds in every mode.
+ * The re-check evaluates the input a hook rewrote, so the hook's **approval**
+ * must not rescue that input: the approval was given for the original call, and
+ * a rewrite must not be able to launder itself through the very hook that
+ * performed it. The hook's **denial** still speaks, though — a hook that denies
+ * a path must not be bypassed by a rewrite onto that path — and the hook's
+ * rewrite is dropped, because the rewrite has already been applied and a second
+ * one would need a third check, and so on.
  */
-export function denyDecisionFor(
-  ctx: ToolContext,
-  deps: BuiltinToolDeps,
-): PermissionDecision | undefined {
-  const decision = evaluateRuleList(deps.rules, deps.rules.deny, 'deny', ctx);
-  if (!decision) return undefined;
-  return { ...decision, reason: describeReason(decision, ctx.toolName) };
+function recheckHook(deps: BuiltinToolDeps): ToolHook {
+  return async (ctx: ToolContext) => {
+    const decision = await deps.hook?.(ctx);
+    if (decision === undefined) return undefined;
+    if (decision.behavior === 'deny') return decision;
+    return undefined;
+  };
 }
 
 /**
@@ -333,14 +395,14 @@ export function absoluteToolPath(inputPath: string, cwd: string | undefined): st
 interface PathSnapshotEntry {
   /** The path as the call named it. */
   inputPath: string;
-  /** Where it resolved when the check ran. */
+  /** Where it resolved when the snapshot was taken. */
   targets: PathTargets;
 }
 
 /**
  * The number of snapshots a tool instance keeps.
  *
- * The snapshot is taken while the permission check runs and forgotten when the
+ * The snapshot is taken after the permission check returns and forgotten when the
  * write is over, so the map holds one entry per call in flight. The bound is a
  * safety net for the calls that never reach the write.
  */
@@ -349,8 +411,9 @@ export const MAX_PATH_SNAPSHOTS = 64;
 /**
  * The path bookkeeping of a file-mutating tool.
  *
- * The snapshot is taken while the permission check runs, and the write path
- * re-resolves it before the write. A symlink swapped in between is refused.
+ * The snapshot is taken **after** the permission check returns, and the write
+ * path re-resolves it **immediately before** the write. A symlink swapped in
+ * between is refused.
  *
  * **The snapshot is of the path the call will act on.** A hook may rewrite the
  * input, and the rewritten path is the one that is written, so the snapshot is
@@ -410,17 +473,18 @@ export class PathSnapshot {
     const after = reResolvePath(entry.targets, this.cwd === undefined ? {} : { cwd: this.cwd });
     if (after.resolved === entry.targets.resolved) return undefined;
 
-    return `The path '${entry.targets.requested}' resolved to '${entry.targets.resolved}' when the permission check ran and to '${after.resolved}' when the write was about to happen, so the write was refused.`;
+    return `The path '${entry.targets.requested}' resolved to '${entry.targets.resolved}' when the permission check approved it and to '${after.resolved}' when the write was about to happen, so the write was refused.`;
   }
 }
 
 /**
  * The permission check a **file-mutating** tool runs.
  *
- * The snapshot is taken **after** the check, on the path the call will act on: a
- * hook may rewrite the input, and the rewritten path is the one that is written.
- * The write path re-resolves that snapshot, so a symlink swapped between the
- * check and the write is refused — on the rewritten path too.
+ * The snapshot is taken **after** the check returns, on the path the call will
+ * act on: a hook may rewrite the input, and the rewritten path is the one that
+ * is written. The write path re-resolves that snapshot immediately before the
+ * write, so a symlink swapped between the check and the write is refused — on
+ * the rewritten path too.
  */
 export async function checkFileToolPermissions(
   ctx: ToolContext,

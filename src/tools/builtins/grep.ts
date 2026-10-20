@@ -44,7 +44,7 @@ import type { ToolContext } from '../../permissions/decision.js';
 import {
   absoluteToolPath,
   checkToolPermissions,
-  denyDecisionFor,
+  recheckToolPermissions,
   isDeniedByReadRule,
   optionalStringField,
   rejectUnknownFields,
@@ -164,9 +164,11 @@ export function createGrepTool(deps: BuiltinToolDeps): ToolDefinition<GrepInput,
       return checkToolPermissions(ctx, deps);
     },
 
-    async recheckDeny(_input, ctx: ToolContext) {
-      // A hook may have rewritten the input onto a path the deny list covers.
-      return denyDecisionFor(ctx, deps);
+    async recheckPermission(_input, ctx: ToolContext) {
+      // A hook may have rewritten the input: the **whole** check runs again on the
+      // rewritten input, so the rewrite cannot escape the ask list, the allow
+      // scope or the mode.
+      return recheckToolPermissions(ctx, deps);
     },
 
     async validateInput(input) {
