@@ -917,6 +917,30 @@ export interface PreToolUseHookApproval {
   git commit -m "feat(extensions): skills, subagents, plugins, IDE bridge"
   ```
 
+### CC-013b — The collision semantics of a contributed name
+
+**Why this task exists.** The `CC-013` review found that a plugin skill or subagent name that two **plugins** provide is **collided**: the first declared wins, the losers are named, and the resolved record carries `collidesWith`. A later review found two things wrong with it:
+
+1. `collidesWith` lists the **winner's own** provider beside itself — `provider: 'demo', collidesWith: ['demo']` — so a real conflict between two different plugins cannot be told apart from **one** plugin packaging the same name twice, which is a different situation (a packaging bug, not a conflict) and which the warning itself now distinguishes.
+2. The manager's `apply(plugin)` path never reported a collision at all: two `skills` directories in one plugin yielded two entries and no log.
+
+**Files:** Modify `src/extensions/skills/registry.ts`; Modify `src/extensions/subagents/registry.ts`; Modify `src/extensions/plugins/registry.ts`; Modify `tests/contracts/extensions.test.ts`.
+
+**Interfaces:** Consumes: the same registries as `CC-013`. Produces: a `collidesWith` that names the **other** providers, or is empty when the collision is one plugin's own duplication; a collision report on the `apply()` path.
+
+- [ ] **Step 1: Write the failing test** — one plugin that provides the same skill name twice reports the duplication with its **two paths**, and `collidesWith` names no provider; two plugins that provide the same name report the conflict with both providers.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [ ] **Step 3: Implement the semantics** — the field must distinguish the two situations, and the **same-source filter** and the **dedupe** must each be pinned.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Write the failing `apply()` test** — `PluginManager.apply(plugin)` on a plugin with two `skills` directories reports the duplication and yields **one** entry.
+- [ ] **Step 6: Implement the report** on the `apply()` path.
+- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 8: Commit.**
+  ```bash
+  git add src/extensions tests/contracts/extensions.test.ts
+  git commit -m "fix(extensions): a contributed name's collision says what collided"
+  ```
+
 ### CC-014 — CLI, headless mode, and output contracts
 
 **Files:** Create `src/cli/args.ts`, `src/cli/command.ts`, `src/cli/headless.ts`, `src/cli/output.ts`; Create `tests/contracts/cli-surface.test.ts`.
