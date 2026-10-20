@@ -341,13 +341,16 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 - Consumes: `src/provider/routes.ts` (`selectRoute`, `RouteSettings`, the route env vars).
 - Produces: an `enabledRoutes(env, settings): ReadonlySet<ProviderRoute>` in `src/provider/routes.ts`; `resolveRouteForModel(model, route, enabled?)` in `src/provider/catalog.ts`, where `enabled` is the set of routes the user turned on.
 
-- [ ] **Step 1: Write the failing test** — with **both** Bedrock and Mantle enabled, an `anthropic.*` model resolves to **`mantle`**, not to `bedrock`; and with only one of them enabled, the model resolves the ordinary way.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the override is not implemented.
-- [ ] **Step 3: Implement `enabledRoutes`** in `src/provider/routes.ts` — the set of routes whose flag is on, derived from the same rules `selectRoute` uses. It must not read the environment twice or disagree with it.
-- [ ] **Step 4: Apply the override** in `resolveRouteForModel` — the `anthropic.*` → `mantle` redirect goes **before** the half-(b) fallback, and only when **both** routes are enabled. The existing three-argument callers must keep working, so the new argument is **optional** and the override is off when it is absent.
-- [ ] **Step 5: Update the module headers** in `src/provider/catalog.ts` and `src/provider/routes.ts` — half (a) is now implemented, and the header must say so.
-- [ ] **Step 6: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 7: Commit.**
+- [x] **Step 1: Write the failing test** — with **both** Bedrock and Mantle enabled, an `anthropic.*` model resolves to **`mantle`**, not to `bedrock`; and with only one of them enabled, the model resolves the ordinary way.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the override is not implemented.
+- [x] **Step 3: Implement `enabledRoutes`** in `src/provider/routes.ts` — the set of routes whose flag is on, derived from the same rules `selectRoute` uses. It must not read the environment twice or disagree with it.
+- [x] **Step 4: Apply the override** in `resolveRouteForModel` — the `anthropic.*` → `mantle` redirect goes **before** the half-(b) fallback, and only when **both** routes are enabled. The existing three-argument callers must keep working, so the new argument is **optional** and the override is off when it is absent.
+- [x] **Step 5: Update the module headers** in `src/provider/catalog.ts` and `src/provider/routes.ts` — half (a) is now implemented, and the header must say so.
+- [x] **Step 6: Run it to verify it passes** — expected: PASS.
+- [x] **Step 7: Commit.**
+
+**Result:** `enabledRoutes(env, settings?)` in `src/provider/routes.ts` collects the routes the user turned on, and `selectRoute` is now implemented **on top of** it, so the set and the selector cannot disagree. `resolveRouteForModel(model, route, enabled?)` applies the `anthropic.*` → `mantle` redirect **before** the mantle fallback, on when **both** routes are enabled, and **off** when the optional argument is absent, so every existing caller is unchanged. The override goes into `resolveModel` and `resolveModelRoute` too, as an optional fourth argument. The compatibility report's `F-07` and `F-08` moved to `match` on their own, because the harness derives its outcome from the measurement.
+
   ```bash
   git add src/provider tests/contracts
   git commit -m "fix(provider): the Bedrock+Mantle anthropic.* override"
