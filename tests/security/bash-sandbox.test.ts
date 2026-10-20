@@ -531,6 +531,40 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
     expect(output.stderr.endsWith('The command was stopped because it ran past its timeout.')).toBe(true);
   });
 
+  it('stops the unconfined command it reports as stopped', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        // No policy at all: the command runs on the host, unconfined.
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    // The marker rides on the **grandchild's** arguments, not the shell's: the
+    // shell is killed either way, so only a process that survives the shell's
+    // death can show the difference. `exec -a` names the process, and the
+    // grandchild is the one the group kill has to reach.
+    // The marker is **assembled**, so the string never appears literally in
+    // this file's own source — a process table that carries the test's own
+    // command line would otherwise satisfy the assertion for the wrong reason.
+    const marker = ['claude008b', 'unconfined', 'still', 'running'].join('-');
+    const input = {
+      command: `bash -c 'exec -a ${marker} sleep 30'`,
+      timeout: 300,
+    };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    expect(output.exitCode).toBe(124);
+    expect(output.timedOut).toBe(true);
+
+    // The report says the command was stopped. It must **be** stopped: the
+    // command's own process — not just the shell — must not survive.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(psOutput()).not.toContain(marker);
+  });
+
   it.skipIf(!bubblewrapAvailable)(
     'stops the sandboxed command it reports as stopped',
     async () => {
@@ -549,7 +583,7 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
       // the host's. Two commands, so the shell does **not** exec them away —
       // a single command is exec'd, which would drop the marker from the
       // process's arguments.
-      const marker = 'claude008b-still-running-marker';
+      const marker = ['claude008b', 'sandboxed', 'still', 'running'].join('-');
       const input = { command: `echo started; sleep 30 # ${marker}`, timeout: 300 };
 
       const output = await tool.execute(input, toolContext('Bash', input));
@@ -1191,7 +1225,8 @@ describe('CC-008b step 6 — the header of the tool', () => {
 
   it('names the wiring the session assembly carries', () => {
     // A **tripwire**, not a guard: it says the wiring is *named* in the
-    // session assembly. The guard is the behavioural test below, which builds
+    // session assembly. The guard is the behavioural test in
+    // `tests/contracts/cli-surface.test.ts`, which builds
     // a real session and checks the policy reached the model.
     // The wiring the tool's header names: the `BuiltinToolDeps` the session
     // assembly builds must carry the loaded sandbox policy, or every command

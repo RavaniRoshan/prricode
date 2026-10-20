@@ -19,6 +19,7 @@ Exactly eight, with the target's dispatch order:
 | 6 | `mantle` | `CLAUDE_CODE_USE_MANTLE` | `ANTHROPIC_BEDROCK_MANTLE_BASE_URL` | `bedrock-mantle` regional host |
 | 7 | `vertex` | `CLAUDE_CODE_USE_VERTEX` | `ANTHROPIC_VERTEX_BASE_URL` | `aiplatform` / `*.googleapis.com` |
 | 8 | `firstParty` | (default) | — | `api.anthropic.com` |
+| The override is decided by the **enabled-flag set** the route layer hands in, and it is off when a caller supplies none | implementation choice (the target's own set is not observed) | F-07 | `tests/contracts/provider-registry.test.ts` — "is off when the enabled-flag set is not supplied" |
 
 The route selector returns **exactly one** active route. The target's own per-model override layers on top: with Bedrock and Mantle both enabled, an `anthropic.*` model resolves to `mantle`; otherwise, if the catalog has no id for the selected route but has one for `mantle`, the model resolves to `mantle`. **This implementation reproduces the route selector and only the second half of the override**: the Bedrock+Mantle `anthropic.*` override is target-observed and not implemented, so the rows `F-07` and `F-08` are reported as `mismatch` in [`results.md`](results.md) — see the known limit below.
 
@@ -26,7 +27,7 @@ The route selector returns **exactly one** active route. The target's own per-mo
 
 | Surface | Target | Implementation |
 |---|---|---|
-| Route selection | one active route from environment flags, and the per-model `wd(model)` override on top | **same selector** — this implementation reproduces the dispatch order and the single active route; the per-model override's Bedrock+Mantle half is **not** implemented |
+| Route selection | one active route from environment flags, and the per-model `wd(model)` override on top | **same selector** — this implementation reproduces the dispatch order, the single active route and **both** halves of the per-model override |
 | Model catalog | **built in**, provider-owned, one row per logical model with a `provider_ids` map across all eight providers | **same** — this implementation reproduces the catalog |
 | Connection registry | **does not exist** | **the extension**: N concurrent connections, each with a free-form name, a route, a base URL, and a credential *reference* |
 | Credential model | per-route credential resolution order (bearer-token env var → skip-auth → AWS credential chain → provider-chain resolver) | **the extension**: credentials are always *references* (env var name, file path, OS keychain key) and never values in a catalog |
@@ -212,7 +213,7 @@ Every row of this table is a **project extension**: the target has no such surfa
 | A `null` provider id means "not served", and is distinct from "unknown" | REA observed | F-07 | same file — "reports a route the model does not serve as absent, not as unknown" |
 | An `Object.prototype` member name never resolves to a provider id | implementation choice | F-07 | same file — "does not resolve inherited Object.prototype members as provider ids" |
 | The mantle half of the target's `wd(model)` rule is implemented | REA observed | F-07 | same file — "implements the mantle half of the target's rule" |
-| The Bedrock+Mantle `anthropic.*` override is **not** implemented, and says so | REA observed + implementation choice | F-07 | same file — "does not implement the Bedrock+Mantle anthropic.* override, and says so" |
+| The Bedrock+Mantle `anthropic.*` override is implemented, and says so | REA observed | F-07 | same file — "implements the Bedrock+Mantle anthropic.* override, and says so" |
 | "Not served" is a documented superset of the audited `=== null` predicate, differing by exactly one row | implementation choice | F-07 | same file — "is a superset of the audited predicate, and the difference is exactly one row" |
 | A caller cannot corrupt the shared catalog table | implementation choice | F-07 | same file — "hands out copies, so a caller cannot corrupt the shared table" |
 | The catalog never reads the credential store | implementation choice | F-07 | same file — "never reads the credential store while the catalog is listed, imported, normalized or resolved" |
@@ -222,6 +223,6 @@ Every row of this table is a **project extension**: the target has no such surfa
 
 **Catalog facts, for the record.** 22 models. Families: `haiku`, `sonnet`, `opus`, `fable`, `mythos` (the target's order of first appearance). Nine models carry all eight route ids — `claude-haiku-4-5`, `claude-sonnet-5`, `claude-sonnet-5-5`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-fable-5`, `claude-fable-5-1` — and thirteen omit at least one. Eleven pricing tiers. Four aliases (`opus`, `sonnet`, `haiku`, `fable`) and four `latest_per_family` entries.
 
-**Known limit, stated plainly.** The target's `wd(model)` rule has two halves. This implementation implements the "no id for the selected route but one for `mantle`" half. The **Bedrock+Mantle `anthropic.*` override is target-observed and not implemented**, because it needs the enabled-flag set, which the catalog API does not take. The wiring point is `resolveRouteForModel` in `src/provider/catalog.ts`; the code says so in the file header and on the function.
+**The target's `wd(model)` rule has two halves, and this implementation implements both.** The "no id for the selected route but one for `mantle`" half is the mantle fallback; the **Bedrock+Mantle `anthropic.*` override** — with both routes enabled, an `anthropic.*` model resolves to `mantle` — is implemented through the **enabled-flag set** the route layer hands in (`enabledRoutes`), and it is **off** when a caller supplies none, so the two-argument callers keep their behaviour.ot implemented**, because it needs the enabled-flag set, which the catalog API does not take. The wiring point is `resolveRouteForModel` in `src/provider/catalog.ts`; the code says so in the file header and on the function.
 
 **A second, smaller divergence.** This implementation treats an **absent** `provider_ids` key as "not served", which is a superset of the audited `provider_ids[route] === null` predicate. The two agree on 21 of 22 rows; the difference is exactly `claude-haiku-5-5` on `gateway`, the one row whose `gateway` key the target's literal omits entirely rather than setting to `null`. The superset is documented and pinned, not silently kept.

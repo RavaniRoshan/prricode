@@ -1754,7 +1754,7 @@ describe('the production wiring of the two seams', () => {
     expect(seen).toContain('sandbox.enabled is false');
     // **Not** the no-policy reason, which is what a session without the
     // wiring would report.
-    expect(seen).not.toContain('configured no sandbox policy');
+    expect(seen).not.toContain('no sandbox policy is configured');
   });
 
   it('refuses a tool call a PreToolUse hook denies', async () => {

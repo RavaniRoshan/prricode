@@ -104,9 +104,10 @@
  *   - A command that runs **past its timeout** is reported with the exit code
  *     `124`, the same message and the same `truncated` flag on both paths. On the
  *     sandboxed path the output is the **partial** output the command had
- *     produced when it was stopped — the launcher hands the output over when the
- *     process ends, so the tool takes it from the launcher after the stop, with a
- *     bounded grace period. The result says so itself: `timedOut` is `true`.
+ *     produced when it was stopped — the launcher keeps what it has collected
+ *     and the tool reads it after the stop, with a bounded grace period for a
+ *     backend that does not collect. The result says so itself: `timedOut` is
+ *     `true`.
  *   - The **output shape** — `{ type: 'text', text, stdout, stderr, exitCode,
  *     truncated, sandboxed, sandboxReason, sandboxEstablishmentReason,
  *     sandboxExemptions, sandboxExemptionScope, sandboxAvailability, timedOut }` —
@@ -133,7 +134,7 @@
  *     cost is paid on every `Bash` call.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess} from 'node:child_process';
 
 import { ToolExecutionError, TOOL_ERROR_CODES, type ToolDefinition } from '../registry.js';
 import type { PermissionDecision, ToolContext } from '../../permissions/decision.js';
@@ -309,11 +310,11 @@ export const SANDBOX_OVERRIDE_REASON = 'Run outside of the sandbox';
  * The grace period the tool gives the launcher to hand over the output of a
  * command it stopped.
  *
- * The launcher collects the output of a sandboxed command and hands it over when
- * the process ends; a command that was stopped never ends on its own, so the
- * tool asks the launcher for the output after the stop and waits at most this
- * long for it. The tool never waits longer than this for a process that does not
- * die.
+ * The launcher keeps the output it has collected, so a command that was stopped
+ * before it ended still yields what it had already printed — the tool reads
+ * that buffer directly. This grace period is the **fallback** for a backend
+ * that does not collect: the tool waits at most this long for the result. The
+ * tool never waits longer than this for a process that does not die.
  */
 export const SANDBOX_OUTPUT_GRACE_MS = 250;
 
@@ -373,6 +374,12 @@ function runCommand(
       cwd,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // The command leads its **own process group**, so the timeout can stop
+      // the whole group. Without this, only the shell is killed and the
+      // command's own process is orphaned and keeps running — the report would
+      // say the command was stopped while it was not. It is what bubblewrap
+      // does with `--die-with-parent`.
+      detached: true,
     });
 
     let stdout = '';
@@ -391,7 +398,9 @@ function runCommand(
     const timer = setTimeout(() => {
       truncated = true;
       timedOut = true;
-      child.kill('SIGKILL');
+      // The **group** is stopped, not just the shell: the command's own
+      // process would otherwise be orphaned and keep running.
+      stopProcessGroup(child);
       // The notice is **reserved room for**, so a standard error that is
       // already at the cap does not truncate it away.
       const notice = '\nThe command was stopped because it ran past its timeout.';
@@ -535,6 +544,32 @@ type SandboxOutcome =
   | { kind: 'completed'; result: SandboxRunResult }
   | { kind: 'timeout'; stdout: string; stderr: string }
   | { kind: 'failed'; message: string };
+
+/**
+ * Stop a command and **everything it started**.
+ *
+ * The child leads its own process group, so the group's negative pid reaches
+ * every process the command started. Killing only the shell would orphan the
+ * command's own process, which would keep running while the report said the
+ * command was stopped.
+ */
+function stopProcessGroup(child: ChildProcess): void {
+  if (child.pid === undefined) {
+    child.kill('SIGKILL');
+    return;
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    // The group is already gone, or the platform refuses the group signal;
+    // the child's own kill is the fallback.
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // The child is already gone.
+    }
+  }
+}
 
 /**
  * The output a stopped command had produced.

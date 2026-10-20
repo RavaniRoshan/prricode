@@ -65,6 +65,8 @@ Runs through `/bin/sh -c` with the **filtered** environment — the session's ow
 
 The command runs **inside the sandbox** when the session carries a sandbox policy, and **unconfined** when the policy says so — an excluded platform, a switched-off sandbox, an excluded command, or a missing backend with `failIfUnavailable` off. The result says which: `sandboxed`, `sandboxReason`, `sandboxEstablishmentReason`, `sandboxExemptions`, `sandboxExemptionScope` and `sandboxAvailability`. See [`sandbox-surface.md`](sandbox-surface.md).
 
+**One difference from the launcher's own unconfined path, stated plainly.** The tool runs an unconfined command itself rather than through the launcher, so an unconfined run produces **no** `SandboxStatus` — the launcher's unconfined path would also carry the note that the sandbox plan was never established. The tool's own report carries the reason, the scope and the availability, so nothing about the run is hidden, but the two paths are not the same implementation.
+
 **Two things are implementation choices and are labelled as such:** the shell is `sh` per call rather than the target's persistent shell session, and the timeout values are unpinned by the audit. `dangerouslyDisableSandbox` is accepted but never skips a rule check.
 
 **A Bash rule matches command text, not program identity.** `Bash(curl *)` does not stop `/usr/bin/curl` or `sh -c 'curl …'`. This implementation matches text and says so rather than implying a stronger guarantee.
