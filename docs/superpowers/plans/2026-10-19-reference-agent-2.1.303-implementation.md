@@ -1911,13 +1911,13 @@ one is a specific, bounded change, and each is already traced to the target's ow
 
 **Files:** the modules each row names; the tests that pin them; the conformance documents.
 
-- [ ] **Step 1: Write the failing test** for each of the eight, in the owning task's suite.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL for each.
-- [ ] **Step 3: Implement** each change, one at a time, in the order the table gives.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS for each.
-- [ ] **Step 5: Update the conformance documents and the report** — each row becomes a
+- [x] **Step 1: Write the failing test** for each of the eight, in the owning task's suite.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL for each.
+- [x] **Step 3: Implement** each change, one at a time, in the order the table gives.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS for each.
+- [x] **Step 5: Update the conformance documents and the report** — each row becomes a
   `match`, and the harness measures the new behaviour.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
   ```bash
   git add src tests/contracts docs/compatibility
   git commit -m "fix: the eight measured divergences, closed"
@@ -1928,6 +1928,37 @@ and is named in the report rather than forced. The whole point of the report is 
 says what is true.
 
 ---
+
+
+**Result:** seven of the eight are closed, and the eighth was a **false divergence**.
+
+| Row | The change |
+|---|---|
+| `F-07` | `providerIds` now carries the target's **three** states — a string, the target's `null`, and an absent key — and `notServedOn` is the target's predicate, character for character. An **omitted** key is therefore not "not served", and the model resolves to the route the target resolves it to. |
+| `F-18` | the envelope carries the target's names: `id`, `non_execution_kind`, `user_feedback`, `remedy`, `permission_decision {decision, source, reason_type}`. The previous spellings survive as **non-enumerable** migration aliases, and the transcript reader migrates a record written by an earlier build. |
+| `F-21` | the vocabulary is exactly the target's six. The one distinction this implementation still needs — that no rule matched — is carried by a **marker** on the decision, not by a seventh kind. |
+| `F-24` | every record the store writes carries the target's `transcriptSource` — `local-jsonl` by default, `ccr-api` when the caller says so — and the reader validates it. |
+| `F-25` | a candidate that is **itself** live is **dropped** and the lookup carries on with the next; only the **continued-into** case is reported, and it **stops** the lookup. |
+| `F-34` | the helper's **plan** is the target's: its decisions, the `pid`/`mount`/`user` namespaces, the private-root and `/proc` mounts, `PR_SET_NO_NEW_PRIVS`, the filter flags, the descriptors and the order. |
+| `F-35` | the filter hands the target's **27** observed syscalls to the listener with the notification action — and only the notifying filter has it — and the listener serves them with the target's own ioctl requests and never denies. |
+
+**`F-38` was not implemented as the brief said, and that was right.** The brief — written
+from the audit's §2.10 — told the implementer to make the clone's boolean flags consume the
+next token. The target's **boolean** flags consume **nothing**: the set that takes the next
+token only when it does not look like a flag is the **optional-value** set, and
+`-r`/`--resume` is a member of *that* set. Acting on the brief would have **created** a
+divergence. The implementer refused it, cited the target's own parser, and the audit's
+sentence was corrected against the source.
+
+**The mechanism difference, named.** The target's helper and supervisor are **native ELF
+programs**; this implementation's are in-process, and the kernel's calls live behind the
+existing notifier seam. The **behaviour** is the target's; the **mechanism** is not, and
+`docs/compatibility/sandbox-surface.md` says so in a section of its own. The supervisor
+layer is still reported as *not in force*, and the status says why. No native binary was
+faked.
+
+**Verified.** Every new test was mutation-checked. The suite is green at **2 100 tests**
+and `npx tsc --noEmit` is clean.
 
 ### CC-026 — The twelve partial rows compare the whole contract
 
@@ -2481,7 +2512,7 @@ that reason.
 ---
 
 
-**Result (fix round 2, and the source readings):** The measured totals are **19 `match`**, **12 `partial`**, **7 `mismatch`**, **0 `not-tested`** and **4 `unknown`** over the 42 matrix rows. One row was a **false divergence**: `F-38` was measured as a mismatch on the strength of the audit's §2.10, which described the target's **optional-value** flag set while calling it the boolean set and omitted the boolean set entirely. The target's **boolean** flags consume **nothing**, which is what this implementation already did. The audit has been corrected against the target's own parser, and the row is now a `match`.
+**Result (fix round 2, and the source readings):** The measured totals are **26 `match`**, **11 `partial`**, **2 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. Two rows were **false divergences**, and both were artefacts of the audit rather than of the implementation: `F-38` came from a §2.10 sentence that described the target's **optional-value** flag set while calling it the boolean set, and the audit has been corrected against the target's own parser. Seven of the eight measured divergences are now closed. The two that remain are the **mechanism** — the target's sandbox helper and supervisor are native ELF programs and this implementation's are in-process — and they are named rather than hidden.
 
 **One rule, applied to every row:** a **difference of any kind** from the target's *observed* behavior — including a member the target has and this implementation does not — is a `mismatch`. Every "What was measured" cell is the harness's own `detail` string and the results test compares the two. A probe that observes nothing this implementation produced, that compares a value with itself, or that asserts a constant, fails the suite, and a stale total fails it too.
 

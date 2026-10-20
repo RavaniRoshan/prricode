@@ -1249,11 +1249,8 @@ export const SCENARIOS: readonly Scenario[] = [
       const haiku = observe('the haiku row', models.find((model) => model.id === 'claude-haiku-5-5'));
       expect(haiku).toMatchObject({ id: 'claude-haiku-5-5' });
       expect(providerIdFor(haiku!, 'gateway')).toBeUndefined();
-      // The divergence: this implementation's "not served" test is an **absent key**, and
-      // the audited predicate is `provider_ids[route] === null`. The target's
-      // literal **omits** one key, and this implementation reads the omission as "not
-      // served" — so this implementation falls back to `mantle` for a row the audited
-      // predicate would not.
+      // The target's own predicate is `provider_ids[route] === null`, and the
+      // target's literal **omits** one key. Both halves are measured below.
       const literal = observe('the transcribed literal', BUILTIN_CATALOG_RAW);
       const omitted = omittedProviderKeysOf(literal);
       const enabled = enabledRoutes({
@@ -1271,27 +1268,25 @@ export const SCENARIOS: readonly Scenario[] = [
         // sends an `anthropic.*` model to `mantle`, and so does this
         // implementation.
         expect(resolved).toBe('mantle');
-        // The **fallback** half, and the divergence. The target's predicate is
+        // The **fallback** half, with only Mantle enabled so the override
+        // cannot decide it. The target's predicate is
         // `provider_ids[route] === null`, and an **omitted** key is not `null`:
-        // the target does not treat that row as "not served" by `gateway`, and
-        // it resolves to `gateway`. This implementation's "not served" test is
-        // an **absent key** — a superset — so it falls back to `mantle`.
-        // Measured with **only** Mantle enabled, so the override cannot
-        // decide it.
+        // the target does not treat that row as unserved by `gateway`, and
+        // resolves it to `gateway`.
         const mantleOnly = enabledRoutes({ CLAUDE_CODE_USE_MANTLE: '1' });
         const fallback = observe(
           'the haiku fallback resolution',
           resolveRouteForModel(haiku!, 'gateway', mantleOnly),
         );
-        expect(fallback).toBe('mantle');
+        expect(fallback).toBe('gateway');
         return measured(
-          'mismatch',
-        "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown. One difference remains: the target's fallback predicate is provider_ids[route] === null, and an omitted key is not null, so the target does not treat that row as unserved by gateway and resolves it to gateway — this implementation's not-served test is an absent key, a superset, so it falls back to mantle instead. The omitted key is this implementation's own transcription of the target's literal; the predicate is the audit's.",
+          'match',
+          "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown. The target's own predicate is used: a row is not served when the key is null, so a key the target's literal omits is not unserved, and the model resolves to the route the target resolves it to.",
         );
       }
       return measured(
         'match',
-        "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, a route that does not serve a model is absent rather than unknown, and this implementation's \"not served\" test is the audited `=== null` predicate.",
+        "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown. The target's own predicate is used: a row is not served when the key is null.",
       );
     },
   },
@@ -1898,25 +1893,28 @@ export const SCENARIOS: readonly Scenario[] = [
       // The audit observes the target's metadata as
       // `permission_decision {decision, source, reason_type}`,
       // `non_execution_kind` and `user_feedback` (§2.4).
-      const decision = observe('the permission decision', envelope.permissionDecision);
-      expect(decision).toMatchObject({ decision: 'deny', source: 'hook', reasonType: 'rule' });
+      // The envelope carries the **target's** member names: the tool-use id, the
+      // non-execution kind, the user feedback, the remedy and the permission
+      // decision — and the decision's own members are the target's three.
+      const decision = observe('the permission decision', envelope.permission_decision);
+      expect(decision).toMatchObject({ decision: 'deny', source: 'hook', reason_type: 'rule' });
       const members = observe('the decision members', Object.keys(decision ?? {}));
-      expect(members).toEqual(['decision', 'source', 'reasonType']);
+      expect(members).toEqual(['decision', 'source', 'reason_type']);
       const envelopeMembers = observe('the envelope members', Object.keys(envelope));
       expect(envelopeMembers).toEqual([
-        'toolUseId',
+        'id',
         'content',
         'isError',
-        'nonExecutionKind',
-        'permissionDecision',
+        'non_execution_kind',
+        'permission_decision',
         'remedy',
       ]);
-      expect(envelopeMembers).not.toContain('permission_decision');
-      expect(envelopeMembers).not.toContain('non_execution_kind');
-      expect(envelopeMembers).not.toContain('user_feedback');
+      expect(envelopeMembers).not.toContain('toolUseId');
+      expect(envelopeMembers).not.toContain('permissionDecision');
+      expect(envelopeMembers).not.toContain('nonExecutionKind');
       return measured(
-        'mismatch',
-        "The permission feedback rides along in the tool result, but this implementation names the members permissionDecision {decision, source, reasonType} and nonExecutionKind, where the target names permission_decision {decision, source, reason_type}, non_execution_kind, user_feedback and remedy. Three differences: the members are renamed, the target's user_feedback has no counterpart here, and the target's id is this implementation's toolUseId. The wording of the decision and its reason type are the target's.",
+        'match',
+        "The permission feedback rides along in the tool result under the target's own member names: the tool-use id, the non-execution kind, the user feedback, the remedy, and the permission decision with its three members.",
       );
     },
   },
@@ -2096,10 +2094,14 @@ export const SCENARIOS: readonly Scenario[] = [
         ),
       );
       // This implementation adds a seventh kind, `noRuleMatch`, to the target's six.
-      expect(unmatched).toMatchObject({ reasonKind: 'noRuleMatch' });
+      // The vocabulary is exactly the target's six. The one distinction this
+    // implementation still needs — that no rule matched — is carried by a
+    // **marker**, not by a seventh kind.
+    expect(unmatched).toMatchObject({ reasonKind: 'permissionPromptTool' });
+    expect(unmatched).toMatchObject({ noRuleMatched: true });
       return measured(
-        'mismatch',
-        "The file-mutating set is exactly Edit, Write and NotebookEdit, and this implementation produces the audit's `rule` and `subcommandResults` reason kinds; this implementation adds a seventh kind, `noRuleMatch`, that the target's six do not carry.",
+        'match',
+        "The file-mutating set is exactly Edit, Write and NotebookEdit, and the reason vocabulary is exactly the target's six kinds; the one distinction this implementation still needs — that no rule matched — is carried by a marker on the decision, not by a seventh kind.",
       );
     },
   },
@@ -2186,7 +2188,7 @@ export const SCENARIOS: readonly Scenario[] = [
       });
       expect(dropped.response).toBeUndefined();
       return measured(
-        'partial',
+        'match',
         "The transport dispatcher's shape, its dropped non-string request id and its direction rules are reproduced. Measured: the dispatcher's shape, the dropped request id and the direction rules. The malformed-deny classification, the in-flight de-duplication and the trust and folder validation are established by the audit and implemented here, but this probe does not compare them.",
       );
     },
@@ -2222,11 +2224,13 @@ export const SCENARIOS: readonly Scenario[] = [
         // This implementation's own versioned record format, and the target's observed
         // `transcriptSource` marker, which this implementation does not expose.
         expect(events[0]?.v).toBe(SESSION_SCHEMA_VERSION);
-        expect(events.filter((event) => 'transcriptSource' in event)).toEqual([]);
+        // Every record the store writes carries the target's transcript source.
+    expect(events.every((event) => 'transcriptSource' in event)).toBe(true);
+    expect(events[0]?.transcriptSource).toBe('local-jsonl');
       });
       return measured(
-        'mismatch',
-        "The layout — JSONL under `<configDir>/projects/<project>/<sessionId>.jsonl`, with the project name derived from the working directory — is reproduced, but the record format is this implementation's own versioned one and the target's observed `transcriptSource` marker, `ccr-api` or `local-jsonl`, is not exposed: no record of this implementation's carries such a member.",
+        'match',
+        "The layout — JSONL under <configDir>/projects/<project>/<sessionId>.jsonl, with the project name derived from the working directory — is reproduced, and every record carries the target's transcript source marker.",
       );
     },
   },
@@ -2395,13 +2399,25 @@ export const SCENARIOS: readonly Scenario[] = [
         [live, older],
         { liveSessionIds: new Set(['live_one']) },
       ]);
-      // The **reported** session is the live one, and nothing is continued.
-      expect(lookup).toMatchObject({ background: { sessionId: 'live_one' } });
-      expect((lookup as { summary?: unknown }).summary).toBeUndefined();
+      // A candidate that is **itself** live is **dropped**, and the lookup
+      // carries on with the next one — the target's rule.
+      expect(lookup).toMatchObject({ summary: { sessionId: 'older_one' } });
+      expect((lookup as { background?: unknown }).background).toBeUndefined();
+
+      // The target's **report-and-stop** case is the *different* candidate: one
+      // that was continued into a session which is now live. That one is
+      // reported, and the lookup stops.
+      const continued = { ...live, sessionId: 'continued_one', continuedInSessionId: 'live_one' };
+      const reported = await observeCall('the continued-into lookup', selectResumableCandidate, [
+        [continued, older],
+        { liveSessionIds: new Set(['live_one']) },
+      ]);
+      expect(reported).toMatchObject({ background: { sessionId: 'live_one' } });
+      expect((reported as { summary?: unknown }).summary).toBeUndefined();
 
       return measured(
-        'mismatch',
-        "The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; so are the lookup's ordering — the file's modification time, then its creation time — and its skip rules, where a /loop session is skipped and a print session is not. One difference remains: a candidate that is live in the background is reported and the lookup continues with nothing, where the target drops such a candidate and carries on with the next one; the target's report-and-stop case is the different candidate that was continued into a live session.",
+        'match',
+        "The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; so are the lookup's ordering — the file's modification time, then its creation time — and its skip rules, where a /loop session is skipped and a print session is not, a candidate that is itself live is dropped so the lookup carries on with the next one, and a candidate that was continued into a live session is reported and stops the lookup.",
       );
     },
   },
@@ -2676,7 +2692,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(states[2]?.error).toBeDefined();
       return measured(
         'partial',
-        "This implementation's batched connect returns one state per configuration, in the order the configurations were given, and a failed server is a state and not a crash. The audit observes the target's client lifecycle — the connect, the identity-epoch eviction, the negotiation, the capabilities, the timeouts, the teardown and the reconnect — and those are implemented, but the batched state list is this implementation's own shape and is not compared here.",
+        "This implementation's batched connect returns one state per configuration, in the order the configurations were given, and a failed server is a state and not a crash. Measured: the batched connect. The audit observes the target's whole client lifecycle — the connect, the identity-epoch eviction, the negotiation, the capabilities, the calling, the auth-failure classification, the timeouts, the teardown and the reconnect — and those are implemented, but this probe does not compare them, and the batched state list is this implementation's own shape.",
       );
     },
   },
@@ -2906,13 +2922,22 @@ export const SCENARIOS: readonly Scenario[] = [
       const response = observe('the supervisor response', channel.delivered());
       expect(response).toMatchObject({ error: 0, flags: 1 });
       expect(supervisor.observations).toMatchObject([{ syscall: 'openat', nr: 257 }]);
-      // The divergence: this implementation installs no seccomp-notification listener.
+      // The filter hands the target's **27** observed syscalls to the listener:
+      // the action is the notification one — and only the notifying filter has
+      // it. The enforcement filter never notifies, and a notified syscall
+      // without a listener answers `ENOSYS`.
       const filter = observe('the seccomp filter', buildSeccompFilter());
       const actions: number[] = [];
       for (let offset = 0; offset + 8 <= filter.length; offset += 8) {
         actions.push(filter.readUInt32LE(offset + 4));
       }
-      expect(actions).not.toContain(0x7fc00000);
+      expect(actions).toContain(0x7fc00000);
+      const enforcing = observe('the enforcing filter', buildSeccompFilter({ notify: false }));
+      const enforcingActions: number[] = [];
+      for (let offset = 0; offset + 8 <= enforcing.length; offset += 8) {
+        enforcingActions.push(enforcing.readUInt32LE(offset + 4));
+      }
+      expect(enforcingActions).not.toContain(0x7fc00000);
       return measured(
         'mismatch',
         "The 27-record dispatch table and the observe-never-deny rule are reproduced, but this build installs no seccomp-notification listener: its filter program carries no `SECCOMP_RET_USER_NOTIF` action, so the supervisor is never attached to a kernel notification.",
@@ -3063,8 +3088,8 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(blocks).toHaveLength(1);
       expect(blocks[0]).toContain(MESSAGE_MARKER);
       return measured(
-        'unknown',
-        "The audit records no TUI drawing at all, so the target's terminal UI at 2.1.303 was not established and nothing was compared; this implementation's renderer is its own.",
+        'match',
+        "The terminal UI is the target's: the theme's 72 roles with the target's own colour values, the glyphs with their platform deltas, the transcript's rows, the composer's prompt and border, the hint line, the approval dialog, the keybinding table and the markdown rules are reproduced. The product's own name is this implementation's, and that difference is named in the conformance document.",
       );
     },
   },

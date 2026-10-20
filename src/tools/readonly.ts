@@ -214,8 +214,8 @@ export const READ_ONLY_COMMANDS: readonly string[] = Object.freeze([
  * not.
  */
 export const READ_ONLY_COMMAND_PAIRS: readonly (readonly string[])[] = Object.freeze([
-  Object.freeze(['claude', '-h']),
-  Object.freeze(['claude', '--help']),
+  Object.freeze(['prricode', '-h']),
+  Object.freeze(['prricode', '--help']),
   Object.freeze(['node', '-v']),
   Object.freeze(['node', '--version']),
   Object.freeze(['python', '--version']),
@@ -1428,8 +1428,8 @@ const TEXT_PATTERNS: readonly RegExp[] = Object.freeze([
     (name) => new RegExp(`^${name}(?:\\s|$)[^<>()$\`|{}&;\\n\\r]*$`),
   ),
   /^echo(?:\s+(?:'[^']*'|"[^"$<>\n\r]*"|[^|;&`$(){}><#\\!"'\s]+))*(?:\s+2>&1)?\s*$/,
-  /^claude -h$/,
-  /^claude --help$/,
+  /^prricode -h$/,
+  /^prricode --help$/,
   /^uniq(?:\s+(?:-[a-zA-Z]+|--[a-zA-Z-]+(?:=\S+)?|-[fsw]\s+\d+))*(?:\s|$)\s*$/,
   /^pwd$/,
   /^whoami$/,
