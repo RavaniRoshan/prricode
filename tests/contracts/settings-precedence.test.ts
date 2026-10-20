@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   linkSync,
   mkdirSync,
+  chmodSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -890,6 +891,21 @@ describe('sandbox configuration', () => {
 
     const stats = statSync(configDir);
     expect(stats.mode & 0o777).toBe(0o700);
+  });
+
+  it('narrows an existing wider configuration directory to the same mode', () => {
+    const workspace = makeWorkspace();
+    const configDir = path.join(workspace.root, 'existing-config');
+    // A directory that already existed may carry a wider mode: the mode
+    // `mkdir` sets is filtered through the process's umask, and a directory
+    // that was there before is not created at all.
+    mkdirSync(configDir, { recursive: true, mode: 0o755 });
+    chmodSync(configDir, 0o755);
+    expect(statSync(configDir).mode & 0o777).toBe(0o755);
+
+    writeSandboxSettings({ configDir, sandbox: { enabled: true } });
+
+    expect(statSync(configDir).mode & 0o777).toBe(0o700);
   });
 
   it('canonicalizes a path through its deepest existing ancestor', () => {
