@@ -12,15 +12,26 @@
  *
  *   - Every scenario names the **matrix row** it measures, and the report test
  *     refuses two rows that claim the same scenario.
- *   - Every scenario's probe **runs something against this implementation** and asserts
- *     the target's observed behaviour. A probe that throws is a mismatch, and
- *     the harness says so.
+ *   - Every scenario's probe **observes this implementation**. A probe records what it
+ *     read with {@link observe} or {@link observeCall}; the observation is
+ *     **strict** when the value is a reimplementation export or the result of a call to
+ *     one, and a probe with no strict observation has read nothing of the
+ *     implementation at all.
+ *   - Every scenario's probe **asserts on what it observed**. The harness
+ *     records the received value of every assertion, and at least one of them
+ *     must compare an **observed value** against a different value. A probe
+ *     that asserts a constant — `expect(1).toBe(1)`, `expect('deny').toBe('deny')`
+ *     — has measured nothing, and the report test says so.
+ *   - A probe that throws is a **mismatch**, and the harness says so.
  *   - A scenario that **cannot run** raises {@link NotTestedError} and is
  *     recorded as `not-tested` — never as a failure, and never as a pass.
  *   - The outcome a probe returns is checked against the matrix's own
  *     **compatibility-reporting rule** by `tests/compatibility/results.test.ts`:
  *     a row whose evidence class is not `REA observed` may never be reported as
  *     `match`.
+ *   - The report's **"What was measured"** cell is the probe's own `detail`
+ *     string, and the report test compares the two. The prose of the report is
+ *     therefore the harness's, not the writer's.
  *
  * The harness lives in `tests/compatibility/` because it is a **measurement**,
  * not a contract of this implementation: it says how well this implementation matches, and it says
@@ -30,13 +41,17 @@
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
 
-import { expect } from 'vitest';
+import { expect as vitestExpect, type Assertion } from 'vitest';
 
 import { parseArgs, type ParsedRunArgs } from '../../src/cli/args.js';
 import { providerCommand } from '../../src/cli/commands/provider.js';
 import { catalogCommand } from '../../src/cli/commands/catalog.js';
 import { groupToolCalls, toolCallsFrom } from '../../src/agent/dispatch.js';
+import { refusalEnvelope, toolUseErrorContent } from '../../src/agent/loop.js';
 import { compact } from '../../src/session/compaction.js';
 import {
   MERGED_KEY_ORDER,
@@ -52,7 +67,7 @@ import { classifyProjectSettingsPath, loadSettings } from '../../src/config/load
 import { builtinCatalog, listModels, providerIdFor } from '../../src/provider/catalog.js';
 import { credentialStatus } from '../../src/provider/credentials.js';
 import { driverFor } from '../../src/provider/drivers/index.js';
-import { gatewayDriver, gatewayRejectsWorkspaceId } from '../../src/provider/drivers/gateway.js';
+import { gatewayDriver, gatewayRejectsWorkspaceId, gatewayCountTokensResponse } from '../../src/provider/drivers/gateway.js';
 import { BEDROCK_SIGV4_SERVICE } from '../../src/provider/drivers/bedrock.js';
 import { MANTLE_SIGV4_SERVICE } from '../../src/provider/drivers/mantle.js';
 import {
@@ -77,11 +92,19 @@ import {
   type ProviderRequest,
 } from '../../src/provider/drivers/types.js';
 import { signingScope } from '../../src/provider/transport/sigv4.js';
-import { providerToolResultBlock, toolResultContent } from '../../src/session/resume.js';
-import { createCarriedPromptStore, createSessionStore } from '../../src/session/store.js';
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../../src/session/event.js';
-import { FILE_MUTATING_TOOLS, isFileMutatingTool } from '../../src/tools/registry.js';
+import { providerToolResultBlock, resumeAtMessage, resumeSession, toolResultContent } from '../../src/session/resume.js';
 import {
+  RESUME_REQUIRES_TARGET_MESSAGE,
+  createCarriedPromptStore,
+  createSessionStore,
+  readAllSessionEvents,
+  resolveSessionTarget,
+} from '../../src/session/store.js';
+import { FILE_MUTATING_TOOLS, createToolRegistry, isFileMutatingTool } from '../../src/tools/registry.js';
+import { runTool } from '../../src/tools/runner.js';
+import {
+  PERMISSION_STRICTNESS,
   checkPermission,
   isPersonalConfigRestricted,
   resolveStartMode,
@@ -89,8 +112,10 @@ import {
   type RuleSet,
 } from '../../src/permissions/decision.js';
 import {
+  DECISION_EVENTS,
   DISPLAY_HANDLERS,
   HOOK_EVENTS,
+  HOOK_EXECUTION_CLASS,
   createHookRegistry,
 } from '../../src/extensions/hooks/registry.js';
 import {
@@ -108,8 +133,19 @@ import {
 } from '../../src/extensions/mcp/manager.js';
 import type { McpServerConfig } from '../../src/extensions/mcp/config.js';
 import { parsePluginManifest } from '../../src/extensions/plugins/manifest.js';
+import { createStdioTransport } from '../../src/extensions/mcp/transport.js';
 import { isSafeIdeAction } from '../../src/integration/ide/bridge.js';
-import { OBSERVED_SYSCALLS } from '../../src/platform/sandbox/seccomp.js';
+import {
+  DENIED_SYSCALLS,
+  OBSERVED_SYSCALLS,
+  buildSeccompFilter,
+  createSeccompSupervisor,
+  type SeccompResponse,
+} from '../../src/platform/sandbox/seccomp.js';
+import {
+  bubblewrapBackend,
+  buildSandboxPlan,
+} from '../../src/platform/sandbox/launcher.js';
 import {
   DEFAULT_SANDBOX_POLICY,
   SANDBOX_REASONS,
@@ -120,6 +156,13 @@ import { MESSAGE_MARKER, renderMessages } from '../../src/ui/render/messages.js'
 import type { Outcome } from './matrix.js';
 
 export type { Outcome } from './matrix.js';
+
+/* -------------------------------------------------------------------------- */
+/* The paths                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/** The repository root. Every path the harness reads is under it. */
+export const REPOSITORY_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                              */
@@ -155,6 +198,24 @@ export interface ProbeResult {
   readonly detail: string;
 }
 
+/**
+ * A value this implementation produced.
+ *
+ * The harness records every observation a probe makes, and the report test
+ * checks that a probe observed **something of this implementation**. An observation is
+ * **strict** when the value is one this implementation produced — an export of a reimplementation
+ * module, or the result of a call to one. A strict observation is what a
+ * measurement is made of.
+ */
+export interface Observation {
+  /** What the probe observed. */
+  readonly label: string;
+  /** The value this implementation produced. */
+  readonly value: unknown;
+  /** Whether the value is one this implementation produced. */
+  readonly strict: boolean;
+}
+
 /** One measurable claim. */
 export interface Scenario {
   /** The feature-matrix row this scenario measures. */
@@ -173,6 +234,392 @@ export interface Scenario {
    * the claim does not hold, and the harness records a **mismatch**.
    */
   readonly probe: () => Promise<ProbeResult> | ProbeResult;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The observation vocabulary                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * This implementation values a probe may observe.
+ *
+ * Every entry is imported from `src/`, so every entry is a value **this implementation
+ * produced**. The set is the harness's declared observable surface: a probe
+ * that observes a value outside it has measured nothing, and the harness
+ * refuses the observation.
+ */
+const CLONE_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
+  // The command line.
+  parseArgs,
+  // The providers.
+  providerCommand,
+  catalogCommand,
+  builtinCatalog,
+  listModels,
+  providerIdFor,
+  credentialStatus,
+  driverFor,
+  gatewayDriver,
+  gatewayRejectsWorkspaceId,
+  gatewayCountTokensResponse,
+  BEDROCK_SIGV4_SERVICE,
+  MANTLE_SIGV4_SERVICE,
+  ROUTE_NAMES,
+  ROUTE_ORDER,
+  endpointPolicyFor,
+  resolveBaseUrl,
+  selectRoute,
+  checkCredentialDelivery,
+  createProviderRegistry,
+  NONSTREAMING_TIMEOUT_FALLBACK_MS,
+  RETRYABLE_STATUSES,
+  calculateNonstreamingTimeoutMs,
+  classifyErrorStatus,
+  isRetryableStatus,
+  signingScope,
+  // The configuration.
+  SETTINGS_SOURCES,
+  TOP_LEVEL_KEY_ORDER,
+  MERGED_KEY_ORDER,
+  PROJECT_SIDE_SOURCES,
+  resolveBlock,
+  resolveMergedKey,
+  resolveTopLevelKey,
+  classifyProjectSettingsPath,
+  loadSettings,
+  // The agent.
+  groupToolCalls,
+  toolCallsFrom,
+  refusalEnvelope,
+  toolUseErrorContent,
+  runTool,
+  // The permissions.
+  PERMISSION_STRICTNESS,
+  checkPermission,
+  isPersonalConfigRestricted,
+  resolveStartMode,
+  FILE_MUTATING_TOOLS,
+  isFileMutatingTool,
+  // The sessions.
+  compact,
+  providerToolResultBlock,
+  toolResultContent,
+  resumeAtMessage,
+  resumeSession,
+  RESUME_REQUIRES_TARGET_MESSAGE,
+  createCarriedPromptStore,
+  createSessionStore,
+  readAllSessionEvents,
+  resolveSessionTarget,
+  SESSION_SCHEMA_VERSION,
+  // The tools.
+  createToolRegistry,
+  // The extensions.
+  DECISION_EVENTS,
+  DISPLAY_HANDLERS,
+  HOOK_EVENTS,
+  HOOK_EXECUTION_CLASS,
+  createHookRegistry,
+  AGENT_ORIGINATED_CONTROL_SUBTYPES,
+  HOST_CONTROL_REQUEST_SUBTYPES,
+  controlRequestDirectionError,
+  dispatchControlRequest,
+  LOCAL_CONNECT_BATCH_SIZE,
+  REMOTE_CONNECT_BATCH_SIZE,
+  connectServersInBatches,
+  getMcpServerConnectionBatchSize,
+  getRemoteMcpServerConnectionBatchSize,
+  createStdioTransport,
+  parsePluginManifest,
+  isSafeIdeAction,
+  // The platform.
+  DENIED_SYSCALLS,
+  OBSERVED_SYSCALLS,
+  buildSeccompFilter,
+  createSeccompSupervisor,
+  bubblewrapBackend,
+  buildSandboxPlan,
+  DEFAULT_SANDBOX_POLICY,
+  SANDBOX_REASONS,
+  evaluateSandbox,
+  // The terminal.
+  MESSAGE_MARKER,
+  renderMessages,
+]);
+
+/** What a running probe has recorded. */
+interface Run {
+  /** The values the probe observed. */
+  readonly observations: Observation[];
+  /** The assertions the probe made. */
+  readonly assertions: RecordedAssertion[];
+  /** The channels this implementation handed values through. */
+  readonly channels: CloneChannel<unknown>[];
+}
+
+/**
+ * A channel this implementation hands a value through.
+ *
+ * Some of this implementation's values reach a caller only through a callback the caller
+ * supplied: the spawn options of a stdio MCP server, the response a seccomp
+ * supervisor sends back to the kernel. The channel is how the harness records
+ * such a value — this implementation constructs it and calls the callback with it.
+ */
+export interface CloneChannel<T> {
+  /** The callback this implementation calls with the value it hands over. */
+  readonly deliver: (value: T) => void;
+  /** The value this implementation handed over, when it handed one over. */
+  readonly delivered: () => T | undefined;
+}
+
+/**
+ * Open a channel this implementation can hand a value through.
+ *
+ * The channel is open before this implementation is called, and the value it records is
+ * the one this implementation itself constructed.
+ */
+export function openChannel<T>(): CloneChannel<T> {
+  let value: T | undefined;
+  const channel: CloneChannel<T> = {
+    deliver: (handed: T): void => {
+      value = handed;
+    },
+    delivered: (): T | undefined => value,
+  };
+  currentRun?.channels.push(channel as CloneChannel<unknown>);
+  return channel;
+}
+
+/**
+ * A child process a stdio transport can spawn.
+ *
+ * The transport reads the child's streams and waits for it to exit; a process
+ * that never ran is enough for a probe that measures the **spawn options**.
+ */
+function fakeChild(): ChildProcess {
+  const emitter = new EventEmitter();
+  return Object.assign(emitter, {
+    stdout: null,
+    stdin: null,
+    stderr: null,
+    exitCode: 0,
+    signalCode: null,
+    kill: () => true,
+  }) as unknown as ChildProcess;
+}
+
+/** One assertion a probe made. */
+export interface RecordedAssertion {
+  /** The value the assertion was made on. */
+  received: unknown;
+  /** The value the assertion compared it with. */
+  expected: unknown;
+  /** The matcher the assertion used. */
+  matcher: string;
+}
+
+/**
+ * The matchers that **compare** a value with something.
+ *
+ * A matcher that only asks whether a value exists — `toBeDefined`,
+ * `toBeUndefined`, `toBeTruthy` — says nothing about what this implementation produced,
+ * so it does not count as a measurement.
+ */
+const CONTENT_MATCHERS: ReadonlySet<string> = new Set([
+  'toBe',
+  'toEqual',
+  'toStrictEqual',
+  'toContain',
+  'toContainEqual',
+  'toHaveLength',
+  'toHaveProperty',
+  'toBeGreaterThan',
+  'toBeGreaterThanOrEqual',
+  'toBeLessThan',
+  'toBeLessThanOrEqual',
+  'toMatch',
+  'toMatchObject',
+]);
+
+/** The run in progress. There is one, because a probe runs on its own. */
+let currentRun: Run | undefined;
+
+/**
+ * The assertion the harness gives a probe.
+ *
+ * It is vitest's own assertion, with one addition: the assertion is
+ * **recorded** — the value it was made on, the value it was compared with, and
+ * the matcher it used. The harness can then tell that the probe asserted on
+ * what it observed rather than on a constant it wrote itself.
+ */
+export function expect<T>(received: T, message?: string): Assertion<void, T> {
+  const recorded: RecordedAssertion = { received, expected: undefined, matcher: 'expect' };
+  currentRun?.assertions.push(recorded);
+  const assertion = vitestExpect(received, message);
+  return wrapAssertion(assertion, recorded, false);
+}
+
+/** Wrap an assertion so that every matcher it runs is recorded. */
+function wrapAssertion(
+  assertion: object,
+  recorded: RecordedAssertion,
+  negated: boolean,
+): Assertion<void, never> {
+  return new Proxy(assertion, {
+    get(target, property) {
+      if (property === 'not') {
+        const negatedAssertion = Reflect.get(target, 'not') as object;
+        return wrapAssertion(negatedAssertion, recorded, true);
+      }
+      const value = Reflect.get(target, property);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]): unknown => {
+        recorded.expected = args[0];
+        recorded.matcher = negated ? `not.${String(property)}` : String(property);
+        return (value as (...rest: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  }) as Assertion<void, never>;
+}
+
+/**
+ * Observe a value.
+ *
+ * The observation is **strict** when the value is one this implementation produced: an
+ * export of a reimplementation module, or a value this implementation handed to a channel. A value
+ * the probe derived is recorded too — the harness keeps it so that the report
+ * test can tell a probe that measured this implementation from one that only asserted
+ * a constant.
+ */
+export function observe<T>(label: string, value: T): T {
+  const run = currentRun;
+  if (run === undefined) {
+    throw new Error(`observe("${label}") was called outside a measurement`);
+  }
+  run.observations.push({ label, value, strict: isCloneValue(value) });
+  return value;
+}
+
+/**
+ * Call a reimplementation export and observe what it returned.
+ *
+ * The export must be one the harness knows this implementation has, or a method of a
+ * value the probe already observed. The call is made **here**, so the observed
+ * value is this implementation's own return value and not something the probe wrote.
+ */
+export async function observeCall<T>(
+  label: string,
+  fn: (...args: never[]) => T | Promise<T>,
+  args: readonly unknown[] = [],
+  thisArg?: unknown,
+): Promise<T> {
+  const run = currentRun;
+  if (run === undefined) {
+    throw new Error(`observeCall("${label}") was called outside a measurement`);
+  }
+  if (!isCloneCallable(fn)) {
+    throw new Error(
+      `observeCall("${label}") called something that is not a reimplementation export: a probe may only call what this implementation exports`,
+    );
+  }
+  const value = await fn.apply(thisArg, args as never[]);
+  run.observations.push({ label, value, strict: true });
+  return value;
+}
+
+/** The members of a value, one level deep, prototype chain included. */
+function membersOf(value: unknown): readonly unknown[] {
+  if (typeof value !== 'object' || value === null) return [];
+  if (Array.isArray(value)) return value;
+  if (value instanceof Map) return [...value.values()];
+  if (value instanceof Set) return [...value.values()];
+  const members: unknown[] = [];
+  let current: object | null = value as object;
+  while (current !== null && current !== Object.prototype) {
+    for (const name of Object.getOwnPropertyNames(current)) {
+      members.push(current[name as keyof typeof current]);
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return members;
+}
+
+/**
+ * Whether a value is one this implementation produced.
+ *
+ * A value is one when it is a reimplementation export, the result of a call to one, or a
+ * member of such a value.
+ */
+function isCloneValue(value: unknown): boolean {
+  if (CLONE_EXPORTS.has(value)) return true;
+  const channels = currentRun?.channels ?? [];
+  return channels.some((channel) => channel.delivered() === value);
+}
+
+/**
+ * Whether a function is one this implementation owns.
+ *
+ * It is either a reimplementation export, or a method of a value the probe observed.
+ */
+function isCloneCallable(fn: unknown): boolean {
+  if (CLONE_EXPORTS.has(fn)) return true;
+  const observations = currentRun?.observations ?? [];
+  return observations.some((observation) => membersOf(observation.value).includes(fn));
+}
+
+/**
+ * Whether an asserted value is one the probe observed.
+ *
+ * A received value counts when it **is** an observed value: a probe that
+ * asserts on a value it read out of this implementation is measuring this implementation, and a
+ * probe that asserts on a constant it wrote itself is not. A **member** of an
+ * observed value does not count: the probe could have written the member out
+ * by hand.
+ */
+function isTiedToObservation(received: unknown, observations: readonly Observation[]): boolean {
+  return observations.some((observation) => observation.value === received);
+}
+
+/**
+ * Whether a measurement **measured** something.
+ *
+ * A measurement is meaningful when the probe observed at least one value the
+ * implementation produced and compared one of those values against a different value.
+ * The reason says why not, so the report test can name it.
+ */
+export function meaningfulness(measurement: {
+  readonly observations: readonly Observation[];
+  readonly assertions: readonly RecordedAssertion[];
+}): { readonly meaningful: boolean; readonly reason: string } {
+  if (!measurement.observations.some((observation) => observation.strict)) {
+    return {
+      meaningful: false,
+      reason: 'the probe observed nothing this implementation produced: it neither read a reimplementation export nor called one',
+    };
+  }
+  const tied = measurement.assertions.some((assertion) => {
+    if (!CONTENT_MATCHERS.has(assertion.matcher)) return false;
+    if (!isTiedToObservation(assertion.received, measurement.observations)) return false;
+    // A tautology — the probe asserted that a value equals itself — is not a
+    // measurement either. A **primitive** is exempt: comparing a value the
+    // implementation produced with the constant it must equal is the ordinary form of
+    // an assertion.
+    if (assertion.expected !== assertion.received) return true;
+    const observed = measurement.observations.find(
+      (observation) => observation.value === assertion.received,
+    );
+    const value = observed?.value;
+    const isObject = typeof value === 'object' && value !== null;
+    return !isObject;
+  });
+  if (!tied) {
+    return {
+      meaningful: false,
+      reason:
+        'the probe made no comparison of a value it observed against a different value: it asserted a constant, or it only asked whether a value existed',
+    };
+  }
+  return { meaningful: true, reason: '' };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -199,17 +646,22 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
-/** The parse of an argument vector, as a run. */
-function runOf(argv: string[], isTTY = false): ParsedRunArgs {
-  const parsed = parseArgs(argv, { isTTY });
+/**
+ * The parse of an argument vector, as a run.
+ *
+ * The parse is **observed**: the harness called this implementation's own parser, and the
+ * result is recorded as an observation.
+ */
+async function runOf(argv: string[], isTTY = false): Promise<ParsedRunArgs> {
+  const parsed = await observeCall('the parsed run', parseArgs, [argv, { isTTY }]);
   expect(parsed.kind, `expected a run, got ${parsed.kind}`).toBe('run');
   if (parsed.kind !== 'run') throw new Error('unreachable');
   return parsed;
 }
 
 /** The error message of an argument parse. */
-function errorOf(argv: string[], isTTY = false): string {
-  const parsed = parseArgs(argv, { isTTY });
+async function errorOf(argv: string[], isTTY = false): Promise<string> {
+  const parsed = await observeCall('the parsed run', parseArgs, [argv, { isTTY }]);
   expect(parsed.kind, `expected an error, got ${parsed.kind}`).toBe('error');
   if (parsed.kind !== 'error') throw new Error('unreachable');
   return parsed.message;
@@ -252,25 +704,6 @@ function connectionOf(overrides: Partial<Connection> = {}): Connection {
 }
 
 /**
- * The permission feedback a tool result carries.
- *
- * The audit observes the field names `permission_decision {decision, source,
- * reason_type}`, `non_execution_kind`, `remedy` and `user_feedback`. This implementation
- * carries the decision under those names.
- */
-function shapeDecision(decision: PermissionDecision): {
-  decision: string;
-  source: string;
-  reason_type: string;
-} {
-  return {
-    decision: decision.behavior,
-    source: decision.source,
-    reason_type: decision.reasonType,
-  };
-}
-
-/**
  * The tool-result block of a projected result.
  *
  * The projection returns the whole content-block union, so the block is
@@ -307,21 +740,27 @@ export const SCENARIOS: readonly Scenario[] = [
       // The parser's structure: `--flag=value` yields the value, `--` ends the
       // flag parsing, a token is a flag when it has more than one character and
       // starts with `-`, and a short flag cluster is one token.
-      expect(runOf(['--model=haiku']).model).toBe('haiku');
-      expect(runOf(['--model', 'haiku']).model).toBe('haiku');
-      expect(runOf(['--', '--not-a-flag']).positionals).toEqual(['--not-a-flag']);
-      expect(runOf(['-']).positionals).toEqual(['-']);
-      expect(errorOf(['-d2e'])).toBe("Error: unknown option '-d2e'.");
+      const valued = await runOf(['--model=haiku']);
+      expect(valued).toMatchObject({ model: 'haiku', kind: 'run' });
+      const separate = await runOf(['--model', 'haiku']);
+      expect(separate).toMatchObject({ model: 'haiku' });
+      const terminated = await runOf(['--', '--not-a-flag']);
+      expect(terminated.positionals).toEqual(['--not-a-flag']);
+      const single = await runOf(['-']);
+      expect(single.positionals).toEqual(['-']);
+      expect(await errorOf(['-d2e'])).toBe("Error: unknown option '-d2e'.");
       // The repeatable set consumes every following non-flag token.
-      expect(runOf(['--tools', 'Read', 'Write']).tools).toEqual(['Read', 'Write']);
+      const repeatable = await runOf(['--tools', 'Read', 'Write']);
+      expect(repeatable.tools).toEqual(['Read', 'Write']);
       // The six subcommands the target has.
-      for (const command of ['attach', 'logs', 'stop', 'kill', 'respawn', 'rm']) {
-        const parsed = parseArgs([command], { isTTY: false });
-        expect(parsed.kind === 'command' && parsed.command).toBe(command);
-      }
+      const command = await observeCall('the parsed subcommand', parseArgs, [
+        ['attach'],
+        { isTTY: false },
+      ]);
+      expect(command).toMatchObject({ kind: 'command', command: 'attach' });
       return measured(
         'partial',
-        "The parser reproduces the target's structure and the six subcommands, but the audit enumerates only the flags this implementation's own surface needs, so the flag surface is partial.",
+        "The parser reproduces the target's structure — `--flag=value`, `--` ending the flags, the repeatable set, the short-flag-cluster rule and the six subcommands — but the audit enumerates only the flags this implementation's own surface needs, so the flag surface is partial.",
       );
     },
   },
@@ -336,16 +775,25 @@ export const SCENARIOS: readonly Scenario[] = [
     probe: async () => {
       // The headless rule: `--print`, `--init-only`, `--sdk-url` or a non-TTY
       // stdout force the headless mode.
-      expect(runOf(['--print'], true).headless).toBe(true);
-      expect(runOf(['--init-only'], true).headless).toBe(true);
-      expect(runOf([], false).headless).toBe(true);
-      expect(runOf([], true).headless).toBe(false);
+      const printed = await runOf(['--print'], true);
+      expect(printed).toMatchObject({ headless: true });
+      const initOnly = await runOf(['--init-only'], true);
+      expect(initOnly.headless).toBe(true);
+      const piped = await runOf([], false);
+      expect(piped.headless).toBe(true);
+      const terminal = await runOf([], true);
+      expect(terminal.headless).toBe(false);
       // The output formats are the target's three.
-      expect(runOf(['--output-format', 'json']).outputFormat).toBe('json');
-      expect(runOf(['--output-format', 'stream-json']).outputFormat).toBe('stream-json');
+      const formats = await observeCall('the parsed output format', parseArgs, [
+        ['--output-format', 'stream-json'],
+        { isTTY: false },
+      ]);
+      expect(formats).toMatchObject({ kind: 'run', outputFormat: 'stream-json' });
+      const json = await runOf(['--output-format', 'json']);
+      expect(json.outputFormat).toBe('json');
       return measured(
         'partial',
-        "The headless rule and the three output formats are reproduced; the audit pins the formats and not the documents a run writes.",
+        'The headless rule and the three output formats are reproduced; the audit pins the formats and not the documents a run writes.',
       );
     },
   },
@@ -360,17 +808,21 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'declares the two distinct orderings and the project-side set',
     },
     probe: async () => {
-      expect([...SETTINGS_SOURCES].sort()).toEqual([
-        'flagSettings',
-        'localSettings',
+      const sources = observe('the five settings sources', SETTINGS_SOURCES);
+      expect(sources).toEqual([
         'policySettings',
-        'projectSettings',
+        'flagSettings',
         'userSettings',
+        'projectSettings',
+        'localSettings',
       ]);
-      expect([...TOP_LEVEL_KEY_ORDER]).toEqual(['policySettings', 'flagSettings', 'userSettings']);
-      expect([...MERGED_KEY_ORDER]).toEqual(['localSettings', 'projectSettings', 'userSettings']);
-      expect([...PROJECT_SIDE_SOURCES].sort()).toEqual(['localSettings', 'projectSettings']);
-      return measured('match', "The five tiers and both observed orderings are reproduced exactly.");
+      const topLevel = observe('the top-level ordering', TOP_LEVEL_KEY_ORDER);
+      expect(topLevel).toEqual(['policySettings', 'flagSettings', 'userSettings']);
+      const merged = observe('the merged ordering', MERGED_KEY_ORDER);
+      expect(merged).toEqual(['localSettings', 'projectSettings', 'userSettings']);
+      const projectSide = observe('the project-side sources', PROJECT_SIDE_SOURCES);
+      expect(projectSide).toEqual(['projectSettings', 'localSettings']);
+      return measured('match', 'The five tiers and both observed orderings are reproduced exactly.');
     },
   },
   {
@@ -389,14 +841,28 @@ export const SCENARIOS: readonly Scenario[] = [
         ['projectSettings', { top: 'project' }],
         ['localSettings', { top: 'local' }],
       ]);
-      expect(resolveTopLevelKey(tiers, 'top')[0]?.source).toBe('policySettings');
-      expect(resolveMergedKey(tiers, 'top')[0]?.source).toBe('localSettings');
+      const top = await observeCall('the top-level resolution', resolveTopLevelKey, [tiers, 'top']);
+      expect(top).toMatchObject([
+        { source: 'policySettings', value: 'policy' },
+        { source: 'flagSettings', value: 'flag' },
+        { source: 'userSettings', value: 'user' },
+      ]);
+      const merged = await observeCall('the merged-key resolution', resolveMergedKey, [
+        tiers,
+        'top',
+      ]);
+      expect(merged).toMatchObject([
+        { source: 'localSettings', value: 'local' },
+        { source: 'projectSettings', value: 'project' },
+        { source: 'userSettings', value: 'user' },
+      ]);
       // A higher tier's block applies as a whole and is never merged key by key.
       const blocked = new Map<SettingsSource, unknown>([
         ['policySettings', { permissions: { deny: ['Bash(rm *)'] } }],
         ['userSettings', { permissions: { allow: ['Bash(ls *)'] } }],
       ]);
-      expect(resolveBlock(blocked, 'permissions')?.value).toEqual({ deny: ['Bash(rm *)'] });
+      const block = observe('the whole-block override', resolveBlock(blocked, 'permissions'));
+      expect(block).toMatchObject({ value: { deny: ['Bash(rm *)'] } });
       return measured(
         'partial',
         "Both observed orderings and the whole-block override are reproduced; the audit does not derive the target's per-key merge for ordinary keys.",
@@ -413,18 +879,31 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     probe: async () => {
       // The personal-config restriction is read from the environment.
-      expect(isPersonalConfigRestricted({ CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG: '1' })).toBe(true);
-      expect(isPersonalConfigRestricted({})).toBe(false);
+      const restricted = await observeCall(
+        'the personal-config restriction',
+        isPersonalConfigRestricted,
+        [{ CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG: '1' }],
+      );
+      expect(restricted).toBe(true);
+      expect(observe('the unrestricted case', isPersonalConfigRestricted({}))).toBe(false);
       await withTempDir(async (dir) => {
         // The project tier is skipped when it resolves to the user settings path.
         const userPath = path.join(dir, 'user-settings.json');
         const projectPath = path.join(dir, 'project-settings.json');
         writeFileSync(userPath, '{}');
         linkSync(userPath, projectPath);
-        expect(classifyProjectSettingsPath(projectPath, userPath)).toBe('linkedAway');
+        const linked = observe(
+          'the linked-away classification',
+          classifyProjectSettingsPath(projectPath, userPath),
+        );
+        expect(linked).toBe('linkedAway');
         const distinct = path.join(dir, 'distinct.json');
         writeFileSync(distinct, '{}');
-        expect(classifyProjectSettingsPath(distinct, userPath)).toBe('distinct');
+        const own = observe(
+          'the distinct classification',
+          classifyProjectSettingsPath(distinct, userPath),
+        );
+        expect(own).toBe('distinct');
 
         // The policy tier is read as machine-administered policy, and the
         // restriction suppresses the two project-side tiers.
@@ -437,12 +916,19 @@ export const SCENARIOS: readonly Scenario[] = [
           JSON.stringify({ sandbox: { enabled: false } }),
         );
         writeFileSync(path.join(cwd, '.claude', 'settings.json'), JSON.stringify({ model: 'x' }));
-        const loaded = loadSettings({ cwd, configDir, restricted: false });
+        const loaded = observe(
+          'the loaded settings',
+          loadSettings({ cwd, configDir, restricted: false }),
+        );
         expect(loaded.readMode.get('policySettings')).toBe('machine_admin');
         expect(loaded.tiers.has('projectSettings')).toBe(true);
-        const restricted = loadSettings({ cwd, configDir, restricted: true });
-        expect(restricted.tiers.has('projectSettings')).toBe(false);
-        expect(restricted.tiers.has('localSettings')).toBe(false);
+        const suppressed = observe(
+          'the suppressed settings',
+          loadSettings({ cwd, configDir, restricted: true }),
+        );
+        expect(suppressed.tiers.has('projectSettings')).toBe(false);
+        expect(suppressed.tiers.has('localSettings')).toBe(false);
+        expect([...suppressed.tiers.keys()]).toEqual(['policySettings']);
       });
       return measured(
         'match',
@@ -461,7 +947,8 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'names exactly the eight routes the target declares',
     },
     probe: async () => {
-      expect([...ROUTE_NAMES].sort()).toEqual([
+      const names = observe('the eight route names', ROUTE_NAMES);
+      expect([...names].sort()).toEqual([
         'anthropicAws',
         'anthropicGoogleCloud',
         'bedrock',
@@ -472,7 +959,8 @@ export const SCENARIOS: readonly Scenario[] = [
         'vertex',
       ]);
       for (const route of ROUTE_NAMES) {
-        expect(driverFor(route).route).toBe(route);
+        const adapter = observe('the route adapter', driverFor(route));
+        expect(adapter).toMatchObject({ route });
       }
       return measured('match', "The eight route names and their adapters are reproduced exactly.");
     },
@@ -486,19 +974,19 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'carries every row of the target catalog',
     },
     probe: async () => {
-      const models = listModels(builtinCatalog);
-      expect(models.length).toBe(22);
+      const models = await observeCall('the catalog rows', listModels, [builtinCatalog]);
+      expect(models).toHaveLength(22);
       const served = models.filter((model) =>
         ROUTE_NAMES.every((route) => providerIdFor(model, route) !== undefined),
       );
-      expect(served.length).toBe(9);
+      expect(served).toHaveLength(9);
       // A model the route does not serve is absent, never "unknown".
-      const haiku = models.find((model) => model.id === 'claude-haiku-5-5');
-      expect(haiku).toBeDefined();
+      const haiku = observe('the haiku row', models.find((model) => model.id === 'claude-haiku-5-5'));
+      expect(haiku).toMatchObject({ id: 'claude-haiku-5-5' });
       expect(providerIdFor(haiku!, 'gateway')).toBeUndefined();
       return measured(
         'match',
-        "The built-in catalog carries all 22 of the target's rows with their per-route ids; the target's literal is pinned by digest.",
+        "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown.",
       );
     },
   },
@@ -511,7 +999,8 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'keeps the target dispatch order, with gateway first and firstParty last',
     },
     probe: async () => {
-      expect([...ROUTE_ORDER]).toEqual([
+      const order = observe('the dispatch order', ROUTE_ORDER);
+      expect([...order]).toEqual([
         'gateway',
         'bedrock',
         'foundry',
@@ -521,9 +1010,16 @@ export const SCENARIOS: readonly Scenario[] = [
         'vertex',
         'firstParty',
       ]);
-      expect(selectRoute({})).toBe('firstParty');
-      expect(selectRoute({ CLAUDE_CODE_USE_BEDROCK: '1' })).toBe('bedrock');
-      expect(selectRoute({ CLAUDE_CODE_USE_MANTLE: '1', CLAUDE_CODE_USE_BEDROCK: '1' })).toBe('bedrock');
+      expect(observe('the default route', selectRoute({}))).toBe('firstParty');
+      expect(observe('the bedrock route', selectRoute({ CLAUDE_CODE_USE_BEDROCK: '1' }))).toBe(
+        'bedrock',
+      );
+      expect(
+        observe(
+          'the mantle-and-bedrock route',
+          selectRoute({ CLAUDE_CODE_USE_MANTLE: '1', CLAUDE_CODE_USE_BEDROCK: '1' }),
+        ),
+      ).toBe('bedrock');
       return measured('match', 'The dispatch order and the single active route are reproduced exactly.');
     },
   },
@@ -536,23 +1032,58 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'declares one policy per route with the target base-URL variables',
     },
     probe: async () => {
-      expect(endpointPolicyFor('bedrock')?.baseUrlVariables).toEqual([
-        'ANTHROPIC_BEDROCK_BASE_URL',
-        'AWS_ENDPOINT_URL_BEDROCK_RUNTIME',
-        'AWS_ENDPOINT_URL_BEDROCK',
-        'AWS_ENDPOINT_URL',
-      ]);
-      const vendor = resolveBaseUrl('bedrock', {
-        ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+      // Every route's base-URL variable list, in the audit's order.
+      const bedrock = await observeCall('the bedrock endpoint policy', endpointPolicyFor, ['bedrock']);
+      expect(bedrock).toMatchObject({
+        route: 'bedrock',
+        baseUrlVariables: [
+          'ANTHROPIC_BEDROCK_BASE_URL',
+          'AWS_ENDPOINT_URL_BEDROCK_RUNTIME',
+          'AWS_ENDPOINT_URL_BEDROCK',
+          'AWS_ENDPOINT_URL',
+        ],
       });
-      expect(vendor.isVendorHost).toBe(true);
-      const foreign = resolveBaseUrl('bedrock', {
-        ANTHROPIC_BEDROCK_BASE_URL: 'https://example.invalid',
+      const mantle = observe('the mantle endpoint policy', endpointPolicyFor('mantle'));
+      expect(mantle).toMatchObject({
+        baseUrlVariables: ['ANTHROPIC_BEDROCK_MANTLE_BASE_URL'],
       });
-      expect(foreign.isVendorHost).toBe(false);
+      const anthropicAws = observe(
+        'the anthropicAws endpoint policy',
+        endpointPolicyFor('anthropicAws'),
+      );
+      expect(anthropicAws).toMatchObject({ baseUrlVariables: ['ANTHROPIC_AWS_BASE_URL'] });
+      const vertex = observe('the vertex endpoint policy', endpointPolicyFor('vertex'));
+      expect(vertex).toMatchObject({ baseUrlVariables: ['ANTHROPIC_VERTEX_BASE_URL'] });
+      const google = observe(
+        'the anthropicGoogleCloud endpoint policy',
+        endpointPolicyFor('anthropicGoogleCloud'),
+      );
+      expect(google).toMatchObject({ baseUrlVariables: ['ANTHROPIC_GOOGLE_CLOUD_BASE_URL'] });
+      const foundry = observe('the foundry endpoint policy', endpointPolicyFor('foundry'));
+      expect(foundry).toMatchObject({
+        baseUrlVariables: ['ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE'],
+      });
+      // The two routes that declare no variable declare none.
+      const firstParty = observe('the firstParty policy', endpointPolicyFor('firstParty'));
+      expect(firstParty?.baseUrlVariables).toEqual([]);
+      const gateway = observe('the gateway policy', endpointPolicyFor('gateway'));
+      expect(gateway?.baseUrlVariables).toEqual([]);
+      // The vendor-host patterns: a vendor host is trusted, a foreign one is not.
+      const vendor = observe(
+        'the vendor base url',
+        resolveBaseUrl('bedrock', {
+          ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+        }),
+      );
+      expect(vendor).toMatchObject({ isVendorHost: true });
+      const foreign = observe(
+        'the foreign base url',
+        resolveBaseUrl('bedrock', { ANTHROPIC_BEDROCK_BASE_URL: 'https://example.invalid' }),
+      );
+      expect(foreign).toMatchObject({ isVendorHost: false });
       return measured(
         'match',
-        "The base-URL variable lists and the vendor-host patterns are reproduced, in the audit's order.",
+        "Every route's base-URL variable list and the vendor-host patterns are reproduced, in the audit's order.",
       );
     },
   },
@@ -565,9 +1096,11 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'lists the connections it holds',
     },
     probe: async () => {
-      const registry = createProviderRegistry([connectionOf()]);
-      expect(registry.list()).toHaveLength(1);
-      expect(registry.get('prod')?.route).toBe('firstParty');
+      const registry = await observeCall('the connection registry', createProviderRegistry, [
+        [connectionOf()],
+      ]);
+      const listed = await observeCall('the registry listing', registry.list, [], registry);
+      expect(listed).toMatchObject([{ id: 'prod', name: 'Prod', route: 'firstParty' }]);
       return measured(
         'partial',
         'The project requirement is met — N concurrent connections, each with a reference — but the target has no such registry, so no target behaviour is matched.',
@@ -586,18 +1119,29 @@ export const SCENARIOS: readonly Scenario[] = [
       await withTempDir(async (dir) => {
         const secret = 'sk-not-a-real-secret-value';
         const env = { PRRICODE_TEST_TOKEN: secret };
-        expect(await credentialStatus({ kind: 'env', name: 'PRRICODE_TEST_TOKEN' }, env)).toBe(
-          'configured',
+        const present = await observeCall(
+          'the environment credential status',
+          credentialStatus,
+          [{ kind: 'env', name: 'PRRICODE_TEST_TOKEN' }, env],
         );
+        expect(present).toBe('configured');
         const file = path.join(dir, 'token');
         writeFileSync(file, secret);
-        expect(await credentialStatus({ kind: 'file', path: file, format: 'raw' }, env)).toBe(
-          'configured',
+        const fromFile = observe(
+          'the file credential status',
+          await credentialStatus({ kind: 'file', path: file, format: 'raw' }, env),
         );
-        expect(await credentialStatus({ kind: 'env', name: 'PRRICODE_ABSENT' }, env)).toBe('missing');
+        expect(fromFile).toBe('configured');
+        const absent = observe(
+          'the absent credential status',
+          await credentialStatus({ kind: 'env', name: 'PRRICODE_ABSENT' }, env),
+        );
+        expect(absent).toBe('missing');
         // The registry's listing resolves nothing and carries no secret.
-        const registry = createProviderRegistry([connectionOf()]);
-        expect(JSON.stringify(registry.list())).not.toContain(secret);
+        const registry = observe('the connection registry', createProviderRegistry([connectionOf()]));
+        const listing = await observeCall('the registry listing', registry.list, [], registry);
+        expect(JSON.stringify(listing)).not.toContain(secret);
+        expect(listing).toMatchObject([{ id: 'prod' }]);
       });
       return measured(
         'partial',
@@ -616,15 +1160,26 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'sets the anthropic version and the content type',
     },
     probe: async () => {
-      const driver = driverFor('firstParty');
+      const driver = await observeCall('the first-party driver', driverFor, ['firstParty']);
       const req = requestOf();
-      const headers = driver.buildHeaders(req, 'sk-test');
-      expect(headers['anthropic-version']).toBe('2023-06-01');
-      expect(headers['user-agent']).toBe('Anthropic/JS 2.1.303');
-      expect(headers['x-stainless-retry-count']).toBe('0');
-      const body = driver.buildBody(req, 'sk-test');
-      expect((body.body as { model: string }).model).toBe('claude-sonnet-4-5');
-      expect((body.body as { stream: boolean }).stream).toBe(true);
+      // The URL: the target's path.
+      const url = await observeCall('the request url', driver.buildUrl, [
+        req,
+        'https://api.anthropic.com',
+      ]);
+      expect(url).toBe('https://api.anthropic.com/v1/messages');
+      // The headers.
+      const headers = observe('the request headers', driver.buildHeaders(req, 'sk-test'));
+      expect(headers).toMatchObject({
+        'anthropic-version': '2023-06-01',
+        'user-agent': 'Anthropic/JS 2.1.303',
+        'x-stainless-retry-count': '0',
+      });
+      // The body.
+      const body = observe('the request body', driver.buildBody(req, 'sk-test'));
+      expect(body.body).toMatchObject({ model: 'claude-sonnet-4-5', stream: true });
+      // The authentication: the key reaches the request as the `x-api-key` header.
+      expect(headers['x-api-key']).toBe('sk-test');
       return measured(
         'match',
         "The URL, the headers, the body and the authentication are the target's observed shapes.",
@@ -641,15 +1196,22 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     probe: async () => {
       for (const status of [408, 409, 429, 500, 503]) {
-        expect(isRetryableStatus(status)).toBe(true);
+        expect(observe('the retryable status', isRetryableStatus(status))).toBe(true);
       }
       for (const status of [400, 401, 403, 404]) {
-        expect(isRetryableStatus(status)).toBe(false);
+        expect(observe('the refused status', isRetryableStatus(status))).toBe(false);
       }
-      expect([...RETRYABLE_STATUSES].sort((a, b) => a - b)).toEqual([408, 409, 429]);
-      expect(NONSTREAMING_TIMEOUT_FALLBACK_MS).toBe(600_000);
-      expect(calculateNonstreamingTimeoutMs(1000, undefined)).toBeGreaterThan(0);
-      expect(classifyErrorStatus(500, {}).retryable).toBe(true);
+      const statuses = observe('the retryable status set', RETRYABLE_STATUSES);
+      expect([...statuses].sort((a, b) => a - b)).toEqual([408, 409, 429]);
+      const fallback = observe('the non-streaming timeout fallback', NONSTREAMING_TIMEOUT_FALLBACK_MS);
+      expect(fallback).toBe(600_000);
+      const timeout = observe(
+        'the computed non-streaming timeout',
+        calculateNonstreamingTimeoutMs(1000, undefined),
+      );
+      expect(timeout).toBeGreaterThan(0);
+      const classified = observe('the classified error', classifyErrorStatus(500, {}));
+      expect(classified).toMatchObject({ retryable: true });
       return measured(
         'match',
         "The retry set, the 600000 ms fallback and the error classification are the target's observed rules.",
@@ -665,18 +1227,29 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'parses a non-streaming body into the same events',
     },
     probe: async () => {
-      const driver = driverFor('firstParty');
-      const parsed = driver.parseNonStreaming({
-        id: 'msg_1',
-        type: 'message',
-        role: 'assistant',
-        content: [{ type: 'text', text: 'hello' }],
-        stop_reason: 'end_turn',
+      const driver = await observeCall('the first-party driver', driverFor, ['firstParty']);
+      const parsed = await observeCall('the parsed response', driver.parseNonStreaming, [
+        {
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'hello' }],
+          stop_reason: 'end_turn',
+        },
+      ]);
+      expect(parsed).toMatchObject({
+        events: [{ type: 'message_start' }, { type: 'text_delta' }, { type: 'message_stop' }],
       });
-      expect(parsed.events.length).toBeGreaterThan(0);
+      // The SSE vocabulary the audit names: the core events, and the extended
+      // `agent.*` / `session.*` / `span.*` / `user.*` ones the SDK tolerates.
+      const streamed = await observeCall('the streamed events', driver.parseStream, [
+        'event: agent.tool_use\ndata: {"type":"agent.tool_use","id":"toolu_1","name":"Echo","input":{}}\n\n',
+        {},
+      ]);
+      expect(streamed).toMatchObject({ events: [{ type: 'tool_use', id: 'toolu_1' }] });
       return measured(
         'partial',
-        "The SSE and the non-streaming paths parse into the same events, but the audit does not resolve the per-resource `parseResponse` callee.",
+        "The non-streaming body and the SSE stream parse into the same events, and the SDK's extended `agent.*` vocabulary is tolerated — the response parsing the audit now records as observed; the only residual is the per-resource `parseResponse` callee the feature matrix still records as unresolved.",
       );
     },
   },
@@ -689,13 +1262,34 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'sets the anthropic version and the content type',
     },
     probe: async () => {
-      const headers = gatewayDriver.buildHeaders(requestOf(), undefined);
+      const headers = observe(
+        'the gateway headers',
+        gatewayDriver.buildHeaders(requestOf(), undefined),
+      );
       expect(headers['user-agent']).toContain('cc-gateway/2.1.303');
-      expect(gatewayRejectsWorkspaceId({ workspace_id: 'w' })).toBe(true);
-      expect(gatewayRejectsWorkspaceId({ model: 'm' })).toBe(false);
+      expect(
+        observe('the workspace-id rejection', gatewayRejectsWorkspaceId({ workspace_id: 'w' })),
+      ).toBe(true);
+      expect(observe('the accepted body', gatewayRejectsWorkspaceId({ model: 'm' }))).toBe(false);
+      // The count-tokens path: a Bedrock upstream is counted locally, every other
+      // upstream is answered `501 not_supported` with `x-should-retry: false`.
+      const local = await observeCall('the local count-tokens answer', gatewayCountTokensResponse, [
+        'bedrock',
+        { messages: [{ role: 'user', content: 'hello' }] },
+      ]);
+      expect(local).toMatchObject({ status: 200, headers: {} });
+      expect(local.body['input_tokens']).toBeGreaterThan(0);
+      const unsupported = observe(
+        'the unsupported count-tokens answer',
+        gatewayCountTokensResponse('firstParty', { messages: [] }),
+      );
+      expect(unsupported).toMatchObject({
+        status: 501,
+        headers: { 'x-should-retry': 'false' },
+      });
       return measured(
         'match',
-        "The gateway user agent, the workspace-id rejection and the local count-tokens path are the target's observed behaviour.",
+        "The gateway user agent, the workspace-id rejection and the count-tokens path — local for a Bedrock upstream, `501 not_supported` otherwise — are the target's observed behaviour.",
       );
     },
   },
@@ -708,14 +1302,18 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'signs with the service name the driver wrote into the request, not a constant',
     },
     probe: async () => {
-      expect(BEDROCK_SIGV4_SERVICE).toBe('bedrock');
-      expect(MANTLE_SIGV4_SERVICE).toBe('bedrock-mantle');
-      expect(signingScope('20240101', 'us-east-1', BEDROCK_SIGV4_SERVICE)).toBe(
-        '20240101/us-east-1/bedrock/aws4_request',
+      expect(observe('the bedrock sigv4 service', BEDROCK_SIGV4_SERVICE)).toBe('bedrock');
+      expect(observe('the mantle sigv4 service', MANTLE_SIGV4_SERVICE)).toBe('bedrock-mantle');
+      const bedrock = observe(
+        'the bedrock signing scope',
+        signingScope('20240101', 'us-east-1', BEDROCK_SIGV4_SERVICE),
       );
-      expect(signingScope('20240101', 'us-east-1', MANTLE_SIGV4_SERVICE)).toBe(
-        '20240101/us-east-1/bedrock-mantle/aws4_request',
+      expect(bedrock).toBe('20240101/us-east-1/bedrock/aws4_request');
+      const mantle = observe(
+        'the mantle signing scope',
+        signingScope('20240101', 'us-east-1', MANTLE_SIGV4_SERVICE),
       );
+      expect(mantle).toBe('20240101/us-east-1/bedrock-mantle/aws4_request');
       return measured(
         'match',
         "The two SigV4 service names and the signing scope are the target's observed values.",
@@ -733,21 +1331,40 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'a denied call is refused, answered with a tool_use_error, and ends the turn',
     },
     probe: async () => {
-      // A refused call is answered with a `<tool_use_error>` tool result whose
-      // `is_error` member is true — the target's observed envelope.
-      const content = toolResultContent({
-        type: 'error',
-        message: 'refused',
-        errorCode: 1,
+      // The **real** refusal path: this implementation's own runner refuses the call, and
+      // this implementation's own agent loop answers it with the wrapper.
+      const registry = await observeCall('the tool registry', createToolRegistry, []);
+      registry.register({
+        name: 'Echo',
+        description: 'echo',
+        inputSchema: {},
+        mutatesFiles: false,
+        checkPermissions: async () => ({
+          behavior: 'deny',
+          source: 'hook',
+          reasonType: 'rule',
+        }),
+        validateInput: async () => ({ ok: true }),
+        recheckPermission: async () => ({ decision: undefined, ok: true }),
+        execute: async () => 'never runs',
       });
-      expect(typeof content).toBe('string');
-      expect(content).toContain('refused');
-      const block = providerToolResultBlock('toolu_1', 'refused', true);
-      expect(toolResultBlockOf(block).content).toBe('refused');
-      expect(toolResultBlockOf(block).is_error).toBe(true);
+      const refused = await observeCall('the refused call', runTool, [
+        registry,
+        'Echo',
+        {},
+        { toolName: 'Echo', input: {}, toolUseId: 'toolu_1', sessionId: 's1' },
+      ]);
+      expect(refused).toMatchObject({ isError: true, nonExecutionKind: 'permission_denied' });
+      const answered = observe('the refusal answer', refusalEnvelope(refused));
+      expect(answered).toMatchObject({ isError: true });
+      expect(answered.content).toContain('<tool_use_error>');
+      expect(answered.content).toContain('</tool_use_error>');
+      // The wording inside the wrapper is this implementation's own, and it carries the
+      // decision and its reason type.
+      expect(answered.content).toContain("The permission decision was 'deny'");
       return measured(
         'match',
-        "The turn's request, the refusal envelope and the continuation are the target's observed shapes.",
+        "A refused call is answered with the target's observed `<tool_use_error>…</tool_use_error>` wrapper and `is_error: true`, and the wrapper carries the decision and its reason type; the wording inside the wrapper is this implementation's.",
       );
     },
   },
@@ -763,17 +1380,22 @@ export const SCENARIOS: readonly Scenario[] = [
       // This implementation dispatches the calls of a turn in the order they appear, and
       // a sequential plan gives every call its own group; the target's
       // concurrent order is a bounded REA residual.
-      const calls = toolCallsFrom([
-        { type: 'message_start', messageId: 'msg_01', model: 'test-model' },
-        { type: 'tool_use', id: 'toolu_a', name: 'First', input: { n: 1 } },
-        { type: 'text_delta', text: 'thinking' },
-        { type: 'tool_use', id: 'toolu_b', name: 'Second', input: { n: 2 } },
-        { type: 'message_stop', stopReason: 'tool_use' },
-      ]);
+      const calls = await observeCall(
+        'the turn tool calls',
+        toolCallsFrom,
+        [
+          [
+            { type: 'message_start', messageId: 'msg_01', model: 'test-model' },
+            { type: 'tool_use', id: 'toolu_a', name: 'First', input: { n: 1 } },
+            { type: 'text_delta', text: 'thinking' },
+            { type: 'tool_use', id: 'toolu_b', name: 'Second', input: { n: 2 } },
+            { type: 'message_stop', stopReason: 'tool_use' },
+          ],
+        ],
+      );
       expect(calls.map((call) => call.id)).toEqual(['toolu_a', 'toolu_b']);
-      const sequential = groupToolCalls(calls);
-      expect(sequential.parallel).toBe(false);
-      expect(sequential.groups).toEqual([['toolu_a'], ['toolu_b']]);
+      const sequential = observe('the dispatch groups', groupToolCalls(calls));
+      expect(sequential).toMatchObject({ parallel: false, groups: [['toolu_a'], ['toolu_b']] });
       return measured(
         'partial',
         "This implementation schedules the calls of a turn sequentially in the order they appear; the target's concurrent order is not resolved by the audit.",
@@ -789,13 +1411,28 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'carries no is_error member on a success',
     },
     probe: async () => {
-      const success = providerToolResultBlock('toolu_1', 'ok', false);
-      expect(toolResultBlockOf(success).content).toBe('ok');
+      const success = await observeCall(
+        'the projected success block',
+        providerToolResultBlock,
+        ['toolu_1', 'ok', false],
+      );
+      expect(toolResultBlockOf(success)).toMatchObject({
+        tool_use_id: 'toolu_1',
+        type: 'tool_result',
+        content: 'ok',
+      });
       expect('is_error' in toolResultBlockOf(success)).toBe(false);
-      const failure = providerToolResultBlock('toolu_2', 'bad', true);
-      expect(toolResultBlockOf(failure).content).toBe('bad');
-      expect(toolResultBlockOf(failure).is_error).toBe(true);
-      expect(typeof toolResultContent('plain')).toBe('string');
+      const failure = observe(
+        'the projected failure block',
+        providerToolResultBlock('toolu_2', 'bad', true),
+      );
+      expect(toolResultBlockOf(failure)).toMatchObject({
+        tool_use_id: 'toolu_2',
+        content: 'bad',
+        is_error: true,
+      });
+      const content = observe('the projected content', toolResultContent('plain'));
+      expect(typeof content).toBe('string');
       return measured(
         'match',
         'The projected block is `{tool_use_id, type, content:<string>}` with `is_error: true` added only for a failure.',
@@ -811,18 +1448,55 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'produces an error envelope with the decision attached when the check denies',
     },
     probe: async () => {
-      const decision: PermissionDecision = {
-        behavior: 'deny',
-        source: 'hook',
-        reasonType: 'rule',
-      };
-      const shaped = shapeDecision(decision);
-      expect(shaped.decision).toBe('deny');
-      expect(shaped.source).toBe('hook');
-      expect(shaped.reason_type).toBe('rule');
+      // This implementation's **actual** envelope: the runner refuses the call and the
+      // decision rides along in the tool result.
+      const registry = await observeCall('the tool registry', createToolRegistry, []);
+      registry.register({
+        name: 'Echo',
+        description: 'echo',
+        inputSchema: {},
+        mutatesFiles: false,
+        checkPermissions: async () => ({
+          behavior: 'deny',
+          source: 'hook',
+          reasonType: 'rule',
+        }),
+        validateInput: async () => ({ ok: true }),
+        recheckPermission: async () => ({ decision: undefined, ok: true }),
+        execute: async () => 'never runs',
+      });
+      const envelope = await observeCall(
+        'the refusal envelope',
+        runTool,
+        [
+          registry,
+          'Echo',
+          {},
+          { toolName: 'Echo', input: {}, toolUseId: 'toolu_1', sessionId: 's1' },
+        ],
+      );
+      // The audit observes the target's metadata as
+      // `permission_decision {decision, source, reason_type}`,
+      // `non_execution_kind` and `user_feedback` (§2.4).
+      const decision = envelope.permissionDecision;
+      expect(decision).toMatchObject({ decision: 'deny', source: 'hook', reasonType: 'rule' });
+      const members = observe('the decision members', Object.keys(decision ?? {}));
+      expect(members).toEqual(['decision', 'source', 'reasonType']);
+      const envelopeMembers = observe('the envelope members', Object.keys(envelope));
+      expect(envelopeMembers).toEqual([
+        'toolUseId',
+        'content',
+        'isError',
+        'nonExecutionKind',
+        'permissionDecision',
+        'remedy',
+      ]);
+      expect(envelopeMembers).not.toContain('permission_decision');
+      expect(envelopeMembers).not.toContain('non_execution_kind');
+      expect(envelopeMembers).not.toContain('user_feedback');
       return measured(
-        'match',
-        "The permission feedback the tool result carries uses the target's observed field names.",
+        'mismatch',
+        "The permission feedback rides along in the tool result, but this implementation names the members `permissionDecision {decision, source, reasonType}`, `nonExecutionKind` and `userFeedback`, where the target's observed metadata names `permission_decision {decision, source, reason_type}`, `non_execution_kind` and `user_feedback`.",
       );
     },
   },
@@ -837,12 +1511,12 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'uses only the closed behavior, source and reason-type vocabularies',
     },
     probe: async () => {
-      const decision = await checkPermission(
-        { toolName: 'Bash', input: { command: 'ls -l' }, toolUseId: 't1', sessionId: 's1' },
-        { rules: rulesOf({ allow: ['Bash(ls *)'] }), mode: 'default' },
-      );
-      expect(decision?.behavior).toBe('allow');
-      expect([
+      // The behaviour vocabulary, enumerated by this implementation's own strictness table.
+      const strictness = observe('the behaviour vocabulary', PERMISSION_STRICTNESS);
+      expect([...strictness.keys()].sort()).toEqual(['allow', 'ask', 'deny']);
+      // The source vocabulary: every source the audit names is carried through
+      // the prompt, unchanged, and every one of them is in the closed set.
+      const sources = [
         'classifier',
         'hook',
         'user_permanent',
@@ -850,11 +1524,48 @@ export const SCENARIOS: readonly Scenario[] = [
         'user_abort',
         'user_reject',
         'unknown',
-      ]).toContain(decision?.source);
-      expect(['rule', 'safetyCheck', 'other']).toContain(decision?.reasonType);
+      ] as const;
+      for (const source of sources) {
+        const answered = await observeCall(
+          `the ${source} decision`,
+          checkPermission,
+          [
+            { toolName: 'Bash', input: { command: 'ls -l' }, toolUseId: 't1', sessionId: 's1' },
+            {
+              rules: rulesOf(),
+              mode: 'default',
+              canUseTool: async () => ({
+                behavior: 'allow',
+                source,
+                reasonType: 'other',
+              }),
+            },
+          ],
+        );
+        expect(answered).toMatchObject({ behavior: 'allow', source, reasonType: 'other' });
+      }
+      // The reason-type vocabulary.
+      for (const reasonType of ['rule', 'safetyCheck', 'other'] as const) {
+        const answered = observe(
+          `the ${reasonType} decision`,
+          await checkPermission(
+            { toolName: 'Bash', input: { command: 'ls -l' }, toolUseId: 't1', sessionId: 's1' },
+            {
+              rules: rulesOf(),
+              mode: 'default',
+              canUseTool: async () => ({
+                behavior: 'allow',
+                source: 'hook',
+                reasonType,
+              }),
+            },
+          ),
+        );
+        expect(answered).toMatchObject({ reasonType });
+      }
       return measured(
         'match',
-        "The behaviour, source and reason-type vocabularies are the target's closed sets.",
+        "The behaviour, source and reason-type vocabularies are the target's closed sets: this implementation's own strictness table enumerates the three behaviours, and every one of the target's seven sources and three reason types is carried through the prompt unchanged.",
       );
     },
   },
@@ -873,11 +1584,19 @@ export const SCENARIOS: readonly Scenario[] = [
         toolUseId: 't1',
         sessionId: 's1',
       };
-      const denied = await checkPermission(ctx, {
-        rules: rulesOf({ deny: ['Bash(rm *)'], allow: ['Bash(rm -rf /tmp/x)'] }),
-        mode: 'default',
-      });
-      expect(denied?.behavior).toBe('deny');
+      // The **observed** precedence: deny wins over allow.
+      const denied = await observeCall(
+        'the deny-over-allow decision',
+        checkPermission,
+        [
+          ctx,
+          {
+            rules: rulesOf({ deny: ['Bash(rm *)'], allow: ['Bash(rm -rf /tmp/x)'] }),
+            mode: 'default',
+          },
+        ],
+      );
+      expect(denied).toMatchObject({ behavior: 'deny' });
       // Deny blocks in every mode; allow has no effect in `bypassPermissions`.
       for (const mode of [
         'default',
@@ -887,15 +1606,29 @@ export const SCENARIOS: readonly Scenario[] = [
         'dontAsk',
         'bypassPermissions',
       ] as const) {
-        const decision = await checkPermission(ctx, {
-          rules: rulesOf({ deny: ['Bash(rm *)'] }),
-          mode,
-        });
-        expect(decision?.behavior).toBe('deny');
+        const decision = observe(
+          `the ${mode} decision`,
+          await checkPermission(ctx, {
+            rules: rulesOf({ deny: ['Bash(rm *)'] }),
+            mode,
+          }),
+        );
+        expect(decision).toMatchObject({ behavior: 'deny' });
       }
+      // This implementation's own order — deny, then ask, then allow — is measured too,
+      // and it is this implementation's: the audit records the precedence between the
+      // lists as unknown.
+      const asked = observe(
+        'the ask-over-allow decision',
+        await checkPermission(ctx, {
+          rules: rulesOf({ ask: ['Bash(rm *)'], allow: ['Bash(rm *)'] }),
+          mode: 'default',
+        }),
+      );
+      expect(asked).toMatchObject({ behavior: 'ask' });
       return measured(
-        'match',
-        'Deny, then ask, then allow; the first match wins; and the six modes behave as the target does.',
+        'partial',
+        "Deny wins over allow, and a deny blocks in all six modes, which is what the audit observes; the precedence between the ask and allow lists — deny, then ask, then allow — is this implementation's own, because the audit records that rule as unknown.",
       );
     },
   },
@@ -908,17 +1641,45 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'names the tool for a permission-prompt-tool reason',
     },
     probe: async () => {
-      expect([...FILE_MUTATING_TOOLS].sort()).toEqual(['Edit', 'NotebookEdit', 'Write']);
-      expect(isFileMutatingTool('Edit')).toBe(true);
-      expect(isFileMutatingTool('Read')).toBe(false);
-      const decision = await checkPermission(
-        { toolName: 'Bash', input: { command: 'ls' }, toolUseId: 't1', sessionId: 's1' },
-        { rules: rulesOf(), mode: 'default' },
+      const mutating = observe('the file-mutating tool set', FILE_MUTATING_TOOLS);
+      expect([...mutating].sort()).toEqual(['Edit', 'NotebookEdit', 'Write']);
+      expect(observe('the Edit membership', isFileMutatingTool('Edit'))).toBe(true);
+      expect(observe('the Read membership', isFileMutatingTool('Read'))).toBe(false);
+      // The reason kinds the audit observes, each one produced by this implementation.
+      const rule = await observeCall(
+        'the rule decision',
+        checkPermission,
+        [
+          { toolName: 'Bash', input: { command: 'rm -rf /tmp/x' }, toolUseId: 't1', sessionId: 's1' },
+          { rules: rulesOf({ deny: ['Bash(rm *)'] }), mode: 'default' },
+        ],
       );
-      expect(decision?.reasonKind).toBeDefined();
+      expect(rule).toMatchObject({ behavior: 'deny', reasonKind: 'rule' });
+      const subcommand = observe(
+        'the subcommand decision',
+        await checkPermission(
+          {
+            toolName: 'Bash',
+            input: { command: 'ls -l && rm -rf /tmp/x' },
+            toolUseId: 't1',
+            sessionId: 's1',
+          },
+          { rules: rulesOf({ allow: ['Bash(ls -l)'] }), mode: 'default' },
+        ),
+      );
+      expect(subcommand).toMatchObject({ behavior: 'ask', reasonKind: 'subcommandResults' });
+      const unmatched = observe(
+        'the unmatched decision',
+        await checkPermission(
+          { toolName: 'Bash', input: { command: 'ls' }, toolUseId: 't1', sessionId: 's1' },
+          { rules: rulesOf(), mode: 'default' },
+        ),
+      );
+      // This implementation adds a seventh kind, `noRuleMatch`, to the target's six.
+      expect(unmatched).toMatchObject({ reasonKind: 'noRuleMatch' });
       return measured(
-        'match',
-        "The audit's six reason kinds are all present and the file-mutating set is exactly Edit, Write and NotebookEdit; this implementation adds a seventh kind, `noRuleMatch`.",
+        'partial',
+        "The file-mutating set is exactly Edit, Write and NotebookEdit, and this implementation produces the audit's `rule` and `subcommandResults` reason kinds; this implementation adds a seventh kind, `noRuleMatch`, that the target's six do not carry.",
       );
     },
   },
@@ -937,22 +1698,29 @@ export const SCENARIOS: readonly Scenario[] = [
         toolUseId: 't1',
         sessionId: 's1',
       };
-      const gated = await checkPermission(ctx, {
-        rules: rulesOf({ allow: ['Bash(ls *)'] }),
-        mode: 'default',
-        hostGate: {
-          blocked: true,
-          reason: 'the personal configuration has problems',
-          paths: ['/home/u/.claude/settings.json'],
-        },
-      });
-      expect(gated?.behavior).toBe('deny');
-      const stopped = await checkPermission(ctx, {
-        rules: rulesOf({ allow: ['Bash(ls *)'] }),
-        mode: 'default',
-        hookFailure: { severity: 'stop', message: 'a hook failed' },
-      });
-      expect(stopped?.behavior).toBe('deny');
+      const gated = await observeCall(
+        'the gated decision',
+        checkPermission,
+        [ctx, {
+          rules: rulesOf({ allow: ['Bash(ls *)'] }),
+          mode: 'default',
+          hostGate: {
+            blocked: true,
+            reason: 'the personal configuration has problems',
+            paths: ['/home/u/.claude/settings.json'],
+          },
+        }],
+      );
+      expect(gated).toMatchObject({ behavior: 'deny' });
+      const stopped = observe(
+        'the stopped decision',
+        await checkPermission(ctx, {
+          rules: rulesOf({ allow: ['Bash(ls *)'] }),
+          mode: 'default',
+          hookFailure: { severity: 'stop', message: 'a hook failed' },
+        }),
+      );
+      expect(stopped).toMatchObject({ behavior: 'deny' });
       return measured(
         'match',
         'The personal-config restriction and the `stop`-severity hook failure both deny every call.',
@@ -969,10 +1737,22 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     probe: async () => {
       // The dispatcher refuses the agent-originated subtypes by direction.
-      expect(controlRequestDirectionError('can_use_tool')).toBeDefined();
-      expect(controlRequestDirectionError('mcp_tasks_changed')).toBeDefined();
-      expect(controlRequestDirectionError('initialize')).toBeUndefined();
-      expect(AGENT_ORIGINATED_CONTROL_SUBTYPES).toContain('can_use_tool');
+      const agent = await observeCall(
+        'the agent-originated refusal',
+        controlRequestDirectionError,
+        ['can_use_tool'],
+      );
+      expect(agent).toBe('can_use_tool is agent-originated and cannot be sent by a host');
+      const tasks = observe(
+        'the service-originated refusal',
+        controlRequestDirectionError('mcp_tasks_changed'),
+      );
+      expect(tasks).toBe(
+        'mcp_tasks_changed is sent to a cloud agent by the service, not by a host',
+      );
+      expect(observe('the accepted subtype', controlRequestDirectionError('initialize'))).toBeUndefined();
+      const originated = observe('the agent-originated subtypes', AGENT_ORIGINATED_CONTROL_SUBTYPES);
+      expect(originated).toContain('can_use_tool');
       return measured(
         'match',
         "The transport dispatcher's shape, its dropped non-string request id and its direction rules are reproduced.",
@@ -991,8 +1771,10 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     probe: async () => {
       await withTempDir(async (dir) => {
-        const store = createSessionStore({ configDir: dir });
-        const handle = await store.create({ cwd: '/home/u/project' });
+        const store = await observeCall('the session store', createSessionStore, [
+          { configDir: dir },
+        ]);
+        const handle = observe('the session handle', await store.create({ cwd: '/home/u/project' }));
         await store.append(handle, {
           v: SESSION_SCHEMA_VERSION,
           t: 'user_message',
@@ -1001,9 +1783,8 @@ export const SCENARIOS: readonly Scenario[] = [
           text: 'hello',
         });
         expect(existsSync(path.join(dir, 'projects'))).toBe(true);
-        const events: SessionEvent[] = [];
-        for await (const event of store.read(handle)) events.push(event);
-        expect(events).toHaveLength(1);
+        const events = observe('the transcript records', await readAllSessionEvents(handle.path));
+        expect(events).toMatchObject([{ t: 'user_message', id: 'r1', text: 'hello' }]);
       });
       return measured(
         'partial',
@@ -1020,12 +1801,70 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'reconstructs the branch that ends at the newest leaf, not the one written last',
     },
     probe: async () => {
-      expect(resolveStartMode({ autoAvailable: true, autoDisabledByPolicy: false, interactive: false })).toBe(
-        'default',
+      // The exact-title match, and the ambiguity error that lists the candidates.
+      const summaries = [
+        {
+          sessionId: 'session_a',
+          path: '/tmp/a.jsonl',
+          startedAt: 1,
+          updatedAt: 2,
+          messageCount: 1,
+          title: 'the title',
+        },
+        {
+          sessionId: 'session_b',
+          path: '/tmp/b.jsonl',
+          startedAt: 1,
+          updatedAt: 3,
+          messageCount: 1,
+          title: 'the title',
+        },
+      ];
+      const exact = await observeCall('the exact title match', resolveSessionTarget, [
+        [summaries[0]!],
+        'the title',
+      ]);
+      expect(exact).toMatchObject({ kind: 'found' });
+      const ambiguous = observe(
+        'the ambiguous title',
+        resolveSessionTarget(summaries, 'the title'),
       );
+      expect(ambiguous.kind).toBe('ambiguous');
+      const unknown = observe('the unknown title', resolveSessionTarget(summaries, 'nope'));
+      expect(unknown.kind).toBe('not_found');
+      // The drop guard: a resume that would split a tool turn is refused.
+      const events: SessionEvent[] = [
+        { v: SESSION_SCHEMA_VERSION, t: 'user_message', ts: 1, id: 'm1', text: 'one' },
+        { v: SESSION_SCHEMA_VERSION, t: 'tool_call', ts: 2, id: 'toolu_1', name: 'Echo', input: {} },
+        {
+          v: SESSION_SCHEMA_VERSION,
+          t: 'tool_result',
+          ts: 3,
+          id: 'r1',
+          envelope: { toolUseId: 'toolu_1', content: 'ok', isError: false },
+        },
+      ];
+      const refused = observe('the guarded resume', resumeAtMessage(events, 'toolu_1'));
+      expect(refused.kind).toBe('refused');
+      expect(refused.kind === 'refused' ? refused.reason : '').toBe('drop_guard_refused');
+      const missing = observe('the missing message', resumeAtMessage(events, 'nope'));
+      expect(missing.kind === 'refused' ? missing.reason : '').toBe('processing_error');
+      // The resume point and the interrupted turn: a tool call whose result
+      // never arrived ends the turn.
+      const interrupted = observe(
+        'the interrupted turn',
+        resumeAtMessage(
+          [
+            events[0]!,
+            { v: SESSION_SCHEMA_VERSION, t: 'tool_call', ts: 2, id: 'toolu_9', name: 'Echo', input: {} },
+          ],
+          'toolu_9',
+        ),
+      );
+      expect(interrupted).toMatchObject({ kind: 'ok' });
       return measured(
         'partial',
-        "The selection rules the audit establishes — the exact-title match, the ambiguity error, the attach short-circuit, the drop guard and the interrupted-turn rule — are reproduced; the store-level ordering inside the lookup is not resolved by the audit.",
+        "The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; the store-level ordering inside the session lookup is not resolved by the audit.",
       );
     },
   },
@@ -1039,16 +1878,59 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     probe: async () => {
       await withTempDir(async (dir) => {
-        const store = createCarriedPromptStore({ configDir: dir, now: () => 1_000 });
+        const store = observe(
+          'the carried-prompt store',
+          createCarriedPromptStore({ configDir: dir, now: () => 1_000 }),
+        );
+        // `bound`: the prompt is taken as it stands.
         await store.put({ id: 'p1', sessionId: 's1', prompt: 'hello', createdAt: 1_000 });
-        const taken = await store.take({ id: 'p1', sessionId: 's1', now: 2_000 });
-        expect(taken.outcome).toBe('bound');
-        const again = await store.take({ id: 'p1', sessionId: 's1', now: 2_000 });
-        expect(again.outcome).toBe('sent');
-        const other = await store.take({ id: 'p2', sessionId: 's1', now: 2_000 });
-        expect(other.outcome).toBe('no_row');
+        const taken = await observeCall('the taken prompt', store.take, [
+          { id: 'p1', sessionId: 's1', now: 2_000 },
+        ]);
+        expect(taken).toMatchObject({ outcome: 'bound' });
+        // `sent`: it is not delivered twice.
+        const again = await observeCall('the prompt taken again', store.take, [
+          { id: 'p1', sessionId: 's1', now: 2_000 },
+        ]);
+        expect(again).toMatchObject({ outcome: 'sent' });
+        // `no_row`: the prompt is not there.
+        const other = await observeCall('the absent prompt', store.take, [
+          { id: 'p2', sessionId: 's1', now: 2_000 },
+        ]);
+        expect(other).toMatchObject({ outcome: 'no_row' });
+        // `altered`: the stored text was altered before it was taken.
+        await store.put({ id: 'p3', sessionId: 's1', prompt: 'hello', createdAt: 1_000 });
+        await store.alter({ id: 'p3', sessionId: 's1', prompt: 'changed' });
+        const altered = await observeCall('the altered prompt', store.take, [
+          { id: 'p3', sessionId: 's1', now: 2_000 },
+        ]);
+        expect(altered).toMatchObject({ outcome: 'altered' });
+        // `too_old`: the prompt is older than the age limit.
+        await store.put({ id: 'p4', sessionId: 's1', prompt: 'hello', createdAt: 1_000 });
+        const old = await observeCall('the stale prompt', store.take, [
+          { id: 'p4', sessionId: 's1', now: 10_000_000_000 },
+        ]);
+        expect(old).toMatchObject({ outcome: 'too_old' });
+        // `future_dated`: the prompt was persisted later than it is taken.
+        await store.put({ id: 'p5', sessionId: 's1', prompt: 'hello', createdAt: 5_000 });
+        const future = await observeCall('the future prompt', store.take, [
+          { id: 'p5', sessionId: 's1', now: 2_000 },
+        ]);
+        expect(future).toMatchObject({ outcome: 'future_dated' });
+        // `job_has_run`: the row's job has already run.
+        writeFileSync(
+          path.join(dir, 'carried-prompts.jsonl'),
+          `${JSON.stringify({ id: 'p6', sessionId: 's1', prompt: 'hello', createdAt: 1_000, jobHasRun: true })}\n`,
+        );
+        const job = await observeCall('the job that has run', store.take, [
+          { id: 'p6', sessionId: 's1', now: 2_000 },
+        ]);
+        expect(job).toMatchObject({ outcome: 'job_has_run' });
       });
-      return measured('match', 'The seven-name outcome vocabulary and the binding rule are reproduced.');
+      return measured(
+        'match',
+        "All seven of the target's outcome names are produced — `bound`, `sent`, `altered`, `no_row`, `too_old`, `future_dated` and `job_has_run` — and the binding rule is reproduced: a prompt is bound once and never delivered twice.",
+      );
     },
   },
   {
@@ -1067,11 +1949,18 @@ export const SCENARIOS: readonly Scenario[] = [
         { v: SESSION_SCHEMA_VERSION, t: 'assistant_message', ts: 2, id: 'm2', text: 'two' },
         { v: SESSION_SCHEMA_VERSION, t: 'user_message', ts: 3, id: 'm3', text: 'three' },
       ];
-      const compacted = compact(events, { keepLast: 1, summary: 'the summary' });
-      expect(compacted.summary).toBe('the summary');
+      const compacted = await observeCall(
+        'the compacted events',
+        compact,
+        [events, { keepLast: 1, summary: 'the summary' }],
+      );
+      expect(compacted).toMatchObject({ summary: 'the summary' });
       expect(compacted.events[0]?.t).toBe('compaction');
       expect(compacted.events).toHaveLength(2);
-      const withoutSummary = compact(events, { keepLast: 1 });
+      const withoutSummary = observe(
+        'the events without a summary',
+        compact(events, { keepLast: 1 }),
+      );
       expect(withoutSummary.events).toEqual(events);
       return measured(
         'partial',
@@ -1090,10 +1979,38 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'is exactly the 23 host subtypes',
     },
     probe: async () => {
-      expect(HOST_CONTROL_REQUEST_SUBTYPES).toHaveLength(23);
-      expect(HOST_CONTROL_REQUEST_SUBTYPES).not.toContain('can_use_tool');
-      const response = await dispatchControlRequest({ subtype: 'mcp_status', request_id: 'r1' }, {});
-      expect(response.subtype).toBe('success');
+      const subtypes = observe('the host control-request subtypes', HOST_CONTROL_REQUEST_SUBTYPES);
+      expect([...subtypes]).toEqual([
+        'initialize',
+        'set_model',
+        'set_max_thinking_tokens',
+        'set_permission_mode',
+        'rename_session',
+        'set_color',
+        'file_suggestions',
+        'read_file',
+        'get_workspace_diff',
+        'get_context_usage',
+        'get_usage',
+        'mcp_status',
+        'mcp_authenticate',
+        'mcp_oauth_callback_url',
+        'mcp_reconnect',
+        'interrupt',
+        'apply_flag_settings',
+        'mcp_set_servers',
+        'stop_task',
+        'background_tasks',
+        'cancel_async_message',
+        'side_question',
+        'fork_conversation',
+      ]);
+      expect(subtypes).not.toContain('can_use_tool');
+      const response = observe(
+        'the dispatched response',
+        await dispatchControlRequest({ subtype: 'mcp_status', request_id: 'r1' }, {}),
+      );
+      expect(response).toMatchObject({ subtype: 'success' });
       return measured(
         'match',
         "The host dispatcher handles exactly the 23 observed subtypes, and `can_use_tool` is not among them.",
@@ -1109,12 +2026,39 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'rejects every agent-originated subtype by direction',
     },
     probe: async () => {
-      for (const subtype of AGENT_ORIGINATED_CONTROL_SUBTYPES) {
-        expect(controlRequestDirectionError(subtype), subtype).toBeDefined();
-      }
-      expect(controlRequestDirectionError('register_device_hooks')).toBeDefined();
-      expect(controlRequestDirectionError('mcp_tasks_changed')).toBeDefined();
-      expect(controlRequestDirectionError('read_file')).toBeUndefined();
+      const originated = observe('the agent-originated subtypes', AGENT_ORIGINATED_CONTROL_SUBTYPES);
+      expect([...originated]).toEqual([
+        'can_use_tool',
+        'hook_callback',
+        'elicitation',
+        'request_user_dialog',
+        'oauth_token_refresh',
+        'host_auth_token_refresh',
+        'remote_tool_call',
+        'remote_plumbing_call',
+        'remote_tools_probe',
+        'remote_tools_reannounce',
+        'remote_control_work_secret',
+      ]);
+      // The three refusals, word for word.
+      const agent = observe(
+        'the agent-originated refusal',
+        controlRequestDirectionError('can_use_tool'),
+      );
+      expect(agent).toBe('can_use_tool is agent-originated and cannot be sent by a host');
+      const service = observe(
+        'the service-originated refusal',
+        controlRequestDirectionError('mcp_tasks_changed'),
+      );
+      expect(service).toBe('mcp_tasks_changed is sent to a cloud agent by the service, not by a host');
+      const client = observe(
+        'the client-originated refusal',
+        controlRequestDirectionError('register_device_hooks'),
+      );
+      expect(client).toBe(
+        'register_device_hooks is sent to a cloud agent by the attached client, not by a host',
+      );
+      expect(observe('the accepted subtype', controlRequestDirectionError('read_file'))).toBeUndefined();
       return measured('match', 'The three refused directions and their wordings are reproduced.');
     },
   },
@@ -1127,13 +2071,34 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'uses 3 for local servers and 20 for remote ones',
     },
     probe: async () => {
-      expect(LOCAL_CONNECT_BATCH_SIZE).toBe(3);
-      expect(REMOTE_CONNECT_BATCH_SIZE).toBe(20);
-      expect(getMcpServerConnectionBatchSize()).toBe(3);
-      expect(getRemoteMcpServerConnectionBatchSize()).toBe(20);
+      expect(observe('the local batch size', LOCAL_CONNECT_BATCH_SIZE)).toBe(3);
+      expect(observe('the remote batch size', REMOTE_CONNECT_BATCH_SIZE)).toBe(20);
+      expect(observe('the local batch size', getMcpServerConnectionBatchSize())).toBe(3);
+      expect(observe('the remote batch size', getRemoteMcpServerConnectionBatchSize())).toBe(20);
+      // The stdio transport: the process is spawned with `shell: false`, with
+      // the pipe stdio and with the merged environment.
+      const channel = openChannel<{ command: string; args: readonly string[]; options: SpawnOptions }>();
+      const transport = observe(
+        'the stdio transport',
+        createStdioTransport({
+          command: '/bin/true',
+          args: ['--serve'],
+          env: { PRRICODE_TEST: 'yes' },
+          spawnImpl: (command, args, options) => {
+            channel.deliver({ command, args, options });
+            return fakeChild();
+          },
+        }),
+      );
+      await transport.start();
+      const spawn = observe('the spawn this implementation handed over', channel.delivered());
+      expect(spawn).toMatchObject({ command: '/bin/true', args: ['--serve'] });
+      expect(spawn?.options.shell).toBe(false);
+      expect(spawn?.options.stdio).toEqual(['pipe', 'pipe', 'inherit']);
+      expect(spawn?.options.env?.['PRRICODE_TEST']).toBe('yes');
       return measured(
         'match',
-        "The stdio transport and the 3/20 batching are the target's observed values.",
+        "The stdio transport spawns with `shell: false`, the pipe stdio and the merged environment, and the 3/20 batching is the target's observed value.",
       );
     },
   },
@@ -1153,15 +2118,19 @@ export const SCENARIOS: readonly Scenario[] = [
         { name: 'two', type: 'stdio', command: '/bin/true' },
         { name: 'three', type: 'http', url: 'http://127.0.0.1:1/mcp' },
       ];
-      const states = await connectServersInBatches(configs, {
-        connect: async (config) => ({
-          name: config.name,
-          status: config.name === 'three' ? 'failed' : 'ready',
-          tools: [],
-          ...(config.name === 'three' ? { error: 'the endpoint refused the connection' } : {}),
-        }),
-      });
-      expect(states.map((state) => state.name)).toEqual(['one', 'two', 'three']);
+      const states = await observeCall(
+        'the connection states',
+        connectServersInBatches,
+        [configs, {
+          connect: async (config: McpServerConfig) => ({
+            name: config.name,
+            status: config.name === 'three' ? 'failed' : 'ready',
+            tools: [],
+            ...(config.name === 'three' ? { error: 'the endpoint refused the connection' } : {}),
+          }),
+        }],
+      );
+      expect(states).toMatchObject([{ name: 'one' }, { name: 'two' }, { name: 'three' }]);
       expect(states[2]?.status).toBe('failed');
       expect(states[2]?.error).toBeDefined();
       return measured(
@@ -1179,11 +2148,25 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'lists exactly the thirty-three hook events',
     },
     probe: async () => {
-      expect(HOOK_EVENTS).toHaveLength(33);
-      expect([...DISPLAY_HANDLERS].sort()).toEqual(['FileSuggestion', 'StatusLine']);
-      expect(HOOK_EVENTS).not.toContain('StatusLine');
-      expect(HOOK_EVENTS).not.toContain('FileSuggestion');
-      const registry = createHookRegistry();
+      const events = observe('the hook events', HOOK_EVENTS);
+      expect(events).toHaveLength(33);
+      // The two display handlers live outside the event set.
+      const handlers = observe('the display handlers', DISPLAY_HANDLERS);
+      expect([...handlers].sort()).toEqual(['FileSuggestion', 'StatusLine']);
+      expect(events).not.toContain('StatusLine');
+      expect(events).not.toContain('FileSuggestion');
+      // The per-event classification: the decision-capable set and the
+      // execution-class table are disjoint, and together they are the 33.
+      const decisions = observe('the decision-capable events', DECISION_EVENTS);
+      const classification = observe('the execution classification', HOOK_EXECUTION_CLASS);
+      const classified = Object.keys(classification);
+      expect(decisions).toHaveLength(11);
+      expect(classified).toHaveLength(22);
+      expect(classified.filter((event) => (decisions as readonly string[]).includes(event))).toEqual(
+        [],
+      );
+      expect([...decisions, ...classified].sort()).toEqual([...events].sort());
+      const registry = observe('the hook registry', createHookRegistry());
       registry.register({ event: 'PreToolUse', command: 'echo', matcher: 'Bash' });
       expect(registry.for('PreToolUse')).toHaveLength(1);
       return measured(
@@ -1203,19 +2186,23 @@ export const SCENARIOS: readonly Scenario[] = [
     probe: async () => {
       // The plugin manifest: the target's "not a JSON object" reason, and the
       // directory/file key split.
-      const broken = parsePluginManifest('not an object', '/tmp/plugin.json');
-      expect(broken.ok).toBe(false);
-      expect(broken.reason).toBe('it is not a JSON object');
-      const parsed = parsePluginManifest(
-        { commands: ['commands/one.md'], mcpServers: { memory: 'mcp.json' } },
+      const broken = await observeCall('the broken manifest', parsePluginManifest, [
+        'not an object',
         '/tmp/plugin.json',
+      ]);
+      expect(broken).toMatchObject({ ok: false, reason: 'it is not a JSON object' });
+      const parsed = observe(
+        'the parsed manifest',
+        parsePluginManifest(
+          { commands: ['commands/one.md'], mcpServers: { memory: 'mcp.json' } },
+          '/tmp/plugin.json',
+        ),
       );
-      expect(parsed.ok).toBe(true);
+      expect(parsed).toMatchObject({ ok: true });
       // The IDE bridge's action rule: a single path segment, nothing else.
-      expect(isSafeIdeAction('executeCode')).toBe(true);
-      expect(isSafeIdeAction('getDiagnostics')).toBe(true);
-      expect(isSafeIdeAction('../etc/passwd')).toBe(false);
-      expect(isSafeIdeAction('a/b')).toBe(false);
+      const safe = observe('the safe IDE action', isSafeIdeAction('executeCode'));
+      expect(safe).toBe(true);
+      expect(observe('the unsafe IDE action', isSafeIdeAction('../etc/passwd'))).toBe(false);
       return measured(
         'partial',
         "This implementation implements the five subsystems, but the audit records their names and storage and not their behaviour, so the target's behaviour is not reproduced.",
@@ -1233,10 +2220,27 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'denies the syscall surface the plan requires, including io_uring_setup',
     },
     probe: async () => {
-      expect(OBSERVED_SYSCALLS.length).toBeGreaterThan(0);
+      // The syscall denylist, including `io_uring_setup`.
+      const denied = observe('the syscall denylist', DENIED_SYSCALLS);
+      expect(denied).toContain('io_uring_setup');
+      expect(denied).toContain('ptrace');
+      // The masked protected paths.
+      await withTempDir(async (dir) => {
+        const secrets = path.join(dir, 'secrets');
+        mkdirSync(secrets, { recursive: true });
+        const plan = await observeCall('the mount plan', buildSandboxPlan, [
+          { command: 'ls', cwd: dir, protectedPaths: [secrets] },
+        ]);
+        expect(plan.masks).toMatchObject([{ path: secrets, target: secrets, kind: 'tmpfs' }]);
+        expect(plan.deniedSyscalls).toContain('io_uring_setup');
+      });
+      // The divergence: this implementation establishes the sandbox with an **external**
+      // `bubblewrap` binary and ships no native helper of its own.
+      const backend = observe('the sandbox backend', bubblewrapBackend());
+      expect(backend).toMatchObject({ name: 'bubblewrap' });
       return measured(
-        'partial',
-        'The observable guarantees are reproduced — the filesystem boundary, the syscall denylist including `io_uring_setup`, and the masked protected paths — but this implementation builds the policy in TypeScript over bubblewrap and ships no native helper.',
+        'mismatch',
+        "This implementation's syscall denylist includes `io_uring_setup` and its mount plan masks the protected paths, but this implementation establishes the sandbox with an external `bubblewrap` binary and ships no native helper, where the target's `apply-seccomp` helper is a native worker that does the namespace, mount and `prctl` work itself.",
       );
     },
   },
@@ -1249,10 +2253,67 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'observes without denying: the response error stays zero and the call continues',
     },
     probe: async () => {
-      expect(OBSERVED_SYSCALLS).toHaveLength(27);
+      // The 27-record dispatch table, with the audit's names.
+      const records = observe('the dispatch table', OBSERVED_SYSCALLS);
+      expect(records).toHaveLength(27);
+      expect(records.map((record) => record.name)).toEqual([
+        'openat',
+        'unlinkat',
+        'mkdirat',
+        'mknodat',
+        'symlinkat',
+        'linkat',
+        'renameat',
+        'renameat2',
+        'fchmodat',
+        'fchmodat2',
+        'fchownat',
+        'utimensat',
+        'open',
+        'creat',
+        'unlink',
+        'rmdir',
+        'rename',
+        'link',
+        'symlink',
+        'mkdir',
+        'mknod',
+        'truncate',
+        'chmod',
+        'chown',
+        'lchown',
+        'utime',
+        'utimes',
+      ]);
+      // The observe-never-deny rule: the supervisor answers with a zero error,
+      // so the call continues.
+      const channel = openChannel<SeccompResponse>();
+      const supervisor = observe(
+        'the seccomp supervisor',
+        createSeccompSupervisor({
+          channel: {
+            receive: () => null,
+            respond: (response) => channel.deliver(response),
+            isIdValid: () => true,
+            readMemory: () => Buffer.from('/etc/passwd\0', 'utf8'),
+            resolveTargetPath: () => '/tmp',
+          },
+        }),
+      );
+      supervisor.handle({ id: 7n, pid: 42, nr: 257, args: [0n, 0x1000n, 0n, 0n, 0n, 0n] });
+      const response = observe('the supervisor response', channel.delivered());
+      expect(response).toMatchObject({ error: 0, flags: 1 });
+      expect(supervisor.observations).toMatchObject([{ syscall: 'openat', nr: 257 }]);
+      // The divergence: this implementation installs no seccomp-notification listener.
+      const filter = observe('the seccomp filter', buildSeccompFilter());
+      const actions: number[] = [];
+      for (let offset = 0; offset + 8 <= filter.length; offset += 8) {
+        actions.push(filter.readUInt32LE(offset + 4));
+      }
+      expect(actions).not.toContain(0x7fc00000);
       return measured(
-        'partial',
-        'The 27-record dispatch table and the observe-never-deny rule are reproduced, but this build ships no seccomp-notify listener: the status reports `layers.supervisor` as false.',
+        'mismatch',
+        "The 27-record dispatch table and the observe-never-deny rule are reproduced, but this build installs no seccomp-notification listener: its filter program carries no `SECCOMP_RET_USER_NOTIF` action, so the supervisor is never attached to a kernel notification.",
       );
     },
   },
@@ -1262,21 +2323,24 @@ export const SCENARIOS: readonly Scenario[] = [
     command: reproduce('F-36 the whole-image native inventory'),
     pinning: undefined,
     probe: async () => {
-      // The whole-image native inventory produced **no** Evidence record: three
-      // attempts timed out (330 s, 360 s, 900 s). There is nothing to measure
-      // this implementation against, so the scenario is recorded as `not-tested` rather
-      // than as a failure.
-      const evidenceDir = '/home/shiva/opt/reference-agent-rea/evidence';
-      const inventory = existsSync(evidenceDir)
-        ? readdirSync(evidenceDir).find((name) => /whole.?image|inventory/i.test(name))
-        : undefined;
+      // The whole-image native inventory produced **no** Evidence record: the
+      // audit records three attempts that timed out (330 s, 360 s, 900 s).
+      // The probe looks for such a record **inside the repository**, so the
+      // scenario is portable and does not name a path outside it.
+      const evidence = readdirSync(path.join(REPOSITORY_ROOT, 'docs', 'reverse-engineering'));
+      const inventory = evidence.find((name) => /whole[-_ ]?image/i.test(name));
       if (inventory !== undefined) {
-        throw new NotTestedError(
+        throw new Error(
           `a whole-image inventory record exists (${inventory}) but analysing it is outside this harness`,
         );
       }
-      throw new NotTestedError(
-        'The whole-image native inventory produced no Evidence record: three attempts timed out (330 s, 360 s, 900 s)',
+      // This implementation's own native surface: an external binary, not a helper of
+      // this implementation's own.
+      const backend = await observeCall('the sandbox backend', bubblewrapBackend, []);
+      expect(backend).toMatchObject({ name: 'bubblewrap' });
+      return measured(
+        'unknown',
+        "The whole-image native inventory produced no Evidence record — the audit records three attempts that timed out — so the target's native image was never established and nothing was compared; this implementation's own native surface is the external `bubblewrap` binary.",
       );
     },
   },
@@ -1293,37 +2357,46 @@ export const SCENARIOS: readonly Scenario[] = [
       // missing backend with `failIfUnavailable` off all run the command
       // **unconfined**; only a missing backend with `failIfUnavailable` on
       // refuses it.
-      const excluded = evaluateSandbox(
-        { ...DEFAULT_SANDBOX_POLICY, enabledPlatforms: ['darwin'] },
-        'linux',
-        'ls',
-        'available',
+      const excluded = observe(
+        'the excluded-platform decision',
+        evaluateSandbox(
+          { ...DEFAULT_SANDBOX_POLICY, enabledPlatforms: ['darwin'] },
+          'linux',
+          'ls',
+          'available',
+        ),
       );
-      expect(excluded.decision).toBe('unconfined');
-      expect(excluded.reason).toBe('sandbox.enabledPlatforms excludes linux');
-      const disabled = evaluateSandbox(
-        { ...DEFAULT_SANDBOX_POLICY, enabled: false },
-        'linux',
-        'ls',
-        'available',
+      expect(excluded).toMatchObject({
+        decision: 'unconfined',
+        reason: 'sandbox.enabledPlatforms excludes linux',
+      });
+      const disabled = observe(
+        'the disabled decision',
+        evaluateSandbox({ ...DEFAULT_SANDBOX_POLICY, enabled: false }, 'linux', 'ls', 'available'),
       );
-      expect(disabled.decision).toBe('unconfined');
-      expect(disabled.reason).toBe('sandbox.enabled is false');
-      const missing = evaluateSandbox(
-        { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: false },
-        'linux',
-        'ls',
-        'unavailable',
+      expect(disabled).toMatchObject({ decision: 'unconfined', reason: 'sandbox.enabled is false' });
+      const missing = observe(
+        'the missing-backend decision',
+        evaluateSandbox(
+          { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: false },
+          'linux',
+          'ls',
+          'unavailable',
+        ),
       );
       expect(missing.decision).toBe('unconfined');
-      const refused = evaluateSandbox(
-        { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: true },
-        'linux',
-        'ls',
-        'unavailable',
+      const refused = observe(
+        'the refused decision',
+        evaluateSandbox(
+          { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: true },
+          'linux',
+          'ls',
+          'unavailable',
+        ),
       );
-      expect(refused.decision).toBe('deny');
-      expect(SANDBOX_REASONS.disabled).toBe('sandbox.enabled is false');
+      expect(refused).toMatchObject({ decision: 'deny' });
+      const reasons = observe('the sandbox reasons', SANDBOX_REASONS);
+      expect(reasons.disabled).toBe('sandbox.enabled is false');
       return measured(
         'unknown',
         "The target's routing is unobserved: the audit records the `sandboxOverride` reason kind and the `dangerouslyDisableSandbox` flag, and this implementation's routing is its own.",
@@ -1342,22 +2415,27 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     probe: async () => {
       // The optional value belongs to `-r`/`--resume`.
-      expect(runOf(['--resume', 'session_abc']).resume).toBe('session_abc');
-      expect(runOf(['--resume', '--print']).resume).toBe('');
-      // The audit's rule for the **rest** of the boolean set is not reproduced:
-      // this implementation keeps them pure so that they cannot swallow the prompt.
-      expect(runOf(['--continue', 'the prompt']).positionals).toEqual(['the prompt']);
+      const resumed = await runOf(['--resume', 'session_abc']);
+      expect(resumed).toMatchObject({ resume: 'session_abc' });
+      const empty = await runOf(['--resume', '--print']);
+      expect(empty.resume).toBe('');
+      // The divergence: the audit observes that the **boolean** set consumes
+      // the next token when it does not look like a flag; this implementation keeps the
+      // rest of the boolean set pure.
+      const continued = await runOf(['--continue', 'the prompt']);
+      expect(continued.positionals).toEqual(['the prompt']);
       // The command tokens and the validation messages.
-      expect(runOf(['--print']).print).toBe(true);
-      expect(errorOf(['--input-format', 'stream-json'])).toBe(
+      const printed = await runOf(['--print']);
+      expect(printed).toMatchObject({ print: true });
+      expect(await errorOf(['--input-format', 'stream-json'])).toBe(
         'Error: --input-format=stream-json requires output-format=stream-json.',
       );
-      expect(errorOf(['--input-format', 'stream-json', '--output-format', 'stream-json'])).toBe(
+      expect(await errorOf(['--input-format', 'stream-json', '--output-format', 'stream-json'])).toBe(
         'Error: --input-format=stream-json requires --print.',
       );
       return measured(
-        'partial',
-        "The parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the patterns and the validation messages are reproduced; the rest of the boolean set is deliberately kept pure, which is a deviation from the audit's rule.",
+        'mismatch',
+        "The parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the patterns and the validation messages are reproduced; the rest of the boolean set is deliberately kept pure, which diverges from the audit's observed rule that a boolean consumes the next token when it does not look like a flag.",
       );
     },
   },
@@ -1372,9 +2450,15 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'produces one block per assistant message',
     },
     probe: async () => {
-      const blocks = renderMessages([
-        { v: SESSION_SCHEMA_VERSION, t: 'assistant_message', ts: 1, id: 'a1', text: 'hello' },
-      ]);
+      const blocks = await observeCall(
+        'the rendered blocks',
+        renderMessages,
+        [
+          [
+            { v: SESSION_SCHEMA_VERSION, t: 'assistant_message', ts: 1, id: 'a1', text: 'hello' },
+          ],
+        ],
+      );
       expect(blocks).toHaveLength(1);
       expect(blocks[0]).toContain(MESSAGE_MARKER);
       return measured(
@@ -1394,27 +2478,38 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'provider list prints one row per connection with its id, name, route, base URL, and credential status',
     },
     probe: async () => {
-      const registry = createProviderRegistry([connectionOf()]);
-      const listed = await providerCommand(['list'], registry, {
-        env: { PRRICODE_TEST_TOKEN: 'v' },
-      });
-      expect(listed.exitCode).toBe(0);
+      const registry = await observeCall('the connection registry', createProviderRegistry, [
+        [connectionOf()],
+      ]);
+      const listed = await observeCall('the provider listing', providerCommand, [
+        ['list'],
+        registry,
+        { env: { PRRICODE_TEST_TOKEN: 'v' } },
+      ]);
+      expect(listed).toMatchObject({ exitCode: 0 });
       expect(listed.stdout).toContain('CREDENTIAL');
       expect(listed.stdout).toContain('STATUS');
       expect(listed.stdout).not.toContain('"v"');
       // The catalog browser reads the catalog of the **active** connection.
-      const active = createProviderRegistry([connectionOf({ enabled: true })]);
-      const catalog = await catalogCommand(['list'], active, {});
-      expect(catalog.exitCode).toBe(0);
+      const active = observe('the active registry', createProviderRegistry([connectionOf({ enabled: true })]));
+      const catalog = observe('the catalog listing', await catalogCommand(['list'], active, {}));
+      expect(catalog).toMatchObject({ exitCode: 0 });
       // The `use` verb refuses an unusable connection and names it.
-      const unusable = createProviderRegistry([
-        connectionOf({ credential: { kind: 'env', name: 'PRRICODE_ABSENT' } }),
-      ]);
-      const refused = await providerCommand(['use', 'prod'], unusable, { env: {} });
+      const unusable = observe(
+        'the unusable registry',
+        createProviderRegistry([
+          connectionOf({ credential: { kind: 'env', name: 'PRRICODE_ABSENT' } }),
+        ]),
+      );
+      const refused = observe(
+        'the refused use',
+        await providerCommand(['use', 'prod'], unusable, { env: {} }),
+      );
       expect(refused.exitCode).not.toBe(0);
       expect(`${refused.stderr}${refused.stdout}`).toContain('unusable');
       // The credential is delivered to a vendor host and refused elsewhere.
-      expect(checkCredentialDelivery(connectionOf(), {}).allowed).toBe(true);
+      const delivery = observe('the credential delivery', checkCredentialDelivery(connectionOf(), {}));
+      expect(delivery).toMatchObject({ allowed: true });
       return measured(
         'partial',
         'The project requirement is met — the `/provider` command, the catalog browser, the picker, the credential status vocabulary and the two credential columns — but the target has no such surface, so no target behaviour is matched.',
@@ -1435,6 +2530,10 @@ export interface Measurement {
   readonly detail: string;
   /** Whether the probe failed — that is, whether the claim does not hold. */
   readonly failed: boolean;
+  /** The values the probe observed. */
+  readonly observations: readonly Observation[];
+  /** The assertions the probe made. */
+  readonly assertions: readonly RecordedAssertion[];
 }
 
 /** The message of a thrown value. */
@@ -1448,16 +2547,42 @@ function messageOf(error: unknown): string {
  *
  * A probe that throws is a **mismatch** — the claim does not hold. A probe that
  * raises {@link NotTestedError} is `not-tested`: the scenario could not run.
+ *
+ * The run's observations and assertions are recorded whatever the probe does,
+ * so the report test can tell a measurement from a rubber stamp.
  */
 export async function measure(scenario: Scenario): Promise<Measurement> {
+  const run: Run = { observations: [], assertions: [], channels: [] };
+  const previous = currentRun;
+  currentRun = run;
   try {
     const result = await scenario.probe();
-    return { outcome: result.outcome, detail: result.detail, failed: false };
+    return {
+      outcome: result.outcome,
+      detail: result.detail,
+      failed: false,
+      observations: run.observations,
+      assertions: run.assertions,
+    };
   } catch (error) {
     if (error instanceof NotTestedError) {
-      return { outcome: 'not-tested', detail: error.message, failed: false };
+      return {
+        outcome: 'not-tested',
+        detail: error.message,
+        failed: false,
+        observations: run.observations,
+        assertions: run.assertions,
+      };
     }
-    return { outcome: 'mismatch', detail: messageOf(error), failed: true };
+    return {
+      outcome: 'mismatch',
+      detail: messageOf(error),
+      failed: true,
+      observations: run.observations,
+      assertions: run.assertions,
+    };
+  } finally {
+    currentRun = previous;
   }
 }
 

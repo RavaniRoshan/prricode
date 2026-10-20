@@ -1,10 +1,16 @@
 /**
- * The harness's own test: every scenario, run against this implementation.
+ * The compatibility scenario harness's own test: every scenario, run against
+ * this implementation.
  *
  * A scenario is one measurable claim. This file runs each of them and fails
  * when a claim does not hold — a probe that throws is a **mismatch**, and the
  * test says so. A scenario that cannot run raises `NotTestedError` and is
  * recorded as `not-tested`, which is **not** a failure.
+ *
+ * The test also checks that every scenario **measured something**: a probe that
+ * observed nothing of this implementation, or that asserted a constant rather than a
+ * value it observed, has not measured the claim it names, and the test says
+ * so.
  *
  * The tests are written out one by one, with their titles spelled out, so that
  * a reader — and `tests/compatibility/results.test.ts` — can find a scenario by
@@ -17,14 +23,16 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { SCENARIOS, measure, scenarioOf } from './scenarios.js';
+import { readMatrix } from './matrix.js';
+import { SCENARIOS, meaningfulness, measure, scenarioOf } from './scenarios.js';
 
 /**
  * Run a scenario and assert that its claim holds.
  *
  * A scenario that measured a mismatch fails here, with the reason the probe
  * gave. A scenario that could not run is recorded as `not-tested` and passes:
- * an honest gap is not a failure.
+ * an honest gap is not a failure. A scenario that measured **nothing** fails
+ * too: a probe that asserts a constant is not a measurement.
  */
 async function expectScenario(rowId: string): Promise<void> {
   const scenario = scenarioOf(rowId);
@@ -33,6 +41,8 @@ async function expectScenario(rowId: string): Promise<void> {
     measurement.failed,
     `${rowId} did not measure: ${measurement.detail}`,
   ).toBe(false);
+  const meaning = meaningfulness(measurement);
+  expect(meaning.meaningful, `${rowId} measured nothing: ${meaning.reason}`).toBe(true);
 }
 
 describe('compatibility scenarios', () => {
@@ -211,5 +221,14 @@ describe('compatibility scenarios', () => {
     expect(new Set(rowIds).size).toBe(rowIds.length);
     const titles = SCENARIOS.map((scenario) => scenario.title);
     expect(new Set(titles).size).toBe(titles.length);
+  });
+
+  it('measures exactly the rows the feature matrix names', () => {
+    // The two sets are **equal**: a scenario for a row the matrix does not
+    // have measures nothing, and a matrix row without a scenario is not
+    // measured at all.
+    const matrixIds = readMatrix().map((row) => row.id);
+    const scenarioIds = SCENARIOS.map((scenario) => scenario.rowId);
+    expect([...scenarioIds].sort()).toEqual([...matrixIds].sort());
   });
 });

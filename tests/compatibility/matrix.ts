@@ -25,6 +25,8 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { cellsOf } from './references.js';
+
 /* -------------------------------------------------------------------------- */
 /* The paths                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -97,6 +99,15 @@ export interface MatrixRow {
   readonly owningTask: string;
   /** The tests the matrix names for the row. */
   readonly testRef: string;
+  /**
+   * How many cells the row read as.
+   *
+   * The matrix's rows carry nine columns, and a row that carries a pipe
+   * inside a cell must still read as nine: a reader that splits on the pipe
+   * reads the wrong number of columns, and the tail columns it reads are the
+   * wrong ones.
+   */
+  readonly cellCount: number;
 }
 
 /** A row of the results report. */
@@ -124,28 +135,6 @@ export interface ResultRow {
 /* -------------------------------------------------------------------------- */
 /* The parsing                                                                 */
 /* -------------------------------------------------------------------------- */
-
-/**
- * The cells of a markdown table row.
- *
- * An empty array for a line that is not a table row. The cells are trimmed.
- *
- * A row that does **not** end with a pipe is still a row: the matrix has two
- * such rows, and a reader that insisted on the closing pipe would silently
- * drop them. The trailing empty cell a closing pipe produces is dropped, so
- * the two shapes read the same.
- */
-function cellsOf(line: string): string[] {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith('|')) return [];
-  const cells = trimmed
-    .slice(1)
-    .split('|')
-    .map((cell) => cell.trim());
-  const last = cells[cells.length - 1];
-  if (last === '') cells.pop();
-  return cells;
-}
 
 /**
  * The canonical form of an evidence class.
@@ -193,6 +182,7 @@ export function parseMatrix(markdown: string): MatrixRow[] {
       cloneStatus,
       owningTask,
       testRef,
+      cellCount: cells.length,
     });
   }
   return rows;

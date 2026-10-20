@@ -161,27 +161,27 @@ The store is append-only, the last row per id wins, and a prompt is not delivere
 
 ## Conformance table
 
-| Claim | Evidence class | Pinned by |
-|---|---|---|
-| The transcript is append-only JSONL under `<configDir>/projects/<project>/<sessionId>.jsonl` | REA observed | `tests/contracts/session-store.test.ts` — "writes one JSON object per line and reads the same events back in order", "keeps the transcript under …" |
-| The project directory name is derived from the working directory, truncated, and hashed | REA observed + implementation choice (truncation and hash) | same file — "derives the project directory name …", "truncates a long project directory name and appends a hash of the full path" |
-| A session id cannot escape the project directory, and a caller-supplied id is data | implementation choice | same file — the id-validation tests |
-| A handle is checked where it is used, so a hand-built handle cannot reach an arbitrary file | implementation choice | same file — "refuses a handle that does not point at a transcript of the store" |
-| A torn final line is discarded; a complete final line is kept | implementation choice | same file — the two torn-line tests |
-| A corrupt line in the middle raises and names `path:line` | implementation choice | same file — "raises a format error for a corrupt line in the middle of the file" |
-| An unknown record version is refused, per record, naming both versions | implementation choice | same file — "refuses a record whose version it does not know, and names both versions", "sees a format change per record, not only on the first one" |
-| The oversized tool result is kept in the file and stubbed in the context | REA observed (the mechanism) + implementation choice (the limit) | `tests/contracts/session-store.test.ts`, `tests/contracts/session-resume.test.ts`, `tests/contracts/tool-result-projection.test.ts`, `tests/contracts/tool-result-stub.test.ts` — the content-replacement tests |
-| All three paths that project a transcript into a context apply the replacement and produce the same stubbed content | implementation choice | `tests/contracts/tool-result-stub.test.ts` — the three-paths-agree tests |
-| The limit is the **store's** `maxToolResultBytes`, not a constant | implementation choice | same file — the store's own limit test |
-| A title match is exact, an ambiguous title is an error listing the candidates, and an unknown title or id has the target's wording | REA observed | same file — the target-resolution tests |
-| The drop guard refuses a resume that would split a tool turn | REA observed (the mechanism) + implementation choice (the exact rule) | same file — the drop-guard tests |
-| The resume point is the last assistant message with a tool use, else the last message | REA observed | `tests/contracts/session-resume.test.ts` — the two resume-point tests |
-| A leaf tie is won by the record written last | implementation choice | same file — "wins a leaf tie with the one that was written last" |
-| `--continue` selects the newest session, reports a background-running one, and uses the target's two failure messages | REA observed (the messages and the newest-session rule) + **implementation choice** (the store-level ordering rule was not traced) | `tests/contracts/session-store.test.ts` — the continue tests |
-| The interrupted turn is detected by the backward walk | REA observed | `tests/contracts/session-resume.test.ts` — the two interrupted-turn tests |
-| A `tool_use` is answered by the `tool_result` with the same id, and the pending id is removed on arrival | REA observed | `tests/contracts/session-resume.test.ts` — "pairs a tool_result with the tool_call it answers", "keeps a tool call whose result never arrived pending" |
-| The compaction boundary skips the prefix and does not delete it, and the boundary is located by the parent link | REA observed (the mechanism) + implementation choice (the model) | `tests/contracts/session-resume.test.ts` — the compaction tests |
-| The summary is passed in, never generated locally | REA observed | `tests/contracts/session-resume.test.ts` — "never produces a summary locally" |
-| The carried-prompt vocabulary is exactly the seven names, the bound check is enforced, and a prompt is not delivered twice | REA observed (the vocabulary) + implementation choice (the semantics) | `tests/contracts/session-store.test.ts` — the carried-prompt tests |
-| The telemetry event names are the target's | REA observed | same file — "emits the target's telemetry event with the outcome" |
-| A transcript path names a session by the **last** session-id segment it holds | implementation choice | `tests/contracts/cli-surface.test.ts` — "scans a path for a session-id segment" |
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The transcript is append-only JSONL under `<configDir>/projects/<project>/<sessionId>.jsonl` | REA observed | F-24 | `tests/contracts/session-store.test.ts` — "writes one JSON object per line and reads the same events back in order", "keeps the transcript under …" |
+| The project directory name is derived from the working directory, truncated, and hashed | REA observed + implementation choice (truncation and hash) | F-24 | same file — "derives the project directory name …", "truncates a long project directory name and appends a hash of the full path" |
+| A session id cannot escape the project directory, and a caller-supplied id is data | implementation choice | F-24 | same file — the id-validation tests |
+| A handle is checked where it is used, so a hand-built handle cannot reach an arbitrary file | implementation choice | F-24 | same file — "refuses a handle that does not point at a transcript of the store" |
+| A torn final line is discarded; a complete final line is kept | implementation choice | F-24 | same file — the two torn-line tests |
+| A corrupt line in the middle raises and names `path:line` | implementation choice | F-24 | same file — "raises a format error for a corrupt line in the middle of the file" |
+| An unknown record version is refused, per record, naming both versions | implementation choice | F-24 | same file — "refuses a record whose version it does not know, and names both versions", "sees a format change per record, not only on the first one" |
+| The oversized tool result is kept in the file and stubbed in the context | REA observed (the mechanism) + implementation choice (the limit) | F-24 | `tests/contracts/session-store.test.ts`, `tests/contracts/session-resume.test.ts`, `tests/contracts/tool-result-projection.test.ts`, `tests/contracts/tool-result-stub.test.ts` — the content-replacement tests |
+| All three paths that project a transcript into a context apply the replacement and produce the same stubbed content | implementation choice | F-24 | `tests/contracts/tool-result-stub.test.ts` — the three-paths-agree tests |
+| The limit is the **store's** `maxToolResultBytes`, not a constant | implementation choice | F-24 | same file — the store's own limit test |
+| A title match is exact, an ambiguous title is an error listing the candidates, and an unknown title or id has the target's wording | REA observed | F-25 | same file — the target-resolution tests |
+| The drop guard refuses a resume that would split a tool turn | REA observed (the mechanism) + implementation choice (the exact rule) | F-25 | same file — the drop-guard tests |
+| The resume point is the last assistant message with a tool use, else the last message | REA observed | F-25 | `tests/contracts/session-resume.test.ts` — the two resume-point tests |
+| A leaf tie is won by the record written last | implementation choice | F-25 | same file — "wins a leaf tie with the one that was written last" |
+| `--continue` selects the newest session, reports a background-running one, and uses the target's two failure messages | REA observed (the messages and the newest-session rule) + **implementation choice** (the store-level ordering rule was not traced) | F-25 | `tests/contracts/session-store.test.ts` — the continue tests |
+| The interrupted turn is detected by the backward walk | REA observed | F-25 | `tests/contracts/session-resume.test.ts` — the two interrupted-turn tests |
+| A `tool_use` is answered by the `tool_result` with the same id, and the pending id is removed on arrival | REA observed | F-25 | `tests/contracts/session-resume.test.ts` — "pairs a tool_result with the tool_call it answers", "keeps a tool call whose result never arrived pending" |
+| The compaction boundary skips the prefix and does not delete it, and the boundary is located by the parent link | REA observed (the mechanism) + implementation choice (the model) | F-27 | `tests/contracts/session-resume.test.ts` — the compaction tests |
+| The summary is passed in, never generated locally | REA observed | F-27 | `tests/contracts/session-resume.test.ts` — "never produces a summary locally" |
+| The carried-prompt vocabulary is exactly the seven names, the bound check is enforced, and a prompt is not delivered twice | REA observed (the vocabulary) + implementation choice (the semantics) | F-26 | `tests/contracts/session-store.test.ts` — the carried-prompt tests |
+| The telemetry event names are the target's | REA observed | F-26 | same file — "emits the target's telemetry event with the outcome" |
+| A transcript path names a session by the **last** session-id segment it holds | implementation choice | F-24 | `tests/contracts/cli-surface.test.ts` — "scans a path for a session-id segment" |

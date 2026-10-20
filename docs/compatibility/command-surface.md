@@ -185,29 +185,29 @@ The **formats** are the target's; the **documents** are this implementation's.
 
 ## Conformance table
 
-| Audit claim | Evidence class | Pinned by |
-|---|---|---|
-| `--flag=value` yields the value, and `--` ends the flag parsing | REA observed | `tests/contracts/cli-surface.test.ts` — "reads the value of --flag=value", "ends the flag parsing at --" |
-| A token is a flag when it has more than one character and starts with `-` | REA observed | same file — "does not read a flag after --" |
-| A short flag cluster is one token, and it is expanded only when every letter is known | REA observed + implementation choice (the widened pattern) | same file — "treats a short flag cluster as one token", "expands a short flag cluster whose letters are all known flags" |
-| The repeatable set is the audit's eleven names, and each consumes every following non-flag token | REA observed | same file — "consumes every following non-flag token for a repeatable flag" |
-| The optional value belongs to `-r`/`--resume`, and the **rest** of the boolean set is pure | REA observed (the flag) + **implementation choice** (the narrowing) | same file — "keeps the optional value of --resume", "takes no value for --resume when the next token is a flag", "keeps the prompt out of a boolean flag" |
-| The six subcommands are the target's, and a bare subcommand is a command when it comes first | REA observed (the names) + implementation choice (the placement) | same file — "recognises the six subcommands" |
-| The command tokens are commands, not flags | REA observed | same file — "takes one prompt argument for -p", "takes -c as the short form of --continue" |
-| The session-id pattern, and the scan of a path for such a segment | REA observed | same file — "recognises the target’s session-id pattern", "scans a path for a session-id segment" |
-| The cloud session ref and the URI arguments | REA observed | same file — "knows the cloud session ref and the URI arguments" |
-| The headless rule: `--print`, `--init-only`, `--sdk-url` or a non-TTY stdout | REA observed | same file — "forces the headless mode when stdout is not a terminal", "forces the headless mode for --print, --init-only and --sdk-url" |
-| The three output formats and the two input formats | REA observed | same file — "accepts the three output formats" |
-| The **fourteen** validation messages, verbatim | REA observed | same file — the "the target's validation messages" block, one test per message |
-| The `<mode>` placeholder's three rows, and which mode each decides | REA observed (the messages) + **implementation choice** (the reading) | same file — "reproduces the mode and resume message", "reproduces the mode and --init-only message", "reproduces the mode and --session-id message", "reproduces the mode and stream-json output message" |
-| The invalid output format's wording | **implementation choice** | same file — "refuses an unknown output format" |
-| The invalid permission mode's wording | **implementation choice** | same file — "refuses an unknown permission mode" |
-| `--help` and `--version` win wherever they appear | **implementation choice** | same file — "writes the help whatever the order of the flags", "writes the version whatever the order of the flags" |
-| An empty `--print=` is no value at all | **implementation choice** | same file — "takes an empty --print= as no prompt at all" |
-| The print mode takes one prompt argument, and `--continue` and `--resume` are mutually exclusive | implementation choice | same file — "refuses a second prompt argument in print mode", "refuses --continue together with --resume" |
-| Every option this implementation recognises and does not implement is **refused by the run** | **implementation choice** | same file — the "the flags this implementation refuses" block |
-| The stream-json input carries JSON documents, and the model receives their **text** | **implementation choice** | same file — "reads the text the documents carry", "runs the turn with the text the documents carry, not the raw blob", "refuses a line that is not JSON" |
-| The exit codes are `0`, `1` and `2` | REA observed (the two the audit names) + implementation choice (the names) | same file — "returns the argument error’s exit code and writes the message to stderr" |
-| The `--settings` file is loaded as the highest-precedence overlay | **implementation choice** | same file — "loads the settings file the --settings flag names", "refuses a settings file it cannot read" |
-| The start mode: the flag, the settings' default, and the three availability overrides | REA observed (the rules) + implementation choice (the wiring) | same file — "starts in the mode the --permission-mode flag names", "does not start in auto mode when a policy disables it", "does not start in auto mode for a HIPAA-configured session" |
-| The manager surfaces are reachable from the command line | **project extension** | same file — "runs the multi-provider manager and returns its exit code" — and [`provider-catalog.md`](provider-catalog.md) |
+| Audit claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| `--flag=value` yields the value, and `--` ends the flag parsing | REA observed | F-01 | `tests/contracts/cli-surface.test.ts` — "reads the value of --flag=value", "ends the flag parsing at --" |
+| A token is a flag when it has more than one character and starts with `-` | REA observed | F-01 | same file — "does not read a flag after --" |
+| A short flag cluster is one token, and it is expanded only when every letter is known | REA observed + implementation choice (the widened pattern) | F-01 | same file — "treats a short flag cluster as one token", "expands a short flag cluster whose letters are all known flags" |
+| The repeatable set is the audit's eleven names, and each consumes every following non-flag token | REA observed | F-01 | same file — "consumes every following non-flag token for a repeatable flag" |
+| The optional value belongs to `-r`/`--resume`, and the **rest** of the boolean set is pure | REA observed (the flag) + **implementation choice** (the narrowing) | F-38 | same file — "keeps the optional value of --resume", "takes no value for --resume when the next token is a flag", "keeps the prompt out of a boolean flag" |
+| The six subcommands are the target's, and a bare subcommand is a command when it comes first | REA observed (the names) + implementation choice (the placement) | F-01 | same file — "recognises the six subcommands" |
+| The command tokens are commands, not flags | REA observed | F-38 | same file — "takes one prompt argument for -p", "takes -c as the short form of --continue" |
+| The session-id pattern, and the scan of a path for such a segment | REA observed | F-38 | same file — "recognises the target’s session-id pattern", "scans a path for a session-id segment" |
+| The cloud session ref and the URI arguments | REA observed | F-38 | same file — "knows the cloud session ref and the URI arguments" |
+| The headless rule: `--print`, `--init-only`, `--sdk-url` or a non-TTY stdout | REA observed | F-02 | same file — "forces the headless mode when stdout is not a terminal", "forces the headless mode for --print, --init-only and --sdk-url" |
+| The three output formats and the two input formats | REA observed | F-02 | same file — "accepts the three output formats" |
+| The **fourteen** validation messages, verbatim | REA observed | F-38 | same file — the "the target's validation messages" block, one test per message |
+| The `<mode>` placeholder's three rows, and which mode each decides | REA observed (the messages) + **implementation choice** (the reading) | F-38 | same file — "reproduces the mode and resume message", "reproduces the mode and --init-only message", "reproduces the mode and --session-id message", "reproduces the mode and stream-json output message" |
+| The invalid output format's wording | **implementation choice** | F-38 | same file — "refuses an unknown output format" |
+| The invalid permission mode's wording | **implementation choice** | F-38 | same file — "refuses an unknown permission mode" |
+| `--help` and `--version` win wherever they appear | **implementation choice** | F-38 | same file — "writes the help whatever the order of the flags", "writes the version whatever the order of the flags" |
+| An empty `--print=` is no value at all | **implementation choice** | F-38 | same file — "takes an empty --print= as no prompt at all" |
+| The print mode takes one prompt argument, and `--continue` and `--resume` are mutually exclusive | implementation choice | F-38 | same file — "refuses a second prompt argument in print mode", "refuses --continue together with --resume" |
+| Every option this implementation recognises and does not implement is **refused by the run** | **implementation choice** | F-38 | same file — the "the flags this implementation refuses" block |
+| The stream-json input carries JSON documents, and the model receives their **text** | **implementation choice** | F-02 | same file — "reads the text the documents carry", "runs the turn with the text the documents carry, not the raw blob", "refuses a line that is not JSON" |
+| The exit codes are `0`, `1` and `2` | REA observed (the two the audit names) + implementation choice (the names) | F-38 | same file — "returns the argument error’s exit code and writes the message to stderr" |
+| The `--settings` file is loaded as the highest-precedence overlay | **implementation choice** | F-38 | same file — "loads the settings file the --settings flag names", "refuses a settings file it cannot read" |
+| The start mode: the flag, the settings' default, and the three availability overrides | REA observed (the rules) + implementation choice (the wiring) | F-38 | same file — "starts in the mode the --permission-mode flag names", "does not start in auto mode when a policy disables it", "does not start in auto mode for a HIPAA-configured session" |
+| The manager surfaces are reachable from the command line | **project extension** | F-40 | same file — "runs the multi-provider manager and returns its exit code" — and [`provider-catalog.md`](provider-catalog.md) |

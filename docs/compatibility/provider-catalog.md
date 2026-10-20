@@ -164,61 +164,61 @@ A **user override** of a catalog-owned field lives in its **own** record and sur
 
 ## Conformance table
 
-| Audit claim | Pinned by |
-|---|---|
-| The eight route names, exactly, with `gateway` first and `firstParty` last | `tests/contracts/provider-registry.test.ts` — "route set", "selectRoute" |
-| The dispatch order is the target's, and a wrong order fails | same file — "selectRoute" |
-| Each route's base-URL variable list, exactly, in the audit's order | same file — "the endpoint policy" |
-| A base URL that does not match the vendor host is user-supplied | same file — "the endpoint policy" |
-| A user-supplied endpoint is refused the credential unless the connection opts in, and the refusal names the host | same file — "the untrusted-endpoint guard" |
-| A non-`https:` base URL is never vendor-trusted | same file — "the untrusted-endpoint guard" |
-| `credentialStatus` reports presence only and never returns a secret | `tests/security/provider-credentials.test.ts` — "credentialStatus" |
-| `credentialStatus` on a keychain reference never reads the keychain | same file — "the keychain reference" |
-| `credentialStatus` on a file reference never reads the contents | same file — the `credentialStatus` block |
-| `registry.list()` resolves no credential and contains no secret | same file — "the registry listing" |
-| `resolveConnectionCredential` runs the endpoint check and then resolves | `src/provider/registry.ts` + its test |
-| A malformed `ANTHROPIC_FOUNDRY_RESOURCE` is not vendor-trusted | `tests/contracts/provider-registry.test.ts` — "the endpoint policy" |
-| The Foundry and Bedrock variable precedences are pinned | same file — "the endpoint policy" |
-| `useConnection` fails loudly rather than silently not switching | same file — "the connection registry" |
-| A registered flag that is explicitly disabled is not treated as set | same file — "selectRoute" |
-| Two connections may share the same route | same file — "the connection registry" |
+| Audit claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- |
+| The eight route names, exactly, with `gateway` first and `firstParty` last | REA observed | F-06 | `tests/contracts/provider-registry.test.ts` — "route set", "selectRoute" |
+| The dispatch order is the target's, and a wrong order fails | REA observed | F-08 | same file — "selectRoute" |
+| Each route's base-URL variable list, exactly, in the audit's order | REA observed | F-09 | same file — "the endpoint policy" |
+| A base URL that does not match the vendor host is user-supplied | REA observed | F-09 | same file — "the endpoint policy" |
+| A user-supplied endpoint is refused the credential unless the connection opts in, and the refusal names the host | implementation choice | F-09 | same file — "the untrusted-endpoint guard" |
+| A non-`https:` base URL is never vendor-trusted | implementation choice | F-09 | same file — "the untrusted-endpoint guard" |
+| `credentialStatus` reports presence only and never returns a secret | project requirement | F-11 | `tests/security/provider-credentials.test.ts` — "credentialStatus" |
+| `credentialStatus` on a keychain reference never reads the keychain | implementation choice | F-11 | same file — "the keychain reference" |
+| `credentialStatus` on a file reference never reads the contents | implementation choice | F-11 | same file — the `credentialStatus` block |
+| `registry.list()` resolves no credential and contains no secret | project requirement | F-11 | same file — "the registry listing" |
+| `resolveConnectionCredential` runs the endpoint check and then resolves | project requirement | F-10 | `src/provider/registry.ts` + its test |
+| A malformed `ANTHROPIC_FOUNDRY_RESOURCE` is not vendor-trusted | REA observed | F-09 | `tests/contracts/provider-registry.test.ts` — "the endpoint policy" |
+| The Foundry and Bedrock variable precedences are pinned | REA observed | F-09 | same file — "the endpoint policy" |
+| `useConnection` fails loudly rather than silently not switching | project requirement | F-10 | same file — "the connection registry" |
+| A registered flag that is explicitly disabled is not treated as set | implementation choice | F-08 | same file — "selectRoute" |
+| Two connections may share the same route | project requirement | F-10 | same file — "the connection registry" |
 
 ## The manager surfaces — conformance
 
 Every row of this table is a **project extension**: the target has no such surface, so there is no target behaviour to match. The measured outcome of the row is in [`results.md`](results.md).
 
-| Claim | Evidence class | Pinned by |
-|---|---|---|
-| The credential status vocabulary is exactly `resolved`, `unresolved`, `unreadable` and `refused` | implementation choice | `tests/contracts/provider-command.test.ts` — "reports a connection whose credential cannot be resolved as unusable, for that connection only", "reports a credential path that exists but cannot be read as unreadable", "reports a refused endpoint as refused, names the host, and never resolves the credential" |
-| The listing carries **two** credential columns — `CREDENTIAL` (the reference) and `STATUS` — and never a value | implementation choice | same file — "provider list prints one row per connection with its id, name, route, base URL, and credential status", "provider list shows no credential value even when the underlying environment variable is set" |
-| The manager's verbs are `list`, `add`, `remove`, `use` and `test` | implementation choice | same file — "provider add registers a connection whose credential is a reference, never a value", "provider remove removes a connection and reports an unknown id", "provider test resolves the credential through the guarded resolver and never prints the value" |
-| `use` refuses an unusable connection and names it, and an `add --use` leaves the registry untouched | implementation choice | same file — "provider use refuses an unusable connection and names it in the error", "provider add --use leaves the registry untouched when the connection is unusable" |
-| The surfaces are reachable in **two** argv forms — the word form and the `--provider` / `--catalog` flag form — and both are machine-readable | implementation choice | same file — "exposes the same operations as --provider style flags with machine-readable output", "dispatches the --provider and the --catalog forms through one entry point" |
-| A connection's `catalogSource` says where its catalog is read from — `builtin`, `file` or `url` | implementation choice | same file — "rewrites the catalog without changing a connection id, name, route, or credential reference" |
-| The catalog and the connection table are **two records**: a refresh rewrites the catalog and never the connection, and a user override survives the refresh | implementation choice | same file — "rewrites the catalog without changing a connection id, name, route, or credential reference", "keeps a user override of a catalog-owned field across a refresh" |
-| A keychain credential is shown as configured without ever reading the OS credential store | implementation choice | same file — "shows a keychain credential as configured without ever reading the OS credential store" |
-| Every surface labels itself as a project extension | project requirement | same file — "labels the provider manager as a project extension wherever it surfaces" |
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The credential status vocabulary is exactly `resolved`, `unresolved`, `unreadable` and `refused` | implementation choice | F-40 | `tests/contracts/provider-command.test.ts` — "reports a connection whose credential cannot be resolved as unusable, for that connection only", "reports a credential path that exists but cannot be read as unreadable", "reports a refused endpoint as refused, names the host, and never resolves the credential" |
+| The listing carries **two** credential columns — `CREDENTIAL` (the reference) and `STATUS` — and never a value | implementation choice | F-40 | same file — "provider list prints one row per connection with its id, name, route, base URL, and credential status", "provider list shows no credential value even when the underlying environment variable is set" |
+| The manager's verbs are `list`, `add`, `remove`, `use` and `test` | implementation choice | F-40 | same file — "provider add registers a connection whose credential is a reference, never a value", "provider remove removes a connection and reports an unknown id", "provider test resolves the credential through the guarded resolver and never prints the value" |
+| `use` refuses an unusable connection and names it, and an `add --use` leaves the registry untouched | implementation choice | F-40 | same file — "provider use refuses an unusable connection and names it in the error", "provider add --use leaves the registry untouched when the connection is unusable" |
+| The surfaces are reachable in **two** argv forms — the word form and the `--provider` / `--catalog` flag form — and both are machine-readable | implementation choice | F-40 | same file — "exposes the same operations as --provider style flags with machine-readable output", "dispatches the --provider and the --catalog forms through one entry point" |
+| A connection's `catalogSource` says where its catalog is read from — `builtin`, `file` or `url` | implementation choice | F-40 | same file — "rewrites the catalog without changing a connection id, name, route, or credential reference" |
+| The catalog and the connection table are **two records**: a refresh rewrites the catalog and never the connection, and a user override survives the refresh | implementation choice | F-40 | same file — "rewrites the catalog without changing a connection id, name, route, or credential reference", "keeps a user override of a catalog-owned field across a refresh" |
+| A keychain credential is shown as configured without ever reading the OS credential store | implementation choice | F-40 | same file — "shows a keychain credential as configured without ever reading the OS credential store" |
+| Every surface labels itself as a project extension | project requirement | F-40 | same file — "labels the provider manager as a project extension wherever it surfaces" |
 
 ## Catalog conformance
 
-| Audit claim | Pinned by |
-|---|---|
-| The built-in catalog is the target's literal, digest for digest | `tests/contracts/provider-catalog.test.ts` — "is the target's literal, digest for digest" (pinned SHA-256 `77b3c0cadfe76ee1dccaadc617edf8ad9c7d488d50e05782087be987cf91a8f8`, `_provenance` excluded) |
-| The pinned digest changes when a model id or a provider id changes | same file — "changes the pinned digest when a model id or a provider id changes" |
-| All 22 model ids, in order, and every per-provider id, are pinned | same file — "pins every model id and every provider id of the target's literal" |
-| The 11 pricing-tier keys and the 4 alias keys are pinned | same file — "pins the pricing-tier keys and the alias keys" |
-| The catalog's `provider_ids` key names are the target's own eight (`anthropic_aws`, `anthropic_google_cloud`, `bedrock`, `first_party`, `foundry`, `gateway`, `mantle`, `vertex`) | same file — "maps the target's provider ids onto the routes explicitly" |
-| Nine models are served by all eight routes and thirteen omit at least one | same file — "serves one model by all eight routes", "omits at least one route for another model" |
-| A `null` provider id means "not served", and is distinct from "unknown" | same file — "reports a route the model does not serve as absent, not as unknown" |
-| An `Object.prototype` member name never resolves to a provider id | same file — "does not resolve inherited Object.prototype members as provider ids" |
-| The mantle half of the target's `wd(model)` rule is implemented | same file — "implements the mantle half of the target's rule" |
-| The Bedrock+Mantle `anthropic.*` override is **not** implemented, and says so | same file — "does not implement the Bedrock+Mantle anthropic.* override, and says so" |
-| "Not served" is a documented superset of the audited `=== null` predicate, differing by exactly one row | same file — "is a superset of the audited predicate, and the difference is exactly one row" |
-| A caller cannot corrupt the shared catalog table | same file — "hands out copies, so a caller cannot corrupt the shared table" |
-| The catalog never reads the credential store | same file — "never reads the credential store while the catalog is listed, imported, normalized or resolved" |
-| A model that declares no `context` still normalizes | same file — "normalizes a model that declares no context" |
-| `listModels` matches the family and the query case-insensitively | same file — "matches the family and the query case-insensitively" |
-| `importCatalog` rejects an unknown `eager_input_streaming` key, a malformed alias key, and a `context` with no `window` | same file — the three "rejects …" tests |
+| Audit claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- |
+| The built-in catalog is the target's literal, digest for digest | REA observed | F-07 | `tests/contracts/provider-catalog.test.ts` — "is the target's literal, digest for digest" (pinned SHA-256 `77b3c0cadfe76ee1dccaadc617edf8ad9c7d488d50e05782087be987cf91a8f8`, `_provenance` excluded) |
+| The pinned digest changes when a model id or a provider id changes | implementation choice | F-07 | same file — "changes the pinned digest when a model id or a provider id changes" |
+| All 22 model ids, in order, and every per-provider id, are pinned | REA observed | F-07 | same file — "pins every model id and every provider id of the target's literal" |
+| The 11 pricing-tier keys and the 4 alias keys are pinned | REA observed | F-07 | same file — "pins the pricing-tier keys and the alias keys" |
+| The catalog's `provider_ids` key names are the target's own eight (`anthropic_aws`, `anthropic_google_cloud`, `bedrock`, `first_party`, `foundry`, `gateway`, `mantle`, `vertex`) | REA observed | F-07 | same file — "maps the target's provider ids onto the routes explicitly" |
+| Nine models are served by all eight routes and thirteen omit at least one | REA observed | F-07 | same file — "serves one model by all eight routes", "omits at least one route for another model" |
+| A `null` provider id means "not served", and is distinct from "unknown" | REA observed | F-07 | same file — "reports a route the model does not serve as absent, not as unknown" |
+| An `Object.prototype` member name never resolves to a provider id | implementation choice | F-07 | same file — "does not resolve inherited Object.prototype members as provider ids" |
+| The mantle half of the target's `wd(model)` rule is implemented | REA observed | F-07 | same file — "implements the mantle half of the target's rule" |
+| The Bedrock+Mantle `anthropic.*` override is **not** implemented, and says so | REA observed + implementation choice | F-07 | same file — "does not implement the Bedrock+Mantle anthropic.* override, and says so" |
+| "Not served" is a documented superset of the audited `=== null` predicate, differing by exactly one row | implementation choice | F-07 | same file — "is a superset of the audited predicate, and the difference is exactly one row" |
+| A caller cannot corrupt the shared catalog table | implementation choice | F-07 | same file — "hands out copies, so a caller cannot corrupt the shared table" |
+| The catalog never reads the credential store | implementation choice | F-07 | same file — "never reads the credential store while the catalog is listed, imported, normalized or resolved" |
+| A model that declares no `context` still normalizes | implementation choice | F-07 | same file — "normalizes a model that declares no context" |
+| `listModels` matches the family and the query case-insensitively | implementation choice | F-07 | same file — "matches the family and the query case-insensitively" |
+| `importCatalog` rejects an unknown `eager_input_streaming` key, a malformed alias key, and a `context` with no `window` | implementation choice | F-07 | same file — the three "rejects …" tests |
 
 **Catalog facts, for the record.** 22 models. Families: `haiku`, `sonnet`, `opus`, `fable`, `mythos` (the target's order of first appearance). Nine models carry all eight route ids — `claude-haiku-4-5`, `claude-sonnet-5`, `claude-sonnet-5-5`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-fable-5`, `claude-fable-5-1` — and thirteen omit at least one. Eleven pricing tiers. Four aliases (`opus`, `sonnet`, `haiku`, `fable`) and four `latest_per_family` entries.
 

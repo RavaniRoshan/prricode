@@ -83,21 +83,21 @@ Delegates through a `deps.delegate` seam and reports a typed `taskUnavailable` f
 
 ## Conformance table
 
-| Claim | Evidence class | Pinned by |
-|---|---|---|
-| The file-mutating set is exactly `Edit`, `Write`, `NotebookEdit`, derived from the permission module | REA observed | `tests/contracts/tool-registry.test.ts` — "derives the file-mutating tool set from the permission module" |
-| The runner's order is check → validate → execute | REA observed | same file — "the tool runner" |
-| A denial produces an envelope with the decision attached, and `execute` is not called | REA observed | same file |
-| A validation failure produces the typed code and a message naming the field | REA observed | same file |
-| A tool with no opinion fails closed | implementation choice | same file |
-| An unresolved ask is refused | implementation choice | same file |
-| A hook rewrite is what executes, and a validator-rejected rewrite denies | REA observed | same file |
-| A rewrite triggers the whole re-check, and the stricter verdict wins | implementation choice | same file — the ask / allow-scope / `acceptEdits` rewrite tests and the negative control |
-| The path the check approved is re-resolved before the write, and a swap is refused | implementation choice | same file — the "path was re-resolved" tests |
-| Every built-in consults the rule engine | REA observed | same file — "the built-in tools and the rule engine" |
-| No tool rewrites its own input | implementation choice (deliberate) | same file |
-| `Glob`/`Grep` apply the `Read` deny rules through a symlinked search path | REA observed | same file |
-| The approval prompt shows the resolved destination | implementation choice | `tests/security/permission-rules.test.ts` — "the approval prompt" |
-| A Bash rule matches command text, not program identity | Documented only | same file |
-| The malformed-call path reaches the audit's `errorCode: 7` / `3` end-to-end | REA observed | `tests/contracts/tool-registry.test.ts` — the end-to-end malformed cases |
-| The rule engine's tool tables name only shipped tools | implementation choice | `tests/security/permission-rules.test.ts` — "the rule engine's tool tables" |
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The file-mutating set is exactly `Edit`, `Write`, `NotebookEdit`, derived from the permission module | REA observed | F-21 | `tests/contracts/tool-registry.test.ts` — "derives the file-mutating tool set from the permission module" |
+| The runner's order is check → validate → execute | REA observed | F-18 | same file — "the tool runner" |
+| A denial produces an envelope with the decision attached, and `execute` is not called | REA observed | F-18 | same file |
+| A validation failure produces the typed code and a message naming the field | REA observed | F-18 | same file |
+| A tool with no opinion fails closed | implementation choice | F-18 | same file |
+| An unresolved ask is refused | implementation choice | F-18 | same file |
+| A hook rewrite is what executes, and a validator-rejected rewrite denies | REA observed | F-18 | same file |
+| A rewrite triggers the whole re-check, and the stricter verdict wins | implementation choice | F-18 | same file — the ask / allow-scope / `acceptEdits` rewrite tests and the negative control |
+| The path the check approved is re-resolved before the write, and a swap is refused | implementation choice | F-18 | same file — the "path was re-resolved" tests |
+| Every built-in consults the rule engine | REA observed | F-20 | same file — "the built-in tools and the rule engine" |
+| No tool rewrites its own input | implementation choice (deliberate) | F-20 | same file |
+| `Glob`/`Grep` apply the `Read` deny rules through a symlinked search path | REA observed | F-20 | same file |
+| The approval prompt shows the resolved destination | implementation choice | F-18 | `tests/security/permission-rules.test.ts` — "the approval prompt" |
+| A Bash rule matches command text, not program identity | Documented only | F-20 | same file |
+| The malformed-call path reaches the audit's `errorCode: 7` / `3` end-to-end | REA observed | F-20 | `tests/contracts/tool-registry.test.ts` — the end-to-end malformed cases |
+| The rule engine's tool tables name only shipped tools | implementation choice | F-20 | `tests/security/permission-rules.test.ts` — "the rule engine's tool tables" |

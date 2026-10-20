@@ -74,25 +74,25 @@ The same-file case reports `as_read` rather than `none`, and the distinction is 
 
 ## Conformance table
 
-| Audit claim | Pinned by |
-|---|---|
-| The two orderings exist, differ, and are not interchangeable | `tests/contracts/settings-precedence.test.ts` — "settings tier resolution" |
-| A project or local tier never wins a top-level key | same file |
-| The ordinary-key path is distinct from the top-level path and is labelled an underived implementation choice | same file |
-| A higher tier's block wins whole; the lower tier's block is not consulted | same file — "settings tier resolution" |
-| `spellcheck` resolves user-only, and a project/local spellcheck block is ignored by every path | same file — "settings scope separation" |
-| The enumeration order and scope map are pinned | same file — "settings scope separation" |
-| The restrict-personal-config path suppresses exactly `projectSettings` and `localSettings` | same file — "settings loader" and "settings scope separation" |
-| Symlink and hard link to the user settings file → linked away, no tier, read mode `none` | same file — "settings loader" |
-| Same file as the user settings file → tier skipped, read mode `as_read` | same file — "settings loader" |
-| A distinct project file → its own tier, with content and read mode `as_read` | same file — "settings loader" |
-| Local settings win over the legacy local settings file | same file — "settings loader" |
-| `policySettings` reads as `machine_admin` | same file — "settings loader" |
-| The `flagSettings` overlay is applied and wins a top-level key | same file — "settings loader" |
-| A malformed settings file produces an error entry and no tier | same file — "settings loader" |
-| The sandbox file is written `0o600` with a `0o700` directory, paths canonicalized | same file — "sandbox configuration" |
-| A malformed settings file is never overwritten | same file — "sandbox configuration" |
-| `~` and `~/` expansion | same file — "sandbox configuration" |
-| Unknown keys in a settings document are preserved | same file — "settings document schema" |
-| A settings document containing `constructor`, `toString`, `hasOwnProperty`, `valueOf`, or `__proto__` does not crash any lookup | same file — "settings lookup hardening" |
-| An unregistered boolean flag with no explicit union throws a clear error | same file — "settings scope separation" |
+| Audit claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- |
+| The two orderings exist, differ, and are not interchangeable | REA observed | F-03 | `tests/contracts/settings-precedence.test.ts` — "settings tier resolution" |
+| A project or local tier never wins a top-level key | REA observed | F-04 | same file |
+| The ordinary-key path is distinct from the top-level path and is labelled an underived implementation choice | implementation choice | F-04 | same file |
+| A higher tier's block wins whole; the lower tier's block is not consulted | REA observed | F-04 | same file — "settings tier resolution" |
+| `spellcheck` resolves user-only, and a project/local spellcheck block is ignored by every path | REA observed | F-05 | same file — "settings scope separation" |
+| The enumeration order and scope map are pinned | REA observed | F-03 | same file — "settings scope separation" |
+| The restrict-personal-config path suppresses exactly `projectSettings` and `localSettings` | REA observed | F-05 | same file — "settings loader" and "settings scope separation" |
+| Symlink and hard link to the user settings file → linked away, no tier, read mode `none` | REA observed | F-05 | same file — "settings loader" |
+| Same file as the user settings file → tier skipped, read mode `as_read` | REA observed | F-05 | same file — "settings loader" |
+| A distinct project file → its own tier, with content and read mode `as_read` | REA observed | F-05 | same file — "settings loader" |
+| Local settings win over the legacy local settings file | REA observed | F-05 | same file — "settings loader" |
+| `policySettings` reads as `machine_admin` | REA observed | F-03 | same file — "settings loader" |
+| The `flagSettings` overlay is applied and wins a top-level key | REA observed | F-03 | same file — "settings loader" |
+| A malformed settings file produces an error entry and no tier | implementation choice | F-05 | same file — "settings loader" |
+| The sandbox file is written `0o600` with a `0o700` directory, paths canonicalized | implementation choice | F-03 | same file — "sandbox configuration" |
+| A malformed settings file is never overwritten | implementation choice | F-03 | same file — "sandbox configuration" |
+| `~` and `~/` expansion | implementation choice | F-03 | same file — "sandbox configuration" |
+| Unknown keys in a settings document are preserved | implementation choice | F-03 | same file — "settings document schema" |
+| A settings document containing `constructor`, `toString`, `hasOwnProperty`, `valueOf`, or `__proto__` does not crash any lookup | implementation choice | F-03 | same file — "settings lookup hardening" |
+| An unregistered boolean flag with no explicit union throws a clear error | implementation choice | F-05 | same file — "settings scope separation" |

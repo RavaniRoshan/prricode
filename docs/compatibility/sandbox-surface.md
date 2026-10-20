@@ -137,31 +137,31 @@ These are this implementation's decisions, not the target's observed behavior:
 
 ## Conformance table
 
-| Claim | Evidence class | Pinned by |
-|---|---|---|
-| The protected path is masked with a tmpfs or an empty-file bind, never a read-only bind on an absent path | REA observed (the mechanism) + implementation choice (the backend) | `tests/security/sandbox.test.ts` — the mask-target tests |
-| A protected path that resolves through a symlink is refused with a named reason | implementation choice | same file — the symlink tests |
-| A mask that would shadow a granted bind refuses the launch with a named reason | implementation choice | same file — the shadowing test |
-| A command substitution in any part — including a redirection target — defeats the `excludedCommands` exemption | REA observed (the exemption) + implementation choice (the rule) | same file — the substitution tests, including the end-to-end host-file proof |
-| An entry must cover the whole sub-command; `git` does not cover `git status` | REA observed | same file |
-| The four target reason strings are verbatim | REA observed | same file — the reason-string tests |
-| The decision mapping: an excluded platform, a switched-off sandbox and a missing backend with `failIfUnavailable` off all run the command **unconfined** | REA observed (the reasons) + **implementation choice** (the mapping) | `tests/security/sandbox.test.ts` — "runs unconfined with the reason naming the platform when enabledPlatforms excludes it", "runs unconfined when the sandbox is disabled", "runs the shell unconfined, and says so, when failIfUnavailable is false" |
-| Only a missing backend with `failIfUnavailable` **true** refuses the command | REA observed (the mechanism) + **implementation choice** (the reason string) | `tests/security/sandbox.test.ts` — "denies when the backend is missing and failIfUnavailable is true", "refuses only when the backend is missing and failIfUnavailable is true" |
-| An exempt command runs unconfined whatever the backend's state is | REA observed (the exemption) | `tests/security/sandbox.test.ts` — "runs an excluded command unconfined when allowUnsandboxedCommands is true" |
-| The status reports only the layers actually in force | implementation choice | same file — the layer tests |
-| The Landlock status says "the seam is not implemented in this build", never "the kernel does not implement Landlock" | REA observed (the ABI ladder) + implementation choice (the seam) | same file — the Landlock tests |
-| The ABI 3 ladder is derived, not assumed: no network rights, no `FS_IOCTL_DEV`, no scopes | REA observed | same file |
-| Neither the sandboxed nor the unconfined path sees the agent's credentials | implementation choice | same file — the environment tests |
-| The environment is not echoed into the status | implementation choice | same file |
-| The unconfined path uses the caller's real home; the sandboxed path uses `/tmp` | implementation choice | same file |
-| The IPv4-mapped loopback is classified as loopback in both spellings | REA observed | same file — the proxy tests |
-| `io_uring_setup` is refused with `EPERM` inside the sandbox, end to end | REA observed (the syscall set) | same file — the `io_uring_setup` test |
-| The 27-record dispatch table and its argument indices are exact | REA observed | same file |
-| The supervisor's `ID_VALID` re-check happens after every read and again before the response | REA observed | same file |
-| The supervisor never authorizes a path that layers 1–3 deny | REA observed | same file |
-| The proxy refuses loopback, link-local and cloud-metadata addresses, and enforces the domain allowlist | REA observed | same file |
-| The proxy socket lives in a `0700` directory with a `0600` socket | implementation choice | same file |
-| `PR_SET_NO_NEW_PRIVS` is asserted end to end | REA observed | same file |
-| A missing backend is reported gracefully, and `failIfUnavailable` decides between refusing and running unconfined | REA observed | same file |
-| The advisory is machine-readable and the backend's version and setuid bit are recorded | implementation choice | same file — the enforcement-probe tests |
-| The residual-risk paragraph is in all five module headers | implementation choice | same file — the header test |
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The protected path is masked with a tmpfs or an empty-file bind, never a read-only bind on an absent path | REA observed (the mechanism) + implementation choice (the backend) | F-34 | `tests/security/sandbox.test.ts` — the mask-target tests |
+| A protected path that resolves through a symlink is refused with a named reason | implementation choice | F-34 | same file — the symlink tests |
+| A mask that would shadow a granted bind refuses the launch with a named reason | implementation choice | F-34 | same file — the shadowing test |
+| A command substitution in any part — including a redirection target — defeats the `excludedCommands` exemption | REA observed (the exemption) + implementation choice (the rule) | F-34 | same file — the substitution tests, including the end-to-end host-file proof |
+| An entry must cover the whole sub-command; `git` does not cover `git status` | REA observed | F-34 | same file |
+| The four target reason strings are verbatim | REA observed | F-34 | same file — the reason-string tests |
+| The decision mapping: an excluded platform, a switched-off sandbox and a missing backend with `failIfUnavailable` off all run the command **unconfined** | REA observed (the reasons) + **implementation choice** (the mapping) | F-37 | `tests/security/sandbox.test.ts` — "runs unconfined with the reason naming the platform when enabledPlatforms excludes it", "runs unconfined when the sandbox is disabled", "runs the shell unconfined, and says so, when failIfUnavailable is false" |
+| Only a missing backend with `failIfUnavailable` **true** refuses the command | REA observed (the mechanism) + **implementation choice** (the reason string) | F-37 | `tests/security/sandbox.test.ts` — "denies when the backend is missing and failIfUnavailable is true", "refuses only when the backend is missing and failIfUnavailable is true" |
+| An exempt command runs unconfined whatever the backend's state is | REA observed (the exemption) | F-37 | `tests/security/sandbox.test.ts` — "runs an excluded command unconfined when allowUnsandboxedCommands is true" |
+| The status reports only the layers actually in force | implementation choice | F-34 | same file — the layer tests |
+| The Landlock status says "the seam is not implemented in this build", never "the kernel does not implement Landlock" | REA observed (the ABI ladder) + implementation choice (the seam) | F-34 | same file — the Landlock tests |
+| The ABI 3 ladder is derived, not assumed: no network rights, no `FS_IOCTL_DEV`, no scopes | REA observed | F-34 | same file |
+| Neither the sandboxed nor the unconfined path sees the agent's credentials | implementation choice | F-34 | same file — the environment tests |
+| The environment is not echoed into the status | implementation choice | F-34 | same file |
+| The unconfined path uses the caller's real home; the sandboxed path uses `/tmp` | implementation choice | F-34 | same file |
+| The IPv4-mapped loopback is classified as loopback in both spellings | REA observed | F-34 | same file — the proxy tests |
+| `io_uring_setup` is refused with `EPERM` inside the sandbox, end to end | REA observed (the syscall set) | F-35 | same file — the `io_uring_setup` test |
+| The 27-record dispatch table and its argument indices are exact | REA observed | F-35 | same file |
+| The supervisor's `ID_VALID` re-check happens after every read and again before the response | REA observed | F-35 | same file |
+| The supervisor never authorizes a path that layers 1–3 deny | REA observed | F-34 | same file |
+| The proxy refuses loopback, link-local and cloud-metadata addresses, and enforces the domain allowlist | REA observed | F-34 | same file |
+| The proxy socket lives in a `0700` directory with a `0600` socket | implementation choice | F-34 | same file |
+| `PR_SET_NO_NEW_PRIVS` is asserted end to end | REA observed | F-34 | same file |
+| A missing backend is reported gracefully, and `failIfUnavailable` decides between refusing and running unconfined | REA observed | F-34 | same file |
+| The advisory is machine-readable and the backend's version and setuid bit are recorded | implementation choice | F-34 | same file — the enforcement-probe tests |
+| The residual-risk paragraph is in all five module headers | implementation choice | F-34 | same file — the header test |

@@ -278,79 +278,79 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 
 ## Conformance table
 
-| Claim | Evidence class | Pinned by |
-|---|---|---|
-| The host dispatcher handles exactly the 23 subtypes, and `can_use_tool` is not among them | REA observed | `tests/contracts/mcp-control.test.ts` — the subtype-list and per-subtype tests |
-| The callback-absence error text is exact | REA observed | same file — the callback-absence test |
-| The directional policy refuses agent-originated subtypes sent by a host | REA observed | same file — the directional-policy test |
-| The two dispatchers stay separate, and the transport one delegates to the existing permission dispatcher | REA observed (the separation) + implementation choice (the delegation) | same file — the dispatcher-separation test |
-| The stdio transport spawns with `shell: false` and the pipe stdio, merging the environments | REA observed | `tests/contracts/mcp-manager.test.ts` — the transport test |
-| The modern revision is probed first and the legacy handshake is the fallback | REA observed (the default) + implementation choice (the ladder) | same file — the negotiation tests |
-| The batching is 3 local and 20 remote | REA observed | same file — the batching tests |
-| The connect memo is dropped on an identity change, when stale, or explicitly | REA observed | same file — the memo tests |
-| The capabilities are fetched separately and aggregated | REA observed | same file |
-| There are four fetch variants and four distinct timeouts | REA observed | same file |
-| A tool description change is surfaced (the target does not do this) | implementation choice | same file — the rug-pull test |
-| A caller-supplied server name is data, never an inherited member | implementation choice | same file — the prototype-key test |
-| The hook decision merge is strictest-wins, and the context lists concatenate | REA observed | `tests/contracts/hooks.test.ts` (the `CC-012` task) |
-| The matcher is an exact string in the simple case and an unanchored regex otherwise | REA observed (the two-mode rule) + **implementation choice** (the supported regex subset) | same file |
-| There are exactly 33 hook events, and `StatusLine`/`FileSuggestion` are display handlers outside that set | REA observed | same file |
-| The exit-code contract is `0` applies, `2` blocks a blockable event, anything else is a non-blocking error | REA observed | same file |
-| The blockable-event set is the audit's 11 decision-capable events plus `PermissionRequest` | REA observed (the 11) + **implementation choice** (the addition) | same file |
-| The handler types are `command`, `http`, `mcp_tool`, `prompt`, `agent`; only `command` and `mcp_tool` are dispatched | REA observed (the vocabulary) + **implementation choice** (the non-dispatch) | same file |
-| The hook payload carries `session_id`, `prompt_id`, `transcript_path`, `cwd`, `scratchpad_dir`, `permission_mode`, `effort.level`, `hook_event_name`, and `agent_id`/`agent_type` for subagents | REA observed | same file |
-| A caller-supplied event, server name, hook id or matcher never resolves to an inherited member | implementation choice | same file |
-| A `PreToolUse` `allow` never overrides a deny or an ask rule, and a `PreToolUse` `deny` holds in every mode | REA observed (the mechanism) + **implementation choice** (the pick) | `tests/contracts/permission-hook.test.ts` (the `CC-007b` task) |
-| The two hook seams (`PreToolUse` and `PermissionRequest`) cannot cancel each other — the stricter wins | **implementation choice** | same file |
-| A matcher this implementation cannot compile is **refused at registration**, not silently ignored | **implementation choice** | same file |
-| The matcher engine's compiled program is bounded by a node budget, and an over-large matcher is refused with a reason | **implementation choice** | same file |
-| A command hook runs through `/bin/sh -c` with the payload on stdin and a 60 s timeout | **implementation choice** | same file |
-| A malformed matcher matches nothing rather than being treated as a literal | **implementation choice** | same file |
-| `updatedPermissions` accepts both a map and a list of typed updates | **implementation choice** | same file |
-| A manifest-declared path is used only when it is inside the plugin root — lexically and through `realpath` — and a refusal carries one of two named reasons, reported both as a `manifest.problems` entry and as a log record | **implementation choice** (the target's behavior is unobserved; the plan's Global Constraint requires implementation-owned path boundaries) | `tests/contracts/extensions.test.ts` — the path-boundary tests, one per check |
-| The standalone (non-plugin) skill directory scan — `SKILL.md` per subdirectory, the frontmatter `description`, the `own` flag, the precedence and the byte limit — is this implementation's | **implementation choice** (§2.8 marks that scan "not traced to resolved relations") | same file — the discovery and override tests |
-| The precedence order `project > local > user > plugin > mcp`, and the meaning of `local`. The five **names** are the plan's | **implementation choice** (the order and `local`'s meaning) | same file — the precedence test |
-| Two plugins that provide the same skill or subagent name collide; the collision is **reported** and the names are **not** namespaced. One plugin providing a name twice is reported as a different situation | **implementation choice** | same file — the collision tests |
-| `collidesWith` is **absent** when nothing collided, **present and empty** when one provider shipped the name twice, and **present and non-empty** naming the **other** providers — never the winner's own | **implementation choice** | same file — the collision-semantics tests |
-| The merged settings' `skillOverrides` block merges **per leaf**, so a user tier survives a local tier | **implementation choice — a documented divergence** from the audit's per-key order | same file — the per-leaf merge test |
-| A frontmatter field that is present but `undefined` is treated as absent | **implementation choice — a documented divergence** from the audit's literal reading | same file — the undefined-field test |
-| An IDE action is validated as a single path segment (no empty, `.`, `..`, `/`, `\`, NUL) before anything is sent, in `apply()` and in the transport | **implementation choice** | same file — the IDE action tests |
-| The default IDE transport refuses a host that is not a loopback address | **implementation choice** | same file — the IDE transport tests |
-| A skill file or a subagent definition file over 1 MiB is surfaced with a problem and **never read** | **implementation choice** | same file — the byte-cap tests |
-| A `telemetry.log` destination other than `collector` is normalized to `anthropic` | **implementation choice** (the **default** is REA observed; the **rewriting** is this implementation's reading and a behavior change) | same file — the telemetry tests |
-| A subagent's name is its file's basename, overridden by the frontmatter's `name`; a name two contributors provide is a reported collision | **implementation choice** (the subagent lifecycle is unobserved) | same file — the subagent tests |
-| The skill override modes are exactly four, and the resolution order is settings → session → policy/flag | REA observed | `tests/contracts/extensions.test.ts` (the `CC-013` task) |
-| The skill-save protocol selects its mode by the target's rule and uses the target's wording | REA observed | same file |
-| The marketplace install reports the disable reason, the enable hint, and distinguishes refused from failed | REA observed | same file |
-| The extension-point registry is the fixed set above, with `tool.call`'s generated `tool_use_id` and `telemetry.log`'s default destination | REA observed | same file |
-| The skill frontmatter must carry a text description, and the target's exact error text is used | REA observed | same file |
-| The plugin manifest's directory keys and file keys, the top-level/`experimental` split, and the single-string/array value shapes | REA observed | same file |
-| A plugin is `ok` when a `SKILL.md` exists at its root, and a non-object manifest is `broken` | REA observed | same file |
-| A command's name is `<plugin>:<basename>`, or `<plugin>:<metadata key>` when a `source` resolves to the same path | REA observed | same file |
-| A directory with no `.md` files and no `SKILL.md` in subdirectories is a warning, not an error | REA observed | same file |
-| A command file over the byte limit is skipped with the target's wording | REA observed | same file |
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The host dispatcher handles exactly the 23 subtypes, and `can_use_tool` is not among them | REA observed | F-28 | `tests/contracts/mcp-control.test.ts` — the subtype-list and per-subtype tests |
+| The callback-absence error text is exact | REA observed | F-28 | same file — the callback-absence test |
+| The directional policy refuses agent-originated subtypes sent by a host | REA observed | F-29 | same file — the directional-policy test |
+| The two dispatchers stay separate, and the transport one delegates to the existing permission dispatcher | REA observed (the separation) + implementation choice (the delegation) | F-28 | same file — the dispatcher-separation test |
+| The stdio transport spawns with `shell: false` and the pipe stdio, merging the environments | REA observed | F-30 | `tests/contracts/mcp-manager.test.ts` — the transport test |
+| The modern revision is probed first and the legacy handshake is the fallback | REA observed (the default) + implementation choice (the ladder) | F-30 | same file — the negotiation tests |
+| The batching is 3 local and 20 remote | REA observed | F-30 | same file — the batching tests |
+| The connect memo is dropped on an identity change, when stale, or explicitly | REA observed | F-31 | same file — the memo tests |
+| The capabilities are fetched separately and aggregated | REA observed | F-30 | same file |
+| There are four fetch variants and four distinct timeouts | REA observed | F-30 | same file |
+| A tool description change is surfaced (the target does not do this) | implementation choice | F-31 | same file — the rug-pull test |
+| A caller-supplied server name is data, never an inherited member | implementation choice | F-31 | same file — the prototype-key test |
+| The hook decision merge is strictest-wins, and the context lists concatenate | REA observed | F-32 | `tests/contracts/hooks.test.ts` (the `CC-012` task) |
+| The matcher is an exact string in the simple case and an unanchored regex otherwise | REA observed (the two-mode rule) + **implementation choice** (the supported regex subset) | F-32 | same file |
+| There are exactly 33 hook events, and `StatusLine`/`FileSuggestion` are display handlers outside that set | REA observed | F-32 | same file |
+| The exit-code contract is `0` applies, `2` blocks a blockable event, anything else is a non-blocking error | REA observed | F-32 | same file |
+| The blockable-event set is the audit's 11 decision-capable events plus `PermissionRequest` | REA observed (the 11) + **implementation choice** (the addition) | F-32 | same file |
+| The handler types are `command`, `http`, `mcp_tool`, `prompt`, `agent`; only `command` and `mcp_tool` are dispatched | REA observed (the vocabulary) + **implementation choice** (the non-dispatch) | F-32 | same file |
+| The hook payload carries `session_id`, `prompt_id`, `transcript_path`, `cwd`, `scratchpad_dir`, `permission_mode`, `effort.level`, `hook_event_name`, and `agent_id`/`agent_type` for subagents | REA observed | F-32 | same file |
+| A caller-supplied event, server name, hook id or matcher never resolves to an inherited member | implementation choice | F-32 | same file |
+| A `PreToolUse` `allow` never overrides a deny or an ask rule, and a `PreToolUse` `deny` holds in every mode | REA observed (the mechanism) + **implementation choice** (the pick) | F-19 | `tests/contracts/permission-hook.test.ts` (the `CC-007b` task) |
+| The two hook seams (`PreToolUse` and `PermissionRequest`) cannot cancel each other — the stricter wins | **implementation choice** | F-19 | same file |
+| A matcher this implementation cannot compile is **refused at registration**, not silently ignored | **implementation choice** | F-32 | same file |
+| The matcher engine's compiled program is bounded by a node budget, and an over-large matcher is refused with a reason | **implementation choice** | F-32 | same file |
+| A command hook runs through `/bin/sh -c` with the payload on stdin and a 60 s timeout | **implementation choice** | F-32 | same file |
+| A malformed matcher matches nothing rather than being treated as a literal | **implementation choice** | F-32 | same file |
+| `updatedPermissions` accepts both a map and a list of typed updates | **implementation choice** | F-32 | same file |
+| A manifest-declared path is used only when it is inside the plugin root — lexically and through `realpath` — and a refusal carries one of two named reasons, reported both as a `manifest.problems` entry and as a log record | **implementation choice** (the target's behavior is unobserved; the plan's Global Constraint requires implementation-owned path boundaries) | F-33 | `tests/contracts/extensions.test.ts` — the path-boundary tests, one per check |
+| The standalone (non-plugin) skill directory scan — `SKILL.md` per subdirectory, the frontmatter `description`, the `own` flag, the precedence and the byte limit — is this implementation's | **implementation choice** (§2.8 marks that scan "not traced to resolved relations") | F-33 | same file — the discovery and override tests |
+| The precedence order `project > local > user > plugin > mcp`, and the meaning of `local`. The five **names** are the plan's | **implementation choice** (the order and `local`'s meaning) | F-33 | same file — the precedence test |
+| Two plugins that provide the same skill or subagent name collide; the collision is **reported** and the names are **not** namespaced. One plugin providing a name twice is reported as a different situation | **implementation choice** | F-33 | same file — the collision tests |
+| `collidesWith` is **absent** when nothing collided, **present and empty** when one provider shipped the name twice, and **present and non-empty** naming the **other** providers — never the winner's own | **implementation choice** | F-33 | same file — the collision-semantics tests |
+| The merged settings' `skillOverrides` block merges **per leaf**, so a user tier survives a local tier | **implementation choice — a documented divergence** from the audit's per-key order | F-33 | same file — the per-leaf merge test |
+| A frontmatter field that is present but `undefined` is treated as absent | **implementation choice — a documented divergence** from the audit's literal reading | F-33 | same file — the undefined-field test |
+| An IDE action is validated as a single path segment (no empty, `.`, `..`, `/`, `\`, NUL) before anything is sent, in `apply()` and in the transport | **implementation choice** | F-33 | same file — the IDE action tests |
+| The default IDE transport refuses a host that is not a loopback address | **implementation choice** | F-33 | same file — the IDE transport tests |
+| A skill file or a subagent definition file over 1 MiB is surfaced with a problem and **never read** | **implementation choice** | F-33 | same file — the byte-cap tests |
+| A `telemetry.log` destination other than `collector` is normalized to `anthropic` | **implementation choice** (the **default** is REA observed; the **rewriting** is this implementation's reading and a behavior change) | F-33 | same file — the telemetry tests |
+| A subagent's name is its file's basename, overridden by the frontmatter's `name`; a name two contributors provide is a reported collision | **implementation choice** (the subagent lifecycle is unobserved) | F-33 | same file — the subagent tests |
+| The skill override modes are exactly four, and the resolution order is settings → session → policy/flag | REA observed | F-33 | `tests/contracts/extensions.test.ts` (the `CC-013` task) |
+| The skill-save protocol selects its mode by the target's rule and uses the target's wording | REA observed | F-33 | same file |
+| The marketplace install reports the disable reason, the enable hint, and distinguishes refused from failed | REA observed | F-33 | same file |
+| The extension-point registry is the fixed set above, with `tool.call`'s generated `tool_use_id` and `telemetry.log`'s default destination | REA observed | F-33 | same file |
+| The skill frontmatter must carry a text description, and the target's exact error text is used | REA observed | F-33 | same file |
+| The plugin manifest's directory keys and file keys, the top-level/`experimental` split, and the single-string/array value shapes | REA observed | F-33 | same file |
+| A plugin is `ok` when a `SKILL.md` exists at its root, and a non-object manifest is `broken` | REA observed | F-33 | same file |
+| A command's name is `<plugin>:<basename>`, or `<plugin>:<metadata key>` when a `source` resolves to the same path | REA observed | F-33 | same file |
+| A directory with no `.md` files and no `SKILL.md` in subdirectories is a warning, not an error | REA observed | F-33 | same file |
+| A command file over the byte limit is skipped with the target's wording | REA observed | F-33 | same file |
 
 ## The subagents — conformance
 
 §2.8 records the subagent definition lifecycle as *"Partial … not traced"*: the names and the storage are observed, the behavior is not. Every row of this table is therefore a **implementation choice**, and the measured outcome of the row is in [`results.md`](results.md).
 
-| Claim | Evidence class | Pinned by |
-|---|---|---|
-| The subagent registry mirrors the skill registry, and discovers a project subagent and a plugin subagent | **implementation choice** | `tests/contracts/extensions.test.ts` — "discovers a project subagent and a plugin subagent" |
-| A subagent is resolved by name, and an inherited member is never resolved as one | **implementation choice** | same file — "resolves a subagent by name and refuses an inherited member" |
-| A session may use only the subagents it is allowed to use | **implementation choice** | same file — "applies the subagents a session may use" |
-| A subagent file over the byte limit is **surfaced**, never read | **implementation choice** | same file — "surfaces a subagent file over the byte limit rather than reading it" |
-| A subagent name two plugins provide is **reported**, not dropped silently | **implementation choice** | same file — "reports a subagent name two plugins provide, instead of dropping one silently" |
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The subagent registry mirrors the skill registry, and discovers a project subagent and a plugin subagent | **implementation choice** | F-33 | `tests/contracts/extensions.test.ts` — "discovers a project subagent and a plugin subagent" |
+| A subagent is resolved by name, and an inherited member is never resolved as one | **implementation choice** | F-33 | same file — "resolves a subagent by name and refuses an inherited member" |
+| A session may use only the subagents it is allowed to use | **implementation choice** | F-33 | same file — "applies the subagents a session may use" |
+| A subagent file over the byte limit is **surfaced**, never read | **implementation choice** | F-33 | same file — "surfaces a subagent file over the byte limit rather than reading it" |
+| A subagent name two plugins provide is **reported**, not dropped silently | **implementation choice** | F-33 | same file — "reports a subagent name two plugins provide, instead of dropping one silently" |
 
 ## The IDE bridge — conformance
 
 §2.8 observes only the two `mcp__ide__executeCode` / `mcp__ide__getDiagnostics` tools; there is no observed lock-file, port or discovery mechanism to copy. Every row of this table is therefore a **implementation choice**, and the measured outcome of the row is in [`results.md`](results.md).
 
-| Claim | Evidence class | Pinned by |
-|---|---|---|
-| The bridge lists the IDE integrations it discovers and resolves one by name | **implementation choice** | `tests/contracts/extensions.test.ts` — "lists the IDE integrations it discovers and resolves one by name" |
-| A request is applied to the resolved IDE, and one that cannot be resolved is refused | **implementation choice** | same file — "applies a request to the resolved IDE", "refuses a request for an IDE it cannot resolve" |
-| The two observed actions are `executeCode` and `getDiagnostics` | REA observed (the two names) + **implementation choice** (the set) | same file — "names the two observed IDE actions" |
-| An action is validated as a **single path segment** — no empty, `.`, `..`, `/`, `\` or NUL — before anything is sent | **implementation choice** | same file — "refuses an action that is not a single path segment", "refuses an action that carries a path separator", "refuses an action that is empty, a dot, a dot-dot, or carries a separator or a NUL" |
-| An action outside the observed set is accepted, as a single path segment | **implementation choice** | same file — "applies an action outside the observed set, as a single path segment" |
-| A request is never sent to a host that is not a loopback address | **implementation choice** | same file — "refuses to send an IDE request to a host that is not a loopback address" |
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The bridge lists the IDE integrations it discovers and resolves one by name | **implementation choice** | F-33 | `tests/contracts/extensions.test.ts` — "lists the IDE integrations it discovers and resolves one by name" |
+| A request is applied to the resolved IDE, and one that cannot be resolved is refused | **implementation choice** | F-33 | same file — "applies a request to the resolved IDE", "refuses a request for an IDE it cannot resolve" |
+| The two observed actions are `executeCode` and `getDiagnostics` | REA observed (the two names) + **implementation choice** (the set) | F-33 | same file — "names the two observed IDE actions" |
+| An action is validated as a **single path segment** — no empty, `.`, `..`, `/`, `\` or NUL — before anything is sent | **implementation choice** | F-33 | same file — "refuses an action that is not a single path segment", "refuses an action that carries a path separator", "refuses an action that is empty, a dot, a dot-dot, or carries a separator or a NUL" |
+| An action outside the observed set is accepted, as a single path segment | **implementation choice** | F-33 | same file — "applies an action outside the observed set, as a single path segment" |
+| A request is never sent to a host that is not a loopback address | **implementation choice** | F-33 | same file — "refuses to send an IDE request to a host that is not a loopback address" |

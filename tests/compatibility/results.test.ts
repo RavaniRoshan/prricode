@@ -23,9 +23,19 @@
  * whose scenario no longer holds fails here, and so does a report that claims
  * a `match` for a row the matrix forbids.
  *
+ * The report's **prose** is bound to the measurement too: the "What was
+ * measured" cell of a row must be the **detail** the probe returned, so every
+ * explanatory sentence in the report is the harness's own words and not the
+ * writer's.
+ *
+ * The **measurement** is bound to this implementation: a probe that observed nothing of
+ * this implementation, or that asserted a constant rather than a value it observed, is
+ * not a measurement, and the report may not carry it.
+ *
  * The links are checked too: the linked test must be a test this repository
- * really has, the pinning test must be a test the owning task really has, and
- * two rows may not claim the same scenario.
+ * really has, the pinning test must be a test the owning task really has, the
+ * matrix's own **Test ref** must name a file this repository has, and two rows
+ * may not claim the same scenario.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -45,9 +55,10 @@ import {
   type MatrixRow,
   type ResultRow,
 } from './matrix.js';
-import { SCENARIOS, measure, scenarioOf } from './scenarios.js';
+import { REPOSITORY_ROOT } from './scenarios.js';
+import { SCENARIOS, meaningfulness, measure, scenarioOf } from './scenarios.js';
 
-const REPOSITORY_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const REPOSITORY = fileURLToPath(new URL('../../', import.meta.url));
 
 /** The harness's own test file — the linked test of every row. */
 const HARNESS_FILE = 'tests/compatibility/scenarios.test.ts';
@@ -68,9 +79,20 @@ const MATRIX_BY_ID = new Map(MATRIX.map((row) => [row.id, row]));
  * that names a test nobody wrote fails here.
  */
 function testSourceOf(relativePath: string): string | undefined {
-  const absolute = path.join(REPOSITORY_ROOT, relativePath);
+  const absolute = path.join(REPOSITORY, relativePath);
   if (!existsSync(absolute)) return undefined;
   return readFileSync(absolute, 'utf8');
+}
+
+/**
+ * The files a cell names.
+ *
+ * A cell names its files in backticks; a cell that names none names no file.
+ */
+function filesOf(cell: string): string[] {
+  return [...cell.matchAll(/`([^`]+)`/g)]
+    .map((match) => match[1] ?? '')
+    .filter((candidate) => /[/\\]/.test(candidate) || /\.(ts|tsx|js|mjs|md|json)$/.test(candidate));
 }
 
 describe('the compatibility report', () => {
@@ -94,6 +116,45 @@ describe('the compatibility report', () => {
         MATRIX_BY_ID.has(result.id),
         `${result.id} is not a feature-matrix row`,
       ).toBe(true);
+    }
+  });
+
+  it('the harness measures exactly the rows the matrix names', () => {
+    // A scenario for a row the matrix does not have measures nothing, and a
+    // matrix row without a scenario is not measured at all.
+    const matrixIds = MATRIX.map((row) => row.id).sort();
+    const scenarioIds = SCENARIOS.map((scenario) => scenario.rowId).sort();
+    expect(scenarioIds).toEqual(matrixIds);
+  });
+
+  it('every matrix row reads as nine columns', () => {
+    // A row that carries a pipe inside a cell must still read as nine columns:
+    // a reader that splits on the pipe reads the wrong tail columns.
+    for (const row of MATRIX) {
+      expect(
+        row.cellCount,
+        `${row.id} reads as ${row.cellCount} columns, not nine: a pipe inside a cell is splitting the row`,
+      ).toBe(9);
+    }
+  });
+
+  it('the matrix\'s own test ref names a file this repository has', () => {
+    for (const row of MATRIX) {
+      const files = filesOf(row.testRef);
+      if (files.length === 0) {
+        // A row with no test of its own — the whole-image native inventory —
+        // names none, and the matrix must not invent one.
+        expect(row.testRef, `${row.id} names no test ref`).toMatch(/^—$/);
+        continue;
+      }
+      for (const file of files) {
+        const source = testSourceOf(file);
+        expect(source, `${row.id} names the test ref ${file}, which does not exist`).toBeDefined();
+        expect(
+          source ?? '',
+          `${row.id} names the test ref ${file}, which has no test in it`,
+        ).toMatch(/\b(it|test)\(/);
+      }
     }
   });
 
@@ -205,6 +266,35 @@ describe('the compatibility report', () => {
     }
   });
 
+  it('every results row carries the prose the harness wrote', async () => {
+    // The "What was measured" cell is the probe's own detail. The report's
+    // sentences are therefore the harness's, and a cell that was edited by
+    // hand fails here.
+    for (const result of RESULTS) {
+      const scenario = scenarioOf(result.id);
+      const measurement = await measure(scenario);
+      expect(
+        result.measured,
+        `${result.id} carries a "What was measured" cell that is not the harness's own: the harness measured "${measurement.detail}"`,
+      ).toBe(measurement.detail);
+    }
+  });
+
+  it('every measurement measured something', async () => {
+    // A probe that observes nothing of this implementation, or that asserts a constant
+    // rather than a value it observed, is not a measurement — and the report
+    // may not carry one.
+    for (const result of RESULTS) {
+      const scenario = scenarioOf(result.id);
+      const measurement = await measure(scenario);
+      const meaning = meaningfulness(measurement);
+      expect(
+        meaning.meaningful,
+        `${result.id} measured nothing: ${meaning.reason}`,
+      ).toBe(true);
+    }
+  });
+
   it('every row reported as a match has a scenario that passes', async () => {
     for (const result of RESULTS) {
       if (result.outcome !== 'match') continue;
@@ -216,5 +306,9 @@ describe('the compatibility report', () => {
       ).toBe(false);
       expect(measurement.outcome).toBe('match');
     }
+  });
+
+  it('the repository root the harness reads is the repository this test runs in', () => {
+    expect(REPOSITORY_ROOT).toBe(REPOSITORY);
   });
 });
