@@ -40,6 +40,7 @@ import {
 import {
   readProviderStateFile,
   registryFromState,
+  usageError,
   type CommandResult,
 } from './shared.js';
 
@@ -140,6 +141,51 @@ export async function loadManagerState(statePath: string): Promise<LoadedManager
  * An **unterminated** quote is a usage error rather than a guess: the text is
  * refused instead of being read as something the user did not write.
  */
+/**
+ * Whether a line of typed text is a manager command.
+ *
+ * **Project extension.** The target has no provider manager, so it has no
+ * `/provider` slash command either. The interactive host asks this before it
+ * treats the line as a prompt.
+ */
+export function isManagerCommand(text: string): boolean {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith('/')) return false;
+  const body = trimmed.slice(1);
+  const first = body.split(/\s/, 1)[0] ?? '';
+  return first === 'provider' || first === 'catalog';
+}
+
+/**
+ * Run the manager command a line of typed text names.
+ *
+ * The line is a **slash command** — `/provider list`, `/catalog search opus` —
+ * and the arguments after the command word are the manager's own. An
+ * **unterminated quote** is a usage error rather than a guess: the line is
+ * refused instead of being read as something the user did not write.
+ *
+ * A line that is **not** a manager command is **not** run: the caller sends it
+ * to the model instead.
+ */
+export async function runManagerText(
+  text: string,
+  registry: ProviderRegistry,
+  options: ManagerCommandOptions = {},
+): Promise<CommandResult | undefined> {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith('/')) return undefined;
+  const body = trimmed.slice(1);
+  const space = body.search(/\s/);
+  const word = space === -1 ? body : body.slice(0, space);
+  if (word !== 'provider' && word !== 'catalog') return undefined;
+  const rest = space === -1 ? '' : body.slice(space + 1);
+  const args = managerArgumentsOf(rest);
+  if (args === undefined) {
+    return usageError('the command has an unterminated quote');
+  }
+  return providerManagerCommand([word, ...args], registry, options);
+}
+
 export function managerArgumentsOf(text: string): string[] | undefined {
   const args: string[] = [];
   let current = '';
