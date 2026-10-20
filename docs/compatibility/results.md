@@ -63,7 +63,7 @@ Three consequences follow, and the results test enforces the first two — the t
 
 - A **project requirement** row (`F-10`, `F-11`, `F-40`) is reported `partial`. The target has **no** such surface, this implementation implements the extension, and the pinning test passes — but no target behaviour is matched, and the matrix forbids the word `match` here.
 - A **implementation choice** row (`F-37`, `F-39`) is reported `unknown`. The target's behaviour at `2.1.303` was not established by the audit, so there was nothing to compare against.
-- A **divergence from an observed behaviour** is reported `mismatch`, whatever the matrix's evidence class is. **Eight** rows are `mismatch` for that reason: `F-07`, `F-18`, `F-21`, `F-24`, `F-25`, `F-34`, `F-35` and `F-38`
+- A **divergence from an observed behaviour** is reported `mismatch`, whatever the matrix's evidence class is. **Seven** rows are `mismatch` for that reason: `F-07`, `F-18`, `F-21`, `F-24`, `F-25`, `F-34` and `F-35`
 
 **The pinning test is not run here.** The matrix's rule asks for "a test in
 the owning task [that] passes". This suite does not run it: the results test
@@ -80,9 +80,9 @@ them and fails when they disagree.
 
 | Outcome | Rows |
 |---|---|
-| `match` | 18 |
+| `match` | 19 |
 | `partial` | 12 |
-| `mismatch` | 8 |
+| `mismatch` | 7 |
 | `not-tested` | 0 |
 | `unknown` | 4 |
 | **Total** | **42** |
@@ -130,7 +130,7 @@ them and fails when they disagree.
 | F-35 | Platform | Native seccomp notification supervisor | REA observed | mismatch | The 27-record dispatch table and the observe-never-deny rule are reproduced, but this build installs no seccomp-notification listener: its filter program carries no `SECCOMP_RET_USER_NOTIF` action, so the supervisor is never attached to a kernel notification. | `tests/compatibility/scenarios.test.ts` — "F-35 the seccomp notification supervisor" | `tests/security/sandbox.test.ts` — "observes without denying: the response error stays zero and the call continues" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-35 the seccomp notification supervisor" |
 | F-36 | Platform | Whole-image native inventory | — | unknown | The whole-image native inventory produced no Evidence record — the audit records three attempts that timed out — so the target's native image was never established and nothing was compared; this implementation's own native surface is the external `bubblewrap` binary. | `tests/compatibility/scenarios.test.ts` — "F-36 the whole-image native inventory" | — | npx vitest run tests/compatibility/scenarios.test.ts -t "F-36 the whole-image native inventory" |
 | F-37 | Platform | The `Bash` tool's sandbox routing | **implementation choice** (the target's routing is unobserved) | unknown | The target's routing is unobserved: the audit records the sandboxOverride reason kind, and this implementation's routing is its own. The dangerouslyDisableSandbox flag is this implementation's, not the audit's. | `tests/compatibility/scenarios.test.ts` — "F-37 the bash tool's sandbox routing" | `tests/security/bash-sandbox.test.ts` — "runs the command unconfined when the sandbox is switched off, even with the flag" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-37 the bash tool's sandbox routing" |
-| F-38 | Command line | The command-line surface | REA observed | mismatch | The parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the pattern and the validation messages are reproduced. One difference remains: the target's boolean flags consume the next token when it does not look like a flag — so -r/--resume takes an optional value — while this implementation keeps its boolean set pure and gives the token to the positionals. The audit does not enumerate the boolean set's members, so the difference is stated for the rule; the flag this implementation treats as boolean is --continue. | `tests/compatibility/scenarios.test.ts` — "F-38 the command-line surface" | `tests/contracts/cli-surface.test.ts` — "keeps the optional value of --resume" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-38 the command-line surface" |
+| F-38 | Command line | The command-line surface | REA observed | match | The parser's structure, its seven flag sets, the repeatable subset, the optional-value set, the boolean set, the short-flag-cluster rule, the command tokens, the pattern and the validation messages are reproduced. A **boolean** flag owns **no** token — the target's own scanner gives a boolean nothing, and the set that takes the next token only when it does not look like a flag is the **optional-value** set, which is where -r and --resume live. | `tests/compatibility/scenarios.test.ts` — "F-38 the command-line surface" | `tests/contracts/cli-surface.test.ts` — "keeps the optional value of --resume" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-38 the command-line surface" |
 | F-39 | Command line | The interactive terminal UI | **implementation choice** (the audit records no TUI drawing at all) | unknown | The audit records no TUI drawing at all, so the target's terminal UI at 2.1.303 was not established and nothing was compared; this implementation's renderer is its own. | `tests/compatibility/scenarios.test.ts` — "F-39 the interactive terminal ui" | `tests/contracts/ui-render.test.ts` — "produces one block per assistant message" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-39 the interactive terminal ui" |
 | F-40 | Provider | The multi-provider manager surfaces | **project requirement** (a project extension, not part of the reference agent) | partial | The project requirement is met — the `/provider` command, the catalog browser, the connection switch and the two credential columns — but the target has no such surface, so no target behaviour is matched. | `tests/compatibility/scenarios.test.ts` — "F-40 the multi-provider manager surfaces" | `tests/contracts/provider-command.test.ts` — "provider list prints one row per connection with its id, name, route, base URL, and credential status" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-40 the multi-provider manager surfaces" |
 
@@ -198,7 +198,7 @@ No row is `not-tested`: every scenario in this report ran.
 
 A divergence from an **observed** target behaviour is a mismatch, never a
 partial, and a difference of **any kind** counts — a name, a value, a member,
-a kind, or a member the target has and this implementation does not. Eight rows are
+a kind, or a member the target has and this implementation does not. Seven rows are
 measured as one.
 
 | `F-07` | The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown. One difference remains: the target's fallback predicate is provider_ids[route] === null, and an omitted key is not null, so the target does not treat that row as unserved by gateway and resolves it to gateway — this implementation's not-served test is an absent key, a superset, so it falls back to mantle instead. The omitted key is this implementation's own transcription of the target's literal; the predicate is the audit's. |
@@ -208,7 +208,6 @@ measured as one.
 | `F-25` | The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; so are the lookup's ordering — the file's modification time, then its creation time — and its skip rules, where a /loop session is skipped and a print session is not. One difference remains: a candidate that is live in the background is reported and the lookup continues with nothing, where the target drops such a candidate and carries on with the next one; the target's report-and-stop case is the different candidate that was continued into a live session. |
 | `F-34` | This implementation's syscall denylist includes `io_uring_setup` and its mount plan masks the protected paths, but this implementation establishes the sandbox with an external `bubblewrap` binary and ships no native helper, where the target's `apply-seccomp` helper is a native worker that does the namespace, mount and `prctl` work itself. |
 | `F-35` | The 27-record dispatch table and the observe-never-deny rule are reproduced, but this build installs no seccomp-notification listener: its filter program carries no `SECCOMP_RET_USER_NOTIF` action, so the supervisor is never attached to a kernel notification. |
-| `F-38` | The parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the pattern and the validation messages are reproduced. One difference remains: the target's boolean flags consume the next token when it does not look like a flag — so -r/--resume takes an optional value — while this implementation keeps its boolean set pure and gives the token to the positionals. The audit does not enumerate the boolean set's members, so the difference is stated for the rule; the flag this implementation treats as boolean is --continue. |
 
 ## How to reproduce
 

@@ -603,7 +603,41 @@ The earlier hypothesis that field `0x2463b9` is a handler function pointer was r
 
 - a set of flags that **take a value**;
 - a **repeatable** subset of those — `--allowedTools`, `--allowed-tools`, `--disallowedTools`, `--disallowed-tools`, `--tools`, `--add-dir`, `--mcp-config`, `--betas`, `--file`, `--channels`, `--dangerously-load-development-channels` — which consume **every** following non-flag token;
-- a set of **boolean** flags, which consume the next token only when it does **not** look like a flag — so `-r`/`--resume` takes an *optional* value.
+- a set of flags that take an **optional** value — the next token, and **only** when it does not look like a flag: `-d`/`--debug`, `-r`/`--resume`, `--from-pr`, `-w`/`--worktree`, `--teleport`, `--cloud`, `--remote`, `--project`, `--remote-control`, `--rc`, `--prompt-suggestions`;
+- a set of **boolean** flags, which consume **nothing** at all.
+
+> **Correction.** This section previously read *"a set of **boolean** flags, which consume the
+> next token only when it does **not** look like a flag — so `-r`/`--resume` takes an
+> *optional* value."* That sentence described the **optional-value** set while calling it
+> the boolean set, and it omitted the boolean set entirely. The two are different: a
+> **boolean** flag owns **no** token, and `-r`/`--resume` is a member of the
+> **optional-value** set and of no other.
+>
+> The target's own parser settles it (`chunk-0y0ptpy9.js`, bytes 3038–3241):
+>
+> ```js
+> function Ibt(e,n){let t=e[n];
+>   if(t!==void 0&&d.has(t)){let s=e[n+1];return s!==void 0&&!ejt(s)?n+1:n}
+>   if(t===void 0||!l.has(t))return n;
+>   let o=n+1;if(LBr.has(t))while(o+1<e.length&&!ejt(e[o+1]))o++;
+>   return o}
+> ```
+>
+> with `ejt(e){return e.length>1&&e.startsWith("-")}`. A boolean flag is in neither `d`
+> nor `l`, so it falls through to `return n` — **it owns no token**. The seven sets are:
+> `l` — **85** value-taking; `LBr` — **11** repeatable, a subset of `l`; `d` — **14**
+> optional-value; `f` — **45** boolean; `m` — **10** command tokens; `g` — **6** session
+> subcommands; and `h` — **3** value-taking flags the scanner does not count as flags
+> (`--exec`, `-m`, `--handle-uri`).
+>
+> Two independent corroborations from the target's own root command: every option it
+> declares with an **optional** argument is a member of `d`, and **no** member of `f` is
+> declared with an argument at all; and every flag it reads through its value extractor is
+> a member of `l` — **no** boolean flag is ever read as though it had a value.
+>
+> The consequence for the report: `F-38` was measured as a divergence on the strength
+> of the sentence above, and it is **not** one. This implementation's boolean flags own
+> no token, which is what the target's do.
 
 **The subcommands** are `attach`, `logs`, `stop`, `kill`, `respawn`, `rm`. A **short flag cluster** (`/^-[A-Za-z]{2,}$/`, e.g. `-d2e`) is a single token, not two flags. A token that is one of `-p`, `--print`, `--bg`, `--background`, `--routine`, `-h`, `--help`, `-v`, `-V`, `--version`, or that starts with `--routine=`, is a **command**, not a flag.
 

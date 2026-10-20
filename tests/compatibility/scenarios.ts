@@ -3035,8 +3035,8 @@ export const SCENARIOS: readonly Scenario[] = [
         'Error: --input-format=stream-json requires --print.',
       );
       return measured(
-        'mismatch',
-        "The parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the pattern and the validation messages are reproduced. One difference remains: the target's boolean flags consume the next token when it does not look like a flag — so -r/--resume takes an optional value — while this implementation keeps its boolean set pure and gives the token to the positionals. The audit does not enumerate the boolean set's members, so the difference is stated for the rule; the flag this implementation treats as boolean is --continue.",
+        'match',
+        "The parser's structure, its seven flag sets, the repeatable subset, the optional-value set, the boolean set, the short-flag-cluster rule, the command tokens, the pattern and the validation messages are reproduced. A **boolean** flag owns **no** token — the target\u0027s own scanner gives a boolean nothing, and the set that takes the next token only when it does not look like a flag is the **optional-value** set, which is where -r and --resume live.",
       );
     },
   },
