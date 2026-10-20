@@ -153,7 +153,7 @@
  */
 
 import { permissionStrictness, type PermissionDecision } from '../../permissions/decision.js';
-import { isRecord, ownBoolean, ownNumber, ownString } from '../../session/event.js';
+import { isRecord, ownBoolean, ownNumber, ownString, toolResultId } from '../../session/event.js';
 import type { SessionEvent } from '../../session/event.js';
 import type { ToolResultEnvelope } from '../../tools/runner.js';
 import { glyphs, type Segment } from '../theme.js';
@@ -611,15 +611,20 @@ export function toolResultLines(
   // unknown behaviour is the strictest one, and the strictest is `deny`.
   const closed = decision === undefined ? undefined : closedDecision(decision);
 
-  const envelopeDecision = envelope?.permissionDecision;
+  const envelopeDecision = envelope?.permission_decision;
   const denied = closed?.behavior === 'deny' || envelopeDecision?.decision === 'deny';
   if (denied) {
     // The decision that refused the call: the envelope's summary when it
     // refused it, and the strictest record otherwise.
     const deciding = envelopeDecision?.decision === 'deny' ? envelopeDecision : closed;
     const source = deciding?.source ?? envelopeDecision?.source ?? closed?.source ?? 'unknown';
+    // The envelope's decision carries the **target's** member name
+    // (`reason_type`); the decision record carries this implementation's own
+    // (`reasonType`).
     const reasonType =
-      deciding?.reasonType ?? envelopeDecision?.reasonType ?? closed?.reasonType ?? 'other';
+      envelopeDecision?.decision === 'deny'
+        ? (envelopeDecision?.reason_type ?? 'other')
+        : (closed?.reasonType ?? envelopeDecision?.reason_type ?? 'other');
     lines.push(`denied (source: ${source}, reason type: ${reasonType})`);
     const reason = closed?.reason;
     if (reason !== undefined && reason !== '') lines.push(stripControlSequences(reason));
@@ -939,12 +944,12 @@ function fold(events: SessionEvent[], includeUserMessages: boolean): Entry[] {
         break;
       }
       case 'tool_result': {
-        const entry = byId.get(event.envelope.toolUseId);
+        const entry = byId.get(toolResultId(event.envelope));
         if (entry === undefined) {
           // The pairing invariant is **checked**, not assumed: the audit
           // records that the target reports the mismatch, so this implementation reports
           // it too rather than dropping the result in silence.
-          entries.push({ kind: 'unmatched', toolUseId: event.envelope.toolUseId });
+          entries.push({ kind: 'unmatched', toolUseId: toolResultId(event.envelope) });
           break;
         }
         entry.envelope = event.envelope;

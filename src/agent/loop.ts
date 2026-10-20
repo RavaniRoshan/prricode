@@ -81,10 +81,10 @@
  *
  *   - a `deny` from either one blocks the call;
  *   - an `ask` from either one refuses it — with **one** exception: the
- *     service's *generic* "no rule matched" prompt (`reasonKind:
- *     'noRuleMatch'`) does not override a call the tool's own check allowed,
- *     because that prompt carries no rule. Every other `ask` — an ask rule, a
- *     mode-level refusal, a safety check — restricts the call;
+ *     service's *generic* "no rule matched" prompt (`noRuleMatched`) does not
+ *     override a call the tool's own check allowed, because that prompt carries
+ *     no rule. Every other `ask` — an ask rule, a mode-level refusal, a safety
+ *     check — restricts the call;
  *   - two `allow`s are the tool's own.
  *
  * **The two checks are two checks, not one check run twice.** By default the
@@ -261,7 +261,7 @@ import {
 } from '../session/store.js';
 import type { ToolDefinition, ToolRegistry, ToolRecheck } from '../tools/registry.js';
 import { isToolConcurrencySafe } from '../tools/registry.js';
-import { runTool, type ToolResultEnvelope } from '../tools/runner.js';
+import { runTool, withLegacyEnvelopeNames, type ToolResultEnvelope } from '../tools/runner.js';
 
 import {
   buildProviderRequest,
@@ -858,7 +858,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     }
 
     const envelope = raced.value;
-    const kind = envelope.nonExecutionKind;
+    const kind = envelope.non_execution_kind;
 
     if (kind === 'permission_denied' || kind === 'permission_unresolved' || kind === 'unknown_tool') {
       // A denial, an unresolved approval and an unknown tool are **refusals**:
@@ -1178,7 +1178,7 @@ export function combineDecisions(
   if (asks.length === 0) return withRewrite(toolDecision, serviceDecision);
 
   const only = asks.length === 1 ? asks[0] : undefined;
-  if (only !== undefined && only.reasonKind === 'noRuleMatch' && toolDecision.behavior === 'allow') {
+  if (only !== undefined && only.noRuleMatched === true && toolDecision.behavior === 'allow') {
     return withRewrite(toolDecision, serviceDecision);
   }
 
@@ -1222,12 +1222,12 @@ function withRewrite(
  * the reason type — which is what a record of the decision needs.
  */
 export function decisionFromEnvelope(envelope: ToolResultEnvelope): PermissionDecision | undefined {
-  const summary = envelope.permissionDecision;
+  const summary = envelope.permission_decision;
   if (summary === undefined) return undefined;
   const decision: PermissionDecision = {
     behavior: summary.decision,
     source: summary.source,
-    reasonType: summary.reasonType ?? 'other',
+    reasonType: summary.reason_type ?? 'other',
   };
   const message = errorMessageOf(envelope);
   if (message !== undefined) decision.reason = message;
@@ -1249,7 +1249,7 @@ export function decisionFromEnvelope(envelope: ToolResultEnvelope): PermissionDe
  * all ride along, and the content becomes the wrapper.
  */
 export function refusalEnvelope(envelope: ToolResultEnvelope): ToolResultEnvelope {
-  return { ...envelope, content: toolUseErrorContent(envelope), isError: true };
+  return withLegacyEnvelopeNames({ ...envelope, content: toolUseErrorContent(envelope), isError: true });
 }
 
 /**
@@ -1271,7 +1271,7 @@ export function toolUseErrorContent(envelope: ToolResultEnvelope): string {
     );
   }
   if (envelope.remedy !== undefined) parts.push(envelope.remedy);
-  if (envelope.userFeedback !== undefined) parts.push(`The user said: ${envelope.userFeedback}`);
+  if (envelope.user_feedback !== undefined) parts.push(`The user said: ${envelope.user_feedback}`);
   return `<tool_use_error>${parts.join(' ')}</tool_use_error>`;
 }
 

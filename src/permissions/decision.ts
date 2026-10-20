@@ -100,7 +100,7 @@
  * attribution.
  *
  * **A hook approval replaces only the generic prompt.** The case where no rule
- * matched at all (`noRuleMatch`) is the one the hook's approval replaces; the
+ * matched at all is the one the hook's approval replaces; the
  * **escalation** of a compound command an allow rule covered only in part
  * (`subcommandResults`) stands, because the hook's approval must not approve the
  * sub-commands the allow rule did not cover.
@@ -146,10 +146,13 @@
  *   - A hook approval that the classifier may not approve (`classifierApprovable:
  *     false`) becomes an **ask** in `auto` mode rather than a denial: a person
  *     decides, and the classifier cannot decide for them.
- *   - The reason kinds are the audit's observed six plus `noRuleMatch`, a reimplementation
- *     addition so that the audit's `permissionPromptTool` ("a named tool requires
- *     approval for this command") keeps its observed meaning instead of also
- *     covering "no rule matched".
+ *   - The reason kinds are the audit's observed **six**, and no more: `rule`,
+ *     `subcommandResults`, `permissionPromptTool`, `sandboxOverride`,
+ *     `workingDir` and `safetyCheck`. The case where no rule matched at all is
+ *     the target's `permissionPromptTool`, and the distinction this
+ *     implementation needs between that generic prompt and a mode-level
+ *     refusal is carried by the decision's own `noRuleMatched` marker, which is
+ *     **not** a reason kind.
  *   - The "don't ask again" affordance **computes** the rules to persist and the
  *     five-rule cap, but **does not write them**: the write to
  *     `.claude/settings.local.json` is not implemented in this module.
@@ -240,14 +243,20 @@ export type PermissionReasonType = 'rule' | 'safetyCheck' | 'other';
 /**
  * The reason kinds the audit records.
  *
- * `rule` names a matched rule and its tier; `subcommandResults` lists the offending
+ * The vocabulary is **closed** and it is the target's own six: `rule` names a
+ * matched rule and its tier; `subcommandResults` lists the offending
  * sub-commands of a compound command and counts the parts that need approval;
- * `permissionPromptTool` names a tool that requires approval; `sandboxOverride` is
- * "Run outside of the sandbox"; `workingDir` is the working directory; and
+ * `permissionPromptTool` names a tool that requires approval; `sandboxOverride`
+ * is "Run outside of the sandbox"; `workingDir` is the working directory; and
  * `safetyCheck` is a refusal that is independent of the rule engine.
  *
- * `noRuleMatch` is a **implementation addition**: it is the case where no rule matched at
- * all, which the audit's `permissionPromptTool` would otherwise have to cover.
+ * **There is no seventh kind.** The case where no rule matched at all — the
+ * generic prompt — is the target's `permissionPromptTool`: the target's own
+ * six do not name it separately, so this implementation does not either. The
+ * distinction this implementation needs between the generic prompt and a
+ * mode-level refusal (a `PreToolUse` hook's approval replaces the first and
+ * never the second) is carried by {@link PermissionDecision.noRuleMatched},
+ * which is **not** a reason kind.
  */
 export type PermissionReasonKind =
   | 'rule'
@@ -255,8 +264,7 @@ export type PermissionReasonKind =
   | 'permissionPromptTool'
   | 'sandboxOverride'
   | 'workingDir'
-  | 'safetyCheck'
-  | 'noRuleMatch';
+  | 'safetyCheck';
 
 /** The permission modes, including the `manual` alias of `default`. */
 export type PermissionMode =
@@ -289,6 +297,17 @@ export interface PermissionDecision {
   rule?: { content: string; source: string };
   /** The specific reason kind, when it is known. */
   reasonKind?: PermissionReasonKind;
+  /**
+   * Whether the decision is the **generic prompt** — the ask that exists only
+   * because no rule matched.
+   *
+   * The target's reason-kind vocabulary has **six** members and none of them
+   * names this case, so the distinction is carried here rather than by a
+   * seventh kind. The member is **this implementation's own**: it says that the
+   * prompt is replaceable by a `PreToolUse` hook's approval, which a
+   * mode-level refusal is not.
+   */
+  noRuleMatched?: boolean;
   /** The offending sub-commands of a compound command. */
   subcommandResults?: { commands: string[]; count: number; total: number };
   /** The rules that were ignored for this call. */
@@ -546,7 +565,7 @@ function attachWarnings<T extends PermissionDecision>(decision: T, warnings: str
  *
  * The reason kinds are the ones the audit records: `rule`,
  * `subcommandResults`, `permissionPromptTool`, `sandboxOverride`, `workingDir` and
- * `safetyCheck`, plus this implementation's `noRuleMatch`.
+ * `safetyCheck`.
  */
 export function describeReason(decision: PermissionDecision, toolName: string): string {
   const kind: PermissionReasonKind | 'other' =
@@ -564,8 +583,6 @@ export function describeReason(decision: PermissionDecision, toolName: string): 
       return describeSubcommandReason(decision, toolName);
     case 'permissionPromptTool':
       return decision.reason ?? `The ${toolName} tool requires approval for this command.`;
-    case 'noRuleMatch':
-      return decision.reason ?? `No permission rule matched, so this ${toolName} call requires approval.`;
     case 'sandboxOverride':
       return 'Run outside of the sandbox';
     case 'workingDir':
@@ -634,7 +651,8 @@ export function evaluateRules(rules: RuleSet, tool: ToolContext): RuleDecision |
 function askDecision(
   toolName: string,
   reason?: string,
-  reasonKind: PermissionReasonKind = 'noRuleMatch',
+  reasonKind: PermissionReasonKind = 'permissionPromptTool',
+  generic: boolean = true,
 ): PermissionDecision {
   const text = reason ?? `No permission rule matched, so this ${toolName} call requires approval.`;
   return {
@@ -644,6 +662,10 @@ function askDecision(
     reasonKind,
     reason: text,
     message: text,
+    // The generic prompt is the ask that exists only because no rule matched:
+    // it is the one a `PreToolUse` hook's approval replaces. A mode-level
+    // refusal is not generic, and it is not replaceable.
+    ...(generic ? { noRuleMatched: true } : {}),
   };
 }
 
@@ -675,8 +697,8 @@ function allowFailureEscalation(tool: ToolContext, outcome: RuleListOutcome): Pe
  * There is **no** "overridden" flag: an ask rule that matched makes the
  * decision an ask, and an ask is never replaced by an approval, so the flag
  * would always be `false` at the places it was read. The rule is enforced by
- * the decision's own `reasonKind` (`noRuleMatch` is the generic prompt, and
- * only it is replaceable).
+ * the decision's own `noRuleMatched` marker (the generic prompt is the one
+ * that is replaceable, and only it is).
  */
 interface HookApproval {
   /** The hook's decision. */
@@ -1033,7 +1055,7 @@ async function recheckEffectiveInput(
  * Apply a hook's approval to the decision the mode produced.
  *
  * An approval replaces a **generic** prompt — the case where no rule matched and
- * nothing else forced a prompt (`noRuleMatch`). It never replaces a denial, never
+ * nothing else forced a prompt. It never replaces a denial, never
  * replaces a mode-level refusal (`permissionPromptTool`), never replaces the ask
  * of an ask rule, and never replaces the **escalation** of a partially covered
  * compound command (`subcommandResults`): the hook's approval must not approve
@@ -1055,10 +1077,11 @@ function applyHookApproval(
   if (decision.behavior === 'deny') return decision;
 
   // The call would prompt.
-  if (decision.reasonKind === 'noRuleMatch') {
+  if (decision.noRuleMatched === true) {
     // The **generic** prompt — the case where no rule matched — is the only one
     // the hook's approval replaces. An ask rule that matched gives the decision
-    // the rule's own reason kind, so it never reaches this branch.
+    // the rule's own reason kind, so it never reaches this branch, and a
+    // mode-level refusal is not generic at all.
     return { ...hook, reason: hook.reason ?? 'A hook approved this call.' };
   }
   // Everything else stands: the ask of an ask rule, the escalation of a partially
@@ -1274,10 +1297,13 @@ function decidePlan(
   if (asked) return asked;
 
   if (mutatesFiles(ctx)) {
+    // A mode-level refusal: the plan mode itself refuses the edit. It is not
+    // the generic prompt, so a hook's approval does not replace it.
     return askDecision(
       ctx.toolName,
       `Plan mode never auto-approves a file edit, so this ${ctx.toolName} call requires approval.`,
       'permissionPromptTool',
+      false,
     );
   }
 

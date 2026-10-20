@@ -13,19 +13,19 @@
  *     literal in this file, never one computed from the file under test), and
  *     every model id, every per-provider model id, every pricing-tier key and
  *     every alias key is spelled out here;
- *   - **"not served" is not "unknown"**: an absent `providerIds` key means the
- *     provider does not serve the model, and the API has no representation for
- *     "unknown" (the type is `string`, never `string | null`);
+ *   - **the target's own three states**: a string (the route serves the model),
+ *     `null` (the route does not — the target's own marker) and an absent key
+ *     (the target's literal does not carry it), and the "not served"
+ *     predicate is the target's `provider_ids[route] === null`;
  *   - the **explicit** map between the target's snake_case `provider_ids` keys
  *     and this implementation's route names;
  *   - the built-in catalog's shape: `schema_version: 1`, 22 rows, a row served
  *     by all eight routes and a row that omits at least one, with the target's
  *     extra fields preserved;
- *   - the target's `mantle` fallback: a model the selected route does not
- *     serve resolves to `mantle` when `mantle` does serve it — and the fact
- *     that this implementation's "not served" test is a **superset** of the audited
- *     `provider_ids[route] === null` predicate, with the difference pinned to
- *     exactly one row;
+ *   - the target's `mantle` fallback: a model the selected route marks as
+ *     `null` resolves to `mantle` when `mantle` does serve it — and the fact
+ *     that a route whose key the target's literal **omits** is not "not
+ *     served", so the predicate is the target's and not a superset of it;
  *   - the **half of the target's `wd(model)` rule that is not implemented**:
  *     the Bedrock+Mantle `anthropic.*` override needs the enabled-flag set,
  *     which this API does not take;
@@ -48,6 +48,7 @@ import {
   findModel,
   importCatalog,
   listModels,
+  notServedOn,
   providerIdFor,
   providerKeyForRoute,
   resolveModel,
@@ -71,8 +72,9 @@ import {
 /**
  * A model served by two of the eight routes.
  *
- * `bedrock` is **absent**: the model is not served there. That absence is a
- * fact, and it is what distinguishes "not served" from "unknown".
+ * `bedrock` is **absent**: the target's literal does not carry the key at all.
+ * The absence is a fact of its own, and it is distinct from `null` — the
+ * target's "this provider does not serve this model".
  */
 const twoRouteModel: CatalogModel = {
   id: 'claude-haiku-4-5',
@@ -88,34 +90,43 @@ const twoRouteModel: CatalogModel = {
 };
 
 /**
- * Compile-time pin: the catalog's provider-id type is `string`, never
- * `string | null`.
+ * Compile-time pin: the catalog's provider-id type carries the target's own
+ * `null` — the marker for "this provider does not serve this model" — and it
+ * is **not** "unknown".
  *
- * There is deliberately **no** representation for "unknown" — a provider id
- * is either present (the provider serves the model) or absent (it does not).
- * A nullable field would conflate the two, which is exactly what the target's
- * `null` avoids.
+ * The target's `provider_ids` has three states per route: a string (the route
+ * serves the model), `null` (it does not) and an absent key (the target's
+ * literal does not carry it). The type keeps all three apart.
  */
-// @ts-expect-error - `null` is not assignable: "unknown" is not representable.
-const unknownIsNotRepresentable: CatalogModel['providerIds']['bedrock'] = null;
-void unknownIsNotRepresentable;
+const notServedIsNull: CatalogModel['providerIds']['bedrock'] = null;
+void notServedIsNull;
 
 describe('the provider-owned model catalog', () => {
-  it('reports a route the model does not serve as absent, not as unknown', () => {
+  it('reports a route the model does not serve as the target does', () => {
     // The model has no `bedrock` key at all.
     expect(Object.hasOwn(twoRouteModel.providerIds, 'bedrock')).toBe(false);
     expect(twoRouteModel.providerIds.bedrock).toBeUndefined();
 
-    // The lookup therefore reports "not served" as the **absent** result ...
+    // The lookup answers with the id, or with nothing — and it answers with
+    // nothing for both a `null` entry and an absent one.
     expect(providerIdFor(twoRouteModel, 'bedrock')).toBeUndefined();
-    // ... and never with a `null` value, which would mean "unknown" in a
-    // nullable design. The map itself holds no `null` either, so the absence
-    // is the only way the API can say "not served".
-    expect(Object.values(twoRouteModel.providerIds)).not.toContain(null);
+
+    // The **predicate** is the target's: `provider_ids[route] === null`. An
+    // absent key is not `null`, so an absent key is **not** "not served".
+    expect(notServedOn(twoRouteModel, 'bedrock')).toBe(false);
+
+    // A route that is explicitly `null` **is** "not served".
+    const notServed: CatalogModel = {
+      ...twoRouteModel,
+      providerIds: { ...twoRouteModel.providerIds, bedrock: null },
+    };
+    expect(providerIdFor(notServed, 'bedrock')).toBeUndefined();
+    expect(notServedOn(notServed, 'bedrock')).toBe(true);
 
     // A route that *is* served reports its provider-specific id.
     expect(providerIdFor(twoRouteModel, 'firstParty')).toBe('claude-haiku-4-5-20251001');
     expect(providerIdFor(twoRouteModel, 'vertex')).toBe('claude-haiku-4-5@20251001');
+    expect(notServedOn(twoRouteModel, 'firstParty')).toBe(false);
   });
 
   it('does not resolve inherited Object.prototype members as provider ids', () => {
@@ -548,14 +559,22 @@ describe('the built-in model catalog', () => {
     );
     expect(nulls.length).toBeGreaterThanOrEqual(1);
 
-    // ... and it becomes an ABSENT key in this implementation's model, never a null value.
+    // ... and it is kept as the target's own marker: a `null` entry means
+    // "this provider does not serve this model".
     const imported = importCatalog(builtinFile);
     for (const model of imported.models) {
       for (const route of ROUTE_NAMES) {
         const value = model.providerIds[route];
-        expect(value === undefined || typeof value === 'string').toBe(true);
+        expect(value === undefined || typeof value === 'string' || value === null).toBe(true);
       }
     }
+
+    // The imported rows carry the target's `null` markers, and the predicate
+    // reads them as "not served".
+    const mythos = imported.models.find((model) => model.id === 'claude-mythos-5') as CatalogModel;
+    expect(mythos.providerIds.mantle).toBeNull();
+    expect(notServedOn(mythos, 'mantle')).toBe(true);
+    expect(providerIdFor(mythos, 'mantle')).toBeUndefined();
   });
 
   it('maps the target\'s provider ids onto the routes explicitly', () => {
@@ -684,14 +703,15 @@ describe('the built-in model catalog', () => {
     }
     expect(actual).toEqual(EXPECTED_PROVIDER_IDS);
 
-    // This implementation's own rows carry exactly the non-null ids, under this implementation's
-    // route names, and nothing else.
+    // This implementation's own rows carry the target's `provider_ids` map
+    // key for key: the same keys, the same values — a string for a route that
+    // serves the model, `null` for one that does not, and no key at all for
+    // the one the target's literal omits.
     const imported = importCatalog(builtinFile);
     expect(imported.models.map((model) => model.id)).toEqual([...EXPECTED_MODEL_IDS]);
     for (const model of imported.models) {
-      const expected: Record<string, string> = {};
+      const expected: Record<string, string | null> = {};
       for (const [key, value] of Object.entries(EXPECTED_PROVIDER_IDS[model.id] ?? {})) {
-        if (value === null) continue;
         const route = routeForProviderKey(key);
         if (route === undefined) throw new Error(`unknown target provider key "${key}"`);
         expected[route] = value;
@@ -755,19 +775,55 @@ describe('model resolution', () => {
   });
 
   it('falls back to mantle when the selected route does not serve the model', () => {
-    // The target's `wd(model)`: no id for the route, one for mantle.
-    expect(resolveModel(builtinCatalog, 'claude-haiku-5-5', 'gateway')).toBe(
-      'anthropic.claude-haiku-5-5',
-    );
-    expect(resolveModelRoute(builtinCatalog, 'claude-haiku-5-5', 'gateway')).toBe('mantle');
-
-    // No fallback when mantle does not serve it either.
+    // The target's `wd(model)`: `provider_ids[route] === null` while
+    // `provider_ids[mantle] !== null`.
+    const mythos = builtinCatalog.models.find((model) => model.id === 'claude-mythos-5') as CatalogModel;
+    expect(notServedOn(mythos, 'bedrock')).toBe(true);
     expect(resolveModel(builtinCatalog, 'claude-mythos-5', 'bedrock')).toBeUndefined();
     expect(resolveModelRoute(builtinCatalog, 'claude-mythos-5', 'bedrock')).toBeUndefined();
+
+    // A row the target's literal marks as `null` on one route and serves on
+    // `mantle` falls back to `mantle`.
+    const imported = importCatalog({
+      schema_version: 1,
+      models: [
+        {
+          id: 'agent-test',
+          family: 'haiku',
+          display_name: 'Test',
+          provider_ids: { gateway: null, mantle: 'anthropic.agent-test' },
+          max_output_tokens: { default: 1, upper: 2 },
+          capabilities: [],
+        },
+      ],
+    });
+    expect(resolveModelRoute(imported, 'agent-test', 'gateway')).toBe('mantle');
+    expect(resolveModel(imported, 'agent-test', 'gateway')).toBe('anthropic.agent-test');
 
     // An unknown model resolves to nothing.
     expect(resolveModel(builtinCatalog, 'claude-nope', 'firstParty')).toBeUndefined();
     expect(resolveModelRoute(builtinCatalog, 'claude-nope', 'firstParty')).toBeUndefined();
+  });
+
+  it('does not fall back for a route whose key the target\'s literal omits', () => {
+    // The target's own literal OMITS the `gateway` key for `claude-haiku-5-5`.
+    // An omitted key is not `null`, so the target's predicate does not fire:
+    // the target does not treat that row as unserved by `gateway`.
+    const raw = (builtinFile.models as Array<Record<string, unknown>>).find(
+      (row) => row.id === 'claude-haiku-5-5',
+    ) as Record<string, unknown>;
+    const providerIds = raw.provider_ids as Record<string, unknown>;
+    expect(Object.hasOwn(providerIds, 'gateway')).toBe(false);
+    expect(providerIds.gateway).toBeUndefined();
+
+    const row = builtinCatalog.models.find((model) => model.id === 'claude-haiku-5-5') as CatalogModel;
+    expect(Object.hasOwn(row.providerIds, 'gateway')).toBe(false);
+    expect(notServedOn(row, 'gateway')).toBe(false);
+
+    // So the model stays on the selected route — and the route carries no id
+    // for it, so there is nothing to resolve.
+    expect(resolveModelRoute(builtinCatalog, 'claude-haiku-5-5', 'gateway')).toBe('gateway');
+    expect(resolveModel(builtinCatalog, 'claude-haiku-5-5', 'gateway')).toBeUndefined();
   });
 
   it('filters the model list by family and by query', () => {
@@ -961,8 +1017,8 @@ describe('model resolution', () => {
 describe('the target\'s per-model route override', () => {
   it('implements the mantle half of the target\'s rule', () => {
     // The audited predicate: `provider_ids[route] === null` while
-    // `provider_ids[mantle] !== null`. A `null` in the target's literal
-    // becomes an ABSENT key in this implementation's row, and the fallback fires.
+    // `provider_ids[mantle] !== null`. The target's `null` is kept as the
+    // target's own marker, and the fallback fires.
     const imported = importCatalog({
       schema_version: 1,
       models: [
@@ -977,38 +1033,22 @@ describe('the target\'s per-model route override', () => {
       ],
     });
     const row = imported.models[0] as CatalogModel;
-    expect(Object.hasOwn(row.providerIds, 'gateway')).toBe(false);
+    expect(row.providerIds.gateway).toBeNull();
+    expect(notServedOn(row, 'gateway')).toBe(true);
     expect(resolveModelRoute(imported, 'agent-test', 'gateway')).toBe('mantle');
     expect(resolveModel(imported, 'agent-test', 'gateway')).toBe('anthropic.agent-test');
   });
 
-  it('falls back for the one row whose gateway key the target\'s literal omits', () => {
-    // This implementation's **extra** case: the target's literal OMITS the `gateway` key
-    // for `claude-haiku-5-5` instead of writing `null`. The audited predicate
-    // (`=== null`) would not fire for that row; this implementation's "not served" test
-    // (an absent key) does.
-    const raw = (builtinFile.models as Array<Record<string, unknown>>).find(
-      (row) => row.id === 'claude-haiku-5-5',
-    ) as Record<string, unknown>;
-    const providerIds = raw.provider_ids as Record<string, unknown>;
-    expect(Object.hasOwn(providerIds, 'gateway')).toBe(false);
-    expect(providerIds.gateway).toBeUndefined();
-
-    const row = builtinCatalog.models.find((model) => model.id === 'claude-haiku-5-5') as CatalogModel;
-    expect(Object.hasOwn(row.providerIds, 'gateway')).toBe(false);
-    expect(resolveModelRoute(builtinCatalog, 'claude-haiku-5-5', 'gateway')).toBe('mantle');
-    expect(resolveModel(builtinCatalog, 'claude-haiku-5-5', 'gateway')).toBe('anthropic.claude-haiku-5-5');
-  });
-
-  it('is a superset of the audited predicate, and the difference is exactly one row', () => {
-    // This implementation's "not served" test is an absent key; the audited predicate is
-    // `=== null`. This implementation therefore falls back in every case the audit
-    // describes **plus** the one row whose key the target omits.
-    //
-    // The audited case (an explicit `null`) has **no instance** in the
-    // built-in table — every built-in row with a `null` route also has a
-    // `null` mantle — so a synthetic row carries it into the sweep and keeps
-    // the assertion below from being vacuous.
+  it('uses the audited predicate, and not a superset of it', () => {
+    // The target's predicate is `provider_ids[route] === null`. This
+    // implementation's predicate is that predicate, so the two agree on every
+    // row of the built-in table — and on the one row whose key the target's
+    // literal **omits**.
+    // The audited case (an explicit `null` on the route and a string on
+    // `mantle`) has **no instance** in the built-in table — every built-in row
+    // with a `null` route also has a `null` mantle — so a synthetic row
+    // carries it into the sweep and keeps the assertion below from being
+    // vacuous.
     const auditedCatalog = importCatalog({
       schema_version: 1,
       models: [
@@ -1059,7 +1099,7 @@ describe('the target\'s per-model route override', () => {
       catalog: auditedCatalog,
     });
 
-    const extra: string[] = [];
+    const mismatched: string[] = [];
     let auditedCases = 0;
 
     for (const { id, providerIds, catalog } of cases) {
@@ -1069,17 +1109,18 @@ describe('the target\'s per-model route override', () => {
         const targetKey = providerKeyForRoute(route) as string;
         // The audited predicate.
         const audited = providerIds[targetKey] === null && typeof mantleId === 'string';
-        const served = providerIdFor(model, route) !== undefined;
         // This implementation's own behaviour, **observed** rather than recomputed.
-        const implementationFallsBack = !served && resolveModelRoute(catalog, id, route) === 'mantle';
+        // The fallback is a move *to* `mantle`, so a route that already **is**
+        // `mantle` never falls back.
+        const implementationFallsBack =
+          route !== 'mantle' && resolveModelRoute(catalog, id, route) === 'mantle';
 
         if (audited) {
           auditedCases += 1;
-          // This implementation never falls back *less* than the audit says.
           expect(implementationFallsBack).toBe(true);
         }
-        if (implementationFallsBack && !audited) {
-          extra.push(`${id}@${route}`);
+        if (implementationFallsBack !== audited) {
+          mismatched.push(`${id}@${route}`);
         }
       }
     }
@@ -1087,9 +1128,9 @@ describe('the target\'s per-model route override', () => {
     // The audited predicate does fire in the sweep, so the assertion above is
     // not vacuous ...
     expect(auditedCases).toBeGreaterThan(0);
-    // ... and exactly one case is this implementation's extra one: the row whose
-    // `gateway` key the target's literal omits.
-    expect(extra).toEqual(['claude-haiku-5-5@gateway']);
+    // ... and the two agree on **every** row: the predicate is the target's,
+    // not a superset of it.
+    expect(mismatched).toEqual([]);
   });
 
   it('implements the Bedrock+Mantle anthropic.* override, and says so', () => {
@@ -1385,15 +1426,29 @@ describe('capability normalization', () => {
   });
 
   it('resolves a model the route does not serve through mantle', () => {
-    // The target's `claude-haiku-5-5` row has no gateway id but does have one
-    // for mantle, so the target's `wd(model)` resolves it to mantle.
-    const row = builtinCatalog.models.find((entry) => entry.id === 'claude-haiku-5-5') as CatalogModel;
+    // The target's predicate: `provider_ids[route] === null` while
+    // `provider_ids[mantle] !== null`. A row the target's literal marks as
+    // `null` on the route resolves to `mantle`.
+    const imported = importCatalog({
+      schema_version: 1,
+      models: [
+        {
+          id: 'agent-test',
+          family: 'haiku',
+          display_name: 'Test',
+          provider_ids: { gateway: null, mantle: 'anthropic.agent-test' },
+          max_output_tokens: { default: 1, upper: 2 },
+          capabilities: [],
+        },
+      ],
+    });
+    const row = imported.models[0] as CatalogModel;
     expect(providerIdFor(row, 'gateway')).toBeUndefined();
-    expect(providerIdFor(row, 'mantle')).toBe('anthropic.claude-haiku-5-5');
+    expect(providerIdFor(row, 'mantle')).toBe('anthropic.agent-test');
 
     const resolved = normalizeModel(row, 'gateway');
     expect(resolved?.route).toBe('mantle');
-    expect(resolved?.providerId).toBe('anthropic.claude-haiku-5-5');
+    expect(resolved?.providerId).toBe('anthropic.agent-test');
 
     // A model no route serves resolves to nothing.
     const mythos = builtinCatalog.models.find((entry) => entry.id === 'claude-mythos-5') as CatalogModel;

@@ -1209,7 +1209,7 @@ describe('the --continue selection', () => {
     expect(result.failure).toBeUndefined();
   });
 
-  it('reports a session that is already running in the background', async () => {
+  it('drops a session that is already running in the background', async () => {
     const configDir = path.join(makeRoot(), 'config');
     const store = createSessionStore({ configDir });
     const handle = await store.create({ cwd: CWD, sessionId: 'newer' });
@@ -1221,14 +1221,49 @@ describe('the --continue selection', () => {
       isLiveSession: (sessionId) => sessionId === 'newer',
     });
 
-    // The background session is **reported**, not silently continued.
+    // The target's lookup **skips** a session that is live in the background —
+    // it does not report it — and carries on with the next candidate. There is
+    // no next candidate here, so the lookup finds nothing.
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('not_found');
+    expect(result.failure?.detail).toBe('No conversation found to continue');
+    expect(result.failure?.afterRestore).toBe(false);
+    expect(result.resume).toBeUndefined();
+    expect(result.backgroundSessionId).toBeUndefined();
+  });
+
+  it('reports the session a candidate was continued into when that one is live', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const base = createSessionStore({ configDir });
+    const older = await base.create({ cwd: CWD, sessionId: 'older' });
+    await base.append(older, userMessage('m1', 'hello', 1000));
+
+    // The store's own listing carries no continued-in id — this
+    // implementation's transcript format has no such record — so the target's
+    // field is set by the caller, exactly as the store's own summary does.
+    const store = {
+      ...base,
+      list: async () => [
+        {
+          ...(await base.list({ cwd: CWD }))[0]!,
+          continuedInSessionId: 'live',
+        },
+      ],
+    };
+
+    // The target's lookup **stops** on a candidate that was continued into a
+    // session that is live in the background, and reports that session: the
+    // lookup continues with nothing.
+    const result = await continueSession({
+      store,
+      cwd: CWD,
+      liveSessionIds: new Set(['live']),
+    });
+
     expect(result.status).toBe('failed');
     expect(result.failure?.reason).toBe('background_running');
     expect(result.failure?.detail).toBe(CONTINUE_BACKGROUND_RUNNING_MESSAGE);
-    expect(result.failure?.afterRestore).toBe(false);
-    expect(result.resume).toBeUndefined();
-    // The report names the session that is running.
-    expect(result.backgroundSessionId).toBe('newer');
+    expect(result.backgroundSessionId).toBe('live');
   });
 
   it('reports that there is nothing to continue', async () => {
@@ -1473,18 +1508,59 @@ describe("the session lookup's skip rules", () => {
     expect(result.background).toBeUndefined();
   });
 
-  it('reports a session that is live in the background rather than continuing it', () => {
+  it('drops a session that is live in the background rather than reporting it', () => {
     const reports: BackgroundSessionReport[] = [];
     const result = selectResumableCandidate([summary({ sessionId: 'live' })], {
       liveSessionIds: new Set(['live']),
       onNewestRunningInBackground: (report) => reports.push(report),
     });
 
-    // The live session is **reported**, not continued.
+    // The target's own filter (`Mlo`, `chunk-4jsg44k7.js`): a candidate that is
+    // **itself** live in the background is skipped — `if(w!==void 0&&h?.has(w))
+    // return!1` — and **nothing is reported**. Only the candidate that was
+    // *continued into* a live session is reported, and that one stops the
+    // lookup.
+    expect(result.summary).toBeUndefined();
+    expect(result.background).toBeUndefined();
+    expect(reports).toHaveLength(0);
+  });
+
+  it('carries on with the next candidate after dropping a live one', () => {
+    const reports: BackgroundSessionReport[] = [];
+    const result = selectResumableCandidate(
+      [summary({ sessionId: 'live' }), summary({ sessionId: 'older' })],
+      {
+        liveSessionIds: new Set(['live']),
+        onNewestRunningInBackground: (report) => reports.push(report),
+      },
+    );
+
+    // The live session is dropped and the lookup **continues** with the next
+    // candidate, exactly as the target's lookup does.
+    expect(result.summary?.sessionId).toBe('older');
+    expect(result.background).toBeUndefined();
+    expect(reports).toHaveLength(0);
+  });
+
+  it('stops the lookup and reports the session a candidate was continued into', () => {
+    const reports: BackgroundSessionReport[] = [];
+    const result = selectResumableCandidate(
+      [
+        summary({ sessionId: 'old', continuedInSessionId: 'live' }),
+        summary({ sessionId: 'older' }),
+      ],
+      {
+        liveSessionIds: new Set(['live']),
+        onNewestRunningInBackground: (report) => reports.push(report),
+      },
+    );
+
+    // The target's filter returns `"stop"` here, so the lookup ends with
+    // nothing: the live session is reported and the next candidate is not
+    // considered.
     expect(result.summary).toBeUndefined();
     expect(result.background?.sessionId).toBe('live');
     expect(reports).toHaveLength(1);
-    expect(reports[0]?.sessionId).toBe('live');
   });
 
   it('reports the session a candidate was continued into when that one is live', () => {
@@ -1522,16 +1598,15 @@ describe("the session lookup's skip rules", () => {
     const newer = await store.create({ cwd: CWD, sessionId: 'newer' });
     await store.append(newer, userMessage('m1', 'hello', 2000));
 
-    // The newest session is live in the background: it is reported, and the
-    // lookup does not continue it.
-    const reported = await continueSession({
+    // The newest session is live in the background: it is **dropped**, and the
+    // lookup carries on with the next candidate.
+    const continued = await continueSession({
       store,
       cwd: CWD,
       liveSessionIds: new Set(['newer']),
     });
-    expect(reported.status).toBe('failed');
-    expect(reported.failure?.reason).toBe('background_running');
-    expect(reported.failure?.detail).toBe(CONTINUE_BACKGROUND_RUNNING_MESSAGE);
-    expect(reported.backgroundSessionId).toBe('newer');
+    expect(continued.status).toBe('continued');
+    expect(continued.sessionId).toBe('older');
+    expect(continued.backgroundSessionId).toBeUndefined();
   });
 });

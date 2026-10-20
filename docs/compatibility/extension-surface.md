@@ -98,7 +98,7 @@ The known MCP weakness is that **clients do not notify the user when a tool desc
 
 ### The event surface
 
-The hooks reference documents **33** events. This implementation adds one reason kind, `noRuleMatch`, to distinguish "no rule matched" from the audit's `permissionPromptTool` ("a **named tool** requires approval for this command") — a **implementation addition**.
+The hooks reference documents **33** events. This implementation adds **no** reason kind: the vocabulary is the target's six, and the case where no rule matched at all is the target's `permissionPromptTool` ("a **named tool** requires approval for this command"). The distinction this implementation still needs is carried by the decision's own `noRuleMatched` marker, which is not a reason kind.
 
 ### The result merge rules
 

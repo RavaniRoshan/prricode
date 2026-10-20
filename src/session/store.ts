@@ -113,11 +113,13 @@ import {
   SESSION_SCHEMA_VERSION,
   SessionFormatError,
   SessionVersionError,
+  TRANSCRIPT_SOURCE_LOCAL,
   isMessageEvent,
   parseSessionEvent,
   type SessionEvent,
   type SessionRecordContext,
   type ToolResultStub,
+  type TranscriptSource,
 } from './event.js';
 import type { ToolResultEnvelope } from '../tools/runner.js';
 
@@ -428,6 +430,17 @@ export interface SessionStoreOptions {
    * `src/agent/loop.ts`) — so the payload does not come back into the context.
    */
   maxToolResultBytes?: number;
+  /**
+   * Where the transcripts come from — the target's own `transcriptSource`
+   * marker (audit §2.6).
+   *
+   * The target switches between the two values when the active remote
+   * changes: `ccr-api` for a remote transcript and `local-jsonl` for a local
+   * one. This implementation writes **local** JSONL, so the default is
+   * `local-jsonl`; the option exists so a caller that writes to a remote
+   * transport can say so.
+   */
+  transcriptSource?: TranscriptSource;
   /** The clock. */
   now?: () => number;
   /** The id factory for the records the store writes. */
@@ -600,6 +613,21 @@ export async function readAllSessionEvents(filePath: string): Promise<SessionEve
 }
 
 /**
+ * A record with the store's **transcript source** on it.
+ *
+ * The target's session controller exposes `transcriptSource` with the two
+ * observed values — `ccr-api` for a remote transcript and `local-jsonl` for a
+ * local one — and switches between them when the active remote changes
+ * (audit §2.6). Every record the store writes carries the marker, so a
+ * transcript says where it came from.
+ *
+ * The record is **copied**, so the caller's record is not changed.
+ */
+function withTranscriptSource(event: SessionEvent, source: TranscriptSource): SessionEvent {
+  return { ...event, transcriptSource: source };
+}
+
+/**
  * Create a store.
  *
  * The store holds the configuration root, so the layout has one source of truth
@@ -608,6 +636,7 @@ export async function readAllSessionEvents(filePath: string): Promise<SessionEve
 export function createSessionStore(options: SessionStoreOptions): SessionStore {
   const configDir = path.resolve(options.configDir);
   const maxToolResultBytes = options.maxToolResultBytes ?? DEFAULT_MAX_TOOL_RESULT_BYTES;
+  const transcriptSource = options.transcriptSource ?? TRANSCRIPT_SOURCE_LOCAL;
   const now = options.now ?? (() => Date.now());
   const idFactory = options.idFactory ?? (() => randomUUID());
 
@@ -692,7 +721,7 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
     async append(handle: SessionHandle, event: SessionEvent): Promise<void> {
       const target = assertHandle(handle);
       const payload = recordsFor(event)
-        .map((record) => `${JSON.stringify(record)}\n`)
+        .map((record) => `${JSON.stringify(withTranscriptSource(record, transcriptSource))}\n`)
         .join('');
       await appendFile(target, payload, 'utf8');
     },

@@ -16,7 +16,7 @@ Every row names its **evidence class**: `REA observed` (established from the pin
 | `reasonType` | `rule` · `safetyCheck` · `other` |
 | reason kind | `rule` · `subcommandResults` · `permissionPromptTool` · `sandboxOverride` · `workingDir` · `safetyCheck` |
 
-This implementation adds one reason kind, **`noRuleMatch`**, to distinguish "no rule matched" from the audit's `permissionPromptTool` ("a **named tool** requires approval for this command"). That is a **implementation addition**.
+This implementation adds **no** reason kind: the vocabulary is the target's six, and the case where no rule matched at all is the target's `permissionPromptTool`. The distinction this implementation still needs — the generic prompt is the one a `PreToolUse` hook's approval may replace, and a mode-level refusal is not — is carried by the decision's own **`noRuleMatched`** marker, which is **not** a reason kind and never reaches the tool result.
 
 ## Rule evaluation
 
@@ -117,7 +117,7 @@ The target changed this behavior in a later release without a deprecation warnin
 | The safety check runs **once** for an unrewritten call and **twice** for a rewritten one — once in the tool's own check, once in the tool layer's re-check | **implementation choice** |
 | A `PreToolUse` `defer` drops the hook's rewrite with it — a deferral is no opinion, so nothing is carried and the call acts on the input the model made | **implementation choice** |
 | The rewrite rides along on an `ask` — the question is about the rewritten call, so `decision.updatedInput` is the rewritten input | **implementation choice** |
-| The tool layer's re-check keeps **only a denial**, so an approving-and-rewriting hook cannot approve a call no rule covers: the re-check leaves the generic `noRuleMatch` ask, the call escalates to the prompt, and with no prompt it is **refused** (`permission_unresolved`) — even though the permission layer allowed it and the hook approved it. A call a rule *does* cover is unaffected | **implementation choice** |
+| The tool layer's re-check keeps **only a denial**, so an approving-and-rewriting hook cannot approve a call no rule covers: the re-check leaves the generic ask, the call escalates to the prompt, and with no prompt it is **refused** (`permission_unresolved`) — even though the permission layer allowed it and the hook approved it. A call a rule *does* cover is unaffected | **implementation choice** |
 | Both layers consult the `PreToolUse` seam **first**, so when both seams deny the refusal names the `PreToolUse` denial in both layers | **implementation choice** |
 | The `PreToolUse` seam is consulted **three** times for a rewritten call (the original input in the check, the effective input in the permission layer's re-check, the effective input in the tool layer's re-check) and **once** for a call that is not rewritten | **implementation choice** |
 | A hook that throws **denies** the call | **implementation choice** |
@@ -131,6 +131,8 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | Audit claim | Evidence class | Matrix row | Pinned by |
 | --- | --- | --- | --- |
 | The decision vocabulary is exactly the four closed sets | REA observed | F-19 | `tests/contracts/permission-decision.test.ts` — "uses only the closed behavior, source and reason-type vocabularies" |
+| The **reason kinds** are exactly the target's six — `rule`, `subcommandResults`, `permissionPromptTool`, `sandboxOverride`, `workingDir`, `safetyCheck` — and there is no seventh | REA observed (audit §2.5) | F-21 | same file — "uses exactly the target's six reason kinds" |
+| The generic prompt — the ask that exists only because no rule matched — is the target's `permissionPromptTool`, and this implementation's own `noRuleMatched` marker says which prompt a hook's approval may replace | REA observed (the kind) + implementation choice (the marker) | F-21 | same file — "keeps the generic prompt's own reason text", "labels the acceptEdits no-rule-matched case as permissionPromptTool" |
 | Precedence is deny → ask → allow, first match wins, specificity irrelevant | REA observed | F-20 | same file — "rule precedence" |
 | A rule never rewrites the tool input | implementation choice | F-20 | same file — "never rewrites the tool input from a rule" (compile-time `updatedInput?: never` pin) |
 | Compound commands split on all seven operators, with no sub-command cap | implementation choice | F-20 | `tests/security/permission-rules.test.ts` — the 51-part and 501-part tests |

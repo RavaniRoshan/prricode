@@ -62,6 +62,7 @@ import {
   ABSENT_ARGUMENT,
   DENIED_SYSCALLS,
   OBSERVED_SYSCALLS,
+  SECCOMP_RET_USER_NOTIF,
   SECCOMP_USER_NOTIF_FLAG_CONTINUE,
   SYSCALL_NUMBERS,
   buildSeccompFilter,
@@ -89,11 +90,21 @@ import {
 import {
   BUBBLEWRAP_ADVISORY,
   BUBBLEWRAP_MINIMUM_VERSION,
+  PR_SET_NO_NEW_PRIVS,
+  SANDBOX_HELPER_ENVIRONMENT,
+  SANDBOX_HELPER_NAMESPACES,
+  SANDBOX_HELPER_SEQUENCE,
   SANDBOX_PROXY_SOCKET_PATH,
   SANDBOX_PROXY_SOCKET_VARIABLE,
+  SECCOMP_FILTER_FLAG_NEW_LISTENER,
+  SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
+  SECCOMP_IOCTL_NOTIF_RECV,
+  SECCOMP_IOCTL_NOTIF_SEND,
   SandboxRefusedError,
   bubblewrapBackend,
+  buildSandboxHelperPlan,
   buildSandboxPlan,
+  createSandboxNotificationListener,
   launchSandbox,
   planFilesystemPolicy,
   planSupervisor,
@@ -986,7 +997,8 @@ describe('CC-017 step 5 — the launcher', () => {
     expect(launched.status.layers.filesystem).toBe(true);
     expect(launched.status.layers.seccomp).toBe(true);
     expect(launched.status.layers.network).toBe(true);
-    // No Landlock ruleset is ever applied, and no USER_NOTIF filter is installed.
+    // No Landlock ruleset is ever applied, and the notification listener is
+    // never attached: the kernel attachment needs a native helper.
     expect(launched.status.layers.pathPolicy).toBe(false);
     expect(launched.status.layers.supervisor).toBe(false);
     expect(launched.status.notes.join(' ')).toMatch(/no Landlock ruleset is applied/);
@@ -1049,7 +1061,9 @@ describe('CC-017 step 5 — the launcher', () => {
     const launched = await launchSandbox({ command: 'echo supervisor', cwd: root, supervisor });
     expect(launched.status.layers.supervisor).toBe(false);
     expect(launched.status.notes.join(' ')).toMatch(/supervisor is not attached/);
-    expect(launched.status.notes.join(' ')).toMatch(/no USER_NOTIF filter/);
+    // The notification filter is installed by the helper, and the helper's
+    // kernel calls need a native listener — so the supervisor observes nothing.
+    expect(launched.status.notes.join(' ')).toMatch(/notification filter it needs is installed by the helper/);
     await launched.cleanup();
   });
 
@@ -2044,6 +2058,128 @@ describe('CC-017 step 11 — the seccomp supervisor', () => {
     }
     // The architecture check is in the program too.
     expect(immediates).toContain(0xc000003e);
+  });
+
+  // --- the target's notification filter (audit §2.9) ---
+
+  it('hands the observed syscalls to the notification listener', () => {
+    // The target's helper installs a filter that **notifies**: the supervisor
+    // receives the call and answers it. The filter carries
+    // `SECCOMP_RET_USER_NOTIF` for the observed syscalls.
+    const filter = buildSeccompFilter();
+    const actions: number[] = [];
+    for (let offset = 0; offset + 8 <= filter.length; offset += 8) {
+      actions.push(filter.readUInt32LE(offset + 4));
+    }
+    expect(actions).toContain(SECCOMP_RET_USER_NOTIF);
+
+    // The **enforcement** filter never does: a notified syscall without a
+    // listener attached answers `ENOSYS`, so the filter the backend installs
+    // must not carry the action.
+    const enforcement = buildSeccompFilter({ notify: false });
+    const enforcementActions: number[] = [];
+    for (let offset = 0; offset + 8 <= enforcement.length; offset += 8) {
+      enforcementActions.push(enforcement.readUInt32LE(offset + 4));
+    }
+    expect(enforcementActions).not.toContain(SECCOMP_RET_USER_NOTIF);
+  });
+
+  it('notifies for every one of the target\'s 27 observed syscalls', () => {
+    const filter = buildSeccompFilter();
+    const immediates: number[] = [];
+    for (let offset = 0; offset + 8 <= filter.length; offset += 8) {
+      if (filter.readUInt16LE(offset) === 0x15) immediates.push(filter.readUInt32LE(offset + 4));
+    }
+    for (const record of OBSERVED_SYSCALLS) {
+      expect(immediates).toContain(record.nr);
+    }
+  });
+
+  it('serves the notifications with the target\'s own ioctl requests', () => {
+    const channel = fakeChannel({ path: '/tmp/a.txt' });
+    const listener = createSandboxNotificationListener({ channel });
+
+    // The target's supervisor receives with `0xc0502100` and answers with
+    // `0xc0182101` (audit §2.9).
+    expect(listener.attached).toBe(true);
+    expect(listener.requests).toEqual({
+      receive: SECCOMP_IOCTL_NOTIF_RECV,
+      send: SECCOMP_IOCTL_NOTIF_SEND,
+    });
+    expect(SECCOMP_IOCTL_NOTIF_RECV).toBe(0xc0502100);
+    expect(SECCOMP_IOCTL_NOTIF_SEND).toBe(0xc0182101);
+  });
+
+  it('never denies: the listener answers every call it serves', () => {
+    const channel = fakeChannel({ path: '/tmp/a.txt' });
+    const listener = createSandboxNotificationListener({ channel });
+
+    listener.serve();
+
+    // The channel is closed in this double, so nothing was served — and the
+    // listener is still the one that would answer.
+    expect(channel.responses).toHaveLength(0);
+    expect(listener.observations).toEqual([]);
+  });
+
+  it('reports that no listener is attached when there is no channel', () => {
+    const listener = createSandboxNotificationListener({});
+
+    expect(listener.attached).toBe(false);
+    // Serving nothing is the only thing it can do.
+    listener.serve();
+    expect(listener.observations).toEqual([]);
+  });
+
+  // --- the target's helper (audit §2.9) ---
+
+  it('builds the plan the target\'s helper executes', () => {
+    const plan = buildSandboxHelperPlan({
+      command: 'ls -l',
+      observeSocket: '/tmp/observe.sock',
+    });
+
+    // The environment it reads: `SRT_OBSERVE_SOCK` and `SRT_ENCODED_CMD`.
+    expect(SANDBOX_HELPER_ENVIRONMENT).toEqual(['SRT_OBSERVE_SOCK', 'SRT_ENCODED_CMD']);
+    expect(plan.environment.observeSocket).toBe('/tmp/observe.sock');
+    expect(plan.environment.encodedCommand).toBe('ls -l');
+
+    // The namespaces it unshares.
+    expect(SANDBOX_HELPER_NAMESPACES).toEqual(['pid', 'mount', 'user']);
+    expect(plan.namespaces).toEqual(['pid', 'mount', 'user']);
+
+    // The mounts it performs: the private root and `/proc`.
+    expect(plan.mounts).toEqual([
+      { kind: 'private-root', target: '/' },
+      { kind: 'proc', target: '/proc' },
+    ]);
+
+    // The `prctl` it sets.
+    expect(plan.prctl).toEqual([
+      { option: PR_SET_NO_NEW_PRIVS, name: 'PR_SET_NO_NEW_PRIVS' },
+    ]);
+
+    // The seccomp calls it makes.
+    expect(plan.seccomp.filterFlags).toBe(SECCOMP_FILTER_FLAG_TSYNC_ESRCH);
+    expect(plan.seccomp.listenerFlags).toBe(SECCOMP_FILTER_FLAG_NEW_LISTENER);
+    expect(plan.seccomp.filter.length % 8).toBe(0);
+
+    // The order it does its work in.
+    expect(SANDBOX_HELPER_SEQUENCE).toEqual([
+      'read-environment',
+      'socketpair',
+      'unshare',
+      'fork',
+      'mount-private-root',
+      'mount-proc',
+      'prctl',
+      'seccomp-filter',
+      'seccomp-listener',
+      'sendmsg',
+      'waitpid',
+      'execvp',
+    ]);
+    expect(plan.sequence).toEqual([...SANDBOX_HELPER_SEQUENCE]);
   });
 
   // --- review finding 16: the errno option applies only to the architecture ---

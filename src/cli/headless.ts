@@ -56,7 +56,7 @@
  */
 
 import type { AgentRuntime } from '../agent/loop.js';
-import type { SessionEvent } from '../session/event.js';
+import { toolResultId, type SessionEvent } from '../session/event.js';
 
 import type { HeadlessEvent } from './output.js';
 
@@ -252,7 +252,7 @@ function eventsOf(record: SessionEvent): HeadlessEvent[] {
       return [
         {
           type: 'tool_result',
-          id: record.envelope.toolUseId,
+          id: toolResultId(record.envelope),
           content: record.envelope.content,
           is_error: record.envelope.isError,
         },

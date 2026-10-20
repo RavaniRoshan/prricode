@@ -20,22 +20,24 @@
  * **`null`** value means *this provider does not serve this model*. That is a
  * **fact**, and the target's route selector uses it: `wd(model)` falls back to
  * `mantle` when the selected route's entry is `null` while `mantle`'s is not
- * (audit §2.1). This implementation keeps the same information with an **absent key**
- * instead of a `null` value:
+ * (audit §2.1). This implementation keeps the same information with the same
+ * **three** states:
  *
  * ```ts
- * providerIds: Partial<Record<ProviderRoute, string>>;  // absent key = not served
+ * providerIds: Partial<Record<ProviderRoute, string | null>>;
+ * //  a string  → the route serves the model, with that id
+ * //  null      → the route does not serve the model (the target's marker)
+ * //  absent    → the target's literal does not carry the key at all
  * ```
  *
- * There is therefore **no representation for "unknown"** anywhere in this
- * module: a key is either present with a provider model id, or absent because
- * the provider does not serve the model. A nullable field would conflate the
- * two, which is exactly the confusion the target's `null` avoids.
+ * The third state is **not** "unknown" in the sense of "we do not know": it is
+ * the target's own literal, which omits exactly one key (`claude-haiku-5-5`
+ * carries no `gateway` key). The target's predicate is
+ * `provider_ids[route] === null`, and an omitted key is **not** `null`, so the
+ * target does not treat that row as unserved by `gateway`.
  *
- * The absent key is a **superset** of the target's `null`: the target's own
- * literal omits one provider key entirely, and this implementation cannot tell that
- * apart from a `null`. See "Not served is a superset of the audited
- * predicate" below.
+ * {@link notServedOn} is that predicate, verbatim, and
+ * {@link resolveRouteForModel} applies it.
  *
  * ## The two provider naming schemes
  *
@@ -59,8 +61,8 @@
  *
  * Half (b) is `resolveModel`; `resolveModelRoute` reports the route it
  * resolved to. `providerIdFor` deliberately does **not** fall back: it is the
- * strict per-route lookup, and an absent key means "this route does not serve
- * the model" — which is what the usable-model list is built from.
+ * strict per-route lookup — it answers with the route's id or with nothing —
+ * and it is what the usable-model list is built from.
  *
  * ### Half (a): the enabled-flag set
  *
@@ -100,24 +102,21 @@
  * gateway wins the dispatch order while the rule is about the Bedrock and
  * Mantle pair.
  *
- * ## "Not served" is a superset of the audited predicate
+ * ## "Not served" is the target's own predicate
  *
  * The audit states half (b) as `provider_ids[route] === null` while
- * `provider_ids[mantle] !== null`. This implementation's "not served" test is an
- * **absent key**, and that is a **superset** of the audited predicate:
+ * `provider_ids[mantle] !== null`, and that is the predicate this
+ * implementation applies:
  *
  *   - an explicit `null` in the target's literal — every "not served" entry
  *     but one — is the audited case, and this implementation's test matches it;
  *   - the target's literal **omits** the `gateway` key for exactly one row
- *     (`claude-haiku-5-5`), and this implementation's test matches that too, while the
- *     audited `=== null` predicate would not.
+ *     (`claude-haiku-5-5`). An omitted key is not `null`, so the target's
+ *     predicate does **not** fire for it: the target does not treat that row
+ *     as unserved by `gateway`, and neither does this implementation.
  *
- * This implementation therefore falls back to `mantle` for one row the audited
- * predicate would not. The behaviour is deliberate: this implementation's model has no
- * way to tell "the target wrote `null`" from "the target wrote nothing", and
- * a row the target does not serve must not resolve to a route that does not
- * serve it. The difference is pinned by a test, and it is exactly one row of
- * the built-in catalog.
+ * The three states are kept apart, so the predicate is the target's rather than
+ * a superset of it. See {@link notServedOn}.
  */
 
 import { ROUTE_NAMES, isProviderRoute, type ProviderRoute } from './routes.js';
@@ -213,10 +212,21 @@ export interface CatalogModel {
   /**
    * The provider-specific model ids, keyed by route.
    *
-   * An **absent key** means "this provider does not serve this model". There
-   * is no representation for "unknown".
+   * The map is the target's own `provider_ids`, translated key by key:
+   *
+   *   - a **string** is the provider's id for the model — the route serves it;
+   *   - **`null`** is the target's "this provider does not serve this model" —
+   *     the marker the target's own route selector tests (`provider_ids[route]
+   *     === null`, audit §2.1);
+   *   - an **absent** key is a key the target's literal does not carry. The
+   *     target's own literal omits exactly one (`claude-haiku-5-5` has no
+   *     `gateway` key), and an omitted key is **not** `null`: the target's
+   *     predicate does not fire for it.
+   *
+   * The three states are therefore distinct, and `null` is never "unknown" —
+   * it is the target's own "not served".
    */
-  providerIds: Partial<Record<ProviderRoute, string>>;
+  providerIds: Partial<Record<ProviderRoute, string | null>>;
   /** Whether a route streams the request body eagerly. */
   eagerInputStreaming: Partial<Record<ProviderRoute, boolean>>;
   /** The environment variable that carries the Vertex region for this model. */
@@ -360,10 +370,11 @@ function deepFreeze(value: unknown): void {
  * The provider-specific model id for a route, or `undefined` when the route
  * does not serve the model.
  *
- * The lookup is **strict**: an absent key is "not served", and there is no
- * "unknown" case to confuse it with. An own-property check guards the lookup,
- * so a route name that collides with an `Object.prototype` member never
- * resolves to the inherited member.
+ * The lookup is **strict**: it answers with the id, or with nothing. A `null`
+ * entry — the target's "not served" — and an absent entry both answer with
+ * nothing, and the two are told apart by {@link notServedOn}. An own-property
+ * check guards the lookup, so a route name that collides with an
+ * `Object.prototype` member never resolves to the inherited member.
  */
 export function providerIdFor(model: CatalogModel, route: ProviderRoute): string | undefined {
   const ids = model.providerIds;
@@ -372,6 +383,26 @@ export function providerIdFor(model: CatalogModel, route: ProviderRoute): string
   const value = ids[route];
   if (typeof value !== 'string' || value === '') return undefined;
   return value;
+}
+
+/**
+ * Whether the route **does not serve** the model.
+ *
+ * **This is the target's own predicate**: `provider_ids[route] === null`
+ * (audit §2.1, "Route selection"). The target's literal marks a route it does
+ * not serve with `null`, and its route selector tests exactly that.
+ *
+ * An **absent** key is **not** "not served": the target's own literal omits
+ * one key (`claude-haiku-5-5` carries no `gateway` key), and an omitted key
+ * is not `null`, so the target's predicate does not fire for it. This
+ * implementation keeps the three states apart, so the predicate is the
+ * target's and not a superset of it.
+ */
+export function notServedOn(model: CatalogModel, route: ProviderRoute): boolean {
+  const ids = model.providerIds;
+  if (ids === null || typeof ids !== 'object') return false;
+  if (!Object.hasOwn(ids, route)) return false;
+  return ids[route] === null;
 }
 
 /** The catalog row with a logical model id, or `undefined`. */
@@ -438,9 +469,12 @@ export function resolveRouteForModel(
   ) {
     return 'mantle';
   }
-  // Half (b) — the mantle fallback.
-  if (providerIdFor(model, route) !== undefined) return route;
-  if (route !== 'mantle' && providerIdFor(model, 'mantle') !== undefined) return 'mantle';
+  // Half (b) — the mantle fallback, with the target's **own** predicate:
+  // `provider_ids[route] === null` while `provider_ids[mantle] !== null`.
+  // An **omitted** key is not `null`, so a route the target's literal does not
+  // mention is not "not served" and the model stays on it.
+  if (!notServedOn(model, route)) return route;
+  if (route !== 'mantle' && !notServedOn(model, 'mantle')) return 'mantle';
   return undefined;
 }
 
@@ -473,8 +507,8 @@ export function resolveModelRoute(
  * know *which* route the id belongs to, and `providerIdFor` when it needs the
  * strict per-route answer.
  *
- * The "no id for the route" test is an **absent key**, which is a superset of
- * the audited `provider_ids[route] === null` predicate — see the module
+ * The "no id for the route" test is the target's own predicate,
+ * `provider_ids[route] === null` — see {@link notServedOn} and the module
  * header.
  *
  * `enabled` is the **enabled-flag set**; it is optional, and the
@@ -579,21 +613,31 @@ function routeForProviderIdKey(key: string): ProviderRoute | undefined {
  * Convert a target-shaped `provider_ids` map into this implementation's route-keyed
  * map.
  *
- * A `null` value — the target's "this provider does not serve this model" —
- * becomes an **absent key**. An unknown key is an error rather than a silent
- * drop, so a typo in a hand-maintained catalog is caught at import time.
+ * The map is translated key by key, and the **values are kept as they are**:
+ * a string is the provider's id and a `null` is the target's "this provider
+ * does not serve this model" — the marker the target's own route selector
+ * tests. A key the target's literal does not carry stays **absent**, because
+ * an omitted key is not `null` and the target's predicate does not fire for
+ * it.
+ *
+ * An unknown key is an error rather than a silent drop, so a typo in a
+ * hand-maintained catalog is caught at import time.
  */
 function convertProviderIds(
   raw: Record<string, unknown>,
   modelId: string,
-): Partial<Record<ProviderRoute, string>> {
-  const providerIds: Partial<Record<ProviderRoute, string>> = {};
+): Partial<Record<ProviderRoute, string | null>> {
+  const providerIds: Partial<Record<ProviderRoute, string | null>> = {};
   for (const [key, value] of Object.entries(raw)) {
     const route = routeForProviderIdKey(key);
     if (route === undefined) {
       throw new Error(`catalog model "${modelId}" has an unknown provider id key "${key}"`);
     }
-    if (value === null) continue; // "not served" — an absent key, never a null value
+    if (value === null) {
+      // The target's "not served" marker, kept as it is.
+      providerIds[route] = null;
+      continue;
+    }
     if (typeof value !== 'string' || value === '') {
       throw new Error(`catalog model "${modelId}" has a malformed provider id for "${key}"`);
     }

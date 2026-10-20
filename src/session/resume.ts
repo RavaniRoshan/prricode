@@ -142,6 +142,7 @@ import {
   answeredToolUseId,
   isMessageEvent,
   requestedToolUseId,
+  toolResultId,
   type SessionEvent,
 } from './event.js';
 import {
@@ -670,7 +671,7 @@ export function projectContext(events: SessionEvent[]): ContextItem[] {
         if (current === undefined || current.role !== 'user') current = openMessage('user');
         current.blocks.push({
           type: 'tool_result',
-          toolUseId: event.envelope.toolUseId,
+          toolUseId: toolResultId(event.envelope),
           content: event.envelope.content,
           isError: event.envelope.isError,
         });
@@ -1588,10 +1589,19 @@ export const SDK_ENTRYPOINTS: readonly string[] = Object.freeze(['sdk-cli', 'sdk
 /**
  * The report of a session that is **live in the background**.
  *
- * **Observed** (the REA's session-lookup finding): the target's lookup takes
- * an `onNewestRunningInBackground` callback that captures the newest session
- * already running in the background — so a background session is **reported**
- * rather than silently continued, and the lookup continues with nothing.
+ * **Observed** (the target's own filter, `Mlo` in `chunk-4jsg44k7.js`): the
+ * report is the **continued-into** case. The target's filter is
+ *
+ * ```js
+ * if (!n && S.continuedInSessionId !== void 0 && h?.has(S.continuedInSessionId))
+ *   return r?.({ sessionId: S.continuedInSessionId, provable: !y.has(S.continuedInSessionId) }), "stop";
+ * ```
+ *
+ * — the session a candidate was **continued into** is reported through
+ * `onNewestRunningInBackground` and the lookup **stops**. A candidate that is
+ * **itself** live is only *skipped* (`if (w !== void 0 && h?.has(w)) return !1`):
+ * it is dropped and the lookup carries on with the next candidate, and nothing
+ * is reported.
  */
 export interface BackgroundSessionReport {
   /** The id of the session that is running. */
@@ -1656,8 +1666,11 @@ export interface ResumableCandidateOptions {
   /**
    * The callback that **reports** a session that is live in the background.
    *
-   * The target reports it and continues with nothing: the report replaces the
-   * lookup's result.
+   * The target reports **one** case: the session a candidate was continued
+   * into. The report **stops** the lookup — the target's filter returns
+   * `"stop"` — so the lookup continues with nothing. A candidate that is
+   * itself live is dropped silently and the lookup carries on with the next
+   * candidate.
    */
   onNewestRunningInBackground?: (report: BackgroundSessionReport) => void;
 }
@@ -1747,10 +1760,9 @@ function reportBackground(options: ResumableCandidateOptions, sessionId: string)
  *   - a **`/loop`** session;
  *   - a **bookkeeping-only** session;
  *   - a session that was **continued into** a session that is live in the
- *     background — that session is *reported*, and the lookup continues with
- *     nothing;
- *   - a session that is **itself** live in the background — it is *reported*,
- *     not continued;
+ *     background — that session is *reported*, and the lookup **stops**;
+ *   - a session that is **itself** live in the background — it is *dropped*, and
+ *     the lookup carries on with the next candidate;
  *   - a **superseded** session;
  *   - and, when the live-session list **could not be read**, every session
  *     carrying a session kind or a continued-in id.
@@ -1797,17 +1809,18 @@ export function isResumableCandidate(
 
   const continuedIn = ownText(summary, 'continuedInSessionId');
   if (options.forkSession !== true) {
-    // A candidate that was continued into a session that is live: that
-    // session is reported, and the lookup continues with nothing.
+    // A candidate that was continued into a session that is live: that session
+    // is reported, and the lookup **stops** — the target's filter returns
+    // `"stop"` here, so no further candidate is considered.
     if (continuedIn !== undefined && isLive(options, continuedIn)) {
       reportBackground(options, continuedIn);
       return false;
     }
-    // A candidate that is itself live: it is reported, not continued.
-    if (isLive(options, summary.sessionId)) {
-      reportBackground(options, summary.sessionId);
-      return false;
-    }
+    // A candidate that is **itself** live in the background is **dropped**:
+    // the target's filter skips it (`if(w!==void 0&&h?.has(w))return!1`) and
+    // the lookup carries on with the next candidate. Nothing is reported here
+    // — the report is the *continued-into* case above, and only that one.
+    if (isLive(options, summary.sessionId)) return false;
   }
 
   // A superseded session — one that was continued into another — is skipped.
@@ -1835,10 +1848,12 @@ export interface SessionLookupResult {
 /**
  * The lookup: the **first** survivor of an ordered list of candidates.
  *
- * **Observed** (the REA's session-lookup finding): the target's lookup walks
- * the list in order and takes the first accepted entry. A session that is
- * live in the background is **reported** through the background callback, and
- * the lookup continues with nothing.
+ * **Observed** (the target's own filter, `Mlo` in `chunk-4jsg44k7.js`): the
+ * target's lookup walks the list in order and takes the first accepted entry.
+ * A candidate that is live in the background is **dropped** and the walk
+ * carries on with the next one; a candidate that was **continued into** a live
+ * background session is **reported**, and the walk **stops** there — the
+ * lookup continues with nothing.
  */
 export function selectResumableCandidate(
   summaries: readonly SessionSummary[],
@@ -1854,8 +1869,8 @@ export function selectResumableCandidate(
   };
   for (const summary of summaries) {
     if (isResumableCandidate(summary, effective)) return { summary };
-    // A reported background session ends the lookup: the target continues
-    // with nothing.
+    // A **reported** background session ends the lookup: the target's filter
+    // returned `"stop"`, so the walk continues with nothing.
     if (background !== undefined) return { background };
   }
   return background === undefined ? {} : { background };
@@ -2178,8 +2193,8 @@ export async function continueSession(
     ...(options.isLiveSession === undefined ? {} : { isLiveSession: options.isLiveSession }),
   });
   if (lookup.background !== undefined) {
-    // The session is already running in the background: it is **reported**,
-    // not silently continued.
+    // The session the candidate was **continued into** is live in the
+    // background: it is **reported**, and the lookup continues with nothing.
     const reported = fail('background_running', CONTINUE_BACKGROUND_RUNNING_MESSAGE, false);
     reported.backgroundSessionId = lookup.background.sessionId;
     return reported;

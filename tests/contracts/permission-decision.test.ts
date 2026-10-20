@@ -25,6 +25,7 @@ import {
   persistentAllowRules,
   resolveStartMode,
   type PermissionDecision,
+  type PermissionReasonKind,
   type RuleSet,
   type ToolContext,
 } from '../../src/permissions/decision.js';
@@ -591,16 +592,56 @@ describe('the permission modes', () => {
     expect(decision.source).toBe('classifier');
   });
 
-  it('labels the acceptEdits no-rule-matched case as noRuleMatch', async () => {
+  it('labels the acceptEdits no-rule-matched case as permissionPromptTool', async () => {
     const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
       rules: rules(),
       mode: 'acceptEdits',
     });
 
-    // The case is "no rule matched", not "a named tool requires approval": the
-    // `noRuleMatch` kind is the one the hook may replace.
+    // The target's reason kinds are **six**, and none of them names the
+    // "no rule matched" case: the generic prompt is the target's
+    // `permissionPromptTool` — "a named tool requires approval for this
+    // command".
     expect(decision.behavior).toBe('ask');
-    expect(decision.reasonKind).toBe('noRuleMatch');
+    expect(decision.reasonKind).toBe('permissionPromptTool');
+  });
+
+  it('uses exactly the target\'s six reason kinds', async () => {
+    // The target's own six (audit §2.5, "Decision reasons").
+    const kinds = [
+      'rule',
+      'subcommandResults',
+      'permissionPromptTool',
+      'sandboxOverride',
+      'workingDir',
+      'safetyCheck',
+    ] as const satisfies readonly PermissionReasonKind[];
+
+    // A compile-time pin: the union is **exactly** these six. A seventh kind
+    // would make this assignment fail to compile.
+    type AssertExact<T, U> = [T] extends [U] ? ([U] extends [T] ? true : never) : never;
+    const exact: AssertExact<PermissionReasonKind, (typeof kinds)[number]> = true;
+    expect(exact).toBe(true);
+
+    // And the two the implementation produces on its own are among them.
+    const denied = await checkPermission(tool({ input: { command: 'rm -rf /tmp/x' } }), {
+      rules: rules({ deny: ['Bash(rm *)'] }),
+      mode: 'default',
+    });
+    expect(denied.reasonKind).toBe('rule');
+
+    const escalated = await checkPermission(
+      tool({ input: { command: 'ls -l && rm -rf /tmp/x' } }),
+      { rules: rules({ allow: ['Bash(ls -l)'] }), mode: 'default' },
+    );
+    expect(escalated.reasonKind).toBe('subcommandResults');
+
+    const generic = await checkPermission(tool({ input: { command: 'ls' } }), {
+      rules: rules(),
+      mode: 'default',
+    });
+    expect(generic.reasonKind).toBe('permissionPromptTool');
+    expect(kinds).toContain(generic.reasonKind);
   });
 
   it('lets a hook approval replace the no-rule-matched prompt in acceptEdits as in default', async () => {
@@ -1538,10 +1579,14 @@ describe('the "don\'t ask again" rules', () => {
 });
 
 describe('the reason kinds', () => {
-  it('distinguishes the no-rule-matched case from a named tool that requires approval', async () => {
+  it('keeps the generic prompt\'s own reason text', async () => {
     const decision = await checkPermission(tool(), { rules: rules(), mode: 'default' });
 
-    expect(decision.reasonKind).toBe('noRuleMatch');
+    // The generic prompt is the target's `permissionPromptTool` — the target's
+    // six name no seventh case — and the marker says that it is the prompt
+    // that exists only because no rule matched.
+    expect(decision.reasonKind).toBe('permissionPromptTool');
+    expect(decision.noRuleMatched).toBe(true);
     expect(decision.reason).toContain('No permission rule matched');
   });
 

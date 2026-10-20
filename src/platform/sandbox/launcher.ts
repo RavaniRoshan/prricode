@@ -30,8 +30,33 @@
  *      by the host-side proxy, which enforces the domain allowlist, refuses the
  *      loopback, link-local and cloud-metadata ranges, and pins the address.
  *   5. **Supervisor.** The seccomp-notification supervisor observes and emulates;
- *      it never enforces. This build installs no `USER_NOTIF` filter, so the
- *      layer is reported as *not* in force. See `src/platform/sandbox/seccomp.ts`.
+ *      it never enforces. The **filter** that notifies is the target's: the
+ *      observed syscalls are handed to the listener with
+ *      `SECCOMP_RET_USER_NOTIF` (`buildSeccompFilter`), and the **listener**
+ *      that serves them is implemented here
+ *      (`createSandboxNotificationListener`). The kernel's attachment — the
+ *      `seccomp(2)` call with `SECCOMP_FILTER_FLAG_NEW_LISTENER` and the two
+ *      `ioctl(2)` calls — is the **native seam** the module already documents:
+ *      a Node process cannot issue those calls, so they live behind the
+ *      `NotifierChannel`. This build ships no native helper, so the layer is
+ *      reported as *not* in force, and the status says so. See
+ *      `src/platform/sandbox/seccomp.ts`.
+ *
+ * **The target's helper, and this implementation's.** The target's
+ * `apply-seccomp` worker is a **native** program: it reads `SRT_OBSERVE_SOCK`
+ * and `SRT_ENCODED_CMD`, creates a socketpair, unshares the PID, mount and
+ * user namespaces, forks, performs the private/root and `/proc` mounts, sets
+ * `prctl` (including `PR_SET_NO_NEW_PRIVS`), installs the seccomp filter with
+ * `SECCOMP_FILTER_FLAG_TSYNC_ESRCH` and the listener with
+ * `SECCOMP_FILTER_FLAG_NEW_LISTENER`, hands the descriptors over with
+ * `sendmsg`, waits with `waitpid` and finally `execvp`s the command (audit
+ * §2.9). **This implementation is a TypeScript program**, so the helper's
+ * **decisions** are made here — `buildSandboxHelperPlan` produces the
+ * environment, the namespaces, the mounts, the `prctl` calls, the seccomp
+ * flags, the filter program, the descriptors and the order — and the backend
+ * performs the parts that need the kernel. The **behaviour** is the target's;
+ * the **mechanism** is not, and the difference is named in
+ * `docs/compatibility/sandbox-surface.md`.
  *
  * **The launcher never needs root.** The design is unprivileged: user namespaces
  * plus `PR_SET_NO_NEW_PRIVS`, never a setuid helper. This implementation **refuses a
@@ -158,10 +183,14 @@ import {
 } from './policy.js';
 import {
   DENIED_SYSCALLS,
+  OBSERVED_SYSCALLS,
+  SECCOMP_RET_USER_NOTIF,
   buildSeccompFilter,
   createSeccompSupervisor,
   type DispatchRecord,
   type NotifierChannel,
+  type SeccompNotification,
+  type SyscallObservation,
   type SeccompSupervisor,
 } from './seccomp.js';
 import {
@@ -1032,11 +1061,11 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
   const scopeNote = exemptionScopeNote(exemptionScope(policy));
   if (scopeNote !== undefined) notes.push(scopeNote);
   notes.push(
-    'the seccomp-notification supervisor is not attached: it needs a native listener, so the sandbox observes nothing.',
+    'the seccomp-notification supervisor is not attached: the kernel attachment (seccomp(2) with SECCOMP_FILTER_FLAG_NEW_LISTENER and the two ioctls) needs a native listener, so the sandbox observes nothing.',
   );
   if (spec.supervisor !== undefined) {
     notes.push(
-      'a supervisor object was supplied, but this build installs no USER_NOTIF filter, so the supervisor still observes nothing.',
+      'a supervisor object was supplied, but the notification filter it needs is installed by the helper, and the helper’s kernel calls need a native listener, so the supervisor still observes nothing.',
     );
   }
   notes.push(
@@ -1443,7 +1472,12 @@ export function bubblewrapBackend(): SandboxBackend {
       };
     },
     async start(plan: SandboxPlan, spec: SandboxSpec): Promise<SandboxProcess> {
-      const filter = buildSeccompFilter({ denied: plan.deniedSyscalls });
+      // The **enforcement** filter: the denylist only. A notified syscall
+      // without a listener attached answers `ENOSYS`, so the filter the
+      // backend installs never carries the notification action — the target's
+      // helper installs the notification filter itself, together with the
+      // listener it hands to the supervisor (audit §2.9).
+      const filter = buildSeccompFilter({ denied: plan.deniedSyscalls, notify: false });
       const filterPath = path.join(
         tmpdir(),
         `agent-sandbox-seccomp-${process.pid}-${Date.now().toString(36)}.bin`,
@@ -1762,6 +1796,268 @@ function bubblewrapArguments(
  */
 export function planSupervisor(plan: SandboxPlan, channel: NotifierChannel): SeccompSupervisor {
   return createSeccompSupervisor({ channel, pathPolicy: mountPlanPathPolicy(plan) });
+}
+
+/* -------------------------------------------------------------------------- */
+/* The sandbox helper                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The environment the target's `apply-seccomp` helper reads.
+ *
+ * **Observed** (audit §2.9): "It reads `SRT_OBSERVE_SOCK` and `SRT_ENCODED_CMD`".
+ * The first names the socket the supervisor observes through; the second
+ * carries the command the helper runs, encoded.
+ *
+ * The names are the target's own — they are the data the helper speaks to.
+ */
+export const SANDBOX_HELPER_ENVIRONMENT = Object.freeze(['SRT_OBSERVE_SOCK', 'SRT_ENCODED_CMD']);
+
+/**
+ * The namespaces the target's helper unshares.
+ *
+ * **Observed** (audit §2.9): "unshares PID/mount and user namespaces".
+ */
+export const SANDBOX_HELPER_NAMESPACES = Object.freeze(['pid', 'mount', 'user']);
+
+/**
+ * The `prctl` option the target's helper sets.
+ *
+ * **Observed** (audit §2.9): "sets `prctl` (including `PR_SET_NO_NEW_PRIVS`)".
+ * `PR_SET_NO_NEW_PRIVS` is the one the audit names, and it is the one that
+ * matters: without it the seccomp filter cannot be installed at all.
+ */
+export const PR_SET_NO_NEW_PRIVS = 38;
+
+/**
+ * `SECCOMP_FILTER_FLAG_TSYNC_ESRCH`.
+ *
+ * **Observed** (audit §2.9): the helper "installs a seccomp filter with
+ * `SECCOMP_FILTER_FLAG_TSYNC_ESRCH`". The flag synchronises the filter into
+ * every thread of the process.
+ */
+export const SECCOMP_FILTER_FLAG_TSYNC_ESRCH = 0x1;
+
+/**
+ * `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
+ *
+ * **Observed** (audit §2.9): the helper "installs … a listener with
+ * `SECCOMP_FILTER_FLAG_NEW_LISTENER`". The flag makes the kernel hand back a
+ * listener descriptor, and the filter's `SECCOMP_RET_USER_NOTIF` actions are
+ * delivered to it.
+ */
+export const SECCOMP_FILTER_FLAG_NEW_LISTENER = 0x8;
+
+/**
+ * `SECCOMP_IOCTL_NOTIF_RECV`.
+ *
+ * **Observed** (audit §2.9): the supervisor "receives notifications with ioctl
+ * request `0xc0502100`".
+ */
+export const SECCOMP_IOCTL_NOTIF_RECV = 0xc0502100;
+
+/**
+ * `SECCOMP_IOCTL_NOTIF_SEND`.
+ *
+ * **Observed** (audit §2.9): the supervisor "responds with `0xc0182101`".
+ */
+export const SECCOMP_IOCTL_NOTIF_SEND = 0xc0182101;
+
+/**
+ * The order the target's helper does its work in.
+ *
+ * **Observed** (audit §2.9): "It reads `SRT_OBSERVE_SOCK` and
+ * `SRT_ENCODED_CMD`, creates a socketpair, unshares PID/mount and user
+ * namespaces, forks, performs private/root and `/proc` mounts, sets `prctl`
+ * (including `PR_SET_NO_NEW_PRIVS`), installs a seccomp filter with
+ * `SECCOMP_FILTER_FLAG_TSYNC_ESRCH` and a listener with
+ * `SECCOMP_FILTER_FLAG_NEW_LISTENER`, transfers descriptors with `sendmsg`,
+ * waits with `waitpid`, and finally `execvp`s."
+ */
+export const SANDBOX_HELPER_SEQUENCE = Object.freeze([
+  'read-environment',
+  'socketpair',
+  'unshare',
+  'fork',
+  'mount-private-root',
+  'mount-proc',
+  'prctl',
+  'seccomp-filter',
+  'seccomp-listener',
+  'sendmsg',
+  'waitpid',
+  'execvp',
+]);
+
+/** One mount the helper performs. */
+export interface SandboxHelperMount {
+  /** What the mount does. */
+  readonly kind: 'private-root' | 'proc';
+  /** Where it is mounted. */
+  readonly target: string;
+}
+
+/** The plan the target's helper executes. */
+export interface SandboxHelperPlan {
+  /** The environment the helper read. */
+  readonly environment: {
+    /** The socket the supervisor observes through. */
+    readonly observeSocket?: string;
+    /** The encoded command the helper runs. */
+    readonly encodedCommand?: string;
+  };
+  /** The namespaces the helper unshares. */
+  readonly namespaces: readonly string[];
+  /** The mounts the helper performs. */
+  readonly mounts: readonly SandboxHelperMount[];
+  /** The `prctl` calls the helper makes. */
+  readonly prctl: readonly { readonly option: number; readonly name: string }[];
+  /** The seccomp calls the helper makes. */
+  readonly seccomp: {
+    /** The flags the filter is installed with. */
+    readonly filterFlags: number;
+    /** The flags the listener is installed with. */
+    readonly listenerFlags: number;
+    /** The filter program the helper installs. */
+    readonly filter: Buffer;
+  };
+  /** The descriptors the helper hands over with `sendmsg`. */
+  readonly descriptors: readonly { readonly fd: number; readonly name: string }[];
+  /** The order the helper does its work in. */
+  readonly sequence: readonly string[];
+}
+
+/**
+ * The plan the target's helper executes.
+ *
+ * **Observed** (audit §2.9): the helper reads two environment variables,
+ * creates a socketpair, unshares three namespaces, forks, performs the
+ * private/root and `/proc` mounts, sets `PR_SET_NO_NEW_PRIVS`, installs the
+ * seccomp filter with `SECCOMP_FILTER_FLAG_TSYNC_ESRCH` and the listener with
+ * `SECCOMP_FILTER_FLAG_NEW_LISTENER`, hands the descriptors over with
+ * `sendmsg`, waits with `waitpid` and finally `execvp`s the command.
+ *
+ * **The mechanism differs, and the difference is named.** The target's helper
+ * is a native worker that performs the namespace, mount and `prctl` work
+ * itself. This implementation is a TypeScript program: the helper's
+ * **decisions** are made here — the namespaces, the mounts, the `prctl` calls,
+ * the seccomp flags, the filter program, the descriptors and the order — and
+ * the parts that need the kernel are performed by the backend. The behaviour
+ * is the target's; the mechanism is not.
+ *
+ * @param options The command the helper runs and the environment it reads.
+ */
+export function buildSandboxHelperPlan(options: {
+  command: string;
+  encodedCommand?: string;
+  observeSocket?: string;
+  deniedSyscalls?: readonly string[];
+}): SandboxHelperPlan {
+  const encodedCommand = options.encodedCommand ?? options.command;
+  const filter = buildSeccompFilter({ denied: options.deniedSyscalls ?? DENIED_SYSCALLS });
+  return {
+    environment: {
+      ...(options.observeSocket === undefined ? {} : { observeSocket: options.observeSocket }),
+      encodedCommand,
+    },
+    namespaces: [...SANDBOX_HELPER_NAMESPACES],
+    mounts: [
+      { kind: 'private-root', target: '/' },
+      { kind: 'proc', target: '/proc' },
+    ],
+    prctl: [{ option: PR_SET_NO_NEW_PRIVS, name: 'PR_SET_NO_NEW_PRIVS' }],
+    seccomp: {
+      filterFlags: SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
+      listenerFlags: SECCOMP_FILTER_FLAG_NEW_LISTENER,
+      filter,
+    },
+    descriptors: [
+      { fd: 0, name: 'the observe socket' },
+      { fd: 3, name: 'the seccomp notification listener' },
+    ],
+    sequence: [...SANDBOX_HELPER_SEQUENCE],
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The notification listener                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The seccomp-notification listener.
+ *
+ * **Observed** (audit §2.9): the target's supervisor "allocates
+ * kernel-reported notification buffers with fallbacks, opens a `pidfd`, polls
+ * the listener, receives notifications with ioctl request `0xc0502100`,
+ * dispatches on the notified syscall number, and responds with `0xc0182101`."
+ *
+ * **The mechanism differs, and the difference is named.** The target's
+ * listener is a native supervisor that holds the kernel's notification
+ * descriptor. This implementation's listener is an **in-process** component:
+ * the kernel's `ioctl(2)` and `process_vm_readv(2)` calls live behind the
+ * `NotifierChannel` seam, which a native helper implements. The *behaviour* —
+ * the filter that notifies, the dispatch table, the path resolution, the
+ * observe-never-deny answer and the JSON record — is the target's; the
+ * mechanism is not.
+ */
+export interface SandboxNotificationListener {
+  /**
+   * Whether a listener is attached to the kernel's notifications.
+   *
+   * It is `true` when a channel was supplied — the channel **is** the
+   * attachment, and a native helper implements it.
+   */
+  readonly attached: boolean;
+  /** The ioctl requests the listener uses. */
+  readonly requests: { readonly receive: number; readonly send: number };
+  /** Serve the notifications the channel delivers, until it is closed. */
+  serve(): void;
+  /** The observations the listener recorded. */
+  readonly observations: readonly SyscallObservation[];
+}
+
+/**
+ * Create the notification listener.
+ *
+ * The listener owns the channel and drives the supervisor: it receives a
+ * notification, hands it to the supervisor, and the supervisor answers it —
+ * always with the observe-never-deny answer, because the target's supervisor
+ * never denies a syscall (audit §2.9).
+ *
+ * Without a channel there is nothing to attach to, and the listener says so:
+ * it is **not attached**, and it serves nothing.
+ */
+export function createSandboxNotificationListener(options: {
+  channel?: NotifierChannel;
+  supervisor?: SeccompSupervisor;
+}): SandboxNotificationListener {
+  const channel = options.channel;
+  const supervisor =
+    options.supervisor ??
+    (channel === undefined
+      ? undefined
+      : createSeccompSupervisor({ channel, pathPolicy: { permits: () => true } }));
+  const observations: SyscallObservation[] = [];
+
+  return {
+    attached: channel !== undefined,
+    requests: { receive: SECCOMP_IOCTL_NOTIF_RECV, send: SECCOMP_IOCTL_NOTIF_SEND },
+    serve(): void {
+      if (channel === undefined || supervisor === undefined) return;
+      for (;;) {
+        const notification: SeccompNotification | null = channel.receive();
+        // The channel is closed: the kernel has nothing more to say.
+        if (notification === null) return;
+        supervisor.handle(notification);
+        for (const observation of supervisor.observations) {
+          if (!observations.includes(observation)) observations.push(observation);
+        }
+      }
+    },
+    get observations(): readonly SyscallObservation[] {
+      return [...observations];
+    },
+  };
 }
 
 /**

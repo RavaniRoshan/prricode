@@ -213,7 +213,7 @@ describe('renderMessages — the message list', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls -la' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: bashOutput(),
           isError: false,
         }),
@@ -234,7 +234,7 @@ describe('renderMessages — the message list', () => {
         assistant('a1', 'Let me look.'),
         toolCall('c1', 'Read', { file_path: '/work/a.txt' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: { type: 'text', text: 'the file body' },
           isError: false,
         }),
@@ -256,10 +256,10 @@ describe('renderMessages — the message list', () => {
       [
         toolCall('c1', 'Bash', { command: 'rm -rf /' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
           isError: true,
-          permissionDecision: { decision: 'deny', source: 'user_reject', reasonType: 'rule' },
+          permission_decision: { decision: 'deny', source: 'user_reject', reason_type: 'rule' },
         }),
       ],
       ENV,
@@ -282,7 +282,7 @@ describe('renderMessages — the message list', () => {
           reason: 'A safety check refused this Bash call.',
         }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
           isError: true,
         }),
@@ -316,7 +316,7 @@ describe('renderMessages — the message list', () => {
           reason: 'A safety check refused this Bash call.',
         }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
           isError: true,
         }),
@@ -401,10 +401,10 @@ describe('renderMessages — the message list', () => {
           reason: 'No permission rule matched.',
         }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
           isError: true,
-          permissionDecision: { decision: 'deny', source: 'hook', reasonType: 'safetyCheck' },
+          permission_decision: { decision: 'deny', source: 'hook', reason_type: 'safetyCheck' },
         }),
       ],
       ENV,
@@ -420,7 +420,7 @@ describe('renderMessages — the message list', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls -la' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: bashOutput({ sandboxed: true }),
           isError: false,
         }),
@@ -436,7 +436,7 @@ describe('renderMessages — the message list', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls -la' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: bashOutput({
             sandboxed: false,
             sandboxReason: 'sandbox.allowUnsandboxedCommands is true',
@@ -459,7 +459,7 @@ describe('renderMessages — the message list', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls -la' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: bashOutput({
             sandboxed: false,
             sandboxEstablishmentReason: 'the bubblewrap backend is not available',
@@ -485,7 +485,7 @@ describe('renderMessages — the message list', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls -la' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: bashOutput({
             sandboxed: false,
             sandboxAvailability: {
@@ -509,7 +509,7 @@ describe('renderMessages — the message list', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls -la' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: bashOutput({
             sandboxed: true,
             sandboxAvailability: { available: true, warning: 'the probe could not check the mount' },
@@ -528,7 +528,7 @@ describe('renderMessages — the message list', () => {
     const blocks = renderMessages(
       [
         toolCall('c1', 'Bash', { command: 'ls' }),
-        toolResult('r1', { toolUseId: 'c1', content: bashOutput(), isError: false }),
+        toolResult('r1', { id: 'c1', content: bashOutput(), isError: false }),
       ],
       ENV,
     );
@@ -546,7 +546,7 @@ describe('renderMessages — the message list', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: { type: 'text', text: 'out\n\u001b[?1049h\n\u001b]0;pwned\u0007' },
           isError: false,
         }),
@@ -586,7 +586,7 @@ describe('renderMessages — the message list', () => {
     const blocks = renderMessages(
       [
         toolResult('r1', {
-          toolUseId: 'nobody',
+          id: 'nobody',
           content: { type: 'text', text: 'the orphan body' },
           isError: false,
         }),
@@ -602,7 +602,7 @@ describe('renderMessages — the message list', () => {
     const events: SessionEvent[] = [
       assistant('a1', 'The answer.'),
       toolCall('c1', 'Bash', { command: 'ls' }),
-      toolResult('r1', { toolUseId: 'c1', content: bashOutput(), isError: false }),
+      toolResult('r1', { id: 'c1', content: bashOutput(), isError: false }),
     ];
     const before = structuredClone(events);
 
@@ -664,7 +664,7 @@ describe('renderMessages — the message list', () => {
       assistant('a1', 'Listing them now.'),
       toolCall('c1', 'Read', { file_path: '/work/a.txt' }),
       toolResult('r1', {
-        toolUseId: 'c1',
+        id: 'c1',
         content: { type: 'text', text: 'the file body' },
         isError: false,
       }),
@@ -826,7 +826,7 @@ describe('the transcript — the target\'s rows', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: { type: 'text', text: 'one\ntwo' },
           isError: false,
         }),
@@ -849,7 +849,7 @@ describe('the transcript — the target\'s rows', () => {
       [
         toolCall('c1', 'Bash', { command: 'ls' }),
         toolResult('r1', {
-          toolUseId: 'c1',
+          id: 'c1',
           content: { type: 'text', text: 'it broke' },
           isError: true,
         }),
@@ -867,7 +867,7 @@ describe('the transcript — the target\'s rows', () => {
         user('u1', 'the question'),
         assistant('a1', 'the answer'),
         toolCall('c1', 'Bash', { command: 'ls' }),
-        toolResult('r1', { toolUseId: 'c1', content: { type: 'text', text: 'out' }, isError: false }),
+        toolResult('r1', { id: 'c1', content: { type: 'text', text: 'out' }, isError: false }),
       ],
       ENV,
     );
@@ -1411,7 +1411,7 @@ describe('the control-sequence strip — one path at a time', () => {
   it('strips the tool result in the result reader itself', () => {
     const lines = toolResultLines(
       {
-        toolUseId: 'c1',
+        id: 'c1',
         content: { type: 'text', text: 'out\u001b[?1049h\u001b]0;pwned\u0007' },
         isError: false,
       },
@@ -1424,7 +1424,7 @@ describe('the control-sequence strip — one path at a time', () => {
   it('strips the output of a Bash run in the result reader itself', () => {
     const lines = toolResultLines(
       {
-        toolUseId: 'c1',
+        id: 'c1',
         content: bashOutput({ stdout: 'out\u001b[2J\u001b]0;pwned\u0007' }),
         isError: false,
       },
@@ -1439,7 +1439,7 @@ describe('the control-sequence strip — one path at a time', () => {
     // through the line splitter, so nothing else strips it on this path.
     const lines = toolResultLines(
       {
-        toolUseId: 'c1',
+        id: 'c1',
         content: {
           type: 'error',
           message: 'boom\u001b[?1049h\u001b]0;pwned\u0007',
@@ -1523,7 +1523,7 @@ describe('the control-sequence strip — one path at a time', () => {
     const blocks = renderMessages(
       [
         toolResult('r1', {
-          toolUseId: 'nobody\u001b[?1049h\u001b]0;pwned\u0007',
+          id: 'nobody\u001b[?1049h\u001b]0;pwned\u0007',
           content: { type: 'text', text: 'the orphan body' },
           isError: false,
         }),
@@ -1898,7 +1898,7 @@ const APP_EVENTS: SessionEvent[] = [
     id: 'r1',
     t: 'tool_result',
     envelope: {
-      toolUseId: 'c1',
+      id: 'c1',
       content: { type: 'text', text: 'file1' },
       isError: false,
     },

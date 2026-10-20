@@ -556,7 +556,7 @@ describe('the agent runtime', () => {
 
     // The tool ran, and its result is a record.
     const toolResult = result.events.find((event) => event.t === 'tool_result');
-    expect(toolResult?.t === 'tool_result' ? toolResult.envelope.toolUseId : '').toBe('toolu_01');
+    expect(toolResult?.t === 'tool_result' ? toolResult.envelope.id : '').toBe('toolu_01');
     expect(toolResult?.t === 'tool_result' ? toolResult.envelope.content : '').toBe('hello');
 
     // The call's record carries the tool-use id, so the call and its result
@@ -710,10 +710,10 @@ describe('the agent runtime', () => {
     expect(envelope?.content).toBe(
       "<tool_use_error>The rule denies this call. The permission decision was 'deny' (source: unknown, reason type: other). Ask the user to approve the call, or change the permission rules.</tool_use_error>",
     );
-    expect(envelope?.permissionDecision?.decision).toBe('deny');
-    expect(envelope?.permissionDecision?.source).toBe('unknown');
-    expect(envelope?.permissionDecision?.reasonType).toBe('other');
-    expect(envelope?.nonExecutionKind).toBe('permission_denied');
+    expect(envelope?.permission_decision?.decision).toBe('deny');
+    expect(envelope?.permission_decision?.source).toBe('unknown');
+    expect(envelope?.permission_decision?.reason_type).toBe('other');
+    expect(envelope?.non_execution_kind).toBe('permission_denied');
 
     // The refusal ends the turn: no second request is issued in this turn.
     expect(driver.requests).toHaveLength(1);
@@ -740,7 +740,7 @@ describe('the agent runtime', () => {
     const record = result.events.find((event) => event.t === 'tool_result');
     expect(record?.t === 'tool_result' ? record.envelope.isError : false).toBe(true);
     expect(record?.t === 'tool_result' ? record.envelope.content : '').toContain('<tool_use_error>');
-    expect(record?.t === 'tool_result' ? record.envelope.nonExecutionKind : '').toBe(
+    expect(record?.t === 'tool_result' ? record.envelope.non_execution_kind : '').toBe(
       'permission_unresolved',
     );
   });
@@ -781,7 +781,7 @@ describe('the agent runtime', () => {
     const record = result.events.find((event) => event.t === 'tool_result');
     expect(record?.t === 'tool_result' ? record.envelope.isError : false).toBe(true);
     expect(record?.t === 'tool_result' ? record.envelope.content : '').toContain('<tool_use_error>');
-    expect(record?.t === 'tool_result' ? record.envelope.nonExecutionKind : '').toBe('unknown_tool');
+    expect(record?.t === 'tool_result' ? record.envelope.non_execution_kind : '').toBe('unknown_tool');
   });
 
   it('the permission request is recorded before the tool runs', async () => {
@@ -913,7 +913,8 @@ describe('the agent runtime', () => {
         behavior: 'ask',
         source: 'unknown',
         reasonType: 'other',
-        reasonKind: 'noRuleMatch',
+        reasonKind: 'permissionPromptTool',
+        noRuleMatched: true,
         reason: 'No permission rule matched.',
       }),
     });
@@ -1165,7 +1166,7 @@ describe('the agent runtime', () => {
     // The record, the envelope and the request all carry the minted id, so the
     // call and its answer pair up.
     const record = result.events.find((event) => event.t === 'tool_result');
-    expect(record?.t === 'tool_result' ? record.envelope.toolUseId : '').toBe(callId);
+    expect(record?.t === 'tool_result' ? record.envelope.id : '').toBe(callId);
     expect(toolResultBlocks(driver.requests[1]!)[0]?.toolUseId).toBe(callId);
     expect(malformed(driver.requests[1]!)).toEqual([]);
   });

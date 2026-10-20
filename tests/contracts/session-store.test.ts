@@ -107,7 +107,7 @@ function toolResult(id: string, toolUseId: string, content: unknown, ts: number)
     t: 'tool_result',
     ts,
     id,
-    envelope: { toolUseId, content, isError: false },
+    envelope: { id: toolUseId, content, isError: false },
   };
 }
 
@@ -132,8 +132,86 @@ describe('the session store', () => {
     const events = await collect(store.read(handle));
     expect(events).toHaveLength(3);
     expect(events.map((event) => event.id)).toEqual(['m1', 'm2', 'm3']);
-    expect(events[0]).toEqual(userMessage('m1', 'hello', 1));
-    expect(events[2]).toEqual(toolResult('m3', 'toolu_1', 'the output', 3));
+    // Every record the store writes carries the target's own
+    // `transcriptSource` marker (audit §2.6).
+    expect(events[0]).toEqual({ ...userMessage('m1', 'hello', 1), transcriptSource: 'local-jsonl' });
+    expect(events[2]).toEqual({
+      ...toolResult('m3', 'toolu_1', 'the output', 3),
+      transcriptSource: 'local-jsonl',
+    });
+  });
+
+  it('marks every record with the transcript source', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD });
+
+    await store.append(handle, userMessage('m1', 'hello', 1));
+    await store.append(handle, assistantMessage('m2', 'hi', 2));
+
+    // The target's session controller exposes `transcriptSource` with the two
+    // observed values — `ccr-api` (remote) and `local-jsonl` (local) — and
+    // switches between them when the active remote changes. This build writes
+    // local JSONL, so the marker is `local-jsonl`.
+    const raw = JSON.parse(readFileSync(handle.path, 'utf8').split('\n')[0] ?? '{}') as Record<
+      string,
+      unknown
+    >;
+    expect(raw['transcriptSource']).toBe('local-jsonl');
+
+    const events = await collect(store.read(handle));
+    for (const event of events) {
+      expect(event.transcriptSource).toBe('local-jsonl');
+    }
+  });
+
+  it('marks the records with the source the caller names', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    // The remote marker is the target's own: `ccr-api`.
+    const store = createSessionStore({ configDir, transcriptSource: 'ccr-api' });
+    const handle = await store.create({ cwd: CWD });
+
+    await store.append(handle, userMessage('m1', 'hello', 1));
+
+    const events = await collect(store.read(handle));
+    expect(events[0]?.transcriptSource).toBe('ccr-api');
+  });
+
+  it('reads a record whose envelope carries the previous member names', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD });
+
+    // A transcript written by an earlier build: the envelope's members were
+    // `toolUseId`, `permissionDecision`, `nonExecutionKind` and `userFeedback`.
+    const legacy = {
+      v: SESSION_SCHEMA_VERSION,
+      t: 'tool_result',
+      ts: 1,
+      id: 'r1',
+      envelope: {
+        toolUseId: 'toolu_1',
+        content: 'ok',
+        isError: true,
+        permissionDecision: { decision: 'deny', source: 'hook', reasonType: 'rule' },
+        nonExecutionKind: 'permission_denied',
+        userFeedback: 'the user said no',
+      },
+    };
+    writeFileSync(handle.path, `${JSON.stringify(legacy)}\n`, 'utf8');
+
+    // The reader migrates it: the envelope it returns carries the **target's**
+    // member names, and it keeps the decision, the kind and the feedback.
+    const events = await collect(store.read(handle));
+    const envelope = events[0]?.t === 'tool_result' ? events[0].envelope : undefined;
+    expect(envelope?.id).toBe('toolu_1');
+    expect(envelope?.permission_decision).toEqual({
+      decision: 'deny',
+      source: 'hook',
+      reason_type: 'rule',
+    });
+    expect(envelope?.non_execution_kind).toBe('permission_denied');
+    expect(envelope?.user_feedback).toBe('the user said no');
   });
 
   it('keeps the transcript under <configDir>/projects/<encoded-cwd>/<sessionId>.jsonl', async () => {

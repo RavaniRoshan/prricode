@@ -154,6 +154,17 @@ const SECCOMP_RET_ALLOW = 0x7fff0000;
 const SECCOMP_RET_ERRNO = 0x00050000;
 
 /**
+ * `SECCOMP_RET_USER_NOTIF`.
+ *
+ * The action that hands the syscall to the **notification** listener: the
+ * kernel blocks the calling thread until the supervisor answers. It is only
+ * usable when the filter is installed with `SECCOMP_FILTER_FLAG_NEW_LISTENER`
+ * — without a listener the kernel answers `ENOSYS` — so the enforcement
+ * filter never carries it.
+ */
+export const SECCOMP_RET_USER_NOTIF = 0x7fc00000;
+
+/**
  * The metadata of one dispatch record.
  *
  * Every member is an **argument index** into the intercepted syscall's argument
@@ -226,11 +237,22 @@ export function findDispatchRecord(nr: number): DispatchRecord | undefined {
 }
 
 /**
- * Build the seccomp-BPF denylist.
+ * Build the seccomp-BPF program.
  *
  * The program is the classic BPF the kernel expects: it loads the architecture,
  * refuses a foreign architecture, loads the syscall number and refuses every
- * syscall on the denylist with `EPERM`. Everything else is allowed.
+ * syscall on the denylist with `EPERM`.
+ *
+ * **The notification filter.** The target's helper installs a filter that
+ * **notifies**: the syscalls it observes are handed to the supervisor with
+ * `SECCOMP_RET_USER_NOTIF`, and the supervisor answers them (audit §2.9). That
+ * is the default here: the program hands the **27 observed syscalls** to the
+ * listener and refuses the denylist with `EPERM`.
+ *
+ * The action is only usable with a listener attached — the kernel answers
+ * `ENOSYS` for a notified syscall when there is none — so the **enforcement**
+ * filter (the one the launcher installs through the backend) is built with
+ * `notify: false`.
  *
  * The result is the raw instruction array — eight bytes per instruction — in the
  * form `seccomp(2)` and bubblewrap's `--seccomp` read.
@@ -239,6 +261,8 @@ export function buildSeccompFilter(options: SeccompFilterOptions = {}): Buffer {
   const denied = options.denied ?? DENIED_SYSCALLS;
   const architecture = options.architecture ?? AUDIT_ARCH_X86_64;
   const errno = options.errno ?? 1; // EPERM
+  const notify = options.notify !== false;
+  const notified = options.notified ?? OBSERVED_SYSCALLS.map((record) => record.name);
 
   const instructions: number[][] = [
     [BPF_LD_W_ABS, 0, 0, 4],
@@ -246,6 +270,16 @@ export function buildSeccompFilter(options: SeccompFilterOptions = {}): Buffer {
     [BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | (errno & 0xffff)],
     [BPF_LD_W_ABS, 0, 0, 0],
   ];
+  // The notified syscalls come first: the target's filter hands them to the
+  // listener, and the listener — not the filter — decides what happens next.
+  if (notify) {
+    for (const name of notified) {
+      const nr = syscallNumber(name);
+      if (nr === undefined) continue;
+      instructions.push([BPF_JEQ_K, 0, 1, nr]);
+      instructions.push([BPF_RET_K, 0, 0, SECCOMP_RET_USER_NOTIF]);
+    }
+  }
   for (const name of denied) {
     const nr = syscallNumber(name);
     if (nr === undefined) continue;
@@ -278,6 +312,23 @@ export interface SeccompFilterOptions {
    * syscalls and the foreign-architecture branch alike. The default is `EPERM`.
    */
   errno?: number;
+  /**
+   * Whether the filter hands the observed syscalls to the **notification
+   * listener**.
+   *
+   * The default is `true`: the target's helper installs a filter that
+   * notifies. The **enforcement** filter — the one the launcher installs
+   * through the backend, where no listener is attached — is built with
+   * `notify: false`, because a notified syscall without a listener answers
+   * `ENOSYS`.
+   */
+  notify?: boolean;
+  /**
+   * The syscall names the filter hands to the listener.
+   *
+   * The default is the target's 27 observed syscalls.
+   */
+  notified?: readonly string[];
 }
 
 /** The number of a syscall, when the table has one. */

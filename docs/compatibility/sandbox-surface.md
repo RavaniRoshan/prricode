@@ -113,6 +113,23 @@ This implementation **refuses a setuid bubblewrap outright** and drives the unpr
 
 All five layers share **one kernel**. Any kernel privilege escalation reachable from the sandbox defeats every layer, and unprivileged user namespaces widen the reachable surface. **Only a microVM moves the boundary below the kernel.** This statement is in the header of all five modules.
 
+## The target's helper and its supervisor — behaviour reproduced, mechanism different
+
+The target's `apply-seccomp` worker is a **native** program, and the target's supervisor is a **native** program that holds the kernel's notification descriptor. This implementation is a TypeScript program, and it does not ship a native helper. The two facts are kept apart: the **behaviour** is the target's, and the **mechanism** is not.
+
+**What is reproduced (the behaviour).**
+
+- The helper's **decisions** — the environment it reads (`SRT_OBSERVE_SOCK`, `SRT_ENCODED_CMD`), the namespaces it unshares (`pid`, `mount`, `user`), the mounts it performs (the private root and `/proc`), the `prctl` it sets (`PR_SET_NO_NEW_PRIVS`), the seccomp flags it installs the filter and the listener with (`SECCOMP_FILTER_FLAG_TSYNC_ESRCH` and `SECCOMP_FILTER_FLAG_NEW_LISTENER`), the descriptors it hands over with `sendmsg`, and the order it does its work in (`read-environment` → `socketpair` → `unshare` → `fork` → the mounts → `prctl` → the filter → the listener → `sendmsg` → `waitpid` → `execvp`). `buildSandboxHelperPlan` in `src/platform/sandbox/launcher.ts` produces it.
+- The **filter** that notifies: the target's 27 observed syscalls are handed to the listener with `SECCOMP_RET_USER_NOTIF` (`buildSeccompFilter` in `src/platform/sandbox/seccomp.ts`). The **enforcement** filter — the one the backend installs, where no listener is attached and a notified syscall would answer `ENOSYS` — is built with `notify: false`.
+- The **listener** (`createSandboxNotificationListener`): it receives with the target's own ioctl request `0xc0502100` and answers with `0xc0182101`, dispatches on the notified syscall number, resolves the path against the target's `/proc/<pid>/cwd` and `/proc/<pid>/fd/<dirfd>`, and **never denies** — the response's error stays `0` and the `SECCOMP_USER_NOTIF_FLAG_CONTINUE` flag is set.
+- The dispatch table's **27 records** and their argument indices, the JSON record the observation is written as, and the observe-never-deny rule.
+
+**What differs (the mechanism).**
+
+- The target's helper is a native ELF worker that performs the namespace, mount and `prctl` work **itself**. This implementation's helper is a **module** whose decisions the backend executes; the namespaces, the mounts and the `prctl` calls are performed by the unprivileged backend, not by a worker this implementation ships.
+- The target's supervisor holds the kernel's notification descriptor and issues the `ioctl(2)` calls itself. This implementation's listener is **in process**, and the kernel's `seccomp(2)`, `ioctl(2)` and `process_vm_readv(2)` calls live behind the `NotifierChannel` seam — the native seam `src/platform/sandbox/seccomp.ts` already documents. A Node process cannot issue those calls.
+- Therefore the **supervisor layer is not in force** in this build: the status reports it as such and says why. The layer is observability and emulation, never enforcement, so nothing about the sandbox's *boundary* depends on it — the boundary is the namespace, mount and `PR_SET_NO_NEW_PRIVS` isolation, and the kernel-enforced layers underneath it.
+
 ## The `sandbox.filesystem` settings block
 
 The target's `sandbox.filesystem.{allowRead, allowWrite, denyRead, denyWrite, credentials}` block is mapped onto the mount plan: `allowRead` becomes a read-only bind, `allowWrite` a read-write bind, and `denyRead`/`denyWrite`/`credentials` paths are **masked**.
@@ -129,7 +146,7 @@ These are this implementation's decisions, not the target's observed behavior:
 - **`enabledPlatforms: ['linux']`.** The target's list is not pinned.
 - **The sandbox does not inherit the host environment.** Safe, but observable: `~/.ssh` and `~/.aws/credentials` are unreachable, whereas the target's default read access is "most of the machine".
 - **Private address ranges are refused** beyond the three named classes (loopback, link-local, cloud-metadata). This implementation's `metadata.goog` and `instance-data` names are also guesses the target does not pin.
-- **The Landlock and supervisor seams**, and the fact that neither is wired in this build.
+- **The Landlock and supervisor seams**, and the fact that neither is wired in this build. The supervisor's *behaviour* is reproduced (the notifying filter, the listener, the dispatch table, the observe-never-deny answer); its *attachment* to the kernel's notifications is the native seam, and this build ships no native helper.
 - **The `sandbox.filesystem` mapping**, including the `denyWrite` fail-safe.
 - **The old-bubblewrap policy**: an old version stays available with a machine-readable advisory, rather than making the backend unavailable. Refusing the backend would be *worse* — this implementation's `failIfUnavailable: true` default would refuse the command outright, while the target's own default would run it **unconfined**, which is weaker in expectation than a sandbox carrying a known advisory.
 
@@ -163,3 +180,6 @@ These are this implementation's decisions, not the target's observed behavior:
 | A missing backend is reported gracefully, and `failIfUnavailable` decides between refusing and running unconfined | REA observed | F-34 | same file |
 | The advisory is machine-readable and the backend's version and setuid bit are recorded | implementation choice | F-34 | same file — the enforcement-probe tests |
 | The residual-risk paragraph is in all five module headers | implementation choice | F-34 | same file — the header test |
+| The **helper's plan** is the target's: the environment it reads (`SRT_OBSERVE_SOCK`, `SRT_ENCODED_CMD`), the namespaces it unshares (`pid`, `mount`, `user`), the mounts it performs (the private root and `/proc`), the `prctl` it sets (`PR_SET_NO_NEW_PRIVS`), the seccomp flags (`SECCOMP_FILTER_FLAG_TSYNC_ESRCH` and `SECCOMP_FILTER_FLAG_NEW_LISTENER`), the descriptors it hands over and the order it does its work in | REA observed (audit §2.9) | F-34 | same file — "builds the plan the target's helper executes" |
+| The **filter** hands the target's 27 observed syscalls to the notification listener with `SECCOMP_RET_USER_NOTIF`, and the **enforcement** filter never does | REA observed (audit §2.9) | F-35 | same file — "hands the observed syscalls to the notification listener", "notifies for every one of the target's 27 observed syscalls" |
+| The **listener** serves the notifications with the target's own ioctl requests — `0xc0502100` to receive and `0xc0182101` to answer — and never denies | REA observed (audit §2.9) | F-35 | same file — "serves the notifications with the target's own ioctl requests", "never denies: the listener answers every call it serves", "reports that no listener is attached when there is no channel" |

@@ -381,13 +381,50 @@ describe('the tool runner', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.permissionDecision).toEqual({
+    expect(envelope.permission_decision).toEqual({
       decision: 'deny',
       source: 'unknown',
-      reasonType: 'rule',
+      reason_type: 'rule',
     });
-    expect(envelope.toolUseId).toBe('toolu_01');
+    expect(envelope.id).toBe('toolu_01');
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('names the envelope\'s members the way the target names them', async () => {
+    const registry = createToolRegistry();
+    registry.register(
+      stubTool({
+        async checkPermissions() {
+          return { behavior: 'deny', source: 'hook', reasonType: 'rule' };
+        },
+      }),
+    );
+
+    const envelope = await runTool(registry, 'Stub', {}, toolContext('Stub', {}));
+
+    // The audit records the target's tool-result metadata as
+    // `{ id: tool_use_id, non_execution_kind, user_feedback, remedy,
+    //    permission_decision: { decision, source, reason_type } }`
+    // (COVERAGE-AUDIT.md §2.4). The envelope carries those names.
+    expect(Object.keys(envelope)).toContain('id');
+    expect(Object.keys(envelope)).toContain('non_execution_kind');
+    expect(Object.keys(envelope)).toContain('remedy');
+    expect(Object.keys(envelope)).toContain('permission_decision');
+    expect(envelope.id).toBe('toolu_01');
+    expect(envelope.non_execution_kind).toBe('permission_denied');
+    expect(Object.keys(envelope.permission_decision ?? {})).toEqual([
+      'decision',
+      'source',
+      'reason_type',
+    ]);
+
+    // The **previous** spellings are not part of the envelope's shape: they
+    // are the migration path, and the reader accepts them in a transcript
+    // written by an earlier build.
+    expect(Object.keys(envelope)).not.toContain('toolUseId');
+    expect(Object.keys(envelope)).not.toContain('permissionDecision');
+    expect(Object.keys(envelope)).not.toContain('nonExecutionKind');
+    expect(Object.keys(envelope)).not.toContain('userFeedback');
   });
 
   it('reports the denial reason and the typed error code in the content', async () => {
@@ -418,7 +455,7 @@ describe('the tool runner', () => {
       message: 'The user rejected the call.',
       errorCode: TOOL_ERROR_CODES.permissionDenied,
     });
-    expect(envelope.userFeedback).toBe('The user rejected the call.');
+    expect(envelope.user_feedback).toBe('The user rejected the call.');
   });
 
   it('produces an error envelope with the message and the error code when the validation fails', async () => {
@@ -470,10 +507,10 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(false);
     expect(envelope.content).toBe('done');
-    expect(envelope.permissionDecision).toEqual({
+    expect(envelope.permission_decision).toEqual({
       decision: 'allow',
       source: 'user_permanent',
-      reasonType: 'rule',
+      reason_type: 'rule',
     });
   });
 
@@ -555,8 +592,8 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.permissionDecision?.decision).toBe('deny');
-    expect(envelope.permissionDecision?.source).toBe('hook');
+    expect(envelope.permission_decision?.decision).toBe('deny');
+    expect(envelope.permission_decision?.source).toBe('hook');
     expect(envelope.content).toMatchObject({
       errorCode: TOOL_ERROR_CODES.invalidPath,
     });
@@ -578,8 +615,8 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.permissionDecision?.decision).toBe('ask');
-    expect(envelope.nonExecutionKind).toBe('permission_unresolved');
+    expect(envelope.permission_decision?.decision).toBe('ask');
+    expect(envelope.non_execution_kind).toBe('permission_unresolved');
   });
 
   it('refuses a call whose tool expressed no opinion', async () => {
@@ -591,7 +628,7 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.nonExecutionKind).toBe('permission_denied');
+    expect(envelope.non_execution_kind).toBe('permission_denied');
   });
 
   it('escalates a tool that expressed no opinion to the session permission service', async () => {
@@ -615,7 +652,7 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(false);
     expect(execute).toHaveBeenCalledTimes(1);
-    expect(envelope.permissionDecision?.source).toBe('classifier');
+    expect(envelope.permission_decision?.source).toBe('classifier');
   });
 
   it('refuses a call to a tool the registry does not hold', async () => {
@@ -624,7 +661,7 @@ describe('the tool runner', () => {
     const envelope = await runTool(registry, 'NoSuchTool', {}, toolContext('NoSuchTool', {}));
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.nonExecutionKind).toBe('unknown_tool');
+    expect(envelope.non_execution_kind).toBe('unknown_tool');
     expect(envelope.content).toMatchObject({ errorCode: TOOL_ERROR_CODES.unknownTool });
   });
 
@@ -644,7 +681,7 @@ describe('the tool runner', () => {
     const envelope = await runTool(registry, 'Stub', {}, toolContext('Stub', {}));
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.nonExecutionKind).toBe('execution_failed');
+    expect(envelope.non_execution_kind).toBe('execution_failed');
     expect(envelope.content).toEqual({
       type: 'error',
       message: 'The file could not be read.',
@@ -749,8 +786,8 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(false);
     expect(execute).toHaveBeenCalledTimes(1);
-    expect(envelope.permissionDecision?.decision).toBe('allow');
-    expect(envelope.permissionDecision?.source).toBe('user_temporary');
+    expect(envelope.permission_decision?.decision).toBe('allow');
+    expect(envelope.permission_decision?.source).toBe('user_temporary');
   });
 
   it('refuses a call whose approval asked again', async () => {
@@ -771,8 +808,8 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.nonExecutionKind).toBe('permission_unresolved');
-    expect(envelope.permissionDecision?.decision).toBe('ask');
+    expect(envelope.non_execution_kind).toBe('permission_unresolved');
+    expect(envelope.permission_decision?.decision).toBe('ask');
   });
 
   it('reports a permission check that failed', async () => {
@@ -791,7 +828,7 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.nonExecutionKind).toBe('permission_check_failed');
+    expect(envelope.non_execution_kind).toBe('permission_check_failed');
     expect(envelope.content).toMatchObject({ errorCode: TOOL_ERROR_CODES.executionFailed });
     expect(String((envelope.content as { message: string }).message)).toContain(
       'the rules could not be read',
@@ -811,7 +848,7 @@ describe('the tool runner', () => {
 
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.nonExecutionKind).toBe('permission_check_failed');
+    expect(envelope.non_execution_kind).toBe('permission_check_failed');
     expect(String((envelope.content as { message: string }).message)).toContain(
       'the service is down',
     );
@@ -841,7 +878,7 @@ describe('the tool runner', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.permissionDecision?.decision).toBe('deny');
+    expect(envelope.permission_decision?.decision).toBe('deny');
     expect(readFileSync(file, 'utf8')).toBe('x');
   });
 });
@@ -886,7 +923,7 @@ describe('the write path', () => {
 
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.nonExecutionKind).toBe('path_changed');
+    expect(envelope.non_execution_kind).toBe('path_changed');
     expect(envelope.content).toMatchObject({ errorCode: TOOL_ERROR_CODES.pathChanged });
     expect(String((envelope.content as { message: string }).message)).toContain(
       path.join(first, 'file.txt'),
@@ -1037,7 +1074,7 @@ describe('the write path', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.nonExecutionKind).toBe('path_changed');
+    expect(envelope.non_execution_kind).toBe('path_changed');
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -1128,7 +1165,7 @@ describe('the write path', () => {
     // the swap is caught on the path that is actually written.
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.nonExecutionKind).toBe('path_changed');
+    expect(envelope.non_execution_kind).toBe('path_changed');
     expect(envelope.content).toMatchObject({ errorCode: TOOL_ERROR_CODES.pathChanged });
   });
 
@@ -1179,7 +1216,7 @@ describe('the write path', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.nonExecutionKind).toBe('path_changed');
+    expect(envelope.non_execution_kind).toBe('path_changed');
     expect(readFileSync(path.join(second, 'file.txt'), 'utf8')).toBe('second');
   });
 
@@ -1276,9 +1313,9 @@ describe('a hook rewrite and the deny list', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.permissionDecision?.decision).toBe('deny');
-    expect(envelope.permissionDecision?.source).toBe('unknown');
-    expect(envelope.nonExecutionKind).toBe('permission_denied');
+    expect(envelope.permission_decision?.decision).toBe('deny');
+    expect(envelope.permission_decision?.source).toBe('unknown');
+    expect(envelope.non_execution_kind).toBe('permission_denied');
     expect(envelope.content).toMatchObject({ errorCode: TOOL_ERROR_CODES.permissionDenied });
     // The denied file is untouched.
     expect(readFileSync(secret, 'utf8')).toBe('the secret');
@@ -1377,8 +1414,8 @@ describe('a hook rewrite and the whole permission check', () => {
     expect(envelope.isError).toBe(true);
     // The refusal is the **same shape** as the no-hook refusal.
     expect(envelope.content).toEqual(plainEnvelope.content);
-    expect(envelope.nonExecutionKind).toBe(plainEnvelope.nonExecutionKind);
-    expect(envelope.permissionDecision).toEqual(plainEnvelope.permissionDecision);
+    expect(envelope.non_execution_kind).toBe(plainEnvelope.non_execution_kind);
+    expect(envelope.permission_decision).toEqual(plainEnvelope.permission_decision);
     // The ask-covered file is untouched.
     expect(readFileSync(secret, 'utf8')).toBe('the secret');
   });
@@ -1415,7 +1452,7 @@ describe('a hook rewrite and the whole permission check', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.permissionDecision?.decision).toBe('ask');
+    expect(envelope.permission_decision?.decision).toBe('ask');
     // The allow rule never covered the rewritten path, so nothing was written.
     expect(existsSync(outside)).toBe(false);
   });
@@ -1451,7 +1488,7 @@ describe('a hook rewrite and the whole permission check', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.permissionDecision?.decision).toBe('ask');
+    expect(envelope.permission_decision?.decision).toBe('ask');
     // `acceptEdits` approves a write inside the working directory only.
     expect(existsSync(path.join(outside, 'x.txt'))).toBe(false);
   });
@@ -1533,8 +1570,8 @@ describe('a hook rewrite and the whole permission check', () => {
     expect(recheck).toHaveBeenCalledTimes(1);
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.permissionDecision?.decision).toBe('ask');
-    expect(envelope.nonExecutionKind).toBe('permission_unresolved');
+    expect(envelope.permission_decision?.decision).toBe('ask');
+    expect(envelope.non_execution_kind).toBe('permission_unresolved');
   });
 
   it('stops the call when the hook denies the rewritten path', async () => {
@@ -1583,7 +1620,7 @@ describe('a hook rewrite and the whole permission check', () => {
     // The hook's **denial** still speaks in the re-check: a rewrite onto a denied
     // path does not get past it.
     expect(envelope.isError).toBe(true);
-    expect(envelope.permissionDecision?.decision).toBe('deny');
+    expect(envelope.permission_decision?.decision).toBe('deny');
     expect(readFileSync(secret, 'utf8')).toBe('the secret');
   });
 
@@ -1625,7 +1662,7 @@ describe('a hook rewrite and the whole permission check', () => {
     // reason of the verdict.
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.permissionDecision?.decision).toBe('ask');
+    expect(envelope.permission_decision?.decision).toBe('ask');
     expect(String((envelope.content as { message: string }).message)).toContain(
       'The rewritten call needs approval.',
     );
@@ -1660,7 +1697,7 @@ describe('a hook rewrite and the whole permission check', () => {
 
     expect(envelope.isError).toBe(true);
     expect(execute).not.toHaveBeenCalled();
-    expect(envelope.nonExecutionKind).toBe('permission_denied');
+    expect(envelope.non_execution_kind).toBe('permission_denied');
   });
 });
 
@@ -2732,7 +2769,7 @@ describe('a malformed call to a file-mutating tool', () => {
       );
 
       expect(envelope.isError).toBe(true);
-      expect(envelope.nonExecutionKind).toBe('validation_error');
+      expect(envelope.non_execution_kind).toBe('validation_error');
       const content = envelope.content as { errorCode: number; message: string };
       expect(content.errorCode).toBe(testCase.errorCode);
       expect(content.message).toContain(testCase.field);
@@ -2945,8 +2982,8 @@ describe('a tool call through the registry', () => {
     );
 
     expect(envelope.isError).toBe(false);
-    expect(envelope.toolUseId).toBe('toolu_01');
-    expect(envelope.permissionDecision?.decision).toBe('allow');
+    expect(envelope.id).toBe('toolu_01');
+    expect(envelope.permission_decision?.decision).toBe('allow');
     expect((envelope.content as { text: string }).text).toBe('hello\n');
   });
 
@@ -2968,8 +3005,8 @@ describe('a tool call through the registry', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.permissionDecision?.decision).toBe('deny');
-    expect(envelope.nonExecutionKind).toBe('permission_denied');
+    expect(envelope.permission_decision?.decision).toBe('deny');
+    expect(envelope.non_execution_kind).toBe('permission_denied');
   });
 });
 

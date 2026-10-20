@@ -400,7 +400,10 @@ describe('the tool layer’s re-check and the two seams', () => {
     );
 
     expect(recheck.decision?.behavior).toBe('ask');
-    expect(recheck.decision?.reasonKind).toBe('noRuleMatch');
+    // The target's reason kinds are six, and the generic prompt is the
+    // target's `permissionPromptTool` — there is no seventh kind.
+    expect(recheck.decision?.reasonKind).toBe('permissionPromptTool');
+    expect(recheck.decision?.noRuleMatched).toBe(true);
   });
 
   it('reports the same denial as the permission layer when both seams deny', async () => {
@@ -586,7 +589,7 @@ describe('the approving-and-rewriting hook and the uncovered call', () => {
     );
 
     expect(envelope.isError).toBe(true);
-    expect(envelope.nonExecutionKind).toBe('permission_unresolved');
+    expect(envelope.non_execution_kind).toBe('permission_unresolved');
     expect(existsSync(rewritten.file_path)).toBe(false);
   });
 });
@@ -651,7 +654,8 @@ describe('the hooks module’s approval in the permission layer', () => {
     // The normal permission path decides: the generic prompt, not the hook's.
     expect(decision.behavior).toBe('ask');
     expect(decision.source).not.toBe('hook');
-    expect(decision.reasonKind).toBe('noRuleMatch');
+    expect(decision.reasonKind).toBe('permissionPromptTool');
+    expect(decision.noRuleMatched).toBe(true);
   });
 
   it('carries the rewrite of an ask along with the question', async () => {

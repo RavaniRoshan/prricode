@@ -99,28 +99,82 @@ import {
 /**
  * The result of a tool call.
  *
- * The members are the target's tool-result metadata: the tool-use id, the content,
- * the error flag, the permission decision, and the three optional members the
- * target's `vo(e)` helper builds.
+ * The members are the target's tool-result metadata: the tool-use id, the
+ * content, the error flag, the permission decision, and the three optional
+ * members the target's `vo(e)` helper builds.
+ *
+ * **The names are the target's own.** The audit records the target's metadata
+ * object as `{ id: tool_use_id, non_execution_kind, user_feedback, remedy,
+ * permission_decision: { decision, source, reason_type } }` (§2.4), and this
+ * envelope carries those names: `id`, `non_execution_kind`, `user_feedback`,
+ * `remedy` and `permission_decision` — and the decision's own members are
+ * `decision`, `source` and `reason_type`.
+ *
+ * `content` and `isError` are this implementation's own members: they are the
+ * tool result's own payload, and the target spells them on the *content
+ * block* (`{ tool_use_id, type, content, is_error }`), which is a different
+ * object from the metadata one.
  */
 export interface ToolResultEnvelope {
-  /** The id of the tool use this result answers. */
-  toolUseId: string;
+  /**
+   * The id of the tool use this result answers — the target's `id`.
+   *
+   * It is **optional** for one reason only: the migration path. A transcript
+   * written by an earlier build spells the id `toolUseId`, and the reader
+   * migrates it. The writer always sets `id`.
+   */
+  id?: string;
   /** The tool's output, or the error that stopped it. */
   content: unknown;
   /** Whether the call failed. */
   isError: boolean;
   /** The permission decision, so the model observes it. */
+  permission_decision?: {
+    decision: PermissionBehavior;
+    source: PermissionSource;
+    reason_type?: PermissionReasonType;
+  };
+  /** The kind of failure that stopped the call, when it did not run. */
+  non_execution_kind?: string;
+  /** What the caller can do about the failure. */
+  remedy?: string;
+  /** The feedback the user gave, when the user gave any. */
+  user_feedback?: string;
+
+  /* ------------------------------------------------------------------ */
+  /* The previous spellings                                              */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The **previous** spelling of {@link id}.
+   *
+   * @deprecated The target's name is `id`. This member is the migration path:
+   * the transcript reader accepts it in a record written by an earlier build,
+   * and the envelope this build returns carries the target's names.
+   */
+  toolUseId?: string;
+  /**
+   * The **previous** spelling of {@link permission_decision}.
+   *
+   * @deprecated The target's name is `permission_decision`, and the decision's
+   * own members are `decision`, `source` and `reason_type`.
+   */
   permissionDecision?: {
     decision: PermissionBehavior;
     source: PermissionSource;
     reasonType?: PermissionReasonType;
   };
-  /** The kind of failure that stopped the call, when it did not run. */
+  /**
+   * The **previous** spelling of {@link non_execution_kind}.
+   *
+   * @deprecated The target's name is `non_execution_kind`.
+   */
   nonExecutionKind?: string;
-  /** What the caller can do about the failure. */
-  remedy?: string;
-  /** The feedback the user gave, when the user gave any. */
+  /**
+   * The **previous** spelling of {@link user_feedback}.
+   *
+   * @deprecated The target's name is `user_feedback`.
+   */
   userFeedback?: string;
 }
 
@@ -162,12 +216,58 @@ export interface ToolErrorContent {
 /** The decision as the tool result carries it. */
 function toEnvelopeDecision(
   decision: PermissionDecision,
-): NonNullable<ToolResultEnvelope['permissionDecision']> {
+): NonNullable<ToolResultEnvelope['permission_decision']> {
   return {
     decision: decision.behavior,
     source: decision.source,
-    reasonType: decision.reasonType,
+    reason_type: decision.reasonType,
   };
+}
+
+/**
+ * Attach the **previous** spellings of the envelope's members.
+ *
+ * The envelope's members carry the **target's** names (audit §2.4), and the
+ * shape of the envelope — what `Object.keys` and `JSON.stringify` see — is
+ * the target's. The spellings this implementation used before are kept as
+ * **non-enumerable** aliases: a caller written against the earlier build
+ * still reads `envelope.nonExecutionKind` and `envelope.permissionDecision`,
+ * and a transcript written by the earlier build is migrated by the reader.
+ *
+ * The aliases are a **migration path**, not part of the envelope's shape.
+ */
+export function withLegacyEnvelopeNames(envelope: ToolResultEnvelope): ToolResultEnvelope {
+  defineLegacyName(envelope, 'toolUseId', () => envelope.id);
+  defineLegacyName(envelope, 'nonExecutionKind', () => envelope.non_execution_kind);
+  defineLegacyName(envelope, 'userFeedback', () => envelope.user_feedback);
+  defineLegacyName(envelope, 'permissionDecision', () => {
+    const decision = envelope.permission_decision;
+    if (decision === undefined) return undefined;
+    return {
+      decision: decision.decision,
+      source: decision.source,
+      reasonType: decision.reason_type,
+    };
+  });
+  return envelope;
+}
+
+/**
+ * Define one non-enumerable alias on the envelope.
+ *
+ * The name is one of this module's own fixed names, never a caller's, and the
+ * property is **not enumerable**: the envelope's shape stays the target's.
+ */
+function defineLegacyName(
+  envelope: ToolResultEnvelope,
+  name: string,
+  read: () => unknown,
+): void {
+  Object.defineProperty(envelope, name, {
+    get: read,
+    enumerable: false,
+    configurable: true,
+  });
 }
 
 /** The sources whose reason is the user's own feedback. */
@@ -190,19 +290,19 @@ function errorEnvelope(
   },
 ): ToolResultEnvelope {
   const envelope: ToolResultEnvelope = {
-    toolUseId: ctx.toolUseId,
+    id: ctx.toolUseId,
     content: {
       type: 'error',
       message: detail.message,
       errorCode: detail.errorCode,
     } satisfies ToolErrorContent,
     isError: true,
-    nonExecutionKind: detail.nonExecutionKind,
+    non_execution_kind: detail.nonExecutionKind,
   };
-  if (detail.decision) envelope.permissionDecision = toEnvelopeDecision(detail.decision);
+  if (detail.decision) envelope.permission_decision = toEnvelopeDecision(detail.decision);
   if (detail.remedy !== undefined) envelope.remedy = detail.remedy;
-  if (detail.userFeedback !== undefined) envelope.userFeedback = detail.userFeedback;
-  return envelope;
+  if (detail.userFeedback !== undefined) envelope.user_feedback = detail.userFeedback;
+  return withLegacyEnvelopeNames(envelope);
 }
 
 /** The reason a denial is reported with. */
@@ -562,12 +662,12 @@ export async function runTool(
   try {
     const output = await tool.execute(effectiveInput, effectiveCtx);
     const envelope: ToolResultEnvelope = {
-      toolUseId: ctx.toolUseId,
+      id: ctx.toolUseId,
       content: output,
       isError: false,
-      permissionDecision: toEnvelopeDecision(decision),
+      permission_decision: toEnvelopeDecision(decision),
     };
-    return envelope;
+    return withLegacyEnvelopeNames(envelope);
   } catch (error) {
     const errorCode =
       error instanceof ToolExecutionError ? error.errorCode : TOOL_ERROR_CODES.executionFailed;

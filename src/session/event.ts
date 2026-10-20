@@ -149,11 +149,31 @@ export interface ToolResultStub {
 }
 
 /**
+ * Where a transcript comes from.
+ *
+ * **Observed** (audit §2.6, "Transcript source"): the target's session
+ * controller exposes `transcriptSource` with two values — `ccr-api` for a
+ * remote transcript and `local-jsonl` for a local one — and it switches
+ * between them when the active remote changes.
+ */
+export type TranscriptSource = 'ccr-api' | 'local-jsonl';
+
+/** The transcript source of a **remote** transcript. */
+export const TRANSCRIPT_SOURCE_REMOTE: TranscriptSource = 'ccr-api';
+
+/** The transcript source of a **local** transcript. */
+export const TRANSCRIPT_SOURCE_LOCAL: TranscriptSource = 'local-jsonl';
+
+/**
  * The members every record carries.
  *
  * `parentId` is the record this one continues. It is **optional**: a log that
  * carries no parent links is a single chain, and the reader falls back to file
  * order for it.
+ *
+ * `transcriptSource` is the target's own marker (audit §2.6) and is
+ * **optional** in the type because a record that is written by hand — in a
+ * test, say — carries no source; the store stamps every record it writes.
  */
 export interface SessionEventBase {
   /** The record's version. Every record carries its own. */
@@ -170,6 +190,20 @@ export interface SessionEventBase {
    * stays in the file and is pruned when the session is resumed.
    */
   parentId?: string;
+  /** Where the transcript comes from — the target's own marker. */
+  transcriptSource?: TranscriptSource;
+}
+
+/**
+ * The tool-use id an envelope carries.
+ *
+ * The envelope's member is the **target's** `id` (audit §2.4). A record
+ * written by an earlier build spelled it `toolUseId`, and the reader migrates
+ * it, so an envelope that reaches a consumer carries `id`. The helper reads
+ * both, because the envelope's type keeps the previous spelling optional.
+ */
+export function toolResultId(envelope: { id?: string; toolUseId?: string }): string {
+  return envelope.id ?? envelope.toolUseId ?? '';
 }
 
 /**
@@ -380,10 +414,28 @@ export function parseSessionEvent(
     throw new SessionFormatError('the record carries no "id" member', context);
   }
   const parentId = ownString(value, 'parentId');
+  const transcriptSourceRaw = ownString(value, 'transcriptSource');
+  let transcriptSource: TranscriptSource | undefined;
+  if (transcriptSourceRaw !== undefined) {
+    if (
+      transcriptSourceRaw !== TRANSCRIPT_SOURCE_REMOTE &&
+      transcriptSourceRaw !== TRANSCRIPT_SOURCE_LOCAL
+    ) {
+      throw new SessionFormatError(
+        `a session record carries the unknown transcript source "${transcriptSourceRaw}"`,
+        context,
+      );
+    }
+    transcriptSource = transcriptSourceRaw;
+  }
 
-  const base: SessionEventBase = parentId === undefined
-    ? { v: SESSION_SCHEMA_VERSION, ts, id }
-    : { v: SESSION_SCHEMA_VERSION, ts, id, parentId };
+  const base: SessionEventBase = {
+    v: SESSION_SCHEMA_VERSION,
+    ts,
+    id,
+    ...(parentId === undefined ? {} : { parentId }),
+    ...(transcriptSource === undefined ? {} : { transcriptSource }),
+  };
 
   switch (kind) {
     case 'user_message': {
@@ -415,14 +467,48 @@ export function parseSessionEvent(
       if (envelope === undefined) {
         throw new SessionFormatError('a tool_result carries no "envelope" member', context);
       }
-      const toolUseId = ownString(envelope, 'toolUseId');
-      if (toolUseId === undefined || toolUseId === '') {
-        throw new SessionFormatError('a tool_result envelope carries no "toolUseId" member', context);
+      // The envelope's members carry the **target's** names (audit §2.4): the
+      // id is `id`. A record written by an earlier build spelled it
+      // `toolUseId`, and the reader accepts that spelling as the migration
+      // path — the envelope it returns always carries the target's names.
+      const id = ownString(envelope, 'id') ?? ownString(envelope, 'toolUseId');
+      if (id === undefined || id === '') {
+        throw new SessionFormatError('a tool_result envelope carries no "id" member', context);
       }
       if (ownBoolean(envelope, 'isError') === undefined) {
         throw new SessionFormatError('a tool_result envelope carries no "isError" member', context);
       }
-      return { ...base, t: 'tool_result', envelope: envelope as unknown as ToolResultEnvelope };
+      const normalized: Record<string, unknown> = { ...envelope, id };
+      // The previous spellings are **migrated**, not dropped: a record written
+      // by an earlier build keeps its decision, its non-execution kind and the
+      // user's feedback. The envelope this build returns carries the target's
+      // names and nothing else.
+      const legacyDecision = ownRecordOf(envelope, 'permissionDecision');
+      if (legacyDecision !== undefined && normalized['permission_decision'] === undefined) {
+        const decision = ownString(legacyDecision, 'decision');
+        const source = ownString(legacyDecision, 'source');
+        const reasonType = ownString(legacyDecision, 'reasonType');
+        if (decision !== undefined && source !== undefined) {
+          normalized['permission_decision'] = {
+            decision,
+            source,
+            ...(reasonType === undefined ? {} : { reason_type: reasonType }),
+          };
+        }
+      }
+      const legacyKind = ownString(envelope, 'nonExecutionKind');
+      if (legacyKind !== undefined && normalized['non_execution_kind'] === undefined) {
+        normalized['non_execution_kind'] = legacyKind;
+      }
+      const legacyFeedback = ownString(envelope, 'userFeedback');
+      if (legacyFeedback !== undefined && normalized['user_feedback'] === undefined) {
+        normalized['user_feedback'] = legacyFeedback;
+      }
+      delete normalized['toolUseId'];
+      delete normalized['permissionDecision'];
+      delete normalized['nonExecutionKind'];
+      delete normalized['userFeedback'];
+      return { ...base, t: 'tool_result', envelope: normalized as unknown as ToolResultEnvelope };
     }
     case 'provider_event': {
       const event = ownRecordOf(value, 'event');
@@ -513,7 +599,7 @@ export function isMessageEvent(event: SessionEvent): boolean {
  */
 export function answeredToolUseId(event: SessionEvent): string | undefined {
   if (event.t !== 'tool_result') return undefined;
-  const id = event.envelope?.toolUseId;
+  const id = event.envelope === undefined ? undefined : toolResultId(event.envelope);
   return typeof id === 'string' && id !== '' ? id : undefined;
 }
 
