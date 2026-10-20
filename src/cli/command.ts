@@ -129,8 +129,10 @@ import { createToolRegistry } from '../tools/registry.js';
 
 import type { ParsedArgs, ParsedCommandArgs, ParsedManagerArgs, ParsedRunArgs } from './args.js';
 import type { CloudTarget } from './args.js';
-import { findSessionIdInPath, isSessionId } from './args.js';
+import { DEFAULT_MODEL, findSessionIdInPath, isSessionId } from './args.js';
 import { readStreamJsonInput, runHeadless } from './headless.js';
+import { PROVIDER_STATE_FILE, runInteractiveSession } from './interactive.js';
+import type { InteractiveContext, MountApp } from './interactive.js';
 import {
   EXIT_FAILURE,
   EXIT_SUCCESS,
@@ -157,8 +159,12 @@ export const CLI_VERSION = '0.1.0';
  * The model a run uses when the flags do not name one.
  *
  * **Implementation choice.** The audit does not record the target's default model.
+ *
+ * The constant itself lives on the **command-line surface**
+ * (`src/cli/args.ts`), because the interactive host resolves its model the
+ * same way this module does, and the two must not drift.
  */
-export const DEFAULT_MODEL = 'claude-sonnet-4-5';
+export { DEFAULT_MODEL };
 
 /**
  * The help text.
@@ -251,6 +257,18 @@ export interface SessionContext {
    * in force.
    */
   settingsDocument?: Record<string, unknown>;
+  /**
+   * The prompt a call that needs approval is put to.
+   *
+   * The runtime has no user interface of its own, so a call that no rule
+   * covers is **refused** unless the caller supplies this seam. The
+   * **interactive host** supplies it: the host is the only surface that has a
+   * user to ask, and it hands the seam the question and receives the answer.
+   *
+   * A headless run supplies none, and its calls are refused the way the
+   * runtime documents.
+   */
+  approveAsk?: (ctx: ToolContext, decision: PermissionDecision) => Promise<PermissionDecision | undefined>;
 }
 
 /** The session a run uses. */
@@ -327,10 +345,19 @@ export interface CommandOptions {
   /**
    * The interactive run.
    *
-   * The interactive terminal UI is a later milestone's surface; the member is
-   * the seam it plugs into.
+   * The interactive terminal UI is the **default**: an interactive run mounts
+   * the app and drives the session through it. The member is the seam a caller
+   * plugs its own host into, and the context it receives is the one the
+   * command built — the same session context the headless path builds.
    */
-  runInteractive?: (parsed: ParsedRunArgs) => Promise<number>;
+  runInteractive?: (parsed: ParsedRunArgs, context: InteractiveContext) => Promise<number>;
+  /**
+   * The seam that mounts the app.
+   *
+   * It is the host's own seam, carried here so that the interactive run can be
+   * mounted **without a terminal** — which is what makes the host observable.
+   */
+  mountApp?: MountApp;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -430,7 +457,7 @@ async function runManagerCommand(
 ): Promise<number> {
   const { stdout, stderr } = options;
   const configDir = options.configDir ?? defaultConfigDir();
-  const statePath = join(configDir, 'providers.json');
+  const statePath = join(configDir, PROVIDER_STATE_FILE);
   const { registry, catalogs } = await loadManagerState(statePath);
   // The surface the **parser** named is the surface that runs: the parser
   // consumed the `--provider` / `--catalog` token, so the command word has to
@@ -592,14 +619,6 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
     return EXIT_FAILURE;
   }
 
-  if (!parsed.headless) {
-    // The interactive terminal UI is a later milestone's surface. The seam is
-    // here so that it plugs in without this module changing.
-    if (context.runInteractive !== undefined) return context.runInteractive(parsed);
-    context.stderr.write('The interactive terminal UI is not implemented here yet.\n');
-    return EXIT_FAILURE;
-  }
-
   const cwd = context.cwd ?? process.cwd();
   const configDir = context.configDir ?? defaultConfigDir();
   const env = context.env ?? process.env;
@@ -621,7 +640,12 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
 
   const hooks = context.hooks ?? createHookRegistry();
   const factory = context.createSession ?? createCommandSession;
-  const session = await factory({
+
+  // **The session's context.** It is built **once**, here, and both paths use
+  // it: the headless run and the interactive session therefore get the same
+  // rules, the same mode, the same tools and the same two hook seams, and the
+  // two cannot drift.
+  const sessionContext: SessionContext = {
     parsed,
     sessionId: resolved.sessionId,
     cwd,
@@ -634,7 +658,26 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
     ...(context.driver === undefined ? {} : { driver: context.driver }),
     ...(context.hookOptions === undefined ? {} : { hookOptions: context.hookOptions }),
     ...(settingsFile.kind === 'ok' ? { settingsDocument: settingsFile.document } : {}),
-  });
+  };
+
+  if (!parsed.headless) {
+    // **The interactive run.** The host owns the state, mounts the app and
+    // drives the session through it. The refusal is the **fallback**: the host
+    // refuses only when the app cannot mount, and the command's own seam — a
+    // caller that supplies one — wins over the host.
+    const runInteractive = context.runInteractive ?? runInteractiveSession;
+    return runInteractive(parsed, {
+      session: sessionContext,
+      createSession: factory,
+      ...(context.model === undefined ? {} : { model: context.model }),
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
+      ...(context.isTTY === undefined ? {} : { isTTY: context.isTTY }),
+      ...(context.mountApp === undefined ? {} : { mountApp: context.mountApp }),
+      stderr: context.stderr,
+    });
+  }
+
+  const session = await factory(sessionContext);
 
   // `--init-only` sets the session up and stops: no turn is made and no prompt
   // is read.
@@ -984,6 +1027,12 @@ export async function createCommandSession(context: SessionContext): Promise<Com
     preToolUseHook: seams.preToolUse,
     hook: seams.permissionRequest,
     cwd,
+    // **The approval seam.** The interactive host supplies it, and the host is
+    // the only surface that has a user to ask: the seam is how a call that no
+    // rule covers reaches the app's approval prompt, and how the user's answer
+    // reaches the call. A headless run supplies none, and its calls are
+    // refused rather than run.
+    ...(context.approveAsk === undefined ? {} : { approveAsk: context.approveAsk }),
   });
 
   return { sessionId: context.sessionId, runtime, mode };

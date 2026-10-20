@@ -219,6 +219,18 @@ export const HEADLESS_CLOUD_CLIENT_ENABLED = false;
 /* -------------------------------------------------------------------------- */
 
 /**
+ * The model a run uses when the flags do not name one.
+ *
+ * **Implementation choice.** The audit does not record the target's default model.
+ *
+ * It lives here, on the **command-line surface**, because it is a command
+ * line's default: the interactive host resolves its model the same way the
+ * headless path does, and the two must not drift. `src/cli/command.ts`
+ * re-exports it, so the name is the same everywhere.
+ */
+export const DEFAULT_MODEL = 'claude-sonnet-4-5';
+
+/**
  * The flags that take a value.
  *
  * A flag of this set consumes the **next** token as its value, whether or not
