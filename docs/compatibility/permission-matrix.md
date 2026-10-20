@@ -59,13 +59,13 @@ This implementation adds one reason kind, **`noRuleMatch`**, to distinguish "no 
 - `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` blocks **every prompt and tool call** when the personal configuration has problems, and the message names the offending file paths.
 - A hook failure of severity `stop` denies all tool calls with the reason *"A problem with your own settings or hooks is blocking tool calls"*.
 
-## Hooks and the safety check (REA observed)
+## Hooks and the safety check
 
-- A `PreToolUse` / `PermissionRequest` hook that returns `allow` does **not** override a deny or an ask rule. This implementation's `checkPermission` runs the deny list **before** the hook.
+- A `PreToolUse` / `PermissionRequest` hook that returns `allow` does **not** override a deny or an ask rule. This implementation's `checkPermission` runs the deny list **before** the hook. **Implementation choice** (the pick) — see the `PreToolUse` seam table below.
 - A hook approval whose arguments the tool cannot verify produces a **`safetyCheck` denial** whose message states that nothing was fetched, and it is **not** reported as a user denial.
 - A hook's `updatedInput` is what the tool receives, and a rewritten input the tool's own validator rejects **denies** the call.
 - A hook approval may replace the **generic prompt** (the no-rule-matched case) only. It may **not** replace a `subcommandResults` escalation — the hook cannot approve the sub-commands a partially matching allow rule did not cover.
-- A hook that rewrites the input triggers a **whole** re-check of the rewritten input — the same rules, mode, safety check and hook semantics — and the re-check may only **restrict** the call. A rewrite therefore cannot escape the deny list, the ask list, the allow scope, or the mode dispatch. The re-check's own hook keeps its **denial** but loses its **approval** and its **rewrite**, because the approval was given for the original call.
+- A hook that rewrites the input triggers a **whole** re-check of the rewritten input — the same rules and the same mode — and the re-check may only **restrict** the call. A rewrite therefore cannot escape the deny list, the ask list, the allow scope, or the mode dispatch. The re-check's own hook is **consulted again** with the rewritten input and keeps its **denial** and its **approval**; only its **rewrite** is dropped, because the rewrite has already been applied. The safety check and the tool's validator are **not** run again — they judged the rewritten input once. the approval was given for the original call.
 - An approval carrying `classifierApprovable: false` cannot be laundered by an `auto` classifier: the result is `ask`, not `allow`.
 
 ## The remote transport dispatcher (REA observed)
@@ -95,22 +95,27 @@ Each of these was a real defect in an earlier the reference agent release. This 
 
 ## The `PreToolUse` hook seam
 
-The target changed this behavior in a later release without a deprecation warning, so the target's own behavior at `2.1.303` is ambiguous from the outside. This implementation picks the **stricter** of the two:
+The target changed this behavior in a later release without a deprecation warning, so the target's own behavior at `2.1.303` is ambiguous from the outside. This implementation picks the **stricter** of the two.
 
 | Rule | Evidence class |
 |---|---|
-| A `PreToolUse` hook returning `allow` does **not** override a deny rule | REA observed (the mechanism) + **implementation choice** (the pick) |
-| A `PreToolUse` hook returning `allow` does **not** override an ask rule | REA observed (the mechanism) + **implementation choice** (the pick) |
-| A `PreToolUse` hook returning `deny` holds in **every** mode, `bypassPermissions` included | REA observed (the mechanism) + **implementation choice** (the pick) |
+| A `PreToolUse` hook returning `allow` does **not** override a deny rule | **implementation choice** (the pick) — the audit records the strictness merge for two **hook results**, not the hook-vs-rule **ordering** |
+| A `PreToolUse` hook returning `allow` does **not** override an ask rule | **implementation choice** (the pick), same correction |
+| A `PreToolUse` hook returning `deny` holds in **every** mode, `bypassPermissions` included | **implementation choice** (the pick), same correction |
 | A `PreToolUse` hook that returns `undefined` expresses no opinion and changes nothing | **implementation choice** |
-| A `PreToolUse` `ask` is the pending question — the prompt is consulted | **implementation choice** |
+| A `PreToolUse` `ask` is the pending question — the prompt is consulted, and it carries the hook's own **reason** and **source** | **implementation choice** |
 | A `PreToolUse` `defer` is no opinion — the normal permission path decides | **implementation choice** |
 | The `PreToolUse` seam and the `PermissionRequest` seam merge by **strictness**, so neither can cancel the other | **implementation choice** |
-| A `PreToolUse` rewrite is re-checked with the **whole** permission check against the **effective** input, and a rewritten input the tool's validator rejects **denies** the call | REA observed (the mechanism) |
+| A tie in that merge goes to the `PermissionRequest` seam, because it is the later event | **implementation choice** |
+| A `PreToolUse` rewrite is re-checked with the **whole** permission check against the **effective** input, and a rewritten input the tool's validator rejects **denies** the call | **implementation choice** for the re-check; "the rewrite is what the tool receives" is REA observed |
+| The re-check keeps the hook's **approval** and its **denial** and drops only its **rewrite**; a deny rule, an ask rule or a mode refusal covering the effective input still wins | **implementation choice** |
+| A rewrite is never lost: the decision that leaves the check records the effective input, and the user's answer to the prompt carries it | **implementation choice** |
+| The safety check and the tool's validator run **once each**, on the effective input | **implementation choice** |
+| A hook that throws **denies** the call | **implementation choice** |
 
-The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny: 3`); the hooks module's four-value table is not imported, because the permission vocabulary has no `defer`.
+The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny: 3`); the hooks module's four-value **type** is imported **type-only** (erased at compile time), so only the table is the permission layer's own.
 
-**Pinned by:** `tests/contracts/permission-hook.test.ts`.
+**Pinned by:** `tests/contracts/permission-hook.test.ts` and `tests/contracts/pre-tool-use-wiring.test.ts`.
 
 ## Conformance table
 
