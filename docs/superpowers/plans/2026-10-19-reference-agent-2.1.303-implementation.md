@@ -633,6 +633,29 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   git commit -m "feat(session): JSONL event store, resume, compaction"
   ```
 
+### CC-008b — Route the `Bash` tool through the sandbox
+
+**Why this task exists.** `CC-008` built the `Bash` tool and `CC-017` built the sandbox, but nothing connects them: the `Bash` tool still runs `/bin/sh -c` directly and its header says "this implementation's sandbox itself is not implemented yet". The sandbox's `launchSandbox` has no caller, so the sandbox currently protects nothing. This task wires the two together.
+
+**Files:** Modify `src/tools/builtins/bash.ts`; Modify `src/tools/builtins/shared.ts`; Create `tests/security/bash-sandbox.test.ts`.
+
+**Interfaces:**
+- Consumes: `src/platform/sandbox/launcher.ts` (`launchSandbox`, the sandbox status), `src/platform/sandbox/policy.ts` (`sandboxPolicy`, `evaluateSandbox`).
+- Produces: the `Bash` tool routes its command through `launchSandbox` when the policy says the command is sandboxed, and runs it unconfined — with the reason recorded — when the policy says so.
+
+- [ ] **Step 1: Write the failing test** — a `Bash` call with the sandbox enabled runs through the launcher; a call the policy exempts runs unconfined and says so; a call whose sandbox cannot be started is refused when `failIfUnavailable` is set and runs unconfined when it is not; and `dangerouslyDisableSandbox` **never** skips a permission rule.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the tool does not call the launcher.
+- [ ] **Step 3: Implement the wiring** in `src/tools/builtins/bash.ts` — resolve the policy, call `evaluateSandbox`, and route the command through `launchSandbox` or run it directly, recording the reason in the result. The tool's existing timeout, output cap, and environment handling stay as they are.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Write the failing safety test** — the sandboxed command cannot see the host's environment (the agent's credentials are not in it), and a denied sandbox leaves the tool's result reporting the refusal rather than a bare non-zero exit.
+- [ ] **Step 6: Implement the safety behavior** and correct the tool's header, which currently says the sandbox is not implemented.
+- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 8: Commit.**
+  ```bash
+  git add src/tools tests/security/bash-sandbox.test.ts
+  git commit -m "feat(tools): route the Bash tool through the sandbox"
+  ```
+
 ### CC-010 — Agent runtime and turn orchestration
 
 **Files:** Create `src/agent/loop.ts`, `src/agent/context.ts`, `src/agent/dispatch.ts`; Create `tests/contracts/agent-loop.test.ts`.
