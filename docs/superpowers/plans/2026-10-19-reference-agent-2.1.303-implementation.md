@@ -806,6 +806,73 @@ export interface PreToolUseHookApproval {
   git commit -m "fix(session): the within-turn tool result is stubbed too"
   ```
 
+### CC-003b — The settings merge is per top-level key
+
+**Why this task exists.** Closing the REA's last open configuration question turned a
+labelled choice into an **observed** rule, and the observed rule is not the one this
+implementation had.
+
+The target merges the settings tiers **per top-level key**, in the order
+**user < project < local < flag < policy** (`Ps`), and the *value* rule is decided per
+key by one helper:
+
+| the key's value | the target's rule |
+|---|---|
+| `modelPicker` | the higher tier **replaces** |
+| an **array** | the two arrays are **concatenated and de-duplicated** |
+| an array, key `fallbackModel` | the higher tier **replaces** |
+| an object, key `extraKnownMarketplaces` or `managedMcpServers` | a **one-level shallow merge** |
+| anything else | the higher tier **replaces** the value **wholesale** |
+
+There is **no per-leaf merge**: an ordinary object-valued setting is not merged key by
+key, and the higher tier's object wins whole.
+
+This implementation merges **per leaf** (`mergeDocuments` recurses into plain objects).
+That was recorded as an implementation choice; it is a **divergence from an observed
+rule**, and the label has to come off.
+
+**Evidence.** `/home/shiva/opt/reference-agent-rea/analysis/findings-config-merge.md`,
+which quotes the source: `Ps` in `chunk-16tfbg7w.js`, `Opn` and `rUr` and `S3` in
+`chunk-c9s0jh80.js`, `me` and `Gge` in `chunk-4sn6hdt2.js`, and the block rule in the
+target's own words in `chunk-6bp7hdav.js`.
+
+**Files:** Modify `src/config/tiers.ts`; Modify `src/config/loader.ts`; Modify
+`tests/contracts/settings-precedence.test.ts`; Modify
+`docs/compatibility/settings-precedence.md`.
+
+**Interfaces:**
+- Consumes: `src/config/tiers.ts` (`SettingsSource`, `mergeDocuments`, `mergeBlockwise`,
+  `mergeMergedSettings`, `TOP_LEVEL_KEY_ORDER`, `MERGED_KEY_ORDER`).
+- Produces: `mergeSettingsByKey(low, high, key): unknown` — the observed per-key value
+  rule — and `EFFECTIVE_SETTINGS_ORDER: readonly SettingsSource[]` — `Ps`, in increasing
+  priority.
+
+- [ ] **Step 1: Write the failing test** — two tiers that define the same **object**
+  setting: the higher tier's value wins **whole**, not key by key; two tiers that define
+  the same **array** setting: the values are **concatenated** and de-duplicated; the two
+  named object keys are **shallow**-merged one level; `fallbackModel` and `modelPicker`
+  are replaced.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the merge is per leaf.
+- [ ] **Step 3: Implement the per-key value rule** in `src/config/tiers.ts` — a function
+  of `(existing, incoming, key)` that returns the merged value, and `undefined` for the
+  default case, which the merge helper reads as "the incoming value replaces".
+- [ ] **Step 4: Replace the per-leaf merge** — `mergeDocuments` becomes a per-top-level-key
+  merge that uses the value rule. The `__proto__`/`constructor`/`prototype` guard stays.
+- [ ] **Step 5: Apply the tier order** — the effective settings are composed in the
+  order `user < project < local < flag < policy`.
+- [ ] **Step 6: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 7: Update the conformance document** — the row's outcome becomes `match`,
+  the "implementation choice" label comes off, and the observed rule is stated.
+- [ ] **Step 8: Commit.**
+  ```bash
+  git add src/config tests/contracts/settings-precedence.test.ts docs/compatibility/settings-precedence.md
+  git commit -m "fix(config): the settings merge is per top-level key, as the target merges it"
+  ```
+
+**Note.** The compatibility harness measures the clone and reports the outcome; this
+task must not edit `docs/compatibility/results.md` or `tests/compatibility/**` — the
+orchestrator owns those and will update the totals when the harness reports.
+
 ### CC-010 — Agent runtime and turn orchestration
 
 **Files:** Create `src/agent/loop.ts`, `src/agent/context.ts`, `src/agent/dispatch.ts`; Create `tests/contracts/agent-loop.test.ts`.
@@ -841,6 +908,69 @@ export interface PreToolUseHookApproval {
   git add src/agent tests/contracts/agent-loop.test.ts
   git commit -m "feat(agent): turn orchestration and tool dispatch"
   ```
+
+### CC-010b — The tool calls of one message run concurrently when they are safe
+
+**Why this task exists.** Closing the REA's open scheduling question turned a labelled
+choice into an **observed** rule, and the observed rule is not the one this
+implementation had.
+
+The target's scheduler is **per tool, not per message**:
+
+- every tool declares whether it is **concurrency safe**;
+- **concurrency-safe** calls run **in parallel** — several are in flight at once;
+- a call that is **not** concurrency safe runs **alone** and acts as a **barrier**: the
+  queue stops at it, and nothing else starts until it has finished;
+- the **next model request is issued only after every** tool call of that assistant
+  message has produced its result — a slow tool holds the next request back;
+- the results are **emitted** in block order for the non-safe calls and in completion
+  order for the concurrency-safe ones.
+
+The per-tool flags the target uses: `Glob`, `Grep`, the notebook-read tool, `WebFetch`
+and `Read` are concurrency safe; the MCP-wait tool is not; `Bash` is safe only when the
+call is read-only.
+
+This implementation runs every tool call of a message **sequentially, in message
+order**, and says so in its module header. That was recorded as an implementation
+choice; it is a **divergence from an observed rule**.
+
+**Evidence.** `/home/shiva/opt/reference-agent-rea/analysis/findings-tool-scheduling.md`,
+which quotes the source: the scheduler `Rs` in `chunk-ehmvy572.js` (`canExecuteTool`,
+`processQueue`, `executeTool`, `getRemainingResults`), the drain in the round loop, and
+the per-tool `isConcurrencySafe` implementations in `chunk-4jsg44k7.js`.
+
+**Files:** Modify `src/agent/loop.ts`; Modify `src/agent/dispatch.ts`; Modify
+`src/tools/registry.ts`; Modify `tests/contracts/agent-loop.test.ts`; Modify
+`tests/contracts/tool-registry.test.ts`.
+
+**Interfaces:**
+- Consumes: `src/agent/dispatch.ts` (`groupToolCalls`, `callsInPlan`), the tool
+  registry's tool definitions.
+- Produces: `isConcurrencySafe(tool, input): boolean` on a tool definition, and a
+  scheduler that runs the safe calls in parallel and the unsafe ones alone.
+
+- [ ] **Step 1: Write the failing test** — two concurrency-safe calls in one message
+  **overlap** in time; a call that is not concurrency safe **never overlaps** with
+  another; the next model request is issued only after **every** call has produced its
+  result.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the calls are sequential.
+- [ ] **Step 3: Add the flag** to the tool definitions and to the registry's contract —
+  the built-in tools get the flags the target uses.
+- [ ] **Step 4: Implement the scheduler** — a queue that starts the safe calls in
+  parallel, breaks at the first unsafe call, and resumes when it finishes; the turn
+  waits for **all** the results before it issues the next request.
+- [ ] **Step 5: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 6: Update the module header** — the "sequential, in message order" note
+  becomes the observed rule, with the per-tool flags.
+- [ ] **Step 7: Commit.**
+  ```bash
+  git add src/agent src/tools tests/contracts/agent-loop.test.ts tests/contracts/tool-registry.test.ts
+  git commit -m "fix(agent): the concurrency-safe tool calls of one message run in parallel"
+  ```
+
+**Note.** The compatibility harness measures the clone and reports the outcome; this
+task must not edit `docs/compatibility/results.md` or `tests/compatibility/**` — the
+orchestrator owns those and will update the totals when the harness reports.
 
 ### CC-011 — MCP and the control surface
 
