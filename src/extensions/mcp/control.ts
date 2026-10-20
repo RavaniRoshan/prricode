@@ -77,6 +77,11 @@
  *   - The **in-flight bookkeeping** is module-global rather than per callback
  *     set: an in-flight `request_id` is not dispatched twice, whatever callback
  *     object the second call carries.
+ *   - The **transport dispatcher** is cached per callback set, and the cached
+ *     entry records the **handler set** it was built for: a permission handler
+ *     that is registered *after* the first dispatch is consulted, rather than
+ *     being locked out by the dispatcher that was built when there was no
+ *     handler at all.
  */
 
 import {
@@ -502,12 +507,29 @@ export interface CanUseToolDispatchResult {
 const inFlightRequestIds = new Set<string>();
 
 /**
+ * A cached transport dispatcher, and the handler set it was built for.
+ */
+interface TransportDispatcherEntry {
+  /** Whether a permission handler was registered when it was built. */
+  hasHandler: boolean;
+  /** The dispatcher itself. */
+  dispatcher: TransportPermissionDispatcher;
+}
+
+/**
  * The transport dispatchers the control surface built.
  *
  * The dispatcher is cached per callback set, so it is built once; the
  * deduplication it performs is the module-global one above.
+ *
+ * The cached entry records the **handler set** the dispatcher was built for.
+ * A caller that registers a permission handler *after* the first dispatch
+ * would otherwise be stuck with the dispatcher that was built when there was
+ * no handler at all — and with the "No permission handler is available."
+ * denial it produces. The entry is therefore rebuilt when the handler set
+ * changes, so a handler that is registered later is consulted.
  */
-const transportDispatchers = new WeakMap<ControlCallbacks, TransportPermissionDispatcher>();
+const transportDispatchers = new WeakMap<ControlCallbacks, TransportDispatcherEntry>();
 
 /** The message a registered handler that did not answer is denied with. */
 export const PERMISSION_NOT_ANSWERED_MESSAGE = 'The permission handler did not answer the permission request.';
@@ -520,12 +542,20 @@ function asDecision(value: unknown): ControlPermissionDecision | undefined {
   return value as ControlPermissionDecision;
 }
 
+/** Whether the callback set carries a permission handler. */
+function hasPermissionHandler(cb: ControlCallbacks): boolean {
+  return cb.onPermissionRequest !== undefined || cb.onPermissionDecision !== undefined;
+}
+
 function transportDispatcherFor(cb: ControlCallbacks): TransportPermissionDispatcher {
-  const existing = transportDispatchers.get(cb);
-  if (existing) return existing;
+  const hasHandler = hasPermissionHandler(cb);
+  const cached = transportDispatchers.get(cb);
+  if (cached && cached.hasHandler === hasHandler) return cached.dispatcher;
+
   // The transport dispatcher owns the "no handler at all" denial, so the
   // implementation installs a decision handler **only** when there is one to install.
-  const hasHandler = cb.onPermissionRequest !== undefined || cb.onPermissionDecision !== undefined;
+  // The handler set is read **here**, at dispatch time, so a handler that is
+  // registered after this dispatcher was built is still consulted.
   const dispatcher = createTransportPermissionDispatcher(
     hasHandler
       ? {
@@ -548,7 +578,7 @@ function transportDispatcherFor(cb: ControlCallbacks): TransportPermissionDispat
         }
       : {},
   );
-  transportDispatchers.set(cb, dispatcher);
+  transportDispatchers.set(cb, { hasHandler, dispatcher });
   return dispatcher;
 }
 

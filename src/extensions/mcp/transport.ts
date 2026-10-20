@@ -337,11 +337,14 @@ export function createHttpMcpTransport(options: HttpMcpTransportOptions): McpTra
 
     async send(message: JsonRpcMessage): Promise<void> {
       if (closed) throw new Error('the MCP connection is closed');
-      const headers: Record<string, string> = {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-        ...(options.headers ?? {}),
-      };
+      // The container has a null prototype, so a header whose name is
+      // `__proto__` is an ordinary header rather than a prototype assignment.
+      const headers: Record<string, string> = Object.create(null) as Record<string, string>;
+      headers['content-type'] = 'application/json';
+      headers['accept'] = 'application/json, text/event-stream';
+      for (const [key, value] of Object.entries(options.headers ?? {})) {
+        headers[key] = value;
+      }
       if (protocolVersion) headers[MCP_PROTOCOL_VERSION_HEADER] = protocolVersion;
       if (options.token) headers['authorization'] = `Bearer ${options.token}`;
       if (sessionId) headers['mcp-session-id'] = sessionId;

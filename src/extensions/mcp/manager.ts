@@ -56,6 +56,7 @@
  */
 
 import {
+  MCP_FAILED_MEMO_MAX_AGE_MS,
   callMCPTool,
   callMCPToolWithUrlElicitationRetry,
   closeMcpConnection,
@@ -305,8 +306,10 @@ export class McpServerManager implements McpManager {
     });
 
     try {
-      // A failed server is retryable: the stale failure is evicted first.
-      evictStaleFailedConnectMemoForServe(config.name);
+      // A failed server is retryable: the stale failure is evicted first. A
+      // failure that is **not yet stale** is kept, and the retry happens
+      // anyway.
+      evictStaleFailedConnectMemoForServe(config.name, MCP_FAILED_MEMO_MAX_AGE_MS);
       const connection = await ensureConnectedClient(config, {
         ...(this.#options.client ?? {}),
         env: this.#options.client?.env ?? this.#env,

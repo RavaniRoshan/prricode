@@ -524,6 +524,34 @@ describe('the transport permission dispatcher', () => {
     // A handler *is* available, so the "no handler" wording would be a lie.
     expect(result.response?.response.message).not.toBe('No permission handler is available.');
   });
+
+  it('consults a handler that is registered after the first dispatch', async () => {
+    const callbacks: ControlCallbacks = {};
+
+    // The first dispatch has no handler at all, so it is denied.
+    const first = await dispatchCanUseTool(
+      { request_id: 'req-late-handler-1', tool_name: 'Bash', input: {} },
+      callbacks,
+    );
+    expect(first.dropped).toBe(false);
+    expect(first.response?.response.behavior).toBe('deny');
+
+    // The handler is registered **after** the first dispatch.
+    const onPermissionDecision = vi.fn(async () => ({ behavior: 'allow' as const }));
+    callbacks.onPermissionDecision = onPermissionDecision;
+
+    const second = await dispatchCanUseTool(
+      { request_id: 'req-late-handler-2', tool_name: 'Bash', input: {} },
+      callbacks,
+    );
+
+    // The dispatcher is not frozen at the first dispatch: the handler that was
+    // registered afterwards is the one that is consulted.
+    expect(onPermissionDecision).toHaveBeenCalledTimes(1);
+    expect(second.dropped).toBe(false);
+    expect(second.response?.response.behavior).toBe('allow');
+    expect(second.response?.response.message).not.toBe('No permission handler is available.');
+  });
 });
 
 describe('the two dispatchers', () => {

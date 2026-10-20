@@ -50,6 +50,7 @@ import {
   DEFAULT_MCP_TIMEOUTS,
   IDE_MCP_TOOL_NAMES,
   LEGACY_PROTOCOL_VERSION,
+  MCP_FAILED_MEMO_MAX_AGE_MS,
   MODERN_PROTOCOL_VERSION,
   McpRpcError,
   McpTimeoutError,
@@ -59,6 +60,7 @@ import {
   classifyMcpAuthFailure,
   cleanupConnectedMcpClients,
   composeMcpTool,
+  connectToServer,
   createCcrProxyFetch,
   createCliOwnedBearerFetch,
   createAgentAiProxyFetch,
@@ -68,6 +70,7 @@ import {
   detachAndCloseConnection,
   discardMemoizedConnectResult,
   disposeServerConnectionDetached,
+  ensureConnectedClient,
   evictAllMcpMemosOnIdentityChange,
   evictStaleFailedConnectMemoForServe,
   fetchCommandsForClient,
@@ -126,6 +129,11 @@ import {
  *   - `modern` — answers `server/discover` with the modern revision;
  *   - `unsupported-version` — answers `server/discover` with the JSON-RPC error
  *     `-32022` and a `supported` list;
+ *   - `unsupported-modern-version` — answers the first `server/discover` with
+ *     `-32022` and **two** modern versions, so the first one is the one the
+ *     client re-probes with;
+ *   - `unsupported-same-version` — answers every `server/discover` with
+ *     `-32022` and the version the client has already probed;
  *   - `exit-on-list` — exits as soon as `tools/list` arrives.
  */
 const FAKE_SERVER_SOURCE = `'use strict';
@@ -142,6 +150,12 @@ function logMethod(method) {
   const file = process.env.FAKE_MCP_METHOD_LOG;
   if (!file || !method) return;
   try { fs.appendFileSync(file, method + '\\n'); } catch { /* the log is a test aid */ }
+}
+
+function logDiscoveryVersion(version) {
+  const file = process.env.FAKE_MCP_DISCOVER_VERSIONS;
+  if (!file || !version) return;
+  try { fs.appendFileSync(file, version + '\\n'); } catch { /* the log is a test aid */ }
 }
 
 function bumpFile(file) {
@@ -210,6 +224,9 @@ rl.on('line', (line) => {
   }
 
   if (method === 'server/discover') {
+    const params = message.params || {};
+    const meta = params._meta || {};
+    logDiscoveryVersion(meta.protocolVersion);
     if (mode === 'modern') {
       send({
         jsonrpc: '2.0',
@@ -235,8 +252,8 @@ rl.on('line', (line) => {
       return;
     }
     if (mode === 'unsupported-modern-version') {
-      // The first probe is refused, and the version the client is told about is
-      // a **modern** one, so the client re-probes with it.
+      // The first probe is refused, and the versions the client is told about
+      // are **modern** ones, so the client re-probes with the **first** of them.
       const seen = bumpFile(process.env.FAKE_MCP_DISCOVER_COUNTER);
       if (seen === 1) {
         send({
@@ -245,7 +262,7 @@ rl.on('line', (line) => {
           error: {
             code: -32022,
             message: 'Unsupported protocol version',
-            data: { supported: ['2026-07-28'] },
+            data: { supported: ['2026-07-30', '2026-07-29'] },
           },
         });
         return;
@@ -257,6 +274,21 @@ rl.on('line', (line) => {
           protocolVersion: '2026-07-28',
           capabilities: { tools: {} },
           serverInfo: { name: 'fake-mcp', version: '1.0.0' },
+        },
+      });
+      return;
+    }
+    if (mode === 'unsupported-same-version') {
+      // The only version the client is told about is the one it has already
+      // probed, so the client must not probe twice for it.
+      bumpFile(process.env.FAKE_MCP_DISCOVER_COUNTER);
+      send({
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code: -32022,
+          message: 'Unsupported protocol version',
+          data: { supported: ['2026-07-28'] },
         },
       });
       return;
@@ -373,6 +405,14 @@ function stdioConfig(
 
 /** The methods the fake server saw, in order. */
 function readMethodLog(file: string): string[] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((line) => line.length > 0);
+}
+
+/** The protocol versions the fake server was probed with, in order. */
+function readDiscoveryVersions(file: string): string[] {
   if (!existsSync(file)) return [];
   return readFileSync(file, 'utf8')
     .split('\n')
@@ -632,12 +672,17 @@ describe('the MCP manager', () => {
     const dir = makeTempDir();
     const serverPath = writeFakeServer('unsupported-modern-version', dir);
     const methodLog = path.join(dir, 'methods.log');
+    const versionsLog = path.join(dir, 'versions.log');
     const counter = path.join(dir, 'discover.txt');
     const manager = createMcpManager();
 
     const state = await manager.connect(
       stdioConfig('reprobed', serverPath, 'unsupported-modern-version', {
-        env: { FAKE_MCP_METHOD_LOG: methodLog, FAKE_MCP_DISCOVER_COUNTER: counter },
+        env: {
+          FAKE_MCP_METHOD_LOG: methodLog,
+          FAKE_MCP_DISCOVER_VERSIONS: versionsLog,
+          FAKE_MCP_DISCOVER_COUNTER: counter,
+        },
       }),
     );
 
@@ -650,7 +695,37 @@ describe('the MCP manager', () => {
     expect(methods.filter((method) => method === 'server/discover')).toHaveLength(2);
     expect(methods).not.toContain('initialize');
 
+    // The re-probe uses the **first** modern version the server named, not the
+    // last one.
+    const probed = readDiscoveryVersions(versionsLog);
+    expect(probed).toEqual([MODERN_PROTOCOL_VERSION, '2026-07-30']);
+    expect(probed).not.toContain('2026-07-29');
+
     await manager.disconnect('reprobed');
+  });
+
+  it('never probes twice for the same version', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('unsupported-same-version', dir);
+    const methodLog = path.join(dir, 'methods.log');
+    const counter = path.join(dir, 'discover.txt');
+    const manager = createMcpManager();
+
+    // The only version the server names is the one the client has already
+    // probed, so the negotiation fails rather than probing again.
+    const state = await manager.connect(
+      stdioConfig('same-version', serverPath, 'unsupported-same-version', {
+        env: { FAKE_MCP_METHOD_LOG: methodLog, FAKE_MCP_DISCOVER_COUNTER: counter },
+      }),
+    );
+
+    expect(state.status).toBe('failed');
+    expect(state.error).toContain('Unsupported protocol version');
+
+    // The modern probe was made **once**: the same version was never probed
+    // twice.
+    const methods = readMethodLog(methodLog);
+    expect(methods.filter((method) => method === 'server/discover')).toHaveLength(1);
   });
 
   it('hides the mcp__ide__ tools the filter covers', async () => {
@@ -666,6 +741,28 @@ describe('the MCP manager', () => {
     // ... and the two special-cased tools are exempt from it.
     expect(names).toContain('mcp__ide__executeCode');
     expect(names).toContain('mcp__ide__getDiagnostics');
+
+    await manager.disconnect('ide');
+  });
+
+  it('hides the mcp__ide__ tools the filter covers when the tools are refreshed', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('ide', dir);
+    const manager = createMcpManager();
+
+    // The filter covers the `ide` **server**, so the server is named `ide`.
+    await manager.connect(stdioConfig('ide', serverPath, 'ide'));
+
+    // The filter is applied where the tool list is built, so a **refreshed**
+    // list is filtered too.
+    const refreshed = await manager.refresh('ide');
+    const names = refreshed.tools.map((tool) => tool.name);
+    expect(names).not.toContain('mcp__ide__other');
+    expect(names).toContain('mcp__ide__executeCode');
+    expect(names).toContain('mcp__ide__getDiagnostics');
+
+    // The manager's own view is filtered as well.
+    expect(manager.toolsFor('ide').map((tool) => tool.name)).not.toContain('mcp__ide__other');
 
     await manager.disconnect('ide');
   });
@@ -804,6 +901,19 @@ describe('the MCP connect memo', () => {
     expect(key).not.toContain('super-secret');
   });
 
+  it('gives two environments that differ only by a newline different identities', () => {
+    const base: McpServerConfig = { name: 'identity', type: 'stdio', command: 'server' };
+
+    // The two environments differ only in where the newline falls, so a
+    // delimiter-joined encoding would give them the same identity.
+    expect(mcpConfigKey({ ...base, env: { A: '1\nB=2' } })).not.toBe(
+      mcpConfigKey({ ...base, env: { A: '1', B: '2' } }),
+    );
+    expect(mcpConfigKey({ ...base, env: { A: '1\nB=2' } })).not.toBe(
+      mcpConfigKey({ ...base, env: { A: '1\nB=3' } }),
+    );
+  });
+
   it('memoizes the connect result and drops it when the identity epoch changes', async () => {
     const dir = makeTempDir();
     const serverPath = writeFakeServer('legacy', dir);
@@ -880,6 +990,63 @@ describe('the MCP connect memo', () => {
     expect(retried.error).toBeUndefined();
 
     await manager.disconnect('failed-memo');
+  });
+
+  it('keeps a failed memo that is not yet stale and evicts it once it is stale', async () => {
+    const manager = createMcpManager();
+
+    // A server that cannot be reached leaves a **failed** memo behind.
+    const failed = await manager.connect({ name: 'fresh-failure', type: 'sdk' });
+    expect(failed.status).toBe('failed');
+
+    // The memo is not yet stale, so it is kept.
+    expect(
+      evictStaleFailedConnectMemoForServe('fresh-failure', MCP_FAILED_MEMO_MAX_AGE_MS),
+    ).toBe(false);
+
+    // Once it is older than the threshold it goes stale, and it is evicted.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + MCP_FAILED_MEMO_MAX_AGE_MS + 1);
+    try {
+      expect(
+        evictStaleFailedConnectMemoForServe('fresh-failure', MCP_FAILED_MEMO_MAX_AGE_MS),
+      ).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+
+    // And it is gone.
+    expect(
+      evictStaleFailedConnectMemoForServe('fresh-failure', MCP_FAILED_MEMO_MAX_AGE_MS),
+    ).toBe(false);
+  });
+
+  it('closes the superseded connection when the configuration changed', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+
+    const events: string[] = [];
+    const off = onMcpServerConnectionEvent((event) => {
+      events.push(`${event.type}:${event.server}`);
+    });
+
+    const first = await ensureConnectedClient(
+      stdioConfig('superseded', serverPath, 'legacy', { env: { FAKE_MCP_MARKER: '1' } }),
+    );
+    expect(first.isLive()).toBe(true);
+
+    // The configuration changed, so the memoized connection is superseded.
+    const second = await ensureConnectedClient(
+      stdioConfig('superseded', serverPath, 'legacy', { env: { FAKE_MCP_MARKER: '2' } }),
+    );
+    expect(second).not.toBe(first);
+
+    // The superseded connection is closed rather than left running, and the
+    // close is reported.
+    expect(first.isLive()).toBe(false);
+    expect(events).toContain('closed:superseded');
+
+    off();
+    await cleanupConnectedMcpClients();
   });
 });
 
@@ -1155,6 +1322,93 @@ describe('the MCP fetch variants', () => {
     expect(cliOwned?.['x-claude-ai-proxy']).toBeUndefined();
     expect(cliOwned?.['x-ccr-proxy']).toBeUndefined();
   });
+
+  it('gives the CLI-owned variant no marker of its own', async () => {
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      seen.push((init?.headers ?? {}) as Record<string, string>);
+      return new Response('{}', { status: 200 });
+    });
+
+    await createCliOwnedBearerFetch({
+      token: 'cli-token',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })('https://c.invalid/mcp');
+
+    // The CLI-owned variant is told apart by what it does **not** carry: it
+    // has no marker of its own.
+    expect(seen[0]?.['x-claude-ai-proxy']).toBeUndefined();
+    expect(seen[0]?.['x-ccr-proxy']).toBeUndefined();
+    expect(seen[0]?.['anthropic-version']).toBeUndefined();
+    // Its credential is the CLI's own bearer.
+    expect(seen[0]?.['authorization']).toBe('Bearer cli-token');
+  });
+
+  it('does not let the configured headers defeat a variant own marker or credential', async () => {
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      seen.push((init?.headers ?? {}) as Record<string, string>);
+      return new Response('{}', { status: 200 });
+    });
+    const asFetch = fetchImpl as unknown as typeof fetch;
+
+    await createAgentAiProxyFetch({
+      token: 'proxy-token',
+      headers: { 'x-claude-ai-proxy': '0', authorization: 'Bearer caller-secret' },
+      fetchImpl: asFetch,
+    })('https://server.invalid/mcp');
+
+    // The variant's own marker wins ...
+    expect(seen[0]?.['x-claude-ai-proxy']).toBe('1');
+    // ... and the caller's credential is not forwarded to the proxy host.
+    expect(seen[0]?.['authorization']).toBe('Bearer proxy-token');
+
+    await createCcrProxyFetch({
+      token: 'ccr-token',
+      headers: { 'x-ccr-proxy': '0', 'x-api-key': 'caller-key' },
+      fetchImpl: asFetch,
+    })('https://server.invalid/mcp');
+
+    expect(seen[1]?.['x-ccr-proxy']).toBe('1');
+    expect(seen[1]?.['x-api-key']).toBeUndefined();
+    expect(seen[1]?.['authorization']).toBe('Bearer ccr-token');
+
+    await createFirstPartyApiMcpFetch({
+      token: 'first-party-token',
+      headers: { 'anthropic-version': '1999-01-01', 'x-api-key': 'caller-key' },
+      fetchImpl: asFetch,
+    })('https://api.invalid/v1/mcp');
+
+    expect(seen[2]?.['anthropic-version']).toBe('2023-06-01');
+    expect(seen[2]?.['x-api-key']).toBe('first-party-token');
+
+    await createCliOwnedBearerFetch({
+      token: 'cli-token',
+      headers: { authorization: 'Bearer caller-secret' },
+      fetchImpl: asFetch,
+    })('https://server.invalid/mcp');
+
+    expect(seen[3]?.['authorization']).toBe('Bearer cli-token');
+  });
+
+  it('keeps a header whose name is __proto__', async () => {
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      seen.push((init?.headers ?? {}) as Record<string, string>);
+      return new Response('{}', { status: 200 });
+    });
+
+    // A JSON-parsed object carries `__proto__` as an **own** key.
+    const raw = JSON.parse('{"__proto__":"value"}') as Record<string, string>;
+
+    await createAgentAiProxyFetch({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })('https://server.invalid/mcp', { headers: raw });
+
+    // The header is neither lost nor turned into a prototype.
+    expect(seen[0]?.['__proto__']).toBe('value');
+    expect(Object.getPrototypeOf(seen[0] as Record<string, string>)).toBe(null);
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1283,6 +1537,28 @@ describe('the MCP timeouts', () => {
     expect((error as McpTimeoutError).kind).toBe('request');
 
     await manager.disconnect('request-timeout');
+  });
+
+  it('rejects a connect that runs out of time with an armed-request timeout', async () => {
+    const dir = makeTempDir();
+    const serverPath = writeFakeServer('legacy', dir);
+
+    // The server never answers the modern probe in time, so the **connect
+    // phase** deadline fires.
+    const error = await connectToServer(
+      stdioConfig('armed-timeout', serverPath, 'legacy', {
+        env: { FAKE_MCP_DELAY_MS: '5000', FAKE_MCP_DELAY_METHOD: 'server/discover' },
+      }),
+      { timeouts: { armedRequestTimeoutMs: 150 } },
+    ).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+
+    // The armed-request timeout is its own kind: it is not an ordinary
+    // request timeout and not a tool timeout.
+    expect(error).toBeInstanceOf(McpTimeoutError);
+    expect((error as McpTimeoutError).kind).toBe('armedRequest');
   });
 });
 

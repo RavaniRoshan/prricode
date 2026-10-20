@@ -83,9 +83,15 @@
  *     the type, the command, the arguments, the URL, the working directory, a
  *     **digest** of the server's environment, a **digest** of the credential,
  *     and the provider connection's id. A digest is used rather than the value
- *     itself so a secret never lands in a map key.
+ *     itself so a secret never lands in a map key. The environment's encoding
+ *     is **injective**, so two environments that differ only in where a
+ *     newline falls are two different servers.
  *   - The **memoized failure** is retryable: a failed memo is evicted before
- *     the next connect is attempted.
+ *     the next connect is attempted, and it goes stale once it is older than
+ *     `MCP_FAILED_MEMO_MAX_AGE_MS`.
+ *   - A **superseded connection** — the memoized connection of a server whose
+ *     configuration changed — is closed rather than left running, and the
+ *     close is reported.
  */
 
 import { createHash } from 'node:crypto';
@@ -447,6 +453,16 @@ function digest(value: string): string {
  *
  * The environment is **digested**, not copied: the memo's key is a map key, and
  * an environment may carry a secret.
+ *
+ * The encoding is **injective**: the sorted pairs are encoded as a JSON array
+ * of two-element arrays, so two environments that differ only in where a
+ * newline falls are two different environments. A delimiter-joined encoding
+ * would give `{ A: '1\nB=2' }` and `{ A: '1', B: '2' }` the same identity, and
+ * a server that was given a different environment would then reuse the
+ * connection that was made for the old one.
+ *
+ * The digest is one-way: the pre-image is handed to the hash and nothing
+ * else, so the map key never carries a secret in a recoverable form.
  */
 function environmentIdentity(env: Record<string, string> | undefined): string {
   if (!env) return '';
@@ -454,7 +470,7 @@ function environmentIdentity(env: Record<string, string> | undefined): string {
     .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   if (entries.length === 0) return '';
-  return digest(entries.map(([key, value]) => `${key}=${value}`).join('\n'));
+  return digest(JSON.stringify(entries));
 }
 
 /**
@@ -511,10 +527,22 @@ export function evictAllMcpMemosOnIdentityChange(): number {
 }
 
 /**
+ * The age at which a **failed** connect memo goes stale.
+ *
+ * The threshold is this implementation's own: a failed connect is retried, but the memo
+ * that records the failure is only dropped once it is older than this. It is
+ * the age the manager and the client measure a failed memo against, so the
+ * "when it goes stale" rule has a real threshold rather than none.
+ */
+export const MCP_FAILED_MEMO_MAX_AGE_MS = 30_000;
+
+/**
  * Evict a memoized **failed** connect result so the server is retried.
  *
  * A failed memo is stale once it is older than `maxAgeMs`; the default of `0`
- * makes every failed memo stale.
+ * makes every failed memo stale — the caller asks for the eviction outright.
+ * The **rule's** threshold is `MCP_FAILED_MEMO_MAX_AGE_MS`, which is what the
+ * manager measures a failed memo against.
  */
 export function evictStaleFailedConnectMemoForServe(name: string, maxAgeMs = 0): boolean {
   const memo = connectMemos.get(name);
@@ -573,10 +601,19 @@ export async function ensureConnectedClient(
     if (memo.epoch !== epoch) {
       connectMemos.delete(config.name);
       if (memo.connection) void closeMcpConnection(memo.connection);
-    } else if (memo.connection?.isLive() && memo.configKey === key) {
-      return memo.connection;
-    } else if (options.retryFailed && memo.failure !== undefined) {
+    } else if (memo.connection?.isLive()) {
+      if (memo.configKey === key) {
+        return memo.connection;
+      }
+      // The configuration changed, so the memoized connection is superseded:
+      // it is closed rather than left running, and the close is reported.
       connectMemos.delete(config.name);
+      await closeMcpConnection(memo.connection);
+    } else if (memo.failure !== undefined) {
+      // A failed memo goes stale once it is older than the threshold; until
+      // then it is kept, and a caller that retries the server says so.
+      const stale = evictStaleFailedConnectMemoForServe(config.name, MCP_FAILED_MEMO_MAX_AGE_MS);
+      if (!stale && options.retryFailed) connectMemos.delete(config.name);
     }
   }
 

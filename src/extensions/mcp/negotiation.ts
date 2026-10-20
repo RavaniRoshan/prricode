@@ -15,8 +15,9 @@
  *      **legacy** `initialize` handshake is the fallback;
  *   3. the server answers `-32022` (the version it declared is unsupported) and
  *      names the versions it supports — the client retries with one of them:
- *      a legacy version, which is the legacy handshake, or a modern version,
- *      which is a **second `server/discover`** with that version;
+ *      a legacy version, which is the legacy handshake, or a modern version
+ *      the client has **not** already probed, which is a **second
+ *      `server/discover`** with that version;
  *   4. the server answers the modern probe with an HTTP `400` — it does not
  *      speak the modern revision, so the legacy handshake is the fallback.
  *
@@ -38,8 +39,10 @@
  *     handshake is the fallback — and the `-32022` retry, but not the order of
  *     the branches nor the HTTP `400` edge.
  *   - The **`-32022` re-probe** picks the **first** supported version that is
- *     not a legacy-era version, and probes with it. It never probes twice for
- *     the same version.
+ *     neither a legacy-era version nor one the client has already probed, and
+ *     probes with it. It never probes twice for the same version: a server
+ *     that names only the version the client has already probed gets the
+ *     `-32022` error rather than a second, identical probe.
  *   - The **`-32022` legacy fallback** picks the **first** supported version
  *     that is a legacy-era version.
  *   - The **HTTP `400` edge** treats a `400` on the modern probe as "this
@@ -115,18 +118,29 @@ export async function negotiate(
     return legacyHandshake(peer, LEGACY_PROTOCOL_VERSION, timeouts, present);
   }
 
-  // The modern revision is probed **first**.
-  present?.(MODERN_PROTOCOL_VERSION);
-  const modernParams = {
+  /**
+   * The versions the client has already probed with.
+   *
+   * The ladder **never probes twice for the same version**: a version that is
+   * in this set is never chosen again.
+   */
+  const probed = new Set<string>();
+
+  /** The modern probe's parameters, for the version being probed. */
+  const modernParams = (version: string): Record<string, unknown> => ({
     _meta: {
-      protocolVersion: MODERN_PROTOCOL_VERSION,
+      protocolVersion: version,
       clientInfo: CLIENT_INFO,
       capabilities: CLIENT_CAPABILITIES,
     },
-  };
+  });
+
+  // The modern revision is probed **first**.
+  present?.(MODERN_PROTOCOL_VERSION);
+  probed.add(MODERN_PROTOCOL_VERSION);
 
   try {
-    const result = await peer.request('server/discover', modernParams, {
+    const result = await peer.request('server/discover', modernParams(MODERN_PROTOCOL_VERSION), {
       armedTimeoutMs: timeouts.armedRequestTimeoutMs,
       requestTimeoutMs: timeouts.requestTimeoutMs,
     });
@@ -153,23 +167,19 @@ export async function negotiate(
       if (legacyVersion) {
         return legacyHandshake(peer, legacyVersion, timeouts, present);
       }
-      const modernVersion = supported.find((version) => !LEGACY_ERA_VERSIONS.has(version));
+      // The re-probe picks the **first** modern version the server names that
+      // the client has not already probed: the ladder never probes twice for
+      // the same version.
+      const modernVersion = supported.find(
+        (version) => !LEGACY_ERA_VERSIONS.has(version) && !probed.has(version),
+      );
       if (modernVersion) {
         present?.(modernVersion);
-        const result = await peer.request(
-          'server/discover',
-          {
-            _meta: {
-              protocolVersion: modernVersion,
-              clientInfo: CLIENT_INFO,
-              capabilities: CLIENT_CAPABILITIES,
-            },
-          },
-          {
-            armedTimeoutMs: timeouts.armedRequestTimeoutMs,
-            requestTimeoutMs: timeouts.requestTimeoutMs,
-          },
-        );
+        probed.add(modernVersion);
+        const result = await peer.request('server/discover', modernParams(modernVersion), {
+          armedTimeoutMs: timeouts.armedRequestTimeoutMs,
+          requestTimeoutMs: timeouts.requestTimeoutMs,
+        });
         const record = readRecord(result) ?? {};
         return {
           era: 'modern',
@@ -181,6 +191,7 @@ export async function negotiate(
           capabilities: readCapabilities(record['capabilities']),
         };
       }
+      // The server named no version the client can use: the error stands.
       throw error;
     }
     if (isMethodNotFoundError(error)) {
