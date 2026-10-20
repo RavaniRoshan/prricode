@@ -760,15 +760,15 @@ export interface PreToolUseHookApproval {
 - Consumes: `src/session/store.ts` (`DEFAULT_MAX_TOOL_RESULT_BYTES`, `serializedSize`, `ToolResultStub`); `src/agent/context.ts` (`toolResultBlock`).
 - Produces: an exported `contentReplacementStub(content: unknown, maxBytes?: number): ToolResultStub | undefined` in `src/session/store.ts`; an optional `readonly maxToolResultBytes?: number` on `SessionStore`; a within-turn tool result that is stubbed when it is oversized.
 
-- [ ] **Step 1: Write the failing test** — a tool whose result is over the limit is stubbed in the **within-turn** request: the request's `tool_result` block carries the stub, not the payload, and the payload is still in the transcript.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the raw payload is in the request.
-- [ ] **Step 3: Export the stub rule from the store** — `contentReplacementStub(content, maxBytes)` returns the stub or `undefined`, and `recordsFor` uses it instead of building the stub inline, so there is **one** rule. Add `readonly maxToolResultBytes?: number` to `SessionStore` (optional, so the existing test doubles still compile).
-- [ ] **Step 4: Use it in the within-turn push** in `src/agent/loop.ts` — the result block carries the stub when the content is oversized, and the raw content when it is not.
-- [ ] **Step 5: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 6: Write the failing consistency test** — the within-turn block, the between-turns load and the cross-turn projection must all produce the **same** stubbed content for the same transcript, and none of them may carry the payload.
-- [ ] **Step 7: Implement whatever that requires** and confirm the three paths agree.
-- [ ] **Step 8: Label the stub's wire form as a implementation choice** where the stub enters the context (`src/session/event.ts` and `src/session/store.ts`) — the audit does not pin the stub's shape.
-- [ ] **Step 9: Commit.**
+- [x] **Step 1: Write the failing test** — a tool whose result is over the limit is stubbed in the **within-turn** request: the request's `tool_result` block carries the stub, not the payload, and the payload is still in the transcript.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the raw payload is in the request.
+- [x] **Step 3: Export the stub rule from the store** — `contentReplacementStub(content, maxBytes)` returns the stub or `undefined`, and `recordsFor` uses it instead of building the stub inline, so there is **one** rule. Add `readonly maxToolResultBytes?: number` to `SessionStore` (optional, so the existing test doubles still compile).
+- [x] **Step 4: Use it in the within-turn push** in `src/agent/loop.ts` — the result block carries the stub when the content is oversized, and the raw content when it is not.
+- [x] **Step 5: Run it to verify it passes** — expected: PASS.
+- [x] **Step 6: Write the failing consistency test** — the within-turn block, the between-turns load and the cross-turn projection must all produce the **same** stubbed content for the same transcript, and none of them may carry the payload.
+- [x] **Step 7: Implement whatever that requires** and confirm the three paths agree.
+- [x] **Step 8: Label the stub's wire form as a implementation choice** where the stub enters the context (`src/session/event.ts` and `src/session/store.ts`) — the audit does not pin the stub's shape.
+- [x] **Step 9: Commit.**
   ```bash
   git add src/session src/agent tests/contracts/tool-result-stub.test.ts
   git commit -m "fix(session): the within-turn tool result is stubbed too"
