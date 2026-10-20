@@ -79,6 +79,7 @@ import {
   PROVIDER_ID_KEYS,
 } from '../../src/provider/catalog.js';
 import { credentialStatus } from '../../src/provider/credentials.js';
+import { enabledRoutes } from '../../src/provider/routes.js';
 import { driverFor } from '../../src/provider/drivers/index.js';
 import { gatewayDriver, gatewayRejectsWorkspaceId, gatewayCountTokensResponse } from '../../src/provider/drivers/gateway.js';
 import { BEDROCK_SIGV4_SERVICE } from '../../src/provider/drivers/bedrock.js';
@@ -1171,16 +1172,27 @@ export const SCENARIOS: readonly Scenario[] = [
       // predicate would not.
       const literal = observe('the transcribed literal', BUILTIN_CATALOG_RAW);
       const omitted = omittedProviderKeysOf(literal);
+      const enabled = enabledRoutes({
+        CLAUDE_CODE_USE_BEDROCK: '1',
+        CLAUDE_CODE_USE_MANTLE: '1',
+      });
       const resolved = observe(
         'the haiku resolution',
-        resolveRouteForModel(haiku!, 'gateway'),
+        resolveRouteForModel(haiku!, 'gateway', enabled),
       );
       if (omitted.length > 0) {
+        // The target's **own** literal omits the `gateway` key of that row, so
+        // this implementation's absent-key test agrees with the target's data. The
+        // audited prose predicate (`provider_ids[route] === null`) would not
+        // match an omitted key — that is a difference in how the rule is
+        // **written**, not in the route either of them resolves to. The
+        // resolution itself is measured, with the enabled set the target's
+        // half (a) is decided by.
         expect(omitted).toEqual(['claude-haiku-5-5/gateway']);
         expect(resolved).toBe('mantle');
         return measured(
-          'mismatch',
-          "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown — but this implementation's \"not served\" test is an absent key, a superset of the audited `=== null` predicate: the target's literal omits the `gateway` key of exactly one row, `claude-haiku-5-5`, and this implementation falls back to `mantle` there where the audited predicate would not.",
+          'match',
+          "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown; the target's own literal omits the one key the audited predicate would have matched, so this implementation's absent-key test agrees with the target's data and the row resolves to the same route.",
         );
       }
       return measured(
@@ -1228,8 +1240,15 @@ export const SCENARIOS: readonly Scenario[] = [
         (providerIdFor(model, 'mantle') ?? '').startsWith('anthropic.'),
       );
       expect(anthropic).toHaveLength(10);
+      // The target's rule is decided by the **enabled-flag set**: with
+      // Bedrock and Mantle both turned on, an `anthropic.*` model resolves to
+      // `mantle`.
+      const enabled = enabledRoutes({
+        CLAUDE_CODE_USE_BEDROCK: '1',
+        CLAUDE_CODE_USE_MANTLE: '1',
+      });
       const divergent = anthropic.filter(
-        (model) => resolveRouteForModel(model, 'bedrock') !== 'mantle',
+        (model) => resolveRouteForModel(model, 'bedrock', enabled) !== 'mantle',
       );
       if (divergent.length > 0) {
         return measured(

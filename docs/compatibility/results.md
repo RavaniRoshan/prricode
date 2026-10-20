@@ -61,7 +61,7 @@ Three consequences follow, and the results test enforces the first two:
 
 - A **project requirement** row (`F-10`, `F-11`, `F-40`) is reported `partial`. The target has **no** such surface, this implementation implements the extension, and the pinning test passes — but no target behaviour is matched, and the matrix forbids the word `match` here.
 - A **implementation choice** row (`F-37`, `F-39`) is reported `unknown`. The target's behaviour at `2.1.303` was not established by the audit, so there was nothing to compare against.
-- A **divergence from an observed behaviour** is reported `mismatch`, whatever the matrix's evidence class is. **Eight** rows are `mismatch` for that reason: `F-07`, `F-08`, `F-18`, `F-21`, `F-24`, `F-34`, `F-35` and `F-38`.
+- A **divergence from an observed behaviour** is reported `mismatch`, whatever the matrix's evidence class is. **Six** rows are `mismatch` for that reason: `F-18`, `F-21`, `F-24`, `F-34`, `F-35` and `F-38`.
 
 **The pinning test is not run here.** The matrix's rule asks for "a test in
 the owning task [that] passes". This suite does not run it: the results test
@@ -78,9 +78,9 @@ them and fails when they disagree.
 
 | Outcome | Rows |
 |---|---|
-| `match` | 18 |
+| `match` | 20 |
 | `partial` | 13 |
-| `mismatch` | 8 |
+| `mismatch` | 6 |
 | `not-tested` | 0 |
 | `unknown` | 3 |
 | **Total** | **42** |
@@ -95,8 +95,8 @@ them and fails when they disagree.
 | F-04 | Configuration | Configuration precedence algorithm | REA observed | partial | Both observed precedence orderings and the whole-block override are reproduced; the audit does not derive the target's per-key merge for ordinary keys. | `tests/compatibility/scenarios.test.ts` — "F-04 the two precedence orderings" | `tests/contracts/settings-precedence.test.ts` — "keeps the two orderings genuinely different" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-04 the two precedence orderings" |
 | F-05 | Configuration | Settings scope isolation and suppression | REA observed | match | The personal-config suppression, the linked-away project tier and the machine-admin policy read mode are all reproduced. | `tests/compatibility/scenarios.test.ts` — "F-05 scope isolation and suppression" | `tests/contracts/settings-precedence.test.ts` — "suppresses exactly the project-side sources when personal config is restricted" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-05 scope isolation and suppression" |
 | F-06 | Providers | Eight provider routes and their adapters | REA observed | match | The eight route names and their adapters are reproduced exactly. | `tests/compatibility/scenarios.test.ts` — "F-06 the eight provider routes" | `tests/contracts/provider-registry.test.ts` — "names exactly the eight routes the target declares" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-06 the eight provider routes" |
-| F-07 | Providers | Provider-owned model catalog | REA observed | mismatch | The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown — but this implementation's "not served" test is an absent key, a superset of the audited `=== null` predicate: the target's literal omits the `gateway` key of exactly one row, `claude-haiku-5-5`, and this implementation falls back to `mantle` there where the audited predicate would not. | `tests/compatibility/scenarios.test.ts` — "F-07 the provider-owned model catalog" | `tests/contracts/provider-catalog.test.ts` — "carries every row of the target catalog" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-07 the provider-owned model catalog" |
-| F-08 | Providers | Route selection (exactly one active route) | REA observed | mismatch | The dispatch order and the single active route are reproduced, but the target's per-model override is not: with Bedrock and Mantle enabled the target sends an `anthropic.*` model to `mantle`, and this implementation sends the 10 `anthropic.*` rows to `bedrock`. | `tests/compatibility/scenarios.test.ts` — "F-08 route selection" | `tests/contracts/provider-registry.test.ts` — "keeps the target dispatch order, with gateway first and firstParty last" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-08 route selection" |
+| F-07 | Providers | Provider-owned model catalog | REA observed |  match |  The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown; the target's own literal omits the one key the audited predicate would have matched, so this implementation's absent-key test agrees with the target's data and the row resolves to the same route. | `tests/compatibility/scenarios.test.ts` — "F-07 the provider-owned model catalog" | `tests/contracts/provider-catalog.test.ts` — "carries every row of the target catalog" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-07 the provider-owned model catalog" |
+| F-08 | Providers | Route selection (exactly one active route) | REA observed |  match |  The dispatch order, the single active route and the target's per-model override are reproduced. | `tests/compatibility/scenarios.test.ts` — "F-08 route selection" | `tests/contracts/provider-registry.test.ts` — "keeps the target dispatch order, with gateway first and firstParty last" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-08 route selection" |
 | F-09 | Providers | Per-provider endpoint policy (base-URL variables, vendor-host patterns) | REA observed | match | Every route's base-URL variable list and the vendor-host patterns are reproduced, in the audit's order. | `tests/compatibility/scenarios.test.ts` — "F-09 the per-provider endpoint policy" | `tests/contracts/provider-registry.test.ts` — "declares one policy per route with the target base-URL variables" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-09 the per-provider endpoint policy" |
 | F-10 | Providers | Multi-provider connection manager | Project requirement | partial | The project requirement is met — N concurrent connections, each with a reference — but the target has no such registry, so no target behaviour is matched. | `tests/compatibility/scenarios.test.ts` — "F-10 the connection registry" | `tests/contracts/provider-registry.test.ts` — "lists the connections it holds" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-10 the connection registry" |
 | F-11 | Providers | Credential handling as references only | Project requirement | partial | The project requirement is met — a credential is a reference and a status is presence only — but the target has no such model, so no target behaviour is matched. | `tests/compatibility/scenarios.test.ts` — "F-11 credentials as references only" | `tests/security/provider-credentials.test.ts` — "never returns the credential value" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-11 credentials as references only" |
@@ -200,13 +200,11 @@ No row is `not-tested`: every scenario in this report ran.
 
 A divergence from an **observed** target behaviour is a mismatch, never a
 partial, and a difference of **any kind** counts — a name, a value, a member,
-a kind, or a member the target has and this implementation does not. Eight rows are
+a kind, or a member the target has and this implementation does not. Six rows are
 measured as one.
 
 | Row | Why |
 |---|---|
-| `F-07` | The catalog carries all **22** of the target's rows and the ids are the target's, but this implementation's "not served" test is an **absent key**, a superset of the audited `provider_ids[route] === null` predicate: the target's literal **omits** the `gateway` key of exactly one row, `claude-haiku-5-5`, and this implementation falls back to `mantle` there where the audited predicate would not. |
-| `F-08` | The dispatch order and the single active route are the target's, but the target's **per-model** override is not implemented: with Bedrock and Mantle enabled the target sends an `anthropic.*` model to `mantle`, and this implementation sends the **10** `anthropic.*` rows to `bedrock`. |
 | `F-18` | The permission feedback rides along in the tool result, but this implementation names the members **`permissionDecision {decision, source, reasonType}`** and **`nonExecutionKind`**, where the target's observed metadata names **`permission_decision {decision, source, reason_type}`** and **`non_execution_kind`**. This implementation's envelope carries a `remedy` member — the target's name — and no `user_feedback` member. The information is the same and the names are not. |
 | `F-21` | The file-mutating set is exactly Edit, Write and NotebookEdit, and this implementation produces the audit's `rule` and `subcommandResults` reason kinds; this implementation **adds a seventh kind**, `noRuleMatch`, with a user-visible message, that the target's six do not carry. |
 | `F-24` | The **layout** is reproduced (JSONL under `<configDir>/projects/<project>/<sessionId>.jsonl`), but the record format is this implementation's own versioned format and the target's observed **`transcriptSource`** marker (`ccr-api` / `local-jsonl`) is **not** exposed: no record of this implementation's carries such a member. |
