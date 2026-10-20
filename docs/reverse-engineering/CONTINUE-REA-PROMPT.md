@@ -72,11 +72,17 @@ The WSL has roughly 6–8 GiB total RAM. This user authorized up to 1 GiB additi
 
 **The REA phase is substantially complete.** The coverage audit at [`COVERAGE-AUDIT.md`](COVERAGE-AUDIT.md) is the authoritative record of what is established, what is partial, and what is unknown. The planning and research phases have been completed and the implementation plan is at [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md). Implementation is running against that plan; `docs/PROGRESS.md` is the live ledger.
 
-Three REA items remain open, in priority order:
+**Three REA items were closed this session**, and two remain open:
 
-1. **Extract the agent-loop, tool-dispatch, and session-resume relations** from the improved `chunk-6bp7hdav.js` graph (40,000 nodes / 35,964 relations) and the improved `chunk-z6a1zj5w.js` graph (40,000 / 18,770). These files exceed the REA transfer byte budget, so their graphs are **bounded, not complete** — a region the truncation cut must be recorded as a gap rather than treated as absent.
-2. **Targeted Ghidra pass over the seccomp supervisor's switch cases** to decode the per-record metadata at the table `0x6c749c0` and the per-syscall action. This is the last native gap.
-3. **Re-derive the Bedrock, Vertex, and Foundry body field names from the target's own bundled adapters** (`chunk-1njnz05e.js`, `chunk-jdnh8sjs.js`, `chunk-m5c0c57d.js`, `chunk-a3dhk724.js`, `chunk-7qjrjq0k.js`). The current wire shapes in the plan come from the *public* SDKs, not from the pinned binary, and are labelled `inference` until this is done.
+- **Closed — the response path.** The default `parseResponse` (`ai`) is read in full, and the bundled SDK's SSE parser accepts an **extended event vocabulary** (`agent.*`, `session.*`, `span.*`, `user.*`) the public API does not document.
+- **Closed — the native sandbox.** The 27-record table at `0x6c749c0` is **decoded**: the records are `{u64 nr; u64 name_ptr; u8 meta[8]}`, the names were read out of the ELF's string table, and the metadata bytes are **argument indices** (path, second path, flags/mode, dirfd, second dirfd) with `0xff` meaning absent. The supervisor **never denies** — its response struct's `error` field is never written — so the `apply-seccomp` helper is an **audit mechanism, not the sandbox boundary**.
+- **Closed — the provider adapter wire shapes.** Bedrock, Vertex, Mantle and Foundry were re-derived from the target's own bundled adapters (`chunk-1njnz05e.js`, `chunk-jdnh8sjs.js`, `chunk-m5c0c57d.js`). This corrected two external-research findings: the target **throws** on a Foundry `baseURL`/`resource` conflict, and the `?beta=true` marker is a distinct path variant the Bedrock and Vertex adapters strip.
+- **Closed — the `--resume` selection.** A session id or an **exact** session title (an ambiguous title is an error listing the candidates), the live-session **attach** short-circuit that `forkSession` bypasses, `--resume-session-at` with its **drop guard**, and the structured resumed state are all established.
+
+Two items remain open:
+
+1. **The `--continue` selection rule** (the "most recent session in this directory" rule) and the session-row index. The session controller's semantic graph is bounded by the REA transfer byte budget at 40,000 nodes, so the region holding the rule may lie outside the retained graph.
+2. **The agent-loop tool scheduling** — the order of concurrent tool calls and the point at which the next model request is issued. Every call in those functions is a **member call** (`this.x(...)`), which REA does not resolve into a `calls` relation, so this needs source reading rather than a better tool. What *is* established: the tool-result content shape and the pairing rules.
 
 ### Two operational rules that are now mandatory
 
