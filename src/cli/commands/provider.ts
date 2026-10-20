@@ -542,7 +542,7 @@ const PROVIDER_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
  */
 export const PROVIDER_COMMAND_HELP = `Usage: provider <verb> [options]  (also: --provider <verb> [options])
 
-The multi-provider manager is a project extension, not part of the reference agent.
+${PROVIDER_EXTENSION_NOTICE}
 The target has no user-managed registry of provider connections.
 
 Verbs:
@@ -1198,6 +1198,10 @@ export const REDACTION_PREFIX_FLOOR = 8;
  *   - a **prefix** of any of those, down to a floor of
  *     {@link REDACTION_PREFIX_FLOOR} characters. A truncated or masked secret
  *     (`sk-ant-do-no`) is still a leak.
+ *
+ * The floor applies to the **prefix** rule only: the secret **itself** is
+ * replaced wherever it occurs, however short it is. A secret of one character
+ * therefore redacts that character everywhere — over-redaction, never a leak.
  *
  * The matching is **case-insensitive** and **literal**: the secret is never
  * compiled into a pattern, so a secret that carries a regular-expression

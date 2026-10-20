@@ -71,8 +71,6 @@ The reason strings are reproduced **verbatim**:
 | `sandbox.allowUnsandboxedCommands is true` | the global opt-out is set |
 | the `excludedCommands` exemption | a matching entry applies |
 
-### The decision mapping
-
 **Only one of the four reasons refuses the command.** The decision vocabulary is `allow` | `unconfined` | `deny`, and the mapping is exact:
 
 | Reason | Decision | What the command does |

@@ -46,6 +46,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { readdirSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { once } from 'node:events';
@@ -91,10 +92,12 @@ import {
   type CatalogStore,
 } from '../../src/cli/commands/catalog.js';
 import {
+  isManagerCommand,
   loadManagerState,
   managerArgumentsOf,
   managerCommandOf,
   providerManagerCommand,
+  runManagerText,
 } from '../../src/cli/commands/manager.js';
 import {
   displayWidth,
@@ -1438,20 +1441,64 @@ describe('the shared pieces of the manager commands', () => {
     return readFile(new URL(`../../src/cli/commands/${name}.ts`, import.meta.url), 'utf8');
   }
 
-  it('gives the command result type exactly one home', async () => {
-    const provider = await sourceOf('provider');
-    const catalog = await sourceOf('catalog');
-    const shared = await sourceOf('shared');
-    const output = await readFile(new URL('../../src/cli/output.ts', import.meta.url), 'utf8');
+  it('recognises a manager slash command and refuses an unterminated quote', async () => {
+    // The slash command is the **interactive** surface; this implementation's
+    // interactive path is a seam, so these helpers have no host yet — but
+    // they are the host's contract, so they are pinned here.
+    expect(isManagerCommand('/provider list')).toBe(true);
+    expect(isManagerCommand('/catalog search opus')).toBe(true);
+    expect(isManagerCommand('  /provider')).toBe(true);
+    expect(isManagerCommand('provider list')).toBe(false);
+    expect(isManagerCommand('/help')).toBe(false);
+    expect(isManagerCommand('tell me about the provider')).toBe(false);
 
-    // The declaration lives in the CLI's own vocabulary module; the command
-    // modules **re-export** it rather than declaring a second one.
-    const declarations = [provider, catalog, shared, output].filter((source) =>
-      /interface CommandResult\b/.test(source),
+    // A double-quoted run is **one** argument, the way a shell reads it.
+    expect(managerArgumentsOf('add prod --name "My Provider"')).toEqual([
+      'add',
+      'prod',
+      '--name',
+      'My Provider',
+    ]);
+    // An unterminated quote is a usage error rather than a guess.
+    expect(managerArgumentsOf('add prod --name "My Provider')).toBeUndefined();
+  });
+
+  it('runs a manager slash command and refuses an unterminated quote', async () => {
+    const registry = createProviderRegistry();
+
+    const refused = await runManagerText('/provider add prod --name "unterminated', registry);
+    expect(refused?.exitCode).toBe(2);
+    expect(refused?.stderr).toContain('unterminated quote');
+
+    // A line that is **not** a manager command is not run: the caller sends
+    // it to the model instead.
+    expect(await runManagerText('hello there', registry)).toBeUndefined();
+  });
+
+  it('gives the command result type exactly one home', async () => {
+    // The scan covers the **whole tree**, not a list of files: a second
+    // declaration in a module nobody thought to list would still be found.
+    const files: string[] = [];
+    const walk = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.ts')) files.push(full);
+      }
+    };
+    walk(new URL('../../src', import.meta.url).pathname);
+
+    const declaring = files.filter((file) =>
+      /interface CommandResult\b/.test(readFileSync(file, 'utf8')),
     );
-    expect(declarations).toHaveLength(1);
+    // The declaration lives in the CLI's own vocabulary module; every other
+    // module **re-exports** it rather than declaring a second one.
+    expect(declaring).toHaveLength(1);
+    expect(declaring[0]).toContain('src/cli/output.ts');
+
+    const output = await readFile(new URL('../../src/cli/output.ts', import.meta.url), 'utf8');
     expect(output).toMatch(/interface CommandResult\b/);
-    expect(shared).toMatch(/export type \{ CommandResult \}/);
+    expect(await sourceOf('shared')).toMatch(/export type \{ CommandResult \}/);
   });
 
   it('gives the shared helpers exactly one home', async () => {

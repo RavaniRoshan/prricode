@@ -138,7 +138,7 @@ An `add --use` runs the same usability check **before** the connection is added,
 
 ### The two argv forms
 
-Every manager surface is reachable in **two** forms, and the decision between them lives in **one** place (`src/cli/commands/manager.ts`), so the two surfaces cannot drift:
+Every manager surface is reachable in **two** forms, and the **surface** selection lives in one place (`src/cli/commands/manager.ts`); the **form** — flag or word — is recorded by the parser (`src/cli/args.ts`) and reconstructed by the dispatcher (`src/cli/command.ts`), so the two surfaces cannot drift:
 
 | Form | Example |
 |---|---|

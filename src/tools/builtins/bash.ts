@@ -394,7 +394,10 @@ function runCommand(
       truncated = true;
       timedOut = true;
       child.kill('SIGKILL');
-      stderr += '\nThe command was stopped because it ran past its timeout.';
+      // The notice is **reserved room for**, so a standard error that is
+      // already at the cap does not truncate it away.
+      const notice = '\nThe command was stopped because it ran past its timeout.';
+      stderr = `${stderr.slice(0, Math.max(0, MAX_BASH_OUTPUT_CHARS - notice.length))}${notice}`;
       finish(124);
     }, timeoutMs);
 

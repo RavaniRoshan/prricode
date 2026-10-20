@@ -280,7 +280,7 @@ const CATALOG_BOOLEAN_FLAGS: ReadonlySet<string> = new Set(['--json', '--help'])
  */
 export const CATALOG_COMMAND_HELP = `Usage: catalog <verb> [options]  (also: --catalog <verb> [options])
 
-The model catalog browser is a project extension, not part of the reference agent. The
+${PROVIDER_EXTENSION_NOTICE} The model catalog browser is part of it. The
 target's own catalog is built in and provider-owned; this browser groups it by
 family, searches it, and refreshes it from a file or a URL.
 
