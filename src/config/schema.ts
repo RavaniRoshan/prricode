@@ -106,15 +106,21 @@ export type SettingsParseResult =
   | { ok: false; issues: string[] };
 
 /**
- * Validate a parsed settings document. Unknown keys are preserved; a document that
- * violates a known key's shape fails with a list of issues.
+ * Whether an error is a permission failure.
+ *
+ * A configuration directory owned by **another** user cannot be narrowed,
+ * and the mode is not ours to change — so a `chmod` that fails that way is
+ * not a reason to refuse the write.
  */
-/** Whether an error is a permission failure. */
 function isPermissionError(error: unknown): boolean {
   const code = (error as { code?: unknown } | undefined)?.code;
   return code === 'EACCES' || code === 'EPERM';
 }
 
+/**
+ * Validate a parsed settings document. Unknown keys are preserved; a document that
+ * violates a known key's shape fails with a list of issues.
+ */
 export function parseSettingsDocument(input: unknown): SettingsParseResult {
   const result = settingsDocumentSchema.safeParse(input);
   if (result.success) return { ok: true, value: result.data };

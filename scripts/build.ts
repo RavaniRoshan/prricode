@@ -28,7 +28,7 @@
  *   - it **removes the previous artifact first**, so a failed build never
  *     leaves a stale binary behind for a test to run;
  *   - it **verifies the result**: the artifact exists, it is a regular file,
- *     and the build **emitted nothing else** — a build that left a
+ *     and the build **emitted nothing new** — a build that left a
  *     `node_modules` tree beside it would not be self-contained.
  *
  * The output directory is **not** cleared: a file that was already there is
@@ -236,7 +236,7 @@ export function build(options: BuildOptions): number {
   }
 
   // The artifact is **verified**: it exists, it is a regular file, and the
-  // build **emitted nothing else**. A build that left a second file beside
+  // build **emitted nothing new**. A build that left a second file beside
   // the executable would not be the self-contained artifact this project
   // ships.
   if (!existsSync(outFile)) {
