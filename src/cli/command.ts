@@ -78,6 +78,11 @@
  *   - the **start mode's three availability overrides**, which the CLI — the
  *     only production caller of `resolveStartMode` — now threads. See
  *     {@link startModeOf}.
+ *   - the **active connection** a run uses: the connection table is this
+ *     implementation's own product surface, and a run that ignored the active
+ *     connection would make the manager inert. The connection's route, base URL
+ *     and credential are the run's, and a connection that cannot be resolved is
+ *     **reported** rather than silently ignored. See {@link resolveRunConnection}.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -90,6 +95,7 @@ import { createAgentRuntime } from '../agent/loop.js';
 import type { ProviderTurnSource } from '../agent/context.js';
 import { streamingSourceOf } from '../agent/context.js';
 import { loadManagerState, providerManagerCommand } from './commands/manager.js';
+import { resolveActiveConnection } from './commands/provider.js';
 import { PROVIDER_EXTENSION_NOTICE } from './commands/shared.js';
 import { loadSettings } from '../config/loader.js';
 import { parseSettingsDocument } from '../config/schema.js';
@@ -112,7 +118,12 @@ import { createPermissionRequestHook, createPreToolUseHook } from '../permission
 import type { RuleSet } from '../permissions/rules.js';
 import { driverFor } from '../provider/drivers/index.js';
 import type { ProviderDriver } from '../provider/drivers/types.js';
-import { resolveBaseUrl, selectRoute } from '../provider/routes.js';
+import { resolveBaseUrl, selectRoute, type ProviderRoute } from '../provider/routes.js';
+import {
+  activeConnectionOf,
+  resolveConnectionCredential,
+  resolveConnectionEndpoint,
+} from '../provider/registry.js';
 import { sendProviderRequest } from '../provider/transport/index.js';
 import { continueSession, resumeAtMessage, resumeSession } from '../session/resume.js';
 import type { SessionEvent } from '../session/event.js';
@@ -369,6 +380,20 @@ export interface SessionContext {
    */
   credential?: string;
   /**
+   * The provider route the run's requests go to.
+   *
+   * It is the **active connection's** route when there is one, and the route
+   * the environment selects when there is not.
+   */
+  route?: ProviderRoute;
+  /**
+   * The base URL the run's requests go to.
+   *
+   * It is the **active connection's** base URL when there is one, and the
+   * route's own base URL when there is not.
+   */
+  baseUrl?: string;
+  /**
    * The driver the run's requests are built with.
    *
    * It defaults to the driver of the route the environment selects.
@@ -467,8 +492,26 @@ export interface CommandOptions {
    * `resolveConnectionCredential` is the only path to one, and the connection
    * registry that owns the connections is the provider manager's surface. The
    * credential is therefore supplied here, already resolved.
+   *
+   * **An active connection wins over this member.** The manager's connections
+   * are the point of the manager, so a run uses the active one; this member is
+   * the seam a programmatic caller uses when the session has **no** connection.
    */
   credential?: string;
+  /**
+   * The provider route the run's requests go to.
+   *
+   * It defaults to the route the environment selects, and the **active
+   * connection's** route wins over it.
+   */
+  route?: ProviderRoute;
+  /**
+   * The base URL the run's requests go to.
+   *
+   * It defaults to the route's own base URL, and the **active connection's**
+   * base URL wins over it.
+   */
+  baseUrl?: string;
   /**
    * The interactive run.
    *
@@ -1050,6 +1093,67 @@ interface RunContext extends CommandOptions {
   stderr: OutputSink;
 }
 
+/**
+ * The active connection of a run, and what it resolved to.
+ *
+ * **Project extension.** The target has no user-managed registry of provider
+ * connections: its route selector yields exactly one active route from
+ * environment flags, and the credential comes from the environment. The
+ * connection below is this implementation's own product surface, and a run
+ * that uses it is a run of this implementation — not a claim about the target.
+ */
+interface RunConnection {
+  /** The route the run's requests go to. */
+  route: ProviderRoute;
+  /** The base URL the run's requests go to. */
+  baseUrl: string;
+  /** The credential the run's requests carry. */
+  credential: string;
+}
+
+/**
+ * Resolve the active connection of a run.
+ *
+ * `undefined` when the connection registry has **no** enabled connection: a
+ * run with no connection is exactly a run with no connection, and the route the
+ * environment selects is the one it uses.
+ *
+ * A connection that **cannot** be resolved is an error, and the error names
+ * the connection: the user is told *which* entry is broken rather than being
+ * told that "something" is. The credential itself is never in the message.
+ *
+ * **The secret comes from one place only.** `resolveConnectionCredential` is
+ * this implementation's single path from a reference to a value, and it runs
+ * the untrusted-endpoint guard first, so a secret can never reach a
+ * user-supplied host by accident.
+ */
+async function resolveRunConnection(
+  configDir: string,
+  env: NodeJS.ProcessEnv,
+): Promise<RunConnection | undefined> {
+  const statePath = join(configDir, PROVIDER_STATE_FILE);
+  const { registry } = await loadManagerState(statePath);
+  const active = activeConnectionOf(registry);
+  if (active === undefined) return undefined;
+
+  // The manager's own check: an active connection whose credential cannot be
+  // resolved is not usable, and the refusal names the connection and the
+  // reason.
+  await resolveActiveConnection(registry, { env });
+
+  const resolved = await resolveConnectionCredential(active, env);
+  if (!resolved.present || resolved.value === undefined) {
+    throw new Error(`the active provider connection "${active.id}" has no usable credential`);
+  }
+
+  const endpoint = resolveConnectionEndpoint(active, env);
+  return {
+    route: active.route,
+    baseUrl: endpoint.baseUrl,
+    credential: resolved.value,
+  };
+}
+
 /** Run the parsed arguments. */
 async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<number> {
   if (parsed.background) {
@@ -1085,6 +1189,22 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
   const resolved = await resolveSession(parsed, { store, cwd, configDir, context });
   if (resolved === undefined) return EXIT_FAILURE;
 
+  // **The active connection.** The provider manager exists so that a run can
+  // talk to a configured endpoint with a configured credential, and a run that
+  // ignores the active connection makes the manager inert. The connection's
+  // **route**, **base URL** and **credential** are therefore the run's.
+  //
+  // A registry with **no** enabled connection leaves the run exactly as it was
+  // — the route the environment selects, and no credential — and a connection
+  // that **cannot** be resolved is **reported**, never silently ignored.
+  let connection: RunConnection | undefined;
+  try {
+    connection = await resolveRunConnection(configDir, env);
+  } catch (error) {
+    context.stderr.write(`${messageOf(error)}\n`);
+    return EXIT_FAILURE;
+  }
+
   const hooks = context.hooks ?? createHookRegistry();
   const factory = context.createSession ?? createCommandSession;
 
@@ -1101,7 +1221,20 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
     hooks,
     store: resolved.store,
     ...(resolved.discarded === undefined ? {} : { discarded: resolved.discarded }),
-    ...(context.credential === undefined ? {} : { credential: context.credential }),
+    // The **active connection** wins over the programmatic seam: the manager's
+    // connections are the user's own configuration, and a run that ignored them
+    // would make the manager inert.
+    ...(connection === undefined
+      ? {
+          ...(context.credential === undefined ? {} : { credential: context.credential }),
+          ...(context.route === undefined ? {} : { route: context.route }),
+          ...(context.baseUrl === undefined ? {} : { baseUrl: context.baseUrl }),
+        }
+      : {
+          credential: connection.credential,
+          route: connection.route,
+          baseUrl: connection.baseUrl,
+        }),
     ...(context.driver === undefined ? {} : { driver: context.driver }),
     ...(context.hookOptions === undefined ? {} : { hookOptions: context.hookOptions }),
     ...(settingsFile.kind === 'ok' ? { settingsDocument: settingsFile.document } : {}),
@@ -1441,8 +1574,12 @@ export async function createCommandSession(context: SessionContext): Promise<Com
     }
   }
 
-  const driver = context.driver ?? driverFor(selectRoute(env));
-  const baseUrl = resolveBaseUrl(selectRoute(env), env).baseUrl;
+  // The **route** and the **base URL** the run's requests go to. They are the
+  // **active connection's** when the session has one, and the ones the
+  // environment selects when it has not.
+  const route = context.route ?? selectRoute(env);
+  const driver = context.driver ?? driverFor(route);
+  const baseUrl = context.baseUrl ?? resolveBaseUrl(route, env).baseUrl;
 
   const permissionOptions = {
     rules,

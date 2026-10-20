@@ -75,7 +75,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 import {
+  activeConnectionOf,
   createProviderRegistry,
+  resolveConnectionCredential,
   type Connection,
   type ProviderRegistry,
 } from '../../src/provider/registry.js';
@@ -1514,5 +1516,70 @@ describe('the shared pieces of the manager commands', () => {
       expect(source).not.toMatch(/function flagValue\(/);
       expect(source).not.toMatch(/function flagValues\(/);
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* CC-021 — the active connection a run resolves                                */
+/* -------------------------------------------------------------------------- */
+
+describe('CC-021 — the active connection of a run', () => {
+  /** A connection with the given id and enabled flag. */
+  function connectionOf(id: string, enabled: boolean): Connection {
+    return {
+      id,
+      name: id,
+      route: 'firstParty',
+      credential: { kind: 'env', name: `${id.toUpperCase()}_KEY` },
+      catalogSource: 'builtin',
+      enabled,
+    };
+  }
+
+  it('is undefined when no connection is enabled', () => {
+    // A session with no configured connection is a session with no connection:
+    // the run is exactly the run it always was.
+    const registry = createProviderRegistry([connectionOf('one', false)]);
+
+    expect(activeConnectionOf(registry)).toBeUndefined();
+  });
+
+  it('is the enabled connection when there is one', () => {
+    const registry = createProviderRegistry([
+      connectionOf('one', false),
+      connectionOf('two', true),
+    ]);
+
+    expect(activeConnectionOf(registry)?.id).toBe('two');
+  });
+
+  it('refuses a table with two enabled connections, and names them', () => {
+    const registry = createProviderRegistry([
+      connectionOf('one', true),
+      connectionOf('two', true),
+    ]);
+
+    // The connection table holds mutually exclusive choices: two active rows
+    // are a broken table, and the error says which rows.
+    expect(() => activeConnectionOf(registry)).toThrow(
+      'multiple enabled provider connections: one, two',
+    );
+  });
+
+  it('resolves the active connection\'s credential through the guarded path', async () => {
+    const registry = createProviderRegistry([connectionOf('one', true)]);
+
+    // The credential comes from the one resolver, and the resolver runs the
+    // untrusted-endpoint guard first: a connection whose endpoint is not the
+    // provider's own host is refused, and the secret is never resolved.
+    const connection = {
+      ...connectionOf('one', true),
+      baseUrl: 'https://user-supplied.test',
+    };
+    expect(activeConnectionOf(registry)).toBeDefined();
+
+    await expect(
+      resolveConnectionCredential(connection, { ONE_KEY: 'sk-secret' }),
+    ).rejects.toThrow(/refusing to send the credential of connection "one"/);
   });
 });

@@ -42,7 +42,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   parseArgs,
@@ -87,6 +87,7 @@ import {
   type OutputSink,
 } from '../../src/cli/output.js';
 import { CLI_VERSION, HELP_TEXT, UNIMPLEMENTED_OPTIONS, createCommandSession, runCommand } from '../../src/cli/command.js';
+import { PROVIDER_STATE_FILE } from '../../src/cli/interactive.js';
 import { providerManagerCommand } from '../../src/cli/commands/manager.js';
 import { catalogStoreOfState } from '../../src/cli/commands/catalog.js';
 import {
@@ -2897,5 +2898,177 @@ describe('the flags the run refuses', () => {
     for (const name of UNIMPLEMENTED_OPTIONS.keys()) {
       expect(known, `${name} is refused but is not a flag of the target`).toContain(name);
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* CC-021 — a run uses the active connection                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A request the stubbed transport recorded.
+ */
+interface RecordedRequest {
+  /** The URL the request went to. */
+  url: string;
+  /** The headers the request carried, lower-cased. */
+  headers: Record<string, string>;
+}
+
+/**
+ * Stub the transport's `fetch` and record what it was asked to send.
+ *
+ * The stub answers with a `401`, so the run fails **after** the request was
+ * built: the recording is what the test asserts on, and the failure is the
+ * endpoint's own — a run that never reached the endpoint fails differently.
+ */
+function stubFetch(requests: RecordedRequest[]): void {
+  vi.stubGlobal('fetch', async (input: unknown, init?: { headers?: unknown }) => {
+    const headers: Record<string, string> = {};
+    const raw = init?.headers;
+    if (typeof raw === 'object' && raw !== null) {
+      for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof value === 'string') headers[name.toLowerCase()] = value;
+      }
+    }
+    requests.push({ url: String(input), headers });
+    return new Response(
+      JSON.stringify({
+        type: 'error',
+        error: { type: 'authentication_error', message: 'invalid x-api-key' },
+      }),
+      { status: 401, headers: { 'content-type': 'application/json' } },
+    );
+  });
+}
+
+describe('CC-021 — a run uses the active connection', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends the active connection\'s credential and reaches the connection\'s base URL', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    const requests: RecordedRequest[] = [];
+    stubFetch(requests);
+    const env: NodeJS.ProcessEnv = { PRRICODE_TEST_KEY: 'sk-connection-secret' };
+
+    // The manager registers the connection and makes it the active one.
+    const added = await runCommand(
+      parseArgs([
+        '--provider',
+        'add',
+        'local',
+        '--name',
+        'local',
+        '--route',
+        'firstParty',
+        '--base-url',
+        'https://connection.test',
+        // The endpoint is not the provider's own host, so the delivery has to be
+        // allowed explicitly — the guard refuses it otherwise.
+        '--allow-untrusted-endpoint',
+        '--credential-env',
+        'PRRICODE_TEST_KEY',
+        '--use',
+      ]),
+      { configDir, cwd, env, stdout: new CollectingSink(), stderr: new CollectingSink() },
+    );
+    expect(added).toBe(EXIT_SUCCESS);
+
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+    const code = await runCommand(parseArgs(['--print', 'hello', '--output-format', 'json']), {
+      stdout,
+      stderr,
+      configDir,
+      cwd,
+      env,
+      isTTY: false,
+    });
+
+    // The run reached the **connection's** base URL...
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe('https://connection.test/v1/messages');
+    // ...and it carried the **connection's** credential.
+    expect(requests[0]?.headers['x-api-key']).toBe('sk-connection-secret');
+    // The endpoint refused the credential, so the run failed — at the endpoint.
+    expect(code).toBe(EXIT_FAILURE);
+  });
+
+  it('is exactly as it is today when there is no connection', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    const requests: RecordedRequest[] = [];
+    stubFetch(requests);
+    // The environment names a credential, but no connection refers to it.
+    const env: NodeJS.ProcessEnv = { PRRICODE_TEST_KEY: 'sk-connection-secret' };
+
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+    const code = await runCommand(parseArgs(['--print', 'hello', '--output-format', 'json']), {
+      stdout,
+      stderr,
+      configDir,
+      cwd,
+      env,
+      isTTY: false,
+    });
+
+    // The run went to the route the environment selects — the first-party one.
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe('https://api.anthropic.com/v1/messages');
+    // And it carried no credential: there is none.
+    expect(requests[0]?.headers['x-api-key']).toBeUndefined();
+    expect(code).toBe(EXIT_FAILURE);
+  });
+
+  it('reports a connection whose credential cannot be resolved, and runs nothing', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    const requests: RecordedRequest[] = [];
+    stubFetch(requests);
+
+    // A connection table whose active connection refers to a variable that is
+    // not set: the manager would refuse to make it active, but the table can
+    // name it — and a run must not quietly ignore it.
+    writeFileSync(
+      path.join(configDir, PROVIDER_STATE_FILE),
+      `${JSON.stringify({
+        version: 1,
+        connections: [
+          {
+            id: 'local',
+            name: 'local',
+            route: 'firstParty',
+            credential: { kind: 'env', name: 'PRRICODE_TEST_KEY' },
+            catalogSource: 'builtin',
+            enabled: true,
+          },
+        ],
+        catalogs: [],
+      })}\n`,
+      'utf8',
+    );
+
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+    const code = await runCommand(parseArgs(['--print', 'hello', '--output-format', 'json']), {
+      stdout,
+      stderr,
+      configDir,
+      cwd,
+      env: {},
+      isTTY: false,
+    });
+
+    // The connection is **named**, and the reason says which reference is
+    // missing — never the secret.
+    expect(stderr.text).toContain('the active provider connection "local" is unusable');
+    expect(stderr.text).toContain('PRRICODE_TEST_KEY');
+    expect(code).toBe(EXIT_FAILURE);
+    // Nothing was sent: a connection that cannot be resolved is not a run.
+    expect(requests).toHaveLength(0);
   });
 });

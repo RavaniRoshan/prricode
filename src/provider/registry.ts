@@ -44,6 +44,16 @@
  *
  * The target's route set, dispatch order and endpoint policy are **observed** and
  * live in `src/provider/routes.ts`.
+ *
+ * ## The active connection of a run
+ *
+ * The registry's `active()` **throws** when no connection is enabled, because
+ * the target always has exactly one active route. A **run** asks a different
+ * question — "is a connection configured?" — and "no" is not an error there: a
+ * session with no connection is a session that uses the route its environment
+ * selects. `activeConnectionOf` answers the run's question, and the run's own
+ * resolution — the route, the base URL and the credential of the active
+ * connection — is `src/cli/command.ts`'s `resolveRunConnection`.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -227,6 +237,30 @@ export class ConnectionRegistry implements ProviderRegistry {
 /** Create a registry, optionally seeded with connections. */
 export function createProviderRegistry(connections: readonly Connection[] = []): ProviderRegistry {
   return new ConnectionRegistry(connections);
+}
+
+/**
+ * The active connection of a registry, or `undefined` when there is none.
+ *
+ * The registry's own `active()` **throws** when no connection is enabled: the
+ * target always has exactly one active route, so "none" is an error *there*.
+ * A **run** asks a different question — "is a connection configured?" — and the
+ * answer "no" is not an error: a session with no configured connection uses the
+ * route its environment selects, exactly as it always has.
+ *
+ * **More than one enabled connection is an error**, and it is the registry's own
+ * error: the connection table is a set of mutually exclusive choices, and a
+ * table with two active rows is a broken table rather than a run with no
+ * connection.
+ */
+export function activeConnectionOf(registry: ProviderRegistry): Connection | undefined {
+  const enabled = registry.list().filter((connection) => connection.enabled);
+  if (enabled.length === 0) return undefined;
+  if (enabled.length > 1) {
+    const ids = enabled.map((connection) => connection.id).join(', ');
+    throw new Error(`multiple enabled provider connections: ${ids}`);
+  }
+  return enabled[0];
 }
 
 /**

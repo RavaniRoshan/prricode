@@ -148,6 +148,21 @@ Every manager surface is reachable in **two** forms, and the **surface** selecti
 
 The flag form writes a **machine-readable** document, and every such document carries the extension label.
 
+### A run uses the active connection
+
+**Project extension.** The target has no user-managed connection table, so it has no "active connection" for a run to use: its route selector yields exactly one route from environment flags, and its credential comes from the environment. The rule below is this implementation's own, and it exists because the manager is otherwise inert — a connection that can be registered, activated and resolved but that no run consults is a table nothing reads.
+
+| Situation | What the run does |
+|---|---|
+| the connection table has **no** enabled connection | the run is **exactly** as it was: the route the environment selects, and no credential |
+| the table has **one** enabled connection | the run uses that connection's **route**, its **base URL** and its **credential** |
+| the active connection's credential **cannot** be resolved | the run is **refused**, and the refusal **names the connection** and the reference that is missing — never the secret |
+| the table has **more than one** enabled connection | the run is **refused**, and the refusal names the connections: the table holds mutually exclusive choices |
+
+The credential comes from **one** place: `resolveConnectionCredential`, the provider layer's only path from a reference to a value, and the path that runs the untrusted-endpoint guard first. The CLI never resolves a secret itself.
+
+The **active connection wins** over the programmatic `credential` seam of `CommandOptions`: the connection table is the user's own configuration, and a run that ignored it would make the manager inert. The seam is what a caller uses when the session has **no** connection.
+
 ### The catalog source location
 
 A connection says **where its catalog is read from**, in its `catalogSource` member: `builtin`, `file` or `url`. The connection is the routing identity; the catalog is the model metadata; the source is the join between them. A connection whose source is a file and that names no catalog file is refused with a named reason, and the same holds for a URL.
@@ -183,6 +198,7 @@ A **user override** of a catalog-owned field lives in its **own** record and sur
 | `useConnection` fails loudly rather than silently not switching | project requirement | F-10 | same file — "the connection registry" |
 | A registered flag that is explicitly disabled is not treated as set | implementation choice | F-08 | same file — "selectRoute" |
 | Two connections may share the same route | project requirement | F-10 | same file — "the connection registry" |
+| A run with **no** enabled connection is exactly the run it always was, and a run with an active one uses that connection's route, base URL and credential | project requirement | F-10 | `tests/contracts/cli-surface.test.ts` — "CC-021 — a run uses the active connection" |
 
 ## The manager surfaces — conformance
 

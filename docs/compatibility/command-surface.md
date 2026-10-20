@@ -537,6 +537,7 @@ This implementation reads the shape the target's own SDK protocol uses: the stan
 | The **exit codes** | `0` success, `1` failure, `2` an argument error | the audit records this implementation's two known ones |
 | The **gateway condition** | the settings key `useGateway` | the target's condition (`Br() \|\| aet() \|\| cet()`) is not resolved in the REA record |
 | The **manager surfaces** | `/provider`, `catalog`, and their `--provider` / `--catalog` forms | a **project extension** — see [`provider-catalog.md`](provider-catalog.md) |
+| The **run's credential** | the **active connection's** credential, resolved through `resolveConnectionCredential`; a run with **no** connection is exactly the run it always was | a **project extension** — the target has no connection table, and its credential comes from the environment. See [`provider-catalog.md`](provider-catalog.md), "A run uses the active connection" |
 
 ## The in-session slash-command registry (REA observed)
 
