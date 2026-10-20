@@ -128,8 +128,23 @@ import type { BuiltinToolDeps } from '../tools/builtins/shared.js';
 import { createToolRegistry } from '../tools/registry.js';
 
 import type { ParsedArgs, ParsedCommandArgs, ParsedManagerArgs, ParsedRunArgs } from './args.js';
-import type { CloudTarget } from './args.js';
-import { DEFAULT_MODEL, findSessionIdInPath, isSessionId } from './args.js';
+import type { CloudTarget, CliCommand } from './args.js';
+import {
+  BOOLEAN_FLAG_NAMES,
+  CLI_COMMAND_GROUPS,
+  CLI_COMMAND_TREE,
+  COMMAND_TOKEN_NAMES,
+  DEFAULT_MODEL,
+  FLAG_ARGUMENT_HINTS,
+  OPTIONAL_VALUE_FLAG_NAMES,
+  REPEATABLE_FLAG_NAMES,
+  SHORT_FLAG_ALIASES,
+  SESSION_SUBCOMMAND_NAMES,
+  VALUE_FLAG_NAMES,
+  cliCommandOf,
+  findSessionIdInPath,
+  isSessionId,
+} from './args.js';
 import { readStreamJsonInput, runHeadless } from './headless.js';
 import { PROVIDER_STATE_FILE, runInteractiveSession } from './interactive.js';
 import type { InteractiveContext, MountApp } from './interactive.js';
@@ -167,44 +182,156 @@ export const CLI_VERSION = '0.1.0';
 export { DEFAULT_MODEL };
 
 /**
+ * The width of the usage column of the help.
+ *
+ * It is declared **before** the help text is built: the help is a module-level
+ * constant, and a `const` declared after it would not be initialised yet.
+ */
+const COMMAND_COLUMN = 34;
+
+/**
  * The help text.
  *
- * **Implementation choice.** The audit records the flag names it observed and no help
- * text, so the text below is this implementation's own.
+ * **Implementation choice.** The audit records the flag names and no help
+ * text, so the text below is this implementation's own. Its **shape** is the
+ * target's: the target's own `--help` lists every flag of its vocabulary —
+ * including the flags the build has no behaviour for — and lists the commands
+ * it registers.
+ *
+ * The flag list is **generated** from the vocabulary the parser knows, so the
+ * help and the parser cannot drift apart.
  */
-export const HELP_TEXT = `Usage: prricode [options] [prompt]
+export const HELP_TEXT = buildHelpText();
 
-Options:
-  -p, --print                 run in print mode and write the answer to stdout
-  -c, --continue              continue the newest session
-  -r, --resume <id|title>     resume a session by its id or its exact title
-      --resume-session-at <uuid>
-                              resume at a message
-      --output-format <fmt>   text (the default), json or stream-json
-      --input-format <fmt>    text (the default) or stream-json
-      --model <id>            the model the run uses
-      --session-id <id>       the id of the session
-      --permission-mode <mode>
-                              default, manual, acceptEdits, bypassPermissions,
-                              plan, auto or dontAsk
-      --allowedTools <tool…>  the tools that need no approval
-      --disallowedTools <tool…>
-                              the tools that are refused
-      --tools <tool…>         the tools the session offers
-      --add-dir <dir…>        the directories the session may write in
-      --settings <file>       a settings file to load over the tiered ones
-      --init-only             set the session up and stop
-      --fork-session          load a copy of the session that is resumed
-      --dangerously-skip-permissions
-                              start in bypassPermissions mode
-  -h, --help                  write this help and stop
-  -v, --version               write the version and stop
+/**
+ * Build the help text.
+ *
+ * The flags are listed by the four shapes the target's parser knows, and the
+ * commands are the target's command tree.
+ */
+function buildHelpText(): string {
+  const lines: string[] = [];
+  lines.push('Usage: prricode [options] [prompt]');
+  lines.push('       prricode <command> [options] [arguments]');
+  lines.push('');
 
-Commands:
-  attach, logs, stop, kill, respawn, rm
+  lines.push('Options:');
+  lines.push('  Flags that take a value:');
+  for (const line of flagLines(VALUE_FLAG_NAMES)) lines.push(`    ${line}`);
+  lines.push('  Flags that take a value and may be repeated');
+  lines.push('  (every following non-flag token belongs to the flag):');
+  for (const line of flagLines(REPEATABLE_FLAG_NAMES)) lines.push(`    ${line}`);
+  lines.push('  Flags that take an optional value');
+  lines.push('  (the next token, when it does not look like a flag):');
+  for (const line of flagLines(OPTIONAL_VALUE_FLAG_NAMES)) lines.push(`    ${line}`);
+  lines.push('  Flags that take no value:');
+  for (const line of flagLines(BOOLEAN_FLAG_NAMES)) lines.push(`    ${line}`);
+  lines.push('  Tokens that are commands, not flags:');
+  for (const token of COMMAND_TOKEN_NAMES) {
+    lines.push(`    ${token}`);
+  }
+  lines.push('');
 
-${PROVIDER_EXTENSION_NOTICE} It is reached through the /provider command.
-`;
+  lines.push('Commands:');
+  for (const line of commandLines(CLI_COMMAND_GROUPS, 1)) lines.push(`  ${line}`);
+  lines.push('');
+
+  lines.push(`${PROVIDER_EXTENSION_NOTICE} It is reached through the /provider command.`);
+  lines.push('');
+  return lines.join('\n');
+}
+
+/**
+ * The lines a list of flags is listed by.
+ *
+ * The target declares `-n, --name <name>`: the two spellings are **one** flag,
+ * and the vocabulary carries both because the target's scanner must know both.
+ * The help shows such a flag **once**, with both spellings.
+ */
+function flagLines(names: readonly string[]): string[] {
+  const set = new Set(names);
+  const lines: string[] = [];
+  for (const name of names) {
+    const long = SHORT_FLAG_ALIASES.get(name);
+    if (long !== undefined && set.has(long)) continue;
+    lines.push(flagLine(name));
+  }
+  return lines;
+}
+
+/**
+ * The line a flag is listed by.
+ *
+ * The short form comes first when the target declares one, and the argument
+ * hint is the target's own.
+ */
+function flagLine(flag: string): string {
+  const short = shortFormOf(flag);
+  const hint = flagHintOf(flag);
+  const name = short === undefined ? flag : `${short}, ${flag}`;
+  return hint === undefined ? name : `${name} ${hint}`;
+}
+
+/** The short form of a flag, when the target declares one. */
+function shortFormOf(flag: string): string | undefined {
+  for (const [short, long] of SHORT_FLAG_ALIASES) {
+    if (long === flag) return short;
+  }
+  return undefined;
+}
+
+/** The argument hint of a flag, when the target declares one. */
+function flagHintOf(flag: string): string | undefined {
+  const hint = FLAG_ARGUMENT_HINTS.get(flag);
+  return hint;
+}
+
+/**
+ * The lines the command tree is listed by.
+ *
+ * The root-level entries come first, in the order the tree holds them, and
+ * each entry's own commands follow it, indented one level.
+ */
+function commandLines(groups: readonly CliCommand[], depth: number): string[] {
+  const lines: string[] = [];
+  const roots = CLI_COMMAND_TREE.filter((entry) => entry.path.length === 1);
+  const ordered = [
+    ...groups.filter((group) => group.path.length === 1),
+    ...roots.filter((entry) => entry.kind === 'command'),
+  ];
+  for (const entry of ordered) {
+    lines.push(commandLine(entry, depth));
+    const children = CLI_COMMAND_TREE.filter(
+      (child) => child.path.slice(0, -1).join(' ') === entry.path.join(' '),
+    );
+    for (const child of children) {
+      lines.push(commandLine(child, depth + 1));
+      const grandchildren = CLI_COMMAND_TREE.filter(
+        (grandchild) => grandchild.path.slice(0, -1).join(' ') === child.path.join(' '),
+      );
+      for (const grandchild of grandchildren) {
+        lines.push(commandLine(grandchild, depth + 2));
+      }
+    }
+  }
+  return lines;
+}
+
+/**
+ * The line a command is listed by.
+ *
+ * The usage comes first, then the target's own description. A description
+ * that carries line breaks is written on one line: the help is a list.
+ */
+function commandLine(entry: CliCommand, depth: number): string {
+  const usage = entry.usage.padEnd(COMMAND_COLUMN);
+  return `${'  '.repeat(depth)}${usage}  ${oneLine(entry.description)}`;
+}
+
+/** A description on one line. */
+function oneLine(text: string): string {
+  return text.replace(/\s*\n\s*/g, ' ');
+}
 
 /* -------------------------------------------------------------------------- */
 /* The options                                                                 */
@@ -488,14 +615,16 @@ async function runManagerCommand(
  * with a message that names it — the same shape as the `--routine` command and
  * the background mode.
  *
- * The **parser** still knows every one of them: the repeatable set is the
- * audit's own eleven, and the parser consumes every following non-flag token
- * for it whether or not the run can honour it.
+ * The **parser** still knows every one of them: the parser's vocabulary is the
+ * target's own — 85 value-taking flags, 45 boolean flags, 14 optional-value
+ * flags, 10 command tokens and the three flags the target's scanner does not
+ * count — and it parses each of them the way the target parses it.
  *
  * The table is a `Map`, so a flag name is **data**: a lookup can never resolve
  * an inherited member of `Object.prototype`.
  */
-const UNIMPLEMENTED_OPTIONS: ReadonlyMap<string, string> = new Map([
+export const UNIMPLEMENTED_OPTIONS: ReadonlyMap<string, string> = new Map([
+  ['--cloud', 'it names a cloud session, and this implementation has no cloud client'],
   ['--sdk-url', 'it names an SDK server, and this implementation has no SDK server'],
   ['--teleport', 'it moves a session to another machine, and this implementation cannot'],
   ['--max-turns', 'it caps the number of turns, and this implementation makes one turn'],
@@ -503,7 +632,6 @@ const UNIMPLEMENTED_OPTIONS: ReadonlyMap<string, string> = new Map([
   ['--append-system-prompt', 'it appends to the system prompt, and this implementation has none'],
   ['--verbose', "it writes more about what the run does, and this implementation does not"],
   ['--debug', "it writes the run's debug trace, and this implementation does not"],
-  ['--cloud', 'it names a cloud session, and this implementation has no cloud client'],
   ['--remote', 'it names a remote session, and this implementation has no remote client'],
   ['--environment', 'it names a cloud environment, and this implementation has no cloud client'],
   ['--betas', 'it names the beta flags of the request, and this implementation sends none'],
@@ -519,6 +647,212 @@ const UNIMPLEMENTED_OPTIONS: ReadonlyMap<string, string> = new Map([
     '--no-session-persistence',
     'it keeps the session off the disk, and this implementation always writes the transcript',
   ],
+  ['--forward-home-settings', 'it says whether this machine\'s settings go into a cloud session, and this implementation has no cloud client'],
+
+  /* The rest of the target's value flags. */
+  ['--prefill', 'it pre-fills the prompt input, and this implementation does not'],
+  ['--prefill-b64', 'it pre-fills the prompt input, and this implementation does not'],
+  ['--deep-link-repo', 'it names a deep-link repository, and this implementation has no deep links'],
+  ['--deep-link-last-fetch', 'it names a deep-link fetch time, and this implementation has no deep links'],
+  ['--deep-link-cwd-b64', 'it names a deep-link working directory, and this implementation has no deep links'],
+  ['--handle-uri', 'it handles a URI argument, and this implementation has no URI handler'],
+  ['--managed-settings', 'it names managed settings, and this implementation has no managed settings tier'],
+  ['--setting-sources', 'it names the settings tiers to load, and this implementation loads them all'],
+  ['--client-data-url', 'it names a client data url, and this implementation has none'],
+  ['--watch-artifact', 'it names an artifact to watch, and this implementation watches none'],
+  [
+    '--watch-artifact-no-autoreact',
+    'it names an artifact to watch, and this implementation watches none',
+  ],
+  ['--team-name', 'it names a team, and this implementation has no teams'],
+  ['--agent-id', 'it names a background agent, and this implementation has none'],
+  ['--agent-name', 'it names a background agent, and this implementation has none'],
+  ['--agent-color', 'it colours a background agent, and this implementation has none'],
+  ['--parent-session-id', 'it names a parent session, and this implementation has no teammate sessions'],
+  ['--agent-type', 'it names an agent type, and this implementation has no agent registry'],
+  ['--agent', 'it names the agent, and this implementation has no agent registry'],
+  ['--routine', 'it names a routine, and this implementation has no routines'],
+  ['--effort', 'it sets the effort level, and this implementation has none'],
+  ['--fast-mode', 'it turns fast mode on or off, and this implementation has no fast mode'],
+  [
+    '--inherit-permission-mode',
+    'it inherits a permission mode, and this implementation has no teammate sessions',
+  ],
+  ['--proactivity', 'it sets the proactivity level, and this implementation has none'],
+  ['--debug-file', 'it names a debug trace file, and this implementation writes no debug trace'],
+  ['--system-prompt-file', 'it reads the system prompt from a file, and this implementation has none'],
+  [
+    '--append-system-prompt-file',
+    'it appends a system prompt from a file, and this implementation has none',
+  ],
+  [
+    '--system-prompt-snapshot',
+    'it records the system prompt once, and this implementation has no system prompt',
+  ],
+  [
+    '--append-subagent-system-prompt',
+    'it appends to a subagent\'s system prompt, and this implementation has none',
+  ],
+  [
+    '--append-subagent-system-prompt-file',
+    'it appends to a subagent\'s system prompt, and this implementation has none',
+  ],
+  [
+    '--plan-mode-instructions',
+    'it sets the plan mode instructions, and this implementation has none',
+  ],
+  [
+    '--permission-prompt-tool',
+    'it names the tool that asks for permission, and this implementation asks in its own host',
+  ],
+  [
+    '--permission-prompts',
+    'it names where the permission prompts go, and this implementation asks in its own host',
+  ],
+  ['--json-schema', 'it constrains the answer to a schema, and this implementation does not'],
+  ['--fallback-model', 'it names a fallback model, and this implementation has one model'],
+  ['--advisor', 'it names an advisor model, and this implementation has none'],
+  ['--agents', 'it names the agent definitions, and this implementation has no agent registry'],
+  ['--plugin-dir', 'it names a plugin directory, and this implementation has no plugins'],
+  ['--plugin-dir-no-mcp', 'it names a plugin directory, and this implementation has no plugins'],
+  ['--plugin-url', 'it names a plugin url, and this implementation has no plugins'],
+  [
+    '--remote-control-session-name-prefix',
+    'it names a remote control session prefix, and this implementation has no remote control',
+  ],
+  ['--exec', 'it runs a command instead of a prompt, and this implementation runs a prompt'],
+  ['--thinking', 'it sets the thinking mode, and this implementation has no thinking mode'],
+  ['--thinking-display', 'it sets the thinking display, and this implementation has none'],
+  [
+    '--max-thinking-tokens',
+    'it caps the thinking tokens, and this implementation has no thinking budget',
+  ],
+  ['--max-budget-usd', "it caps the run's cost, and this implementation does not measure it"],
+  ['--task-budget', 'it caps a task\'s tokens, and this implementation does not measure them'],
+  [
+    '--autocompact',
+    'it sets the auto-compaction window, and this implementation compacts on demand',
+  ],
+  ['--rewind-files', 'it rewinds the files to a message, and this implementation cannot'],
+  ['--resume-drops-turn', 'it drops a turn from a resume, and this implementation resumes whole sessions'],
+  ['--workload', 'it names a workload, and this implementation has none'],
+  ['--teammate-mode', 'it sets the teammate mode, and this implementation has no teammates'],
+  [
+    '--messaging-socket-path',
+    'it names a messaging socket, and this implementation has none',
+  ],
+  ['--pool', 'it names a pool, and this implementation has none'],
+  ['--ref', 'it names a git ref for a cloud session, and this implementation has no cloud client'],
+  ['--on-branch', 'it names a branch for a cloud session, and this implementation has no cloud client'],
+  ['--correlation-id', 'it names a correlation id, and this implementation sends none'],
+  [
+    '--project-config-root',
+    'it names the project configuration root, and this implementation resolves it from the working directory',
+  ],
+  [
+    '--attach-serve',
+    'it attaches a serve-only helper to a cloud session, and this implementation has no cloud client',
+  ],
+
+  /* The target's optional-value flags this implementation does not act on. */
+  ['--from-pr', 'it resumes a pull request, and this implementation has no pull request surface'],
+  ['--worktree', 'it names a worktree, and this implementation has no worktrees'],
+  ['--project', 'it names a project, and this implementation has no cloud projects'],
+  [
+    '--remote-control',
+    'it names a remote control session, and this implementation has no remote control',
+  ],
+  ['--rc', 'it names a remote control session, and this implementation has no remote control'],
+  [
+    '--prompt-suggestions',
+    'it turns prompt suggestions on or off, and this implementation has none',
+  ],
+
+  /* The target's boolean flags this implementation does not act on. */
+  [
+    '--debug-to-stderr',
+    "it writes the run's debug trace to stderr, and this implementation writes no debug trace",
+  ],
+  ['--bare', 'it starts the session without the project context, and this implementation does not'],
+  ['--safe-mode', 'it restricts the session, and this implementation has no safe mode'],
+  ['--init', 'it runs the setup hooks with the init trigger, and this implementation has no setup hooks'],
+  [
+    '--maintenance',
+    'it runs the setup hooks with the maintenance trigger, and this implementation has no setup hooks',
+  ],
+  [
+    '--include-hook-events',
+    "it writes the hook events to the output stream, and this implementation's output stream carries none",
+  ],
+  [
+    '--include-partial-messages',
+    "it writes the partial messages to the output stream, and this implementation's output stream carries none",
+  ],
+  [
+    '--forward-subagent-text',
+    'it forwards the subagent text to the output stream, and this implementation has no subagent output',
+  ],
+  ['--session-mirror', 'it mirrors the transcript to stdout, and this implementation does not'],
+  ['--await-claim', 'it waits for a session claim, and this implementation has no background sessions'],
+  [
+    '--await-initialize',
+    'it waits for the session initialization, and this implementation has no background sessions',
+  ],
+  [
+    '--allow-dangerously-skip-permissions',
+    'it makes the bypass mode available, and this implementation\'s modes are fixed',
+  ],
+  [
+    '--replay-user-messages',
+    'it replays the user messages to stdout, and this implementation does not',
+  ],
+  [
+    '--host-auth-is-org-sign-in',
+    "it says the host's sign-in is an organisation sign-in, and this implementation has no host sign-in",
+  ],
+  [
+    '--enable-auth-status',
+    'it reports the authentication status, and this implementation has no account sign-in',
+  ],
+  [
+    '--restricted',
+    'it starts the session in restricted mode, and this implementation restricts through the settings instead',
+  ],
+  [
+    '--allow-other-models',
+    'it offers the models this version does not know, and this implementation knows its own',
+  ],
+  [
+    '--exclude-dynamic-system-prompt-sections',
+    'it drops the dynamic system prompt sections, and this implementation has no system prompt',
+  ],
+  [
+    '--include-unsupported-models',
+    'it offers the unsupported models, and this implementation knows its own',
+  ],
+  ['--deep-link-origin', 'it names a deep-link origin, and this implementation has no deep links'],
+  ['--reply-on-resume', 'it replies on a resume, and this implementation resumes silently'],
+  ['--ide', 'it opens the IDE integration, and this implementation has no IDE integration'],
+  ['--desktop', 'it continues in the desktop app, and this implementation has no desktop app'],
+  [
+    '--strict-mcp-config',
+    'it uses only the MCP servers the command line names, and this implementation loads none',
+  ],
+  [
+    '--disable-slash-commands',
+    'it disables the slash commands, and this implementation always registers them',
+  ],
+  ['--chrome', 'it opens the browser integration, and this implementation has none'],
+  ['--no-chrome', 'it opens the browser integration, and this implementation has none'],
+  ['--tmux', 'it runs the session in tmux, and this implementation does not'],
+  [
+    '--enable-auto-mode',
+    'it enables the auto mode, and this implementation\'s auto mode is chosen by the start mode',
+  ],
+  ['--brief', 'it asks for a brief answer, and this implementation has no brief mode'],
+  ['--ax-screen-reader', 'it drives the screen reader, and this implementation does not'],
+  ['--plan-mode-required', 'it requires the plan mode, and this implementation does not'],
+  ['--hard-fail', 'it fails the run on the first error, and this implementation does not'],
 ]);
 
 /**
@@ -556,39 +890,152 @@ function describeCloudTarget(target: CloudTarget): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* The subcommands                                                             */
+/* The commands                                                                */
 /* -------------------------------------------------------------------------- */
 
 /**
- * What each subcommand would do.
+ * The capability each command needs and this implementation does not have.
  *
- * The audit records the six names and not their behaviour, and this implementation has no
- * live-session model to attach to, stop, kill or respawn. The command therefore
- * **recognises** them and says plainly that it does not implement them, rather
- * than pretending to.
+ * **Implementation choice.** The target's own tree says what each command
+ * **does**; it does not say what a clone must have to do it. The capability is
+ * what this implementation would need, and the refusal names it — the same
+ * shape the in-session slash commands use.
  *
- * The table is a `Map`, so the subcommand's name is **data**: the lookup can
- * never resolve an inherited member of `Object.prototype`.
+ * The key is the command's **path**: the group a command lives in when the
+ * command has no entry of its own.
+ *
+ * The table is a `Map`, so a path is **data**: the lookup can never resolve an
+ * inherited member of `Object.prototype`.
  */
-const SUBCOMMAND_INTENT: ReadonlyMap<string, string> = new Map([
-  ['attach', 'attach to a session that is already running'],
-  ['logs', 'write the log of a session that is already running'],
-  ['stop', 'stop the session that is running in the background'],
-  ['kill', 'kill the session that is running in the background'],
-  ['respawn', 'respawn the worker of a session'],
-  ['rm', 'remove a session'],
+const COMMAND_CAPABILITIES: ReadonlyMap<string, string> = new Map([
+  /* The groups. */
+  ['plugin', 'this implementation has no plugin manager'],
+  ['mcp', 'this implementation has no MCP server configuration surface'],
+  ['auth', 'this implementation has no account sign-in'],
+  ['auto-mode', 'this implementation has no auto mode classifier configuration'],
+  ['sandbox', 'this implementation has no Windows sandbox installer'],
+  ['project', 'this implementation has no project state purge'],
+
+  /* The root-level commands. */
+  ['gateway', 'this implementation has no enterprise gateway'],
+  ['setup-token', 'this implementation has no long-lived token setup'],
+  ['agents', 'this implementation has no background agent registry'],
+  ['ultrareview', 'this implementation has no cloud-hosted review'],
+  ['remote-control', 'this implementation has no remote control session'],
+  ['doctor', 'this implementation has no installation doctor'],
+  ['apply-project-settings', 'this implementation has no cloud settings acceptance'],
+  ['update', 'this implementation has no autoupdater'],
+  ['install', 'this implementation has no native build installer'],
+  ['import', 'this implementation has no agent configuration importer'],
+  ['import-conversations', 'this implementation has no conversation importer'],
+  ['purge', 'this implementation has no project state purge'],
+
+  /* The hidden editor commands. */
+  ['edit-hook', 'this implementation has no editor bridge'],
+  ['edit-permission-rules', 'this implementation has no editor bridge'],
+  ['edit-memory-settings', 'this implementation has no editor bridge'],
+  ['edit-skill-overrides', 'this implementation has no editor bridge'],
+  ['edit-sandbox-settings', 'this implementation has no editor bridge'],
+  ['design-login', 'this implementation has no editor bridge'],
+  ['edit-chrome-settings', 'this implementation has no editor bridge'],
+  ['drop-worktree-registrations', 'this implementation has no editor bridge'],
+
+  /* The session-management subcommands. */
+  ['attach', 'this implementation has no live background session to attach to'],
+  ['logs', 'this implementation has no live background session to read the log of'],
+  ['stop', 'this implementation has no live background session to stop'],
+  ['kill', 'this implementation has no live background session to kill'],
+  ['respawn', 'this implementation has no live background session to respawn'],
+  ['rm', 'this implementation has no session store that removes a session'],
 ]);
 
-/** Run one of the target's subcommands. */
+/**
+ * The capability a command needs.
+ *
+ * A command's own entry wins; otherwise the **group** it lives in decides, and
+ * otherwise the command is refused without naming one.
+ */
+function capabilityOf(path: readonly string[]): string | undefined {
+  const own = COMMAND_CAPABILITIES.get(path.join(' '));
+  if (own !== undefined) return own;
+  for (let depth = path.length - 1; depth > 0; depth -= 1) {
+    const group = COMMAND_CAPABILITIES.get(path.slice(0, depth).join(' '));
+    if (group !== undefined) return group;
+  }
+  return undefined;
+}
+
+/**
+ * Run one of the target's commands.
+ *
+ * The command is resolved through the **command tree**, so the path the user
+ * typed decides what runs. A **group** with no command of its own writes the
+ * group's help; a command this implementation does not have writes a refusal
+ * that names the capability it would need.
+ */
 async function runSubcommand(
   parsed: ParsedCommandArgs,
   context: RunContext,
 ): Promise<number> {
-  const intent = SUBCOMMAND_INTENT.get(parsed.command) ?? parsed.command;
+  const entry = cliCommandOf(parsed.path);
+
+  if (entry === undefined) {
+    context.stderr.write(`Error: unknown command '${parsed.path.join(' ')}'.\n`);
+    return EXIT_USAGE;
+  }
+
+  if (entry.kind === 'group') {
+    // **Implementation choice.** The target's own dispatcher writes the group's
+    // help to the error stream and exits with `1` when the group is named with
+    // no command of its own. The wording is this implementation's own.
+    const unknown = parsed.args[0];
+    if (unknown !== undefined) {
+      context.stderr.write(`Error: unknown command '${unknown}' for '${entry.usage}'.\n`);
+      return EXIT_USAGE;
+    }
+    context.stderr.write(groupHelpOf(entry));
+    return EXIT_FAILURE;
+  }
+
+  const capability = capabilityOf(entry.path);
+  if (capability === undefined) {
+    context.stderr.write(
+      `The '${entry.usage}' command is not implemented here yet.\n`,
+    );
+    return EXIT_FAILURE;
+  }
   context.stderr.write(
-    `The '${parsed.command}' command is not implemented here yet. It would ${intent}.\n`,
+    `The '${entry.usage}' command is not implemented here yet: ${capability}.\n`,
   );
   return EXIT_FAILURE;
+}
+
+/**
+ * The help of a group.
+ *
+ * The group, its own commands and their own commands — the tree the target
+ * registers under that group.
+ */
+function groupHelpOf(group: CliCommand): string {
+  const lines: string[] = [];
+  lines.push(`Usage: prricode ${group.usage} <command> [options]`);
+  lines.push('');
+  lines.push(group.description);
+  lines.push('');
+  const children = CLI_COMMAND_TREE.filter(
+    (entry) => entry.path.slice(0, -1).join(' ') === group.path.join(' '),
+  );
+  for (const child of children) {
+    lines.push(commandLine(child, 1));
+    const grandchildren = CLI_COMMAND_TREE.filter(
+      (entry) => entry.path.slice(0, -1).join(' ') === child.path.join(' '),
+    );
+    for (const grandchild of grandchildren) {
+      lines.push(commandLine(grandchild, 2));
+    }
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 /* -------------------------------------------------------------------------- */

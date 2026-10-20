@@ -1,8 +1,8 @@
 # Command-line surface conformance
 
 **Target:** the pinned reference build `2.1.303`, Linux x86-64, SHA-256 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`.
-**Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.10 ("The command-line surface") and this implementation-choice labels the source carries in [`src/cli/args.ts`](../../src/cli/args.ts), [`src/cli/command.ts`](../../src/cli/command.ts), [`src/cli/headless.ts`](../../src/cli/headless.ts) and [`src/cli/output.ts`](../../src/cli/output.ts).
-**Owning task:** `CC-014` (the parser, the headless mode, the output contracts), `CC-016` (the multi-provider manager) and `CC-030` (the in-session slash-command registry) in [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
+**Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.10 ("The command-line surface"), the REA record `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-surfaces.md` §3.4 ("The CLI flags — the complete list") and §G3 ("The CLI command tree"), and the target's own source — `chunk-0y0ptpy9.js` (the flag registry and the parser), `chunk-t0c9yez3.js` (the root command's option declarations), `chunk-64447bxa.js` (the `plugin` tree), `chunk-dmqgh1rk.js` (the `mcp` tree), `chunk-9y799w6p.js` (the `auth`, `auto-mode`, `sandbox` and `project` trees and the root commands) and `chunk-mancccdx.js` (the hidden editor commands) — together with this implementation-choice labels the source carries in [`src/cli/args.ts`](../../src/cli/args.ts), [`src/cli/command.ts`](../../src/cli/command.ts), [`src/cli/headless.ts`](../../src/cli/headless.ts) and [`src/cli/output.ts`](../../src/cli/output.ts).
+**Owning task:** `CC-014` (the parser, the headless mode, the output contracts), `CC-016` (the multi-provider manager), `CC-030` (the in-session slash-command registry) and `CC-031` (the complete flag list and the subcommand tree) in [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
 **Matrix rows:** F-01, F-02, F-38 in [`feature-matrix.md`](feature-matrix.md), and F-40 in [`provider-catalog.md`](provider-catalog.md).
 
 Every row names its **evidence class**: `REA observed` (established from the pinned binary), `Documented only` (external product documentation, not the pinned binary), or `implementation choice` (a decision this implementation makes). The **measured** outcome of each row is in [`results.md`](results.md).
@@ -11,21 +11,348 @@ Every row names its **evidence class**: `REA observed` (established from the pin
 
 The scanner walks `argv` until `--`, which **ends** the flag parsing. A token of the form `--flag=value` yields that value; a token equal to a known flag consumes the next token as its value. A token is a **flag** when it has more than one character and starts with `-` — a lone `-` is a positional.
 
-The parser keeps three sets:
+The target's own parser lives in `chunk-0y0ptpy9.js` and is **seven sets and six functions**. This implementation reproduces the functions one for one, and the sets are the flag list below.
 
-| Set | What it does |
-|---|---|
-| the **value** flags | a known flag consumes the next token as its value, whether or not that token looks like a flag |
-| the **repeatable** subset | a flag of this set consumes **every** following non-flag token, so `--allowedTools Read Write` names two tools |
-| the **boolean** flags | a flag of this set consumes the next token only when it does **not** look like a flag — so `-r`/`--resume` takes an *optional* value |
+| The target's | What it does | This implementation's |
+|---|---|---|
+| `ejt(e)` (`:5387`+ region) | a token looks like a flag when it is longer than one character and starts with `-` | `isFlagToken` |
+| `Ibt(e, n)` (`:3038`) | the index of the **last** token the flag at `n` owns | `flagValueEnd` |
+| `x(e)` (`:5387`+) | whether a token is a **flag** | `isKnownFlag` |
+| `S(e)` (`:5387`+) | whether a token is a **command token** | `isCommandToken` |
+| `c(e)` (`:4441`+ region) | the index of the first token that is not a flag | `firstPositionalIndex` |
+| `Bjo(e)` (`:4383`+ region) | the index of the session-management subcommand, or `-1` | `sessionSubcommandIndex` |
 
-The **repeatable** set is exactly the audit's eleven names: `--allowedTools`, `--allowed-tools`, `--disallowedTools`, `--disallowed-tools`, `--tools`, `--add-dir`, `--mcp-config`, `--betas`, `--file`, `--channels`, `--dangerously-load-development-channels`.
+### The three shapes a flag can have
+
+`Ibt` is the whole of the consumption rule, and it is **commander's** rule:
+
+| Shape | The rule | An example |
+|---|---|---|
+| a **value** flag | owns the **next** token, whether or not that token looks like a flag | `--model --print` gives `--print` to `--model` |
+| a **repeatable** value flag | owns the next token — **whatever it looks like** — and every token after it that does not look like a flag | `--tools --print Read` gives two values to `--tools` |
+| an **optional-value** flag | owns the next token only when that token does **not** look like a flag | `--resume session_abc` names a session; `--resume --print` names none |
+| a **boolean** flag | owns **nothing** | `--verbose what is the weather?` keeps the prompt |
+
+**The audit's summary was wrong, and this milestone corrects it.** The audit describes the **boolean** set as consuming the next non-flag token, and names `-r`/`--resume` as the flag that takes an optional value. The target's own source says otherwise: the boolean set is **pure**, and the optional value belongs to a set of **fourteen** flags — `-d`, `--debug`, `-r`, `--resume`, `--from-pr`, `-w`, `--worktree`, `--teleport`, `--cloud`, `--remote`, `--project`, `--remote-control`, `--rc`, `--prompt-suggestions`. This implementation now applies the optional value to **all fourteen**, which is the target's rule.
+
+### The three flags the scanner does not count
+
+`h` holds `--exec`, `-m` and `--handle-uri`. They **take a value** — `Ibt` consumes it — but `x()` excludes them, so the session-subcommand scanner does not treat them as flags. The exclusion is reproduced: `isKnownFlag` returns `false` for all three.
+
+`x()` also reads the `--flag=value` form by the name **before** the `=`, and matches a boolean flag **whole**: `--model=x` is a flag, `--verbose=x` is **not**.
+
+## The complete flag list (REA observed)
+
+**Source of truth:** the target's own flag registry, `chunk-0y0ptpy9.js` — the five sets and the parser that reads them. The record's §3.4 is the list; the parser is what the list **means**.
+
+| Set | What it holds | How many | Where |
+|---|---|---|---|
+| `l` | flags that take a value | **85** | `chunk-0y0ptpy9.js:1112` |
+| `LBr` | of those, the **repeatable** ones | **11** | `chunk-0y0ptpy9.js:2671` |
+| `d` | flags that take an **optional** value | **14** | `chunk-0y0ptpy9.js:2871` |
+| `f` | **boolean** flags | **45** | `chunk-0y0ptpy9.js:4539` |
+| `m` | tokens that are **commands**, not flags | **10** | `chunk-0y0ptpy9.js:4441` |
+| `g` | the **session-management** subcommands | **6** | `chunk-0y0ptpy9.js:4383` |
+| `h` | value-taking flags the scanner does **not** count as flags | **3** | `chunk-0y0ptpy9.js:5387` |
+
+The totals are therefore **88** value-taking flags (85 + the 3 carve-out), **45** boolean flags, **14** optional-value flags, **11** repeatable flags, **10** command tokens and **6** session subcommands — which is what the record's §3.4 concludes.
+
+### The 85 value-taking flags
+
+```
+  --prefill                      --permission-mode
+  --prefill-b64                  --inherit-permission-mode
+  --deep-link-repo               --proactivity
+  --deep-link-last-fetch         --debug-file
+  --deep-link-cwd-b64            --system-prompt
+  --handle-uri                   --system-prompt-file
+  --settings                     --append-system-prompt
+  --managed-settings             --append-system-prompt-file
+  --setting-sources              --system-prompt-snapshot
+  --client-data-url              --append-subagent-system-prompt
+  --watch-artifact               --append-subagent-system-prompt-file
+  --watch-artifact-no-autoreact  --plan-mode-instructions
+  --team-name                    --permission-prompt-tool
+  --agent-id                     --permission-prompts
+  --agent-name                   --json-schema
+  --agent-color                  --fallback-model
+  --parent-session-id            --advisor
+  --agent-type                   --agents
+  --model                        --name
+  --agent                        -n
+  --routine                      --allowedTools
+  --effort                       --allowed-tools
+  --fast-mode                    --disallowedTools
+```
+
+```
+  --disallowed-tools             --plugin-dir
+  --tools                        --plugin-dir-no-mcp
+  --add-dir                      --plugin-url
+  --mcp-config                   --remote-control-session-name-prefix
+  --betas                        --exec
+  --file                         -m
+  --channels                     --sdk-url
+  --dangerously-load-development-channels
+                                 --thinking
+  --autocompact                  --thinking-display
+  --rewind-files                 --max-thinking-tokens
+  --resume-session-at            --max-turns
+  --resume-drops-turn            --max-budget-usd
+  --workload                     --task-budget
+  --output-format                --teammate-mode
+  --input-format                 --messaging-socket-path
+  --session-id                   --environment
+  --pool                         --ref
+  --on-branch                    --correlation-id
+  --forward-home-settings        --project-config-root
+  --attach-serve
+```
+
+### The 11 repeatable flags
+
+```
+  --allowedTools                 --allowed-tools
+  --disallowedTools              --disallowed-tools
+  --tools                        --add-dir
+  --mcp-config                   --betas
+  --file                         --channels
+  --dangerously-load-development-channels
+```
+
+### The 14 optional-value flags
+
+```
+  -d                             --debug
+  -r                             --resume
+  --from-pr                      -w
+  --worktree                     --teleport
+  --cloud                        --remote
+  --project                      --remote-control
+  --rc                           --prompt-suggestions
+```
+
+### The 45 boolean flags
+
+```
+  -d2e                           --debug-to-stderr
+  --verbose                      -p
+  --print                        --bare
+  --safe-mode                    --init
+  --init-only                    --maintenance
+  --include-hook-events          --include-partial-messages
+  --forward-subagent-text        --session-mirror
+  --await-claim                  --await-initialize
+  --dangerously-skip-permissions --allow-dangerously-skip-permissions
+  --replay-user-messages         --host-auth-is-org-sign-in
+  --enable-auth-status           --restricted
+  --allow-other-models           --exclude-dynamic-system-prompt-sections
+  --include-unsupported-models   -c
+  --continue                     --fork-session
+  --deep-link-origin             --no-session-persistence
+  --reply-on-resume              --ide
+  --desktop                      --strict-mcp-config
+  --disable-slash-commands       --chrome
+  --no-chrome                    --tmux
+  --enable-auto-mode             --bg
+  --background                   --brief
+  --ax-screen-reader             --plan-mode-required
+  --hard-fail
+```
+
+### The 10 command tokens
+
+```
+  -p                             --print
+  --bg                           --background
+  --routine                      -h
+  --help                         -v
+  -V                             --version
+```
+
+### The 6 session-management subcommands
+
+```
+  attach                         logs
+  stop                           kill
+  respawn                        rm
+```
+
+### The 3 flags the scanner does not count
+
+```
+  --exec                         -m
+  --handle-uri
+```
+
+### The argument hints
+
+The **argument hint** of a flag is the target's own, read from the root command's option declarations in `chunk-t0c9yez3.js` (and from `chunk-081t8575.js:75750`, where the target registers `--model` with the alias `-m`). The hint says what shape a flag's value has, and this implementation carries all of them.
+
+| Flag | Hint | Flag | Hint |
+|---|---|---|---|
+| `--model` | `<model>` | `--session-id` | `<uuid>` |
+| `--allowedTools`, `--allowed-tools` | `<tools...>` | `--output-format` | `<format>` |
+| `--disallowedTools`, `--disallowed-tools` | `<tools...>` | `--input-format` | `<format>` |
+| `--tools` | `<tools...>` | `--permission-mode` | `<mode>` |
+| `--add-dir` | `<directories...>` | `--resume-session-at` | `<message id>` |
+| `--mcp-config` | `<configs...>` | `--system-prompt` | `<prompt>` |
+| `--betas` | `<betas...>` | `--json-schema` | `<schema>` |
+| `--file` | `<specs...>` | `--fallback-model` | `<model>` |
+| `--channels` | `<servers...>` | `--attach-serve` | `<session_id>` |
+| `--dangerously-load-development-channels` | `<servers...>` | `--handle-uri` | `<uri>` |
+| `--name`, `-n` | `<name>` | `--exec` | `<command>` |
+| `--settings` | `<file-or-json>` | `--routine` | `<name>` |
+| `--forward-home-settings` | `<true\|false>` | `--project` | `<name>` |
+| `--resume` | `[value]` | `--debug` | `[filter]` |
+| `--teleport` | `[session]` | `--cloud` | `[description\|session_id\|url]` |
+| `--remote` | `[description\|session_id\|url]` | `--worktree` | `[name]` |
+| `--from-pr` | `[value]` | `--prompt-suggestions` | `[value]` |
+| `--remote-control`, `--rc` | `[name]` | `--verbose` | *(no value)* |
 
 ## The command tokens (REA observed)
 
 A token is a **command**, not a flag, when it is one of `-p`, `--print`, `--bg`, `--background`, `--routine`, `-h`, `--help`, `-v`, `-V`, `--version`, or when it starts with `--routine=`.
 
-The **subcommands** are `attach`, `logs`, `stop`, `kill`, `respawn`, `rm`.
+The **session-management subcommands** are `attach`, `logs`, `stop`, `kill`, `respawn`, `rm` — the set `g` of `chunk-0y0ptpy9.js:4383`.
+
+## The subcommand tree (REA observed)
+
+**Source of truth:** the target's own command registrations, read against the record's §G3 table:
+
+| Group | Entries | Where |
+|---|---|---|
+| `plugin` (alias `plugins`) | 19 | `chunk-64447bxa.js:16382`, and its description registry at `chunk-kctf5bfr.js:693` |
+| `mcp` | 15 | `chunk-dmqgh1rk.js:19834` |
+| `auth` | 4 | `chunk-9y799w6p.js:34608` |
+| `auto-mode` | 5 | `chunk-9y799w6p.js:39124` |
+| `sandbox` (hidden) | 3 | `chunk-9y799w6p.js:42028` |
+| `project` (hidden) | 3 | `chunk-9y799w6p.js:21667` |
+| the **root** commands | 13 | `chunk-9y799w6p.js` |
+| the **hidden editor** commands | 7 | `chunk-mancccdx.js:2065` |
+| the **session-management** subcommands | 6 | `chunk-0y0ptpy9.js:4383` |
+
+**77** entries in all: **8** groups and **69** commands.
+
+The record says "~60 subcommands in eight groups"; the reading against the source finds **77** entries. The difference is that the record's table lists the *leaf* commands and leaves out the **group** nodes (`plugin marketplace`, `mcp xaa`) and the two registrations of `purge` — the visible `purge` at the root and the hidden `project purge` — and the three root commands the record's row does not name (`apply-project-settings`, `import-conversations`, `edit-hook`).
+
+### The table
+
+| Path | Usage | Hidden | Where |
+| --- | --- | --- | --- |
+| `plugin` | `plugin` | no | `chunk-64447bxa.js:16382` |
+| `plugin init` | `plugin init <name>` | no | `chunk-64447bxa.js:16669` |
+| `plugin validate` | `plugin validate <path>` | no | `chunk-64447bxa.js:17288` |
+| `plugin tag` | `plugin tag [path]` | no | `chunk-64447bxa.js:17778` |
+| `plugin list` | `plugin list` | no | `chunk-64447bxa.js:18371` |
+| `plugin eval` | `plugin eval [target]` | no | `chunk-64447bxa.js:19085` |
+| `plugin eval init` | `plugin eval init [name]` | no | `chunk-64447bxa.js:23408` |
+| `plugin test` | `plugin test [dir]` | yes | `chunk-64447bxa.js:24175` |
+| `plugin details` | `plugin details <name>` | no | `chunk-64447bxa.js:24806` |
+| `plugin marketplace` | `plugin marketplace` | no | `chunk-64447bxa.js:25087` |
+| `plugin marketplace add` | `plugin marketplace add <source>` | no | `chunk-64447bxa.js:25180` |
+| `plugin marketplace list` | `plugin marketplace list` | no | `chunk-64447bxa.js:26599` |
+| `plugin marketplace remove` | `plugin marketplace remove <name>` | no | `chunk-64447bxa.js:26900` |
+| `plugin marketplace update` | `plugin marketplace update [name]` | no | `chunk-64447bxa.js:27489` |
+| `plugin install` | `plugin install <plugin>` | no | `chunk-64447bxa.js:27903` |
+| `plugin uninstall` | `plugin uninstall <plugin>` | no | `chunk-64447bxa.js:30601` |
+| `plugin prune` | `plugin prune` | no | `chunk-64447bxa.js:31451` |
+| `plugin enable` | `plugin enable <plugin>` | no | `chunk-64447bxa.js:31968` |
+| `plugin disable` | `plugin disable [plugin]` | no | `chunk-64447bxa.js:32434` |
+| `plugin update` | `plugin update <plugin>` | no | `chunk-64447bxa.js:32953` |
+| `plugin configure` | `plugin configure <plugin>` | no | `chunk-64447bxa.js:34171` |
+| `mcp` | `mcp` | no | `chunk-dmqgh1rk.js:19834` |
+| `mcp add` | `mcp add <name> <commandOrUrl> [args...]` | no | `chunk-dmqgh1rk.js:10959` |
+| `mcp add-json` | `mcp add-json <name> <json>` | no | `chunk-dmqgh1rk.js:22953` |
+| `mcp add-from-claude-desktop` | `mcp add-from-claude-desktop` | no | `chunk-dmqgh1rk.js:23455` |
+| `mcp remove` | `mcp remove <name>` | no | `chunk-dmqgh1rk.js:20925` |
+| `mcp list` | `mcp list` | no | `chunk-dmqgh1rk.js:21324` |
+| `mcp get` | `mcp get <name>` | no | `chunk-dmqgh1rk.js:21777` |
+| `mcp login` | `mcp login <name>` | no | `chunk-dmqgh1rk.js:22243` |
+| `mcp logout` | `mcp logout <name>` | no | `chunk-dmqgh1rk.js:22688` |
+| `mcp reset-project-choices` | `mcp reset-project-choices` | no | `chunk-dmqgh1rk.js:23757` |
+| `mcp serve` | `mcp serve` | no | `chunk-dmqgh1rk.js:19948` |
+| `mcp xaa` | `mcp xaa` | no | `chunk-dmqgh1rk.js:15447` |
+| `mcp xaa setup` | `mcp xaa setup` | no | `chunk-dmqgh1rk.js:15519` |
+| `mcp xaa login` | `mcp xaa login` | no | `chunk-dmqgh1rk.js:17310` |
+| `mcp xaa show` | `mcp xaa show` | no | `chunk-dmqgh1rk.js:18798` |
+| `mcp xaa clear` | `mcp xaa clear` | no | `chunk-dmqgh1rk.js:19460` |
+| `auth` | `auth` | no | `chunk-9y799w6p.js:34608` |
+| `auth login` | `auth login` | no | `chunk-9y799w6p.js:34685` |
+| `auth status` | `auth status` | no | `chunk-9y799w6p.js:35187` |
+| `auth logout` | `auth logout` | no | `chunk-9y799w6p.js:35574` |
+| `auto-mode` | `auto-mode` | no | `chunk-9y799w6p.js:39124` |
+| `auto-mode defaults` | `auto-mode defaults` | no | `chunk-9y799w6p.js:39214` |
+| `auto-mode config` | `auto-mode config` | no | `chunk-9y799w6p.js:39695` |
+| `auto-mode reset` | `auto-mode reset` | no | `chunk-9y799w6p.js:40064` |
+| `auto-mode critique` | `auto-mode critique` | no | `chunk-9y799w6p.js:40453` |
+| `sandbox` | `sandbox` | yes | `chunk-9y799w6p.js:42028` |
+| `sandbox install` | `sandbox install` | yes | `chunk-9y799w6p.js:42069` |
+| `sandbox status` | `sandbox status` | yes | `chunk-9y799w6p.js:42363` |
+| `project` | `project` | yes | `chunk-9y799w6p.js:21667` |
+| `project purge` | `project purge [path]` | yes | `chunk-9y799w6p.js:21776` |
+| `purge` | `purge [path]` | no | `chunk-9y799w6p.js:21776` |
+| `gateway` | `gateway` | no | `chunk-9y799w6p.js:33972` |
+| `setup-token` | `setup-token` | no | `chunk-9y799w6p.js:35913` |
+| `agents` | `agents` | no | `chunk-9y799w6p.js:36231` |
+| `ultrareview` | `ultrareview [target]` | no | `chunk-9y799w6p.js:38379` |
+| `remote-control` | `remote-control` | yes | `chunk-9y799w6p.js:40856` |
+| `doctor` | `doctor` | no | `chunk-9y799w6p.js:41274` |
+| `apply-project-settings` | `apply-project-settings` | yes | `chunk-9y799w6p.js:41592` |
+| `update` | `update` | no | `chunk-9y799w6p.js:42646` |
+| `install` | `install [target]` | no | `chunk-9y799w6p.js:42825` |
+| `import` | `import` | no | `chunk-9y799w6p.js:43139` |
+| `import-conversations` | `import-conversations <exportPath>` | yes | `chunk-9y799w6p.js:43668` |
+| `edit-hook` | `edit-hook` | yes | `chunk-9y799w6p.js:20517` |
+| `edit-permission-rules` | `edit-permission-rules` | yes | `chunk-mancccdx.js:2065` |
+| `edit-memory-settings` | `edit-memory-settings` | yes | `chunk-mancccdx.js:2821` |
+| `edit-skill-overrides` | `edit-skill-overrides` | yes | `chunk-mancccdx.js:3554` |
+| `edit-sandbox-settings` | `edit-sandbox-settings` | yes | `chunk-mancccdx.js:4304` |
+| `design-login` | `design-login` | yes | `chunk-mancccdx.js:5036` |
+| `edit-chrome-settings` | `edit-chrome-settings` | yes | `chunk-mancccdx.js:6017` |
+| `drop-worktree-registrations` | `drop-worktree-registrations` | yes | `chunk-mancccdx.js:6759` |
+| `attach` | `attach <session>` | no | `chunk-0y0ptpy9.js:4383` |
+| `logs` | `logs <session>` | no | `chunk-0y0ptpy9.js:4383` |
+| `stop` | `stop <session>` | no | `chunk-0y0ptpy9.js:4383` |
+| `kill` | `kill <session>` | no | `chunk-0y0ptpy9.js:4383` |
+| `respawn` | `respawn <session>` | no | `chunk-0y0ptpy9.js:4383` |
+| `rm` | `rm <session>` | no | `chunk-0y0ptpy9.js:4383` |
+
+The six **session-management** subcommands are the target's set `g`, and the target's set carries the six names and **no description** — the descriptions in the table are this implementation's own.
+
+### The aliases
+
+| Alias | The command it answers to |
+|---|---|
+| `plugins` | `plugin` |
+| `new` | `plugin init` |
+| `i` | `plugin install` |
+| `remove`, `rm` | `plugin uninstall` |
+| `autoremove` | `plugin prune` |
+| `rm` | `plugin marketplace remove` |
+| `rc` | `remote-control` |
+| `upgrade` | `update` |
+
+### The clone-choice labels this milestone adds
+
+| Label | What it means | Which entries |
+|---|---|---|
+| **implemented** | the parser knows the entry, and the dispatcher reaches its handler | none — this implementation runs **no** command of the tree |
+| **refused** | the parser knows the entry, the dispatcher reaches it, and the refusal names the **capability** the command needs and this implementation does not have | all **69** commands |
+
+The refusal's wording is this implementation's own:
+
+```
+The '<path>' command is not implemented here yet: this implementation has no <capability>.
+```
+
+A command that is refused is **not** silently dropped: it is in the tree, it is in the help, and naming it says what would have to exist for it to run.
+
+### What the target's product name is replaced by
+
+The tree reproduces the target's **data** — the paths, the usage strings, the descriptions, the aliases, the hidden flag and the offsets. It does not reproduce the target's **product name**: where the target's own text names its product, this implementation says **PRRICODE**.
+
+The target's *environment variables*, *model ids*, *API hosts* and *file names* keep the target's names, because those are the data the implementation has to speak to: `CLAUDE.md`, `.claude/`, `.claude-plugin/`, `claude.ai`, `claude-sonnet-4-5`, and the command name `mcp add-from-claude-desktop`, are unchanged.
 
 ## The shapes (REA observed)
 
@@ -81,11 +408,33 @@ The audit's `<mode>` placeholder is ambiguous: it records three rows that name a
 
 Each of these is this implementation's own decision, labelled as such in the source it lives in.
 
-### The boolean-flag deviation
+### The boolean-flag deviation — **now resolved against the audit**
 
-**Implementation choice, deliberate.** The audit describes the **boolean** set as consuming the next non-flag token. Taken literally, every boolean would swallow the prompt: `agent --continue "the prompt"` would run with no prompt at all. This implementation applies the optional value to **the flag the audit names** — `-r`/`--resume` — and keeps the rest of the boolean set **pure**.
+**The audit was wrong, and the target's own source settles it.** The audit describes the **boolean** set as consuming the next non-flag token. The target's parser (`chunk-0y0ptpy9.js`) says the opposite: a boolean flag owns **nothing**, and the optional value belongs to a set of **fourteen** flags (`-d`, `--debug`, `-r`, `--resume`, `--from-pr`, `-w`, `--worktree`, `--teleport`, `--cloud`, `--remote`, `--project`, `--remote-control`, `--rc`, `--prompt-suggestions`).
 
-The audit's rule is therefore reproduced **for the flag it names**, and narrowed everywhere else. The narrowing is a deliberate divergence and it is recorded here rather than left implicit.
+This implementation now applies the optional value to **all fourteen**, which is the target's rule, and the boolean set is **pure** — as the target's own root command declares it (`-p, --print`, `-c, --continue`, `--verbose`, … carry no argument). The narrowing this implementation made in `CC-014` is therefore **withdrawn**: the target's own behaviour is reproduced everywhere, and the divergence is gone.
+
+### The three divergences this milestone keeps
+
+**Implementation choice, deliberate.** Three places where this implementation's behaviour is not the target's, each pinned by an existing contract test:
+
+| The flag | The target's own rule | This implementation | Why |
+|---|---|---|---|
+| `-d2e` | a **short form** of `--debug-to-stderr`, and a boolean flag of the target's `f` set | an **unknown option** | the `CC-014` contract test and the compatibility scenario `F-01` both pin the message `Error: unknown option '-d2e'.` The **vocabulary** still carries it among the target's forty-five boolean flags, and the target's own scanner (`isKnownFlag`) still counts it — only the **parser** refuses it |
+| `--attach-serve` | a **value** flag, `--attach-serve <session_id>`: it owns the next token, and a line without one is a missing-argument error | it owns the next token only when that token does **not** look like a flag | the `CC-014` contract test pins both the target's `--attach-serve` message for a line that gives the flag without a session id, and that the flag does not swallow the `--print` that follows it. The **vocabulary** still carries it among the target's eighty-five value flags |
+| `--print=<value>` | the target declares `--print` as a **boolean**, and takes the prompt from the positional argument | `--print=<value>` names the prompt | this implementation's own extension, kept because the `CC-014` contract test pins it |
+
+### The discrepancies between the record and the target's source
+
+The record's §3.4 and §G3 were read against the target's own source, and the two readings disagree in five places. The **parser's** reading is the one this implementation follows, for the same reason the `CC-030` milestone followed the parser's reading of the slash-command registry: the registry is the target's, and a thing the target registers is a thing the surface holds.
+
+| # | The record says | The target's source says | The reading this implementation took |
+|---|---|---|---|
+| 1 | "roughly ninety value-taking flags and forty boolean ones" | exactly **85** value-taking (+ the 3 carve-out = 88) and **45** boolean | the **source**: the exact figures are 85 + 3 and 45, and the record's own §3.4 totals agree |
+| 2 | the **boolean** set consumes the next non-flag token, and `-r`/`--resume` is the flag that takes an optional value | the boolean set consumes **nothing**; the **optional-value** set has **fourteen** members | the **source**: the optional value is applied to all fourteen, and the boolean set is pure. The `CC-014` narrowing is withdrawn |
+| 3 | "~60 subcommands in eight groups" | **77** entries: **8** groups and **69** commands | the **source**: the record's table lists the leaf commands and leaves out the group nodes (`plugin marketplace`, `mcp xaa`), the two registrations of `purge`, and the three root commands its row does not name (`apply-project-settings`, `import-conversations`, `edit-hook`) |
+| 4 | the record's `plugin` row lists **18** subcommands | the target registers **19** entries under `plugin` (the record's list plus the `marketplace` **group** node) | the **source**: the group node is in the tree, because it is a thing the target registers |
+| 5 | the target's flag registry ends with `...[]]` — a spread of an **empty** array — in the value and boolean sets | the same | the **source**, as extracted: the literal members are the whole of both sets, and the counts are 85 and 45. The spread is recorded here so that a reader who finds it knows it was seen |
 
 ### The invalid-output-format wording
 
@@ -117,6 +466,18 @@ Error: Invalid permission mode "<value>".
 
 **Implementation choice.** The audit records the flag names and not what they do, and this implementation does not implement them. A flag this implementation accepts and then ignores is worse than one it refuses, so each of them is **refused by the run**, before anything is set up, with a message that names it.
 
+This milestone extends the rule from the audit's seventeen names to **every** flag of the target's vocabulary that the run does not act on. The parser knows **144** flags, and there is no third case for any of them — a flag is either acted on or refused:
+
+| | How many | Which |
+|---|---|---|
+| **acted on** by the run | **19** | `--model`, `--settings`, `--allowedTools`, `--allowed-tools`, `--disallowedTools`, `--disallowed-tools`, `--tools`, `--add-dir`, `--output-format`, `--input-format`, `--session-id`, `--resume-session-at`, `--permission-mode`, `--continue`, `--resume`, `--fork-session`, `--init-only`, `--dangerously-skip-permissions`, `--print` |
+| **refused by the run** | **115** | every flag of the vocabulary that is not acted on, and not one of the four rows below |
+| **refused by the background mode** | **2** | `--bg`, `--background` |
+| **the short form** of a flag above | **7** | `-n`, `-m`, `-c`, `-r`, `-p`, `-d`, `-w` |
+| **refused by the parser** as an unknown option | **1** | `-d2e` |
+
+The contract test "refuses every flag of the target's vocabulary that the run does not act on" says so, and the refusal list itself is checked against the vocabulary from the other side.
+
 | Option | Why this implementation refuses it |
 |---|---|
 | `--sdk-url` | it names an SDK server, and this implementation has no SDK server |
@@ -137,7 +498,21 @@ Error: Invalid permission mode "<value>".
 | `--name` | it names the session, and this implementation has no name for one |
 | `--no-session-persistence` | it keeps the session off the disk, and this implementation always writes the transcript |
 
+The **rest** of the refused flags — the target's other **98** — are refused for the same reason and with the same shape; their reason is in `UNIMPLEMENTED_OPTIONS` in [`src/cli/command.ts`](../../src/cli/command.ts), one line each, next to the flag it names.
+
 The **parser** still knows every one of them, so the audit's own validation messages fire first.
+
+### The unimplemented commands
+
+**Implementation choice.** The target's command tree holds **69** commands, and this implementation runs **none** of them: the plugin manager, the MCP configuration surface, the account sign-in, the auto mode classifier configuration, the Windows sandbox, the project purge, the enterprise gateway, the autoupdater, the native build installer, the agent importers, the remote control and the editor bridge are all **later milestones** or **other products**.
+
+Each command is therefore **recognised** — the parser knows its path, its aliases and its arguments — and **refused** with a message that names the capability it needs:
+
+```
+The 'plugin init' command is not implemented here yet: this implementation has no plugin manager.
+```
+
+A **group** named with no command of its own writes the group's help to the error stream and exits with `1`; a group named with a command it does not have is an **unknown command** and exits with `2`.
 
 ### The stream-json input
 
@@ -151,13 +526,13 @@ This implementation reads the shape the target's own SDK protocol uses: the stan
 
 | Choice | What this implementation does | Why it is this implementation's |
 |---|---|---|
-| The **short flag cluster** | the pattern is widened to `^-[A-Za-z0-9]{2,}$`, so the audit's own example (`-d2e`) is one token; it is expanded only when **every** letter is a known short flag | the audit's pattern does not match its own example |
-| The **bare subcommand** | a subcommand is a command when it comes **first** | the audit names the six names and not where they may appear; the first token is the only placement that cannot swallow a prompt |
-| The **subcommands** | the six names are recognised and **refused** by the run | the audit records their names and not their behaviour |
+| The **short flag cluster** | the pattern is widened to `^-[A-Za-z0-9]{2,}$`, so the target's own example (`-d2e`) is one token; it is expanded only when **every** letter is a known short flag | the target's pattern does not match its own example, and the target does not expand clusters at all — its own `S()` treats a cluster as a *command token* |
+| The **bare command** | a command's name is a command when it comes **first** | the target's dispatcher is commander's, and a command's name is always its first argument; the first token is the only placement that cannot swallow a prompt |
+| The **command tree** | the target's **77** entries are recognised and **refused** by the run | the target's commands need capabilities this implementation does not have — see "The unimplemented commands" |
 | The **background mode** | recognised and refused by the run | this implementation does not run it |
 | The **default model** | `claude-sonnet-4-5` | the audit does not record the target's default model |
 | The **version** | this implementation's own `package.json` version | this implementation does not claim to be the reference agent |
-| The **help text** | this implementation's own | the audit records the flag names and no help text |
+| The **help text** | this implementation's own, **generated** from the vocabulary and the tree | the audit records the flag names and no help text; generating it means the help and the parser cannot drift apart |
 | The **output documents** | this implementation's own shapes | the audit pins the three formats and nothing about what a document contains |
 | The **exit codes** | `0` success, `1` failure, `2` an argument error | the audit records this implementation's two known ones |
 | The **gateway condition** | the settings key `useGateway` | the target's condition (`Br() \|\| aet() \|\| cet()`) is not resolved in the REA record |
@@ -396,8 +771,16 @@ The **formats** are the target's; the **documents** are this implementation's.
 | A token is a flag when it has more than one character and starts with `-` | REA observed | F-01 | same file — "does not read a flag after --" |
 | A short flag cluster is one token, and it is expanded only when every letter is known | REA observed + implementation choice (the widened pattern) | F-01 | same file — "treats a short flag cluster as one token", "expands a short flag cluster whose letters are all known flags" |
 | The repeatable set is the audit's eleven names, and each consumes every following non-flag token | REA observed | F-01 | same file — "consumes every following non-flag token for a repeatable flag" |
-| The optional value belongs to `-r`/`--resume`, and the **rest** of the boolean set is pure | REA observed (the flag) + **implementation choice** (the narrowing) | F-38 | same file — "keeps the optional value of --resume", "takes no value for --resume when the next token is a flag", "keeps the prompt out of a boolean flag" |
-| The six subcommands are the target's, and a bare subcommand is a command when it comes first | REA observed (the names) + implementation choice (the placement) | F-01 | same file — "recognises the six subcommands" |
+| The **optional value** belongs to the target's **fourteen** optional-value flags, and the **boolean** set is pure | REA observed (the target's parser) — the audit's summary was wrong | F-38 | same file — the "the target’s flag shapes" block: "gives an optional-value flag the next token only when it does not look like a flag", "gives a boolean flag nothing" |
+| A **value** flag owns the next token, whether or not that token looks like a flag | REA observed | F-38 | same file — "gives a value flag the next token, even one that looks like a flag" |
+| A **repeatable** flag owns the next token whatever it looks like | REA observed | F-38 | same file — "gives a repeatable flag a first token that looks like a flag" |
+| The **three** flags the target's scanner does not count (`--exec`, `-m`, `--handle-uri`) | REA observed | F-38 | same file — "counts the three flags the target’s scanner does not count" |
+| The target's **flag registry**: 85 value-taking, 11 repeatable, 14 optional-value, 45 boolean, 10 command tokens, 6 session subcommands, 3 carve-out | REA observed | F-38 | same file — the "the complete flag vocabulary" block |
+| The target's **argument hints** | REA observed | F-38 | same file — "carries the target’s argument hints" |
+| The target's **parser**: the flag test, the command-token test, the first-positional rule and the session-subcommand rule | REA observed | F-38 | same file — "reproduces the target’s command-token test", "reproduces the target’s first-positional rule", "reproduces the target’s session-subcommand rule" |
+| The target's **command tree**: 77 entries in eight groups, with their usages, aliases, hidden flags and offsets | REA observed | F-38 | same file — the "the subcommand tree" block |
+| Every command of the tree **dispatches**, and the ones this implementation does not have are **refused** with a named capability | **implementation choice** (the refusal) | F-38 | same file — the "the command dispatch" block |
+| The six session-management subcommands are the target's, and a bare command is a command when it comes first | REA observed (the names) + implementation choice (the placement) | F-01 | same file — "recognises the six subcommands" |
 | The command tokens are commands, not flags | REA observed | F-38 | same file — "takes one prompt argument for -p", "takes -c as the short form of --continue" |
 | The session-id pattern, and the scan of a path for such a segment | REA observed | F-38 | same file — "recognises the target’s session-id pattern", "scans a path for a session-id segment" |
 | The cloud session ref and the URI arguments | REA observed | F-38 | same file — "knows the cloud session ref and the URI arguments" |
@@ -410,7 +793,8 @@ The **formats** are the target's; the **documents** are this implementation's.
 | `--help` and `--version` win wherever they appear | **implementation choice** | F-38 | same file — "writes the help whatever the order of the flags", "writes the version whatever the order of the flags" |
 | An empty `--print=` is no value at all | **implementation choice** | F-38 | same file — "takes an empty --print= as no prompt at all" |
 | The print mode takes one prompt argument, and `--continue` and `--resume` are mutually exclusive | implementation choice | F-38 | same file — "refuses a second prompt argument in print mode", "refuses --continue together with --resume" |
-| Every option this implementation recognises and does not implement is **refused by the run** | **implementation choice** | F-38 | same file — the "the flags this implementation refuses" block |
+| Every option this implementation recognises and does not implement is **refused by the run** | **implementation choice** | F-38 | same file — the "the flags this implementation refuses" block, and the "the flags the run refuses" block |
+| Every flag of the target's vocabulary is either **acted on** or **refused** — there is no third case | **implementation choice** | F-38 | same file — "refuses every flag of the target’s vocabulary that the run does not act on" |
 | The stream-json input carries JSON documents, and the model receives their **text** | **implementation choice** | F-02 | same file — "reads the text the documents carry", "runs the turn with the text the documents carry, not the raw blob", "refuses a line that is not JSON" |
 | The exit codes are `0`, `1` and `2` | REA observed (the two the audit names) + implementation choice (the names) | F-38 | same file — "returns the argument error’s exit code and writes the message to stderr" |
 | The `--settings` file is loaded as the highest-precedence overlay | **implementation choice** | F-38 | same file — "loads the settings file the --settings flag names", "refuses a settings file it cannot read" |

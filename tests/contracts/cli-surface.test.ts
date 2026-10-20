@@ -46,13 +46,30 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   parseArgs,
+  BOOLEAN_FLAG_NAMES,
+  CLI_COMMAND_GROUPS,
+  CLI_COMMAND_TREE,
+  CLI_COMMANDS,
   CLOUD_SESSION_REF_PATTERN,
+  COMMAND_TOKEN_NAMES,
+  FLAG_ARGUMENT_HINTS,
+  NON_FLAG_VALUE_FLAG_NAMES,
+  OPTIONAL_VALUE_FLAG_NAMES,
+  REPEATABLE_FLAG_NAMES,
   SESSION_ID_PATTERN,
+  SESSION_SUBCOMMAND_NAMES,
   SUBCOMMANDS,
+  VALUE_FLAG_NAMES,
+  cliCommandOf,
+  cliRootCommandOf,
   findSessionIdInPath,
+  firstPositionalIndex,
   isCloudSessionRef,
+  isCommandToken,
+  isKnownFlag,
   isSessionId,
   isUriArgument,
+  sessionSubcommandIndex,
   type ParsedArgs,
   type ParsedRunArgs,
 } from '../../src/cli/args.js';
@@ -69,7 +86,7 @@ import {
   writeHeadlessOutput,
   type OutputSink,
 } from '../../src/cli/output.js';
-import { CLI_VERSION, createCommandSession, runCommand } from '../../src/cli/command.js';
+import { CLI_VERSION, HELP_TEXT, UNIMPLEMENTED_OPTIONS, createCommandSession, runCommand } from '../../src/cli/command.js';
 import { providerManagerCommand } from '../../src/cli/commands/manager.js';
 import { catalogStoreOfState } from '../../src/cli/commands/catalog.js';
 import {
@@ -2242,5 +2259,643 @@ describe('the autocomplete overlay', () => {
     expect(renderAutocompleteSuggestion(row!, true)).toBe(
       '❯ /help – Show help and available commands',
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The complete flag vocabulary                                                */
+/* -------------------------------------------------------------------------- */
+
+describe('the complete flag vocabulary', () => {
+  it('carries the target’s sets, at the target’s counts', () => {
+    // **REA observed** (`chunk-0y0ptpy9.js`): the target's five sets and the
+    // record's counts. The flag list is the contract.
+    expect(VALUE_FLAG_NAMES).toHaveLength(85);
+    expect(REPEATABLE_FLAG_NAMES).toHaveLength(11);
+    expect(OPTIONAL_VALUE_FLAG_NAMES).toHaveLength(14);
+    expect(BOOLEAN_FLAG_NAMES).toHaveLength(45);
+    expect(COMMAND_TOKEN_NAMES).toHaveLength(10);
+    expect(SESSION_SUBCOMMAND_NAMES).toHaveLength(6);
+    expect(NON_FLAG_VALUE_FLAG_NAMES).toHaveLength(3);
+  });
+
+  it('carries the flags the record names', () => {
+    // The record's §3.4 lists, and the target's own registry holds, these.
+    for (const name of [
+      '--prefill',
+      '--deep-link-repo',
+      '--handle-uri',
+      '--settings',
+      '--managed-settings',
+      '--setting-sources',
+      '--model',
+      '--agent',
+      '--routine',
+      '--effort',
+      '--permission-mode',
+      '--system-prompt',
+      '--append-system-prompt',
+      '--plan-mode-instructions',
+      '--permission-prompt-tool',
+      '--permission-prompts',
+      '--json-schema',
+      '--fallback-model',
+      '--advisor',
+      '--agents',
+      '--name',
+      '-n',
+      '--allowedTools',
+      '--allowed-tools',
+      '--disallowedTools',
+      '--disallowed-tools',
+      '--tools',
+      '--add-dir',
+      '--mcp-config',
+      '--betas',
+      '--file',
+      '--channels',
+      '--dangerously-load-development-channels',
+      '--plugin-dir',
+      '--plugin-dir-no-mcp',
+      '--plugin-url',
+      '--remote-control-session-name-prefix',
+      '--exec',
+      '-m',
+      '--sdk-url',
+      '--thinking',
+      '--thinking-display',
+      '--max-thinking-tokens',
+      '--max-turns',
+      '--max-budget-usd',
+      '--task-budget',
+      '--autocompact',
+      '--rewind-files',
+      '--resume-session-at',
+      '--resume-drops-turn',
+      '--workload',
+      '--output-format',
+      '--input-format',
+      '--teammate-mode',
+      '--messaging-socket-path',
+      '--session-id',
+      '--environment',
+      '--pool',
+      '--ref',
+      '--on-branch',
+      '--correlation-id',
+      '--forward-home-settings',
+      '--project-config-root',
+      '--attach-serve',
+    ]) {
+      expect(VALUE_FLAG_NAMES, `${name} is a value flag`).toContain(name);
+    }
+
+    for (const name of [
+      '-d',
+      '--debug',
+      '-r',
+      '--resume',
+      '--from-pr',
+      '-w',
+      '--worktree',
+      '--teleport',
+      '--cloud',
+      '--remote',
+      '--project',
+      '--remote-control',
+      '--rc',
+      '--prompt-suggestions',
+    ]) {
+      expect(OPTIONAL_VALUE_FLAG_NAMES, `${name} is an optional-value flag`).toContain(name);
+    }
+
+    for (const name of [
+      '-d2e',
+      '--debug-to-stderr',
+      '--verbose',
+      '-p',
+      '--print',
+      '--bare',
+      '--safe-mode',
+      '--init',
+      '--init-only',
+      '--maintenance',
+      '--include-hook-events',
+      '--include-partial-messages',
+      '--forward-subagent-text',
+      '--session-mirror',
+      '--await-claim',
+      '--await-initialize',
+      '--dangerously-skip-permissions',
+      '--allow-dangerously-skip-permissions',
+      '--replay-user-messages',
+      '--host-auth-is-org-sign-in',
+      '--enable-auth-status',
+      '--restricted',
+      '--allow-other-models',
+      '--exclude-dynamic-system-prompt-sections',
+      '--include-unsupported-models',
+      '-c',
+      '--continue',
+      '--fork-session',
+      '--deep-link-origin',
+      '--no-session-persistence',
+      '--reply-on-resume',
+      '--ide',
+      '--desktop',
+      '--strict-mcp-config',
+      '--disable-slash-commands',
+      '--chrome',
+      '--no-chrome',
+      '--tmux',
+      '--enable-auto-mode',
+      '--bg',
+      '--background',
+      '--brief',
+      '--ax-screen-reader',
+      '--plan-mode-required',
+      '--hard-fail',
+    ]) {
+      expect(BOOLEAN_FLAG_NAMES, `${name} is a boolean flag`).toContain(name);
+    }
+
+    expect(COMMAND_TOKEN_NAMES).toEqual([
+      '-p',
+      '--print',
+      '--bg',
+      '--background',
+      '--routine',
+      '-h',
+      '--help',
+      '-v',
+      '-V',
+      '--version',
+    ]);
+    expect(NON_FLAG_VALUE_FLAG_NAMES).toEqual(['--exec', '-m', '--handle-uri']);
+  });
+
+  it('keeps the three flag sets disjoint', () => {
+    // The target's parser needs to know which shape a flag has, so the shapes
+    // do not overlap.
+    for (const name of VALUE_FLAG_NAMES) {
+      expect(OPTIONAL_VALUE_FLAG_NAMES).not.toContain(name);
+      expect(BOOLEAN_FLAG_NAMES).not.toContain(name);
+    }
+    for (const name of OPTIONAL_VALUE_FLAG_NAMES) {
+      expect(BOOLEAN_FLAG_NAMES).not.toContain(name);
+    }
+  });
+
+  it('carries the repeatable flags inside the value flags', () => {
+    for (const name of REPEATABLE_FLAG_NAMES) {
+      expect(VALUE_FLAG_NAMES).toContain(name);
+    }
+  });
+
+  it('carries the four flags the command-token set shares with the boolean set', () => {
+    // The target's own sets overlap here: `-p`, `--print`, `--bg` and
+    // `--background` are **both** command tokens and boolean flags.
+    expect(COMMAND_TOKEN_NAMES.filter((name) => BOOLEAN_FLAG_NAMES.includes(name))).toEqual([
+      '-p',
+      '--print',
+      '--bg',
+      '--background',
+    ]);
+  });
+
+  it('carries the target’s argument hints', () => {
+    // The hints are the target's own: they say what shape a flag's value has.
+    expect(FLAG_ARGUMENT_HINTS.get('--model')).toBe('<model>');
+    expect(FLAG_ARGUMENT_HINTS.get('--allowedTools')).toBe('<tools...>');
+    expect(FLAG_ARGUMENT_HINTS.get('--mcp-config')).toBe('<configs...>');
+    expect(FLAG_ARGUMENT_HINTS.get('--resume')).toBe('[value]');
+    expect(FLAG_ARGUMENT_HINTS.get('--debug')).toBe('[filter]');
+    expect(FLAG_ARGUMENT_HINTS.get('--teleport')).toBe('[session]');
+    expect(FLAG_ARGUMENT_HINTS.get('--verbose')).toBeUndefined();
+  });
+
+  it('never names the target’s product', () => {
+    // The flags are the target's **data**, and no flag name carries the
+    // target's product name.
+    for (const name of [
+      ...VALUE_FLAG_NAMES,
+      ...REPEATABLE_FLAG_NAMES,
+      ...OPTIONAL_VALUE_FLAG_NAMES,
+      ...BOOLEAN_FLAG_NAMES,
+      ...COMMAND_TOKEN_NAMES,
+    ]) {
+      expect(name).not.toContain(TARGET_PRODUCT_NAME);
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The target’s flag shapes                                                    */
+/* -------------------------------------------------------------------------- */
+
+describe('the target’s flag shapes', () => {
+  it('gives a value flag the next token, even one that looks like a flag', () => {
+    // The target's own parser: a known value flag owns the next token,
+    // whether or not that token looks like a flag.
+    const parsed = runOf(parseArgs(['--model', '--print']));
+
+    expect(parsed.model).toBe('--print');
+    // The token was the flag's **value**, so it is not the print mode.
+    expect(parsed.print).toBe(false);
+  });
+
+  it('gives a repeatable flag the next token and every non-flag token after it', () => {
+    const parsed = runOf(parseArgs(['--tools', 'Read', 'Write']));
+
+    expect(parsed.tools).toEqual(['Read', 'Write']);
+  });
+
+  it('gives a repeatable flag a first token that looks like a flag', () => {
+    // The target's own parser: the **first** token after a repeatable flag is
+    // the flag's, whatever it looks like.
+    const parsed = runOf(parseArgs(['--tools', '--print', 'Read']));
+
+    expect(parsed.tools).toEqual(['--print', 'Read']);
+    expect(parsed.print).toBe(false);
+  });
+
+  it('gives an optional-value flag the next token only when it does not look like a flag', () => {
+    const named = runOf(parseArgs(['--resume', 'session_abc']));
+    expect(named.resume).toBe('session_abc');
+
+    const bare = runOf(parseArgs(['--resume', '--print']));
+    expect(bare.flags.has('--resume')).toBe(true);
+    expect(bare.resume).toBe('');
+    expect(bare.print).toBe(true);
+  });
+
+  it('gives a boolean flag nothing', () => {
+    const parsed = runOf(parseArgs(['--verbose', 'what is the weather?']));
+
+    expect(parsed.flags.has('--verbose')).toBe(true);
+    expect(parsed.prompt).toBe('what is the weather?');
+  });
+
+  it('counts the three flags the target’s scanner does not count', () => {
+    // The target's `x()`: `--exec`, `-m` and `--handle-uri` take a value, and
+    // the scanner does not count them as flags.
+    expect(isKnownFlag('--exec')).toBe(false);
+    expect(isKnownFlag('-m')).toBe(false);
+    expect(isKnownFlag('--handle-uri')).toBe(false);
+
+    expect(isKnownFlag('--model')).toBe(true);
+    expect(isKnownFlag('--model=x')).toBe(true);
+    expect(isKnownFlag('--verbose')).toBe(true);
+    expect(isKnownFlag('--resume')).toBe(true);
+    // A boolean flag is matched whole, so `--verbose=x` is not a flag.
+    expect(isKnownFlag('--verbose=x')).toBe(false);
+  });
+
+  it('reproduces the target’s command-token test', () => {
+    expect(isCommandToken('-p')).toBe(true);
+    expect(isCommandToken('--version')).toBe(true);
+    expect(isCommandToken('--routine=nightly')).toBe(true);
+    expect(isCommandToken('-abc')).toBe(true);
+    // `-d2e` carries a digit, so it is not a cluster.
+    expect(isCommandToken('-d2e')).toBe(false);
+    expect(isCommandToken('--model')).toBe(false);
+  });
+
+  it('reproduces the target’s first-positional rule', () => {
+    expect(firstPositionalIndex(['--model', 'haiku', 'hello'])).toBe(2);
+    expect(firstPositionalIndex(['--', '--not-a-flag'])).toBe(1);
+    expect(firstPositionalIndex(['--model'])).toBe(-1);
+    // The repeatable flag owns every non-flag token that follows it.
+    expect(firstPositionalIndex(['--tools', 'Read', 'Write'])).toBe(-1);
+  });
+
+  it('reproduces the target’s session-subcommand rule', () => {
+    expect(sessionSubcommandIndex(['attach', 'deadbeef'])).toBe(0);
+    expect(sessionSubcommandIndex(['--model', 'haiku', 'attach', 'deadbeef'])).toBe(2);
+    // The subcommand is the first token: the target answers `0` there and then.
+    expect(sessionSubcommandIndex(['attach'])).toBe(0);
+    // The reference is eight hex digits.
+    expect(sessionSubcommandIndex(['--model', 'haiku', 'attach', 'nothex'])).toBe(-1);
+    expect(sessionSubcommandIndex(['respawn', '--all'])).toBe(0);
+    // A flag the scanner does not count disqualifies the line.
+    expect(sessionSubcommandIndex(['--exec', 'x', 'attach', 'deadbeef'])).toBe(-1);
+    // A command token disqualifies the line too.
+    expect(sessionSubcommandIndex(['--print', 'attach', 'deadbeef'])).toBe(-1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The subcommand tree                                                         */
+/* -------------------------------------------------------------------------- */
+
+describe('the subcommand tree', () => {
+  it('holds the target’s groups', () => {
+    expect(CLI_COMMAND_GROUPS.map((group) => group.path.join(' '))).toEqual([
+      'plugin',
+      'plugin marketplace',
+      'mcp',
+      'mcp xaa',
+      'auth',
+      'auto-mode',
+      'sandbox',
+      'project',
+    ]);
+  });
+
+  it('holds the target’s commands', () => {
+    expect(CLI_COMMAND_TREE).toHaveLength(77);
+    expect(CLI_COMMANDS).toHaveLength(69);
+
+    // The record's §G3 table, read against the target's own source.
+    for (const path of [
+      'plugin init',
+      'plugin validate',
+      'plugin tag',
+      'plugin list',
+      'plugin eval',
+      'plugin eval init',
+      'plugin test',
+      'plugin details',
+      'plugin marketplace add',
+      'plugin marketplace list',
+      'plugin marketplace remove',
+      'plugin marketplace update',
+      'plugin install',
+      'plugin uninstall',
+      'plugin prune',
+      'plugin enable',
+      'plugin disable',
+      'plugin update',
+      'plugin configure',
+      'mcp add',
+      'mcp add-json',
+      'mcp add-from-claude-desktop',
+      'mcp remove',
+      'mcp list',
+      'mcp get',
+      'mcp login',
+      'mcp logout',
+      'mcp reset-project-choices',
+      'mcp serve',
+      'mcp xaa setup',
+      'mcp xaa login',
+      'mcp xaa show',
+      'mcp xaa clear',
+      'auth login',
+      'auth status',
+      'auth logout',
+      'auto-mode defaults',
+      'auto-mode config',
+      'auto-mode reset',
+      'auto-mode critique',
+      'sandbox install',
+      'sandbox status',
+      'project purge',
+      'gateway',
+      'setup-token',
+      'agents',
+      'ultrareview',
+      'remote-control',
+      'doctor',
+      'update',
+      'install',
+      'import',
+      'import-conversations',
+      'edit-hook',
+      'edit-permission-rules',
+      'edit-memory-settings',
+      'edit-skill-overrides',
+      'edit-sandbox-settings',
+      'design-login',
+      'edit-chrome-settings',
+      'drop-worktree-registrations',
+      'attach',
+      'logs',
+      'stop',
+      'kill',
+      'respawn',
+      'rm',
+    ]) {
+      expect(cliCommandOf(path.split(' ')), `${path} is a command`).toBeDefined();
+    }
+  });
+
+  it('answers to the target’s aliases', () => {
+    expect(cliRootCommandOf('plugins')?.path).toEqual(['plugin']);
+    expect(cliCommandOf(['plugin', 'new'])?.path).toEqual(['plugin', 'init']);
+    expect(cliCommandOf(['plugin', 'i'])?.path).toEqual(['plugin', 'install']);
+    expect(cliCommandOf(['plugin', 'remove'])?.path).toEqual(['plugin', 'uninstall']);
+    expect(cliCommandOf(['plugin', 'rm'])?.path).toEqual(['plugin', 'uninstall']);
+    expect(cliCommandOf(['plugin', 'autoremove'])?.path).toEqual(['plugin', 'prune']);
+    expect(cliCommandOf(['plugin', 'marketplace', 'rm'])?.path).toEqual([
+      'plugin',
+      'marketplace',
+      'remove',
+    ]);
+    expect(cliRootCommandOf('rc')?.path).toEqual(['remote-control']);
+    expect(cliRootCommandOf('upgrade')?.path).toEqual(['update']);
+  });
+
+  it('marks the target’s hidden commands', () => {
+    const hidden = CLI_COMMAND_TREE.filter((entry) => entry.hidden).map((entry) =>
+      entry.path.join(' '),
+    );
+
+    expect(hidden).toEqual([
+      'plugin test',
+      'sandbox',
+      'sandbox install',
+      'sandbox status',
+      'project',
+      'project purge',
+      'remote-control',
+      'apply-project-settings',
+      'import-conversations',
+      'edit-hook',
+      'edit-permission-rules',
+      'edit-memory-settings',
+      'edit-skill-overrides',
+      'edit-sandbox-settings',
+      'design-login',
+      'edit-chrome-settings',
+      'drop-worktree-registrations',
+    ]);
+  });
+
+  it('carries the target’s usage strings', () => {
+    // The `plugin` group's usages are the target's own registry
+    // (`chunk-kctf5bfr.js:693`); the rest are the target's own declarations.
+    expect(cliCommandOf(['plugin', 'init'])?.usage).toBe('plugin init <name>');
+    expect(cliCommandOf(['plugin', 'marketplace', 'add'])?.usage).toBe(
+      'plugin marketplace add <source>',
+    );
+    expect(cliCommandOf(['mcp', 'add'])?.usage).toBe('mcp add <name> <commandOrUrl> [args...]');
+    expect(cliCommandOf(['mcp', 'xaa', 'setup'])?.usage).toBe('mcp xaa setup');
+    expect(cliCommandOf(['ultrareview'])?.usage).toBe('ultrareview [target]');
+    expect(cliCommandOf(['import-conversations'])?.usage).toBe(
+      'import-conversations <exportPath>',
+    );
+  });
+
+  it('records where the target puts each command', () => {
+    expect(cliCommandOf(['plugin', 'init'])?.offset).toBe(16669);
+    expect(cliCommandOf(['plugin', 'configure'])?.offset).toBe(34171);
+    expect(cliCommandOf(['mcp', 'xaa', 'setup'])?.offset).toBe(15519);
+    expect(cliRootCommandOf('doctor')?.offset).toBe(41274);
+    expect(cliRootCommandOf('edit-hook')?.source).toBe('chunk-9y799w6p.js');
+    expect(cliRootCommandOf('edit-chrome-settings')?.source).toBe('chunk-mancccdx.js');
+  });
+
+  it('never names the target’s product', () => {
+    // The tree reproduces the target's **data** — the paths, the usages, the
+    // descriptions — and not the target's product name.
+    for (const entry of CLI_COMMAND_TREE) {
+      expect(entry.description).not.toContain(TARGET_PRODUCT_NAME);
+      expect(entry.usage).not.toContain(TARGET_PRODUCT_NAME);
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The command dispatch                                                        */
+/* -------------------------------------------------------------------------- */
+
+describe('the command dispatch', () => {
+  it('resolves a group and its command', () => {
+    const parsed = parseArgs(['plugin', 'init', 'my-plugin']);
+
+    expect(parsed.kind).toBe('command');
+    if (parsed.kind !== 'command') return;
+    expect(parsed.path).toEqual(['plugin', 'init']);
+    expect(parsed.command).toBe('init');
+    expect(parsed.group).toBe('plugin');
+    expect(parsed.args).toEqual(['my-plugin']);
+  });
+
+  it('resolves a nested group and its command', () => {
+    const parsed = parseArgs(['mcp', 'xaa', 'setup']);
+
+    expect(parsed.kind).toBe('command');
+    if (parsed.kind !== 'command') return;
+    expect(parsed.path).toEqual(['mcp', 'xaa', 'setup']);
+    expect(parsed.group).toBe('mcp xaa');
+  });
+
+  it('answers to a group alias', () => {
+    const parsed = parseArgs(['plugins', 'list']);
+
+    expect(parsed.kind).toBe('command');
+    if (parsed.kind !== 'command') return;
+    expect(parsed.path).toEqual(['plugin', 'list']);
+  });
+
+  it('writes the group’s help when the group is named with no command', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+
+    const code = await runCommand(parseArgs(['plugin']), { stdout, stderr });
+
+    expect(code).toBe(EXIT_FAILURE);
+    expect(stderr.text).toContain('plugin init <name>');
+    expect(stderr.text).toContain('plugin marketplace add <source>');
+    expect(stdout.text).toBe('');
+  });
+
+  it('refuses an unknown command of a known group', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+
+    const code = await runCommand(parseArgs(['plugin', 'frobnicate']), { stdout, stderr });
+
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr.text).toContain("unknown command 'frobnicate'");
+  });
+
+  it('refuses every command of the tree, and names a capability', async () => {
+    for (const entry of CLI_COMMANDS) {
+      const stdout = new CollectingSink();
+      const stderr = new CollectingSink();
+
+      const code = await runCommand(parseArgs([...entry.path]), { stdout, stderr });
+
+      expect(code, `${entry.usage} is refused`).toBe(EXIT_FAILURE);
+      expect(stderr.text).toContain(`'${entry.usage}'`);
+      expect(stderr.text).toContain('this implementation has no');
+    }
+  });
+
+  it('lists the whole flag vocabulary and the command tree in the help', () => {
+    expect(HELP_TEXT).toContain('--prefill <text>');
+    expect(HELP_TEXT).toContain('-m, --model <model>');
+    expect(HELP_TEXT).toContain('-r, --resume [value]');
+    expect(HELP_TEXT).toContain('plugin init <name>');
+    expect(HELP_TEXT).toContain('mcp xaa setup');
+    expect(HELP_TEXT).toContain('doctor');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The flags the run refuses                                                   */
+/* -------------------------------------------------------------------------- */
+
+describe('the flags the run refuses', () => {
+  it('refuses every flag of the target’s vocabulary that the run does not act on', () => {
+    // **Implementation choice.** A flag this implementation accepts and then
+    // ignores is worse than one it refuses, so every flag of the target's
+    // vocabulary is either **acted on** or **refused** — there is no third
+    // case.
+    const acted = new Set([
+      '--model',
+      '--settings',
+      '--allowedTools',
+      '--allowed-tools',
+      '--disallowedTools',
+      '--disallowed-tools',
+      '--tools',
+      '--add-dir',
+      '--output-format',
+      '--input-format',
+      '--session-id',
+      '--resume-session-at',
+      '--permission-mode',
+      '--continue',
+      '--resume',
+      '--fork-session',
+      '--init-only',
+      '--dangerously-skip-permissions',
+      '--print',
+      // The short forms the target declares for the flags above.
+      '-m',
+      '-n',
+      '-c',
+      '-r',
+      '-p',
+      // The short forms the target declares for the flags the run refuses:
+      // `-d` is `--debug` and `-w` is `--worktree`.
+      '-d',
+      '-w',
+      // The flag the **parser** refuses as an unknown option.
+      '-d2e',
+      // The two the **commands** refuse.
+      '--bg',
+      '--background',
+      '--routine',
+    ]);
+
+    const known = [
+      ...VALUE_FLAG_NAMES,
+      ...OPTIONAL_VALUE_FLAG_NAMES,
+      ...BOOLEAN_FLAG_NAMES,
+    ];
+    for (const name of known) {
+      if (acted.has(name)) continue;
+      expect(
+        UNIMPLEMENTED_OPTIONS.has(name),
+        `${name} is neither acted on nor refused`,
+      ).toBe(true);
+    }
+    for (const name of UNIMPLEMENTED_OPTIONS.keys()) {
+      expect(known, `${name} is refused but is not a flag of the target`).toContain(name);
+    }
   });
 });
