@@ -53,10 +53,12 @@ import {
   readMatrix,
   readResults,
   type MatrixRow,
+  type Outcome,
   type ResultRow,
 } from './matrix.js';
 import { REPOSITORY_ROOT } from './scenarios.js';
 import { SCENARIOS, meaningfulness, measure, scenarioOf } from './scenarios.js';
+import { declaredTitlesOf } from './references.js';
 
 const REPOSITORY = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -284,15 +286,14 @@ describe('the compatibility report', () => {
     // A probe that observes nothing of this implementation, or that asserts a constant
     // rather than a value it observed, is not a measurement — and the report
     // may not carry one.
+    const problems: string[] = [];
     for (const result of RESULTS) {
       const scenario = scenarioOf(result.id);
       const measurement = await measure(scenario);
       const meaning = meaningfulness(measurement);
-      expect(
-        meaning.meaningful,
-        `${result.id} measured nothing: ${meaning.reason}`,
-      ).toBe(true);
+      if (!meaning.meaningful) problems.push(`${result.id} measured nothing: ${meaning.reason}`);
     }
+    expect(problems).toEqual([]);
   });
 
   it('every row reported as a match has a scenario that passes', async () => {

@@ -23,8 +23,20 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { SESSION_SCHEMA_VERSION } from '../../src/session/event.js';
+import { selectRoute } from '../../src/provider/routes.js';
+
 import { readMatrix } from './matrix.js';
-import { SCENARIOS, meaningfulness, measure, scenarioOf } from './scenarios.js';
+import {
+  SCENARIOS,
+  expect as harnessExpect,
+  meaningfulness,
+  measure,
+  observe,
+  observeCall,
+  scenarioOf,
+  type Scenario,
+} from './scenarios.js';
 
 /**
  * Run a scenario and assert that its claim holds.
@@ -230,5 +242,95 @@ describe('compatibility scenarios', () => {
     const matrixIds = readMatrix().map((row) => row.id);
     const scenarioIds = SCENARIOS.map((scenario) => scenario.rowId);
     expect([...scenarioIds].sort()).toEqual([...matrixIds].sort());
+  });
+});
+
+/**
+ * A scenario that runs one probe, so that the rule can be tried on it.
+ *
+ * The row id is one the matrix does not have: the scenario is a **rule's**
+ * own fixture, not a measurement of this implementation.
+ */
+function probeScenario(probe: Scenario['probe']): Scenario {
+  return {
+    rowId: 'F-99',
+    title: "the rule's own fixture",
+    command: 'npx vitest run tests/compatibility/scenarios.test.ts -t "the rule"',
+    pinning: undefined,
+    probe,
+  };
+}
+
+describe('the harness refuses a rubber stamp', () => {
+  it('a probe that observes a bare constant and compares it with itself measures nothing', async () => {
+    // The proof: `SESSION_SCHEMA_VERSION` is a primitive this implementation merely
+    // exports, so reading it is not reading this implementation's behaviour, and
+    // `expect(c).toBe(c)` compares the value with itself. The rule refuses
+    // the whole measurement.
+    const measurement = await measure(
+      probeScenario(() => {
+        const c = observe('a constant', SESSION_SCHEMA_VERSION);
+        harnessExpect(c).toBe(c);
+        return { outcome: 'match', detail: 'a rubber stamp' };
+      }),
+    );
+    const meaning = meaningfulness(measurement);
+    expect(meaning.meaningful).toBe(false);
+    expect(meaning.reason).toContain('with itself');
+  });
+
+  it('a probe that observes a bare constant measures nothing, even when it compares it with another value', async () => {
+    // The other half of the rule: a bare constant is not a value this implementation
+    // produced, so a probe that reads one has measured nothing at all.
+    const measurement = await measure(
+      probeScenario(() => {
+        const c = observe('a constant', SESSION_SCHEMA_VERSION);
+        harnessExpect(c).toBe(2);
+        return { outcome: 'match', detail: 'a rubber stamp' };
+      }),
+    );
+    const meaning = meaningfulness(measurement);
+    expect(meaning.meaningful).toBe(false);
+    expect(meaning.reason).toContain('nothing this implementation produced');
+  });
+
+  it('a probe that observes a primitive this implementation produced and compares it with itself measures nothing', async () => {
+    // The same shape, with a value this implementation really produced: the route the
+    // implementation's own selector returns. A comparison of a value with itself
+    // cannot fail, so it measures nothing either.
+    const measurement = await measure(
+      probeScenario(async () => {
+        const c = await observeCall('the route', selectRoute, [{}]);
+        harnessExpect(c).toBe(c);
+        return { outcome: 'match', detail: 'a rubber stamp' };
+      }),
+    );
+    const meaning = meaningfulness(measurement);
+    expect(meaning.meaningful).toBe(false);
+    expect(meaning.reason).toContain('with itself');
+  });
+
+  it('a probe that compares a value this implementation produced against the constant it must equal measures something', async () => {
+    // The ordinary form of an assertion: the route this implementation's selector
+    // returns, compared with the route the target's selector returns. It is
+    // not a comparison of a value with itself, and it measures something.
+    const measurement = await measure(
+      probeScenario(async () => {
+        const c = await observeCall('the route', selectRoute, [{}]);
+        harnessExpect(c).toBe('firstParty');
+        return { outcome: 'match', detail: 'a measurement' };
+      }),
+    );
+    expect(meaningfulness(measurement).meaningful).toBe(true);
+  });
+
+  it('a probe that asserts a constant measures nothing', async () => {
+    const measurement = await measure(
+      probeScenario(() => {
+        harnessExpect(1).toBe(1);
+        return { outcome: 'match', detail: 'a rubber stamp' };
+      }),
+    );
+    expect(meaningfulness(measurement).meaningful).toBe(false);
   });
 });

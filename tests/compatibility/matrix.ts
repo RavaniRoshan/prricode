@@ -268,6 +268,28 @@ export function permittedOutcomes(row: MatrixRow): readonly Outcome[] {
   return mayReportMatch(row) ? ['match', ...base] : base;
 }
 
+/**
+ * Parse the **totals** the report declares.
+ *
+ * The report's totals table names an outcome and a count. The counts are the
+ * report's own claim, and the results test checks them against the rows the
+ * report carries — a total that does not follow from the rows is a report
+ * that disagrees with itself.
+ */
+export function parseTotals(markdown: string): Map<Outcome, number> {
+  const totals = new Map<Outcome, number>();
+  for (const line of markdown.split('\n')) {
+    const cells = cellsOf(line);
+    if (cells.length < 2) continue;
+    const name = (cells[0] ?? '').replace(/[`*]/g, '').trim();
+    if (!isOutcome(name)) continue;
+    const count = Number((cells[1] ?? '').replace(/[`*]/g, '').trim());
+    if (!Number.isFinite(count)) continue;
+    totals.set(name, count);
+  }
+  return totals;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The readers                                                                 */
 /* -------------------------------------------------------------------------- */

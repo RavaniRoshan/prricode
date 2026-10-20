@@ -98,11 +98,9 @@
  *     does not pin the shell timeout. A timeout of `0` is refused: it would stop
  *     the command before it began.
  *   - The output is capped, so a command that prints without bound does not fill
- *     the context window. On the **sandboxed** path the cap is applied to the
- *     output the launcher collected, so the launcher itself buffers the whole
- *     output before the cap bites: the launcher must cap **at its collection
- *     point** for the cap to bound the memory the process holds. The cap the tool
- *     reports is unchanged.
+ *     the context window. On the **sandboxed** path the launcher caps **at its
+ *     collection point**, so the cap bounds the memory the process holds, not
+ *     only what the tool reports. The cap the tool reports is unchanged.
  *   - A command that runs **past its timeout** is reported with the exit code
  *     `124`, the same message and the same `truncated` flag on both paths. On the
  *     sandboxed path the output is the **partial** output the command had

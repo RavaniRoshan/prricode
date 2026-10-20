@@ -14,9 +14,10 @@
  *   - a cell of the form `same file` names that file and no title;
  *   - a cell of the form `` `path` + its test `` names a source file.
  *
- * A **title** matches when the file contains it, after the typography is
- * normalised (`’` for `'`, `“`/`”` for `"`) and an **ellipsis** is read as
- * "and then some": each fragment around the `…` must be in the file.
+ * A **title** matches when the file **declares** it — an `it`, a `test` or a
+ * `describe` call with that title — after the typography is normalised
+ * (`’` for `'`, `“`/`”` for `"`). An **ellipsis** is read as "and then some":
+ * each fragment around the `…` must be the beginning of a declared title.
  */
 
 import { readFileSync } from 'node:fs';
@@ -116,16 +117,45 @@ function isFilePath(candidate: string): boolean {
 }
 
 /**
- * Whether a file contains a test title.
+ * A **declared** test title.
  *
- * The title is matched after the typography is normalised, and an ellipsis
- * stands for "and then some": every fragment around it must be in the file.
+ * A title is declared by an `it`, a `test` or a `describe` call. The check is
+ * a declaration check, not a substring check: a comment that repeats a title
+ * does not declare it, so a reference cannot be satisfied by prose.
+ */
+const DECLARED_TITLE =
+  /\b(?:it|test|describe)\b\s*(?:\.\s*[A-Za-z]+\s*\([^()]*\)\s*)*\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*)\1/g;
+
+/**
+ * The titles a test file **declares**.
+ *
+ * The titles are returned with their typography normalised, so a title that
+ * differs only in its quotes is the same title.
+ */
+export function declaredTitlesOf(source: string): string[] {
+  const titles: string[] = [];
+  for (const match of source.matchAll(DECLARED_TITLE)) {
+    titles.push(normalizeTypography(match[2] ?? ''));
+  }
+  return titles;
+}
+
+/**
+ * Whether a file **declares** a test title.
+ *
+ * The title is matched after the typography is normalised. A title written
+ * with an ellipsis is read as "and then some": every fragment around the
+ * ellipsis must be the **beginning** of a declared title.
  */
 export function fileHasTitle(source: string, title: string): boolean {
-  const haystack = normalizeTypography(source);
+  const declared = declaredTitlesOf(source);
   const needle = normalizeTypography(title);
   const fragments = needle.split('\u2026').map((fragment) => fragment.trim());
-  return fragments.every((fragment) => fragment === '' || haystack.includes(fragment));
+  if (fragments.length === 1) return declared.includes(fragments[0] ?? '');
+  return fragments.every(
+    (fragment) =>
+      fragment === '' || declared.some((candidate) => candidate.startsWith(fragment)),
+  );
 }
 
 /**

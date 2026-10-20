@@ -205,9 +205,10 @@ export type SandboxAvailability = 'available' | 'unavailable';
 /**
  * Decide what to do with a command.
  *
- * The decision is `deny` when the platform is excluded or the sandbox is switched
- * off, `unconfined` when the command is exempt or the backend is missing and the
- * policy tolerates that, and `allow` otherwise.
+ * The decision is `unconfined` when the platform is excluded or the sandbox is
+ * switched off, `unconfined` when the command is exempt or the backend is
+ * missing and the policy tolerates that, `deny` when the backend is missing and
+ * the policy does **not** tolerate that, and `allow` otherwise.
  *
  * The **availability is an argument, never a guess**: the caller says whether the
  * backend can run on this host. The three-argument form of the plan's signature

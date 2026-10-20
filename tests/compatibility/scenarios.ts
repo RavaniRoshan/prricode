@@ -64,7 +64,15 @@ import {
   type SettingsSource,
 } from '../../src/config/tiers.js';
 import { classifyProjectSettingsPath, loadSettings } from '../../src/config/loader.js';
-import { builtinCatalog, listModels, providerIdFor } from '../../src/provider/catalog.js';
+import { SOURCE_ENUMERATION_ORDER } from '../../src/config/scope.js';
+import {
+  BUILTIN_CATALOG_RAW,
+  builtinCatalog,
+  listModels,
+  providerIdFor,
+  resolveRouteForModel,
+  PROVIDER_ID_KEYS,
+} from '../../src/provider/catalog.js';
 import { credentialStatus } from '../../src/provider/credentials.js';
 import { driverFor } from '../../src/provider/drivers/index.js';
 import { gatewayDriver, gatewayRejectsWorkspaceId, gatewayCountTokensResponse } from '../../src/provider/drivers/gateway.js';
@@ -76,6 +84,7 @@ import {
   endpointPolicyFor,
   resolveBaseUrl,
   selectRoute,
+  type ProviderRoute,
 } from '../../src/provider/routes.js';
 import {
   checkCredentialDelivery,
@@ -122,6 +131,7 @@ import {
   AGENT_ORIGINATED_CONTROL_SUBTYPES,
   HOST_CONTROL_REQUEST_SUBTYPES,
   controlRequestDirectionError,
+  dispatchCanUseTool,
   dispatchControlRequest,
 } from '../../src/extensions/mcp/control.js';
 import {
@@ -199,13 +209,37 @@ export interface ProbeResult {
 }
 
 /**
+ * Where an observed value came from.
+ *
+ * The provenance is what tells a measurement from a rubber stamp. A value the
+ * implementation **produced** is one of:
+ *
+ *   - `call-return` — the return value of a call to a reimplementation export;
+ *   - `channel` — a value this implementation handed over a channel the probe opened;
+ *   - `implementation-export` — a reimplementation export that is **not a bare constant** (an
+ *     object, an array, a function — something this implementation *holds*);
+ *   - `member` — a member of one of the above.
+ *
+ * A value the probe made is `derived`, and a **primitive** this implementation merely
+ * exports is a `bare-constant`: reading one is not reading this implementation's
+ * behaviour, it is reading a literal this implementation happens to publish.
+ */
+export type Provenance =
+  | 'call-return'
+  | 'channel'
+  | 'implementation-export'
+  | 'member'
+  | 'bare-constant'
+  | 'derived';
+
+/**
  * A value this implementation produced.
  *
  * The harness records every observation a probe makes, and the report test
  * checks that a probe observed **something of this implementation**. An observation is
- * **strict** when the value is one this implementation produced — an export of a reimplementation
- * module, or the result of a call to one. A strict observation is what a
- * measurement is made of.
+ * **strict** when the value is one this implementation produced — its provenance is
+ * `call-return`, `channel`, `implementation-export` or `member`. A strict observation
+ * is what a measurement is made of.
  */
 export interface Observation {
   /** What the probe observed. */
@@ -214,6 +248,8 @@ export interface Observation {
   readonly value: unknown;
   /** Whether the value is one this implementation produced. */
   readonly strict: boolean;
+  /** Where the value came from. */
+  readonly provenance: Provenance;
 }
 
 /** One measurable claim. */
@@ -255,8 +291,11 @@ const CLONE_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   providerCommand,
   catalogCommand,
   builtinCatalog,
+  BUILTIN_CATALOG_RAW,
   listModels,
   providerIdFor,
+  resolveRouteForModel,
+  PROVIDER_ID_KEYS,
   credentialStatus,
   driverFor,
   gatewayDriver,
@@ -282,6 +321,7 @@ const CLONE_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   TOP_LEVEL_KEY_ORDER,
   MERGED_KEY_ORDER,
   PROJECT_SIDE_SOURCES,
+  SOURCE_ENUMERATION_ORDER,
   resolveBlock,
   resolveMergedKey,
   resolveTopLevelKey,
@@ -323,6 +363,7 @@ const CLONE_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   AGENT_ORIGINATED_CONTROL_SUBTYPES,
   HOST_CONTROL_REQUEST_SUBTYPES,
   controlRequestDirectionError,
+  dispatchCanUseTool,
   dispatchControlRequest,
   LOCAL_CONNECT_BATCH_SIZE,
   REMOTE_CONNECT_BATCH_SIZE,
@@ -483,20 +524,58 @@ function wrapAssertion(
 }
 
 /**
+ * Whether a value is a **bare constant**.
+ *
+ * A primitive this implementation exports — a number, a string, a boolean — is a
+ * constant: reading it tells the reader what this implementation publishes, not what the
+ * implementation *does*. A bare constant is therefore not a value this implementation produced,
+ * and a probe that observes one and compares it with itself has measured
+ * nothing.
+ */
+function isBareConstant(value: unknown): boolean {
+  if (value === null) return true;
+  return typeof value !== 'object' && typeof value !== 'function';
+}
+
+/**
+ * Where a value came from.
+ *
+ * The order matters: a reimplementation export is one thing this implementation publishes, a
+ * channel delivery is a thing this implementation handed over, and a member of a value
+ * this implementation produced is one level down from it. Anything else is a value the
+ * probe made.
+ */
+function provenanceOf(value: unknown): Provenance {
+  if (CLONE_EXPORTS.has(value)) {
+    return isBareConstant(value) ? 'bare-constant' : 'implementation-export';
+  }
+  const channels = currentRun?.channels ?? [];
+  if (channels.some((channel) => channel.delivered() === value)) return 'channel';
+  const observations = currentRun?.observations ?? [];
+  for (const observation of observations) {
+    if (!observation.strict) continue;
+    if (membersOf(observation.value).includes(value)) return 'member';
+  }
+  return 'derived';
+}
+
+/**
  * Observe a value.
  *
- * The observation is **strict** when the value is one this implementation produced: an
- * export of a reimplementation module, or a value this implementation handed to a channel. A value
- * the probe derived is recorded too — the harness keeps it so that the report
- * test can tell a probe that measured this implementation from one that only asserted
- * a constant.
+ * The observation is **strict** when the value is one this implementation produced: the
+ * return of a call to a reimplementation export, a value this implementation handed over a channel,
+ * a member of one of those, or a reimplementation export that is not a bare constant. A
+ * value the probe derived is recorded too — the harness keeps it so that the
+ * report test can tell a probe that measured this implementation from one that only
+ * asserted a constant.
  */
 export function observe<T>(label: string, value: T): T {
   const run = currentRun;
   if (run === undefined) {
     throw new Error(`observe("${label}") was called outside a measurement`);
   }
-  run.observations.push({ label, value, strict: isCloneValue(value) });
+  const provenance = provenanceOf(value);
+  run.observations.push({ label, value, strict: provenance !== 'derived' && provenance !== 'bare-constant', provenance });
   return value;
 }
 
@@ -523,7 +602,7 @@ export async function observeCall<T>(
     );
   }
   const value = await fn.apply(thisArg, args as never[]);
-  run.observations.push({ label, value, strict: true });
+  run.observations.push({ label, value, strict: true, provenance: 'call-return' });
   return value;
 }
 
@@ -572,38 +651,99 @@ function isCloneCallable(fn: unknown): boolean {
  *
  * A received value counts when it **is** an observed value: a probe that
  * asserts on a value it read out of this implementation is measuring this implementation, and a
- * probe that asserts on a constant it wrote itself is not. A **member** of an
- * observed value does not count: the probe could have written the member out
- * by hand.
+ * probe that asserts on a constant it wrote itself is not. The observation it
+ * is tied to must be a **strict** one — a value this implementation produced. A
+ * **member** of an observed value does not count on its own: the probe could
+ * have written the member out by hand. A member the probe *observed* is a
+ * member of its own observation, and it counts.
  */
 function isTiedToObservation(received: unknown, observations: readonly Observation[]): boolean {
-  return observations.some((observation) => observation.value === received);
+  return observations.some(
+    (observation) => observation.strict && observation.value === received,
+  );
+}
+
+/**
+ * A comparison of a value **with itself**.
+ *
+ * `expect(c).toBe(c)` measures nothing, whatever the value is: the assertion
+ * cannot fail, because both sides are the same value. The harness cannot
+ * tell such a comparison from the ordinary one at runtime — a primitive the
+ * implementation produced and the constant it must equal are the same value — so it
+ * reads the probe's **own source** and looks for the shape.
+ *
+ * The shape is deliberately narrow: the same simple expression on both sides
+ * of a comparison matcher, written on one call. Anything the pattern does not
+ * recognise is left alone, so an unrecognised comparison is never treated as
+ * a tautology.
+ *
+ * The call is written the way the module system writes it, so that an
+ * imported assertion function is read as well as a local one.
+ */
+const SELF_COMPARISON =
+  /(?:\(\s*0\s*,\s*)?([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)(?:\s*\))?\(\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*\)\s*\.\s*(?:toBe|toEqual|toStrictEqual|toContain|toMatch)\(\s*\2\s*\)/g;
+
+/**
+ * The self-comparisons in a probe's own source.
+ *
+ * The returned strings name the expression that is compared with itself. Only
+ * a call on an assertion function is read — `expect`, or a name that ends in
+ * it — so an unrelated call that happens to look the same is not mistaken for
+ * one.
+ */
+export function selfComparisonsOf(source: string): string[] {
+  const found: string[] = [];
+  for (const match of source.matchAll(SELF_COMPARISON)) {
+    const callee = match[1] ?? '';
+    const name = (callee.split('.').pop() ?? '').toLowerCase();
+    if (!name.endsWith('expect')) continue;
+    found.push(match[2] ?? '');
+  }
+  return found;
 }
 
 /**
  * Whether a measurement **measured** something.
  *
- * A measurement is meaningful when the probe observed at least one value the
- * implementation produced and compared one of those values against a different value.
+ * A measurement is meaningful when the probe
+ *
+ *   1. observed at least one value **this implementation produced** — the return of a
+ *      call to a reimplementation export, a value this implementation handed over a channel, a
+ *      member of one of those, or a reimplementation export that is **not a bare
+ *      constant**; and
+ *   2. compared one of those values against a **different** value — the
+ *      comparison is not of a value **with itself**, and an object or a
+ *      function is not compared with its own reference.
+ *
  * The reason says why not, so the report test can name it.
  */
 export function meaningfulness(measurement: {
   readonly observations: readonly Observation[];
   readonly assertions: readonly RecordedAssertion[];
+  readonly selfComparisons?: readonly string[];
 }): { readonly meaningful: boolean; readonly reason: string } {
+  const selfComparisons = measurement.selfComparisons ?? [];
+  if (selfComparisons.length > 0) {
+    return {
+      meaningful: false,
+      reason: `the probe compares a value with itself (${selfComparisons.join(', ')}): a comparison of a value with itself cannot fail, so it measures nothing`,
+    };
+  }
   if (!measurement.observations.some((observation) => observation.strict)) {
     return {
       meaningful: false,
-      reason: 'the probe observed nothing this implementation produced: it neither read a reimplementation export nor called one',
+      reason:
+        'the probe observed nothing this implementation produced: it read neither a reimplementation export that is not a bare constant, nor the result of a call to one',
     };
   }
   const tied = measurement.assertions.some((assertion) => {
     if (!CONTENT_MATCHERS.has(assertion.matcher)) return false;
     if (!isTiedToObservation(assertion.received, measurement.observations)) return false;
-    // A tautology — the probe asserted that a value equals itself — is not a
-    // measurement either. A **primitive** is exempt: comparing a value the
-    // implementation produced with the constant it must equal is the ordinary form of
-    // an assertion.
+    // A different value is a measurement. An object compared with its own
+    // reference is not — and a primitive compared with the constant it must
+    // equal is the ordinary form of an assertion, which is why only the
+    // object case is refused here. A comparison of a value with itself is
+    // caught by the source check above, which can tell the two apart.
     if (assertion.expected !== assertion.received) return true;
     const observed = measurement.observations.find(
       (observation) => observation.value === assertion.received,
@@ -717,6 +857,32 @@ function toolResultBlockOf(
   return block;
 }
 
+/**
+ * The provider keys the target's own literal **omits**.
+ *
+ * The audited "not served" predicate is `provider_ids[route] === null`, and an
+ * **omitted** key is not `null`: the audited predicate does not fire for it.
+ * The rows the literal omits a key for are therefore the rows where the
+ * implementation's absent-key test and the audited predicate disagree.
+ */
+function omittedProviderKeysOf(literal: unknown): string[] {
+  if (typeof literal !== 'object' || literal === null) return [];
+  const models = (literal as { models?: unknown }).models;
+  if (!Array.isArray(models)) return [];
+  const omitted: string[] = [];
+  for (const model of models) {
+    if (typeof model !== 'object' || model === null) continue;
+    const record = model as { id?: unknown; provider_ids?: unknown };
+    if (typeof record.id !== 'string') continue;
+    const providerIds = record.provider_ids;
+    if (typeof providerIds !== 'object' || providerIds === null) continue;
+    for (const key of Object.keys(PROVIDER_ID_KEYS)) {
+      if (!Object.hasOwn(providerIds, key)) omitted.push(`${record.id}/${key}`);
+    }
+  }
+  return omitted;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The scenarios                                                               */
 /* -------------------------------------------------------------------------- */
@@ -753,11 +919,13 @@ export const SCENARIOS: readonly Scenario[] = [
       const repeatable = await runOf(['--tools', 'Read', 'Write']);
       expect(repeatable.tools).toEqual(['Read', 'Write']);
       // The six subcommands the target has.
-      const command = await observeCall('the parsed subcommand', parseArgs, [
-        ['attach'],
-        { isTTY: false },
-      ]);
-      expect(command).toMatchObject({ kind: 'command', command: 'attach' });
+      for (const command of ['attach', 'logs', 'stop', 'kill', 'respawn', 'rm']) {
+        const parsed = await observeCall(`the ${command} subcommand`, parseArgs, [
+          [command],
+          { isTTY: false },
+        ]);
+        expect(parsed).toMatchObject({ kind: 'command', command });
+      }
       return measured(
         'partial',
         "The parser reproduces the target's structure — `--flag=value`, `--` ending the flags, the repeatable set, the short-flag-cluster rule and the six subcommands — but the audit enumerates only the flags this implementation's own surface needs, so the flag surface is partial.",
@@ -784,13 +952,13 @@ export const SCENARIOS: readonly Scenario[] = [
       const terminal = await runOf([], true);
       expect(terminal.headless).toBe(false);
       // The output formats are the target's three.
-      const formats = await observeCall('the parsed output format', parseArgs, [
-        ['--output-format', 'stream-json'],
-        { isTTY: false },
-      ]);
-      expect(formats).toMatchObject({ kind: 'run', outputFormat: 'stream-json' });
-      const json = await runOf(['--output-format', 'json']);
-      expect(json.outputFormat).toBe('json');
+      for (const format of ['text', 'json', 'stream-json']) {
+        const formats = await observeCall(`the ${format} output format`, parseArgs, [
+          ['--output-format', format],
+          { isTTY: false },
+        ]);
+        expect(formats).toMatchObject({ kind: 'run', outputFormat: format });
+      }
       return measured(
         'partial',
         'The headless rule and the three output formats are reproduced; the audit pins the formats and not the documents a run writes.',
@@ -816,13 +984,20 @@ export const SCENARIOS: readonly Scenario[] = [
         'projectSettings',
         'localSettings',
       ]);
+      // The four orderings the audit observes as literals: `C7s`, `Ble`, `D_`
+      // and `VD`.
       const topLevel = observe('the top-level ordering', TOP_LEVEL_KEY_ORDER);
       expect(topLevel).toEqual(['policySettings', 'flagSettings', 'userSettings']);
       const merged = observe('the merged ordering', MERGED_KEY_ORDER);
       expect(merged).toEqual(['localSettings', 'projectSettings', 'userSettings']);
+      const enumeration = observe('the source enumeration ordering', SOURCE_ENUMERATION_ORDER);
+      expect(enumeration).toEqual(['userSettings', 'projectSettings', 'localSettings']);
       const projectSide = observe('the project-side sources', PROJECT_SIDE_SOURCES);
       expect(projectSide).toEqual(['projectSettings', 'localSettings']);
-      return measured('match', 'The five tiers and both observed orderings are reproduced exactly.');
+      return measured(
+        'match',
+        "The five tiers and the four observed orderings — the top-level, the merged, the source enumeration and the project-side set — are reproduced exactly.",
+      );
     },
   },
   {
@@ -984,9 +1159,28 @@ export const SCENARIOS: readonly Scenario[] = [
       const haiku = observe('the haiku row', models.find((model) => model.id === 'claude-haiku-5-5'));
       expect(haiku).toMatchObject({ id: 'claude-haiku-5-5' });
       expect(providerIdFor(haiku!, 'gateway')).toBeUndefined();
+      // The divergence: this implementation's "not served" test is an **absent key**, and
+      // the audited predicate is `provider_ids[route] === null`. The target's
+      // literal **omits** one key, and this implementation reads the omission as "not
+      // served" — so this implementation falls back to `mantle` for a row the audited
+      // predicate would not.
+      const literal = observe('the transcribed literal', BUILTIN_CATALOG_RAW);
+      const omitted = omittedProviderKeysOf(literal);
+      const resolved = observe(
+        'the haiku resolution',
+        resolveRouteForModel(haiku!, 'gateway'),
+      );
+      if (omitted.length > 0) {
+        expect(omitted).toEqual(['claude-haiku-5-5/gateway']);
+        expect(resolved).toBe('mantle');
+        return measured(
+          'mismatch',
+          "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown — but this implementation's \"not served\" test is an absent key, a superset of the audited `=== null` predicate: the target's literal omits the `gateway` key of exactly one row, `claude-haiku-5-5`, and this implementation falls back to `mantle` there where the audited predicate would not.",
+        );
+      }
       return measured(
         'match',
-        "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown.",
+        "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, a route that does not serve a model is absent rather than unknown, and this implementation's \"not served\" test is the audited `=== null` predicate.",
       );
     },
   },
@@ -1020,7 +1214,28 @@ export const SCENARIOS: readonly Scenario[] = [
           selectRoute({ CLAUDE_CODE_USE_MANTLE: '1', CLAUDE_CODE_USE_BEDROCK: '1' }),
         ),
       ).toBe('bedrock');
-      return measured('match', 'The dispatch order and the single active route are reproduced exactly.');
+      // The target's **per-model** override: with Bedrock and Mantle enabled,
+      // an `anthropic.*` model resolves to `mantle`. This implementation does not
+      // implement that half of the rule, so what is measured below is a
+      // **divergence**, and the row is reported as one.
+      const models = await observeCall('the catalog rows', listModels, [builtinCatalog]);
+      const anthropic = models.filter((model) =>
+        (providerIdFor(model, 'mantle') ?? '').startsWith('anthropic.'),
+      );
+      expect(anthropic).toHaveLength(10);
+      const divergent = anthropic.filter(
+        (model) => resolveRouteForModel(model, 'bedrock') !== 'mantle',
+      );
+      if (divergent.length > 0) {
+        return measured(
+          'mismatch',
+          `The dispatch order and the single active route are reproduced, but the target's per-model override is not: with Bedrock and Mantle enabled the target sends an \`anthropic.*\` model to \`mantle\`, and this implementation sends the ${divergent.length} \`anthropic.*\` rows to \`bedrock\`.`,
+        );
+      }
+      return measured(
+        'match',
+        "The dispatch order, the single active route and the target's per-model override are reproduced.",
+      );
     },
   },
   {
@@ -1068,14 +1283,28 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(firstParty?.baseUrlVariables).toEqual([]);
       const gateway = observe('the gateway policy', endpointPolicyFor('gateway'));
       expect(gateway?.baseUrlVariables).toEqual([]);
-      // The vendor-host patterns: a vendor host is trusted, a foreign one is not.
-      const vendor = observe(
-        'the vendor base url',
-        resolveBaseUrl('bedrock', {
-          ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock-runtime.us-east-1.amazonaws.com',
-        }),
-      );
-      expect(vendor).toMatchObject({ isVendorHost: true });
+      // The vendor-host patterns: every route that declares one recognises
+      // its own vendor host and refuses a foreign one.
+      const vendorHosts: ReadonlyArray<readonly [ProviderRoute, string]> = [
+        ['bedrock', 'https://bedrock-runtime.us-east-1.amazonaws.com'],
+        ['mantle', 'https://bedrock-mantle.us-east-1.api.aws'],
+        ['anthropicAws', 'https://aws-external-anthropic.us-east-1.amazonaws.com'],
+        ['vertex', 'https://aiplatform.googleapis.com'],
+        ['anthropicGoogleCloud', 'https://claude.googleapis.com'],
+        ['foundry', 'https://my-deployment.services.ai.azure.com/anthropic/'],
+      ];
+      for (const [route, baseUrl] of vendorHosts) {
+        const variable = endpointPolicyFor(route)?.baseUrlVariables[0];
+        if (variable === undefined) throw new Error(`${route} declares no base-URL variable`);
+        const vendor = await observeCall(
+          `the ${route} vendor base url`,
+          resolveBaseUrl,
+          [route, { [variable]: baseUrl }],
+        );
+        expect(vendor, `${route} does not recognise its own vendor host`).toMatchObject({
+          isVendorHost: true,
+        });
+      }
       const foreign = observe(
         'the foreign base url',
         resolveBaseUrl('bedrock', { ANTHROPIC_BEDROCK_BASE_URL: 'https://example.invalid' }),
@@ -1097,10 +1326,20 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     probe: async () => {
       const registry = await observeCall('the connection registry', createProviderRegistry, [
-        [connectionOf()],
+        [
+          connectionOf(),
+          connectionOf({ id: 'staging', name: 'Staging', route: 'bedrock' }),
+          connectionOf({ id: 'edge', name: 'Edge', route: 'gateway' }),
+        ],
       ]);
       const listed = await observeCall('the registry listing', registry.list, [], registry);
-      expect(listed).toMatchObject([{ id: 'prod', name: 'Prod', route: 'firstParty' }]);
+      expect(listed).toMatchObject([
+        { id: 'prod', name: 'Prod', route: 'firstParty' },
+        { id: 'staging', name: 'Staging', route: 'bedrock' },
+        { id: 'edge', name: 'Edge', route: 'gateway' },
+      ]);
+      // Every connection carries a credential **reference**, never a value.
+      expect(listed.every((connection) => connection.credential.kind === 'env')).toBe(true);
       return measured(
         'partial',
         'The project requirement is met — N concurrent connections, each with a reference — but the target has no such registry, so no target behaviour is matched.',
@@ -1196,21 +1435,22 @@ export const SCENARIOS: readonly Scenario[] = [
     },
     probe: async () => {
       for (const status of [408, 409, 429, 500, 503]) {
-        expect(observe('the retryable status', isRetryableStatus(status))).toBe(true);
+        expect(await observeCall('the retryable status', isRetryableStatus, [status])).toBe(true);
       }
       for (const status of [400, 401, 403, 404]) {
-        expect(observe('the refused status', isRetryableStatus(status))).toBe(false);
+        expect(await observeCall('the refused status', isRetryableStatus, [status])).toBe(false);
       }
       const statuses = observe('the retryable status set', RETRYABLE_STATUSES);
       expect([...statuses].sort((a, b) => a - b)).toEqual([408, 409, 429]);
       const fallback = observe('the non-streaming timeout fallback', NONSTREAMING_TIMEOUT_FALLBACK_MS);
       expect(fallback).toBe(600_000);
-      const timeout = observe(
+      const timeout = await observeCall(
         'the computed non-streaming timeout',
-        calculateNonstreamingTimeoutMs(1000, undefined),
+        calculateNonstreamingTimeoutMs,
+        [1000, undefined],
       );
       expect(timeout).toBeGreaterThan(0);
-      const classified = observe('the classified error', classifyErrorStatus(500, {}));
+      const classified = await observeCall('the classified error', classifyErrorStatus, [500, {}]);
       expect(classified).toMatchObject({ retryable: true });
       return measured(
         'match',
@@ -1304,14 +1544,16 @@ export const SCENARIOS: readonly Scenario[] = [
     probe: async () => {
       expect(observe('the bedrock sigv4 service', BEDROCK_SIGV4_SERVICE)).toBe('bedrock');
       expect(observe('the mantle sigv4 service', MANTLE_SIGV4_SERVICE)).toBe('bedrock-mantle');
-      const bedrock = observe(
+      const bedrock = await observeCall(
         'the bedrock signing scope',
-        signingScope('20240101', 'us-east-1', BEDROCK_SIGV4_SERVICE),
+        signingScope,
+        ['20240101', 'us-east-1', BEDROCK_SIGV4_SERVICE],
       );
       expect(bedrock).toBe('20240101/us-east-1/bedrock/aws4_request');
-      const mantle = observe(
+      const mantle = await observeCall(
         'the mantle signing scope',
-        signingScope('20240101', 'us-east-1', MANTLE_SIGV4_SERVICE),
+        signingScope,
+        ['20240101', 'us-east-1', MANTLE_SIGV4_SERVICE],
       );
       expect(mantle).toBe('20240101/us-east-1/bedrock-mantle/aws4_request');
       return measured(
@@ -1362,6 +1604,8 @@ export const SCENARIOS: readonly Scenario[] = [
       // The wording inside the wrapper is this implementation's own, and it carries the
       // decision and its reason type.
       expect(answered.content).toContain("The permission decision was 'deny'");
+      expect(answered.content).toContain('source: hook');
+      expect(answered.content).toContain('reason type: rule');
       return measured(
         'match',
         "A refused call is answered with the target's observed `<tool_use_error>…</tool_use_error>` wrapper and `is_error: true`, and the wrapper carries the decision and its reason type; the wording inside the wrapper is this implementation's.",
@@ -1394,7 +1638,7 @@ export const SCENARIOS: readonly Scenario[] = [
         ],
       );
       expect(calls.map((call) => call.id)).toEqual(['toolu_a', 'toolu_b']);
-      const sequential = observe('the dispatch groups', groupToolCalls(calls));
+      const sequential = await observeCall('the dispatch groups', groupToolCalls, [calls]);
       expect(sequential).toMatchObject({ parallel: false, groups: [['toolu_a'], ['toolu_b']] });
       return measured(
         'partial',
@@ -1478,7 +1722,7 @@ export const SCENARIOS: readonly Scenario[] = [
       // The audit observes the target's metadata as
       // `permission_decision {decision, source, reason_type}`,
       // `non_execution_kind` and `user_feedback` (§2.4).
-      const decision = envelope.permissionDecision;
+      const decision = observe('the permission decision', envelope.permissionDecision);
       expect(decision).toMatchObject({ decision: 'deny', source: 'hook', reasonType: 'rule' });
       const members = observe('the decision members', Object.keys(decision ?? {}));
       expect(members).toEqual(['decision', 'source', 'reasonType']);
@@ -1496,7 +1740,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(envelopeMembers).not.toContain('user_feedback');
       return measured(
         'mismatch',
-        "The permission feedback rides along in the tool result, but this implementation names the members `permissionDecision {decision, source, reasonType}`, `nonExecutionKind` and `userFeedback`, where the target's observed metadata names `permission_decision {decision, source, reason_type}`, `non_execution_kind` and `user_feedback`.",
+        "The permission feedback rides along in the tool result, but this implementation names the members `permissionDecision {decision, source, reasonType}` and `nonExecutionKind` where the target's observed metadata names `permission_decision {decision, source, reason_type}` and `non_execution_kind`; this implementation's envelope carries a `remedy` member and no `user_feedback` member.",
       );
     },
   },
@@ -1678,7 +1922,7 @@ export const SCENARIOS: readonly Scenario[] = [
       // This implementation adds a seventh kind, `noRuleMatch`, to the target's six.
       expect(unmatched).toMatchObject({ reasonKind: 'noRuleMatch' });
       return measured(
-        'partial',
+        'mismatch',
         "The file-mutating set is exactly Edit, Write and NotebookEdit, and this implementation produces the audit's `rule` and `subcommandResults` reason kinds; this implementation adds a seventh kind, `noRuleMatch`, that the target's six do not carry.",
       );
     },
@@ -1753,6 +1997,18 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(observe('the accepted subtype', controlRequestDirectionError('initialize'))).toBeUndefined();
       const originated = observe('the agent-originated subtypes', AGENT_ORIGINATED_CONTROL_SUBTYPES);
       expect(originated).toContain('can_use_tool');
+      // The dropped request: a `can_use_tool` request whose `request_id` is not
+      // a string cannot be correlated, so it is dropped with **no response**.
+      const dropped = await observeCall(
+        'the dropped request',
+        dispatchCanUseTool,
+        [{ request_id: 42, tool_name: 'Bash', input: { command: 'ls' } }, {}],
+      );
+      expect(dropped).toMatchObject({
+        dropped: true,
+        reason: 'the request_id is not a string, so no response is possible',
+      });
+      expect(dropped.response).toBeUndefined();
       return measured(
         'match',
         "The transport dispatcher's shape, its dropped non-string request id and its direction rules are reproduced.",
@@ -1783,12 +2039,18 @@ export const SCENARIOS: readonly Scenario[] = [
           text: 'hello',
         });
         expect(existsSync(path.join(dir, 'projects'))).toBe(true);
-        const events = observe('the transcript records', await readAllSessionEvents(handle.path));
+        const events = await observeCall('the transcript records', readAllSessionEvents, [
+          handle.path,
+        ]);
         expect(events).toMatchObject([{ t: 'user_message', id: 'r1', text: 'hello' }]);
+        // This implementation's own versioned record format, and the target's observed
+        // `transcriptSource` marker, which this implementation does not expose.
+        expect(events[0]?.v).toBe(SESSION_SCHEMA_VERSION);
+        expect(events.filter((event) => 'transcriptSource' in event)).toEqual([]);
       });
       return measured(
-        'partial',
-        "The layout — JSONL under `<configDir>/projects/<project>/<sessionId>.jsonl`, with the project name derived from the working directory — is reproduced, but the record format is this implementation's own versioned format and the target's `transcriptSource` marker is not.",
+        'mismatch',
+        "The layout — JSONL under `<configDir>/projects/<project>/<sessionId>.jsonl`, with the project name derived from the working directory — is reproduced, but the record format is this implementation's own versioned one and the target's observed `transcriptSource` marker, `ccr-api` or `local-jsonl`, is not exposed: no record of this implementation's carries such a member.",
       );
     },
   },
@@ -2006,9 +2268,10 @@ export const SCENARIOS: readonly Scenario[] = [
         'fork_conversation',
       ]);
       expect(subtypes).not.toContain('can_use_tool');
-      const response = observe(
+      const response = await observeCall(
         'the dispatched response',
-        await dispatchControlRequest({ subtype: 'mcp_status', request_id: 'r1' }, {}),
+        dispatchControlRequest,
+        [{ subtype: 'mcp_status', request_id: 'r1' }, {}],
       );
       expect(response).toMatchObject({ subtype: 'success' });
       return measured(
@@ -2041,24 +2304,27 @@ export const SCENARIOS: readonly Scenario[] = [
         'remote_control_work_secret',
       ]);
       // The three refusals, word for word.
-      const agent = observe(
-        'the agent-originated refusal',
-        controlRequestDirectionError('can_use_tool'),
-      );
+      const agent = await observeCall('the agent-originated refusal', controlRequestDirectionError, [
+        'can_use_tool',
+      ]);
       expect(agent).toBe('can_use_tool is agent-originated and cannot be sent by a host');
-      const service = observe(
+      const service = await observeCall(
         'the service-originated refusal',
-        controlRequestDirectionError('mcp_tasks_changed'),
+        controlRequestDirectionError,
+        ['mcp_tasks_changed'],
       );
       expect(service).toBe('mcp_tasks_changed is sent to a cloud agent by the service, not by a host');
-      const client = observe(
+      const client = await observeCall(
         'the client-originated refusal',
-        controlRequestDirectionError('register_device_hooks'),
+        controlRequestDirectionError,
+        ['register_device_hooks'],
       );
       expect(client).toBe(
         'register_device_hooks is sent to a cloud agent by the attached client, not by a host',
       );
-      expect(observe('the accepted subtype', controlRequestDirectionError('read_file'))).toBeUndefined();
+      expect(
+        await observeCall('the accepted subtype', controlRequestDirectionError, ['read_file']),
+      ).toBeUndefined();
       return measured('match', 'The three refused directions and their wordings are reproduced.');
     },
   },
@@ -2357,42 +2623,41 @@ export const SCENARIOS: readonly Scenario[] = [
       // missing backend with `failIfUnavailable` off all run the command
       // **unconfined**; only a missing backend with `failIfUnavailable` on
       // refuses it.
-      const excluded = observe(
+      const excluded = await observeCall(
         'the excluded-platform decision',
-        evaluateSandbox(
-          { ...DEFAULT_SANDBOX_POLICY, enabledPlatforms: ['darwin'] },
-          'linux',
-          'ls',
-          'available',
-        ),
+        evaluateSandbox,
+        [{ ...DEFAULT_SANDBOX_POLICY, enabledPlatforms: ['darwin'] }, 'linux', 'ls', 'available'],
       );
       expect(excluded).toMatchObject({
         decision: 'unconfined',
         reason: 'sandbox.enabledPlatforms excludes linux',
       });
-      const disabled = observe(
+      const disabled = await observeCall(
         'the disabled decision',
-        evaluateSandbox({ ...DEFAULT_SANDBOX_POLICY, enabled: false }, 'linux', 'ls', 'available'),
+        evaluateSandbox,
+        [{ ...DEFAULT_SANDBOX_POLICY, enabled: false }, 'linux', 'ls', 'available'],
       );
       expect(disabled).toMatchObject({ decision: 'unconfined', reason: 'sandbox.enabled is false' });
-      const missing = observe(
+      const missing = await observeCall(
         'the missing-backend decision',
-        evaluateSandbox(
+        evaluateSandbox,
+        [
           { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: false },
           'linux',
           'ls',
           'unavailable',
-        ),
+        ],
       );
       expect(missing.decision).toBe('unconfined');
-      const refused = observe(
+      const refused = await observeCall(
         'the refused decision',
-        evaluateSandbox(
+        evaluateSandbox,
+        [
           { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: true },
           'linux',
           'ls',
           'unavailable',
-        ),
+        ],
       );
       expect(refused).toMatchObject({ decision: 'deny' });
       const reasons = observe('the sandbox reasons', SANDBOX_REASONS);
@@ -2534,6 +2799,13 @@ export interface Measurement {
   readonly observations: readonly Observation[];
   /** The assertions the probe made. */
   readonly assertions: readonly RecordedAssertion[];
+  /**
+   * The comparisons of a value **with itself** the probe's own source holds.
+   *
+   * A primitive cannot be told from the constant it must equal at runtime, so
+   * the harness reads the probe's source to see the shape.
+   */
+  readonly selfComparisons: readonly string[];
 }
 
 /** The message of a thrown value. */
@@ -2555,6 +2827,7 @@ export async function measure(scenario: Scenario): Promise<Measurement> {
   const run: Run = { observations: [], assertions: [], channels: [] };
   const previous = currentRun;
   currentRun = run;
+  const selfComparisons = selfComparisonsOf(scenario.probe.toString());
   try {
     const result = await scenario.probe();
     return {
@@ -2563,6 +2836,7 @@ export async function measure(scenario: Scenario): Promise<Measurement> {
       failed: false,
       observations: run.observations,
       assertions: run.assertions,
+      selfComparisons,
     };
   } catch (error) {
     if (error instanceof NotTestedError) {
@@ -2572,6 +2846,7 @@ export async function measure(scenario: Scenario): Promise<Measurement> {
         failed: false,
         observations: run.observations,
         assertions: run.assertions,
+        selfComparisons,
       };
     }
     return {
@@ -2580,6 +2855,7 @@ export async function measure(scenario: Scenario): Promise<Measurement> {
       failed: true,
       observations: run.observations,
       assertions: run.assertions,
+      selfComparisons,
     };
   } finally {
     currentRun = previous;

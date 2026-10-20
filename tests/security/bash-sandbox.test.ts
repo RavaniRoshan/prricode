@@ -495,6 +495,10 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
     // standard error never exceeds the cap.
     expect(output.stderr.length).toBe(MAX_BASH_OUTPUT_CHARS);
     expect(output.stderr.length).toBeLessThanOrEqual(MAX_BASH_OUTPUT_CHARS);
+    // The message is **reserved room for**, so a standard error that is
+    // already at the cap does not truncate it away: the notice is part of the
+    // report, and the report has to survive the cap.
+    expect(output.stderr.endsWith('The command was stopped because it ran past its timeout.')).toBe(true);
   });
 
   it('does not report a sandboxed run that failed as a command that succeeded', async () => {

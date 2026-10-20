@@ -69,13 +69,23 @@ describe('the conformance documents', () => {
     }
   });
 
-  it('the references are checked after the typography is normalised', () => {
-    // The check itself: a title that differs only in its typography or in an
-    // ellipsis is a match, and a title that differs in its words is not.
+  it('the references are checked against the titles a file declares', () => {
+    // The check itself: a title that differs only in its typography is a
+    // match; a title the file does not **declare** is not, not even when the
+    // file repeats the words in a comment; and an ellipsis is read as "and
+    // then some" — the fragment must be the beginning of a declared title.
     const source = 'it("the target’s validation messages", () => {});';
     expect(fileHasTitle(source, "the target's validation messages")).toBe(true);
     expect(fileHasTitle(source, 'the target’s validation messages')).toBe(true);
-    expect(fileHasTitle(source, 'validation messages')).toBe(true);
+    expect(fileHasTitle(source, 'validation messages')).toBe(false);
     expect(fileHasTitle(source, 'the target’s other messages')).toBe(false);
+    // A comment repeats the words and declares nothing.
+    expect(fileHasTitle('// the target’s validation messages', "the target's validation messages")).toBe(
+      false,
+    );
+    // The ellipsis.
+    expect(fileHasTitle(source, 'the target’s validation …')).toBe(true);
+    expect(fileHasTitle(source, '… validation messages')).toBe(false);
+    expect(fileHasTitle(source, 'other …')).toBe(false);
   });
 });

@@ -668,6 +668,27 @@ function fakeDriver(
   };
 }
 
+/** The rounds a turn that runs the `Bash` tool takes. */
+function bashRounds(): ProviderEvent[][] {
+  return [
+    [
+      { type: 'message_start', messageId: 'msg-1', model: 'claude-sonnet-4-5' },
+      {
+        type: 'tool_use',
+        id: 'toolu_bash',
+        name: 'Bash',
+        input: { command: 'printf hello' },
+      },
+      { type: 'message_stop', stopReason: 'tool_use' },
+    ],
+    [
+      { type: 'message_start', messageId: 'msg-2', model: 'claude-sonnet-4-5' },
+      { type: 'text_delta', text: 'the command is done' },
+      { type: 'message_stop', stopReason: 'end_turn' },
+    ],
+  ];
+}
+
 /** The rounds a write turn takes. */
 function writeRounds(target: string): ProviderEvent[][] {
   return [
@@ -1702,6 +1723,38 @@ describe('the production wiring of the two seams', () => {
     expect(code).toBe(EXIT_SUCCESS);
     // The write ran: the session's own tools are wired to the runtime.
     expect(existsSync(target)).toBe(true);
+  });
+
+  it('carries the loaded sandbox policy into the session the CLI builds', async () => {
+    // The wiring the `Bash` tool's header names: the session the CLI builds
+    // must carry the **loaded** sandbox policy, or every command takes the
+    // no-policy branch and the sandbox protects nothing. The settings say the
+    // sandbox is switched off, so the command runs **unconfined** — with the
+    // **policy's** reason, which is what tells the two apart.
+    const configDir = makeDirectory();
+    writeFileSync(
+      path.join(configDir, 'settings.json'),
+      JSON.stringify({ permissions: { allow: ['Bash'] }, sandbox: { enabled: false } }),
+    );
+    const cwd = makeDirectory();
+    const requests: ProviderRequest[] = [];
+
+    const code = await runCommand(parseArgs(['-p', 'list the files', '--output-format', 'json']), {
+      stdout: new CollectingSink(),
+      stderr: new CollectingSink(),
+      configDir,
+      cwd,
+      isTTY: false,
+      driver: fakeDriver(bashRounds(), requests),
+    });
+
+    expect(code).toBe(EXIT_SUCCESS);
+    // The tool result the model saw carries the **policy's** reason.
+    const seen = JSON.stringify(requests);
+    expect(seen).toContain('sandbox.enabled is false');
+    // **Not** the no-policy reason, which is what a session without the
+    // wiring would report.
+    expect(seen).not.toContain('configured no sandbox policy');
   });
 
   it('refuses a tool call a PreToolUse hook denies', async () => {
