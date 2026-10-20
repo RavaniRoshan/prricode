@@ -74,6 +74,8 @@
 | unknown | 1 |
 | inferred | 0 |
 | not applicable (project requirement) | 2 |
+| implementation choice | 2 |
+| project requirement | 1 |
 | **Total rows** | **42** |
 
 `F-27` is counted as partial rather than observed because the compaction *event* is observed but the boundary-and-projection *model* is inferred from the tool-result shaping code, not from a resolved relation.
