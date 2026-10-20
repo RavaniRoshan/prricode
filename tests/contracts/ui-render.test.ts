@@ -46,6 +46,25 @@
  *  11. The **implementation's own strings** are pinned by their **content**, not by
  *      their presence: a reworded marker, a missing exemption line or a
  *      changed choice label is a change the suite must catch.
+ *  12. The **strip is per path**: every path that carries a caller-supplied
+ *      string strips it **itself**, and each path's stripped text is pinned
+ *      **exactly** — so a path that stopped stripping, or a second and weaker
+ *      scanner, is caught on its own and not by the path next to it.
+ *  13. The **ARIA label** of the approval prompt and the **status line** are
+ *      stripped too, and the **mounted** app puts **no** escape sequence on
+ *      the terminal — the label reaches the terminal through Ink's own
+ *      sanitiser, so only the mount can show that it does not.
+ *  14. The **sandbox availability report** is shown: an unconfined run says
+ *      why the backend was not used.
+ *  15. The renderer's **strictness** rule **fails closed**: a behavior outside
+ *      the closed vocabulary is the strictest, exactly as the permission
+ *      layer's own rule is.
+ *  16. The **shipped view** is built on the plan's `renderMessages`: the
+ *      relationship is asserted **by the code** — the conversation is built
+ *      from `renderMessages`' own blocks — and by a **behavioural** test (the
+ *      conversation's model blocks *are* the model's blocks). It is **not**
+ *      observed by spying on the call: an ESM namespace spy cannot see an
+ *      intra-module call.
  */
 
 import { PassThrough, Writable } from 'node:stream';
@@ -58,6 +77,7 @@ import type { PermissionDecision } from '../../src/permissions/decision.js';
 import type { ToolResultEnvelope } from '../../src/tools/runner.js';
 import {
   appRenderOptions,
+  approvalLabel,
   inputEcho,
   renderApp,
   STREAMING_MAX_FPS,
@@ -68,6 +88,9 @@ import {
   KNOWN_INPUT_FIELDS,
   renderConversation,
   renderMessages,
+  renderToolBlock,
+  summarizeToolInput,
+  toolResultLines,
 } from '../../src/ui/render/messages.js';
 import { approvalChoices, renderApprovalPrompt } from '../../src/ui/render/prompts.js';
 
@@ -125,6 +148,7 @@ function bashOutput(overrides: Partial<{
   sandboxEstablishmentReason: string;
   sandboxExemptions: readonly string[];
   sandboxExemptionScope: 'none' | 'partial' | 'all';
+  sandboxAvailability: { available: boolean; reason?: string; warning?: string };
   timedOut: boolean;
 }> = {}): Record<string, unknown> {
   const stdout = overrides.stdout ?? 'file1\nfile2';
@@ -146,6 +170,9 @@ function bashOutput(overrides: Partial<{
     ...(overrides.sandboxExemptionScope === undefined
       ? {}
       : { sandboxExemptionScope: overrides.sandboxExemptionScope }),
+    ...(overrides.sandboxAvailability === undefined
+      ? {}
+      : { sandboxAvailability: overrides.sandboxAvailability }),
     ...(overrides.timedOut === undefined ? {} : { timedOut: overrides.timedOut }),
   };
 }
@@ -274,6 +301,57 @@ describe('renderMessages — the message list', () => {
     expect(blocks[0]).not.toContain('source: unknown');
   });
 
+  it('folds a permission request into the most recent call of the same tool', () => {
+    // The request belongs to the **most recent** call of the same tool —
+    // whether or not that call already carries a decision, because a call that
+    // is checked twice folds both requests into it.
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'ls' }),
+      toolCall('c2', 'Bash', { command: 'rm -rf /' }),
+      permissionRequest('p1', 'Bash', {
+        behavior: 'deny',
+        source: 'hook',
+        reasonType: 'safetyCheck',
+        reason: 'A safety check refused this Bash call.',
+      }),
+    ]);
+
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toContain('denied (source: hook, reason type: safetyCheck)');
+    expect(blocks[0]).not.toContain('denied');
+  });
+
+  it('fails closed on a behaviour outside the closed vocabulary', () => {
+    // The types forbid it, but a caller can still build one at runtime. The
+    // permission layer's own rule treats an unknown behaviour as the
+    // **strictest**, and the renderer shares that rule, so the unknown
+    // behaviour decides the call — and a call that is not an `allow` and not
+    // an `ask` is marked as a denial rather than shown as approved.
+    const outside = {
+      behavior: 'maybe',
+      source: 'unknown',
+      reasonType: 'other',
+      reason: 'An unknown behaviour decided this Bash call.',
+    } as unknown as PermissionDecision;
+
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'rm -rf /' }),
+      permissionRequest('p1', 'Bash', {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No permission rule matched.',
+      }),
+      permissionRequest('p2', 'Bash', outside),
+    ]);
+
+    expect(blocks[0]).toContain('denied (source: unknown, reason type: other)');
+    // The unknown behaviour **won the fold**: the `ask` decision's reason is
+    // not the one that is shown.
+    expect(blocks[0]).toContain('An unknown behaviour decided this Bash call.');
+    expect(blocks[0]).not.toContain('No permission rule matched.');
+  });
+
   it('prefers the decision that decided the call over the first request', () => {
     // The envelope carries the decision the call was settled with; a
     // `permission_request` record is the log of the checks that led to it.
@@ -350,6 +428,46 @@ describe('renderMessages — the message list', () => {
     expect(blocks[0]).toContain('  ⎿ sandbox not established: the bubblewrap backend is not available');
     expect(blocks[0]).toContain('  ⎿ sandbox exemption scope: all');
     expect(blocks[0]).toContain('  ⎿ timed out');
+  });
+
+  it('shows the backend\'s availability report, so an unconfined run says why', () => {
+    // On the unconfined path the availability report is the **only** carrier
+    // of *why the backend was not used*, so it is shown and not merely read.
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'ls -la' }),
+      toolResult('r1', {
+        toolUseId: 'c1',
+        content: bashOutput({
+          sandboxed: false,
+          sandboxAvailability: {
+            available: false,
+            reason: 'the bubblewrap backend is not available',
+          },
+        }),
+        isError: false,
+      }),
+    ]);
+
+    expect(blocks[0]).toContain(
+      '  ⎿ sandbox backend unavailable: the bubblewrap backend is not available',
+    );
+  });
+
+  it('shows what the availability probe could not establish', () => {
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'ls -la' }),
+      toolResult('r1', {
+        toolUseId: 'c1',
+        content: bashOutput({
+          sandboxed: true,
+          sandboxAvailability: { available: true, warning: 'the probe could not check the mount' },
+        }),
+        isError: false,
+      }),
+    ]);
+
+    expect(blocks[0]).toContain('  ⎿ sandbox backend available');
+    expect(blocks[0]).toContain('  ⎿ sandbox availability warning: the probe could not check the mount');
   });
 
   it('renders a tool block in this implementation\'s own shape', () => {
@@ -495,6 +613,8 @@ describe('renderMessages — the message list', () => {
     expect(model).toHaveLength(2);
     expect(conversation).toHaveLength(3);
     expect(conversation.filter((block) => model.includes(block))).toEqual(model);
+    // The conversation's model blocks **are** the model's blocks, in order.
+    expect(conversation).toEqual(['> Please list the files.', ...model]);
   });
 });
 
@@ -714,6 +834,109 @@ describe('renderApprovalPrompt — the approval prompt', () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* The strip, one path at a time                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The strip is **per path**, and this block is what makes it so.
+ *
+ * The paths **mask** each other: the tool result is stripped by the result
+ * reader *and* by the block renderer, so a reader that stopped stripping
+ * would still be hidden by the renderer next to it. A test that only looked
+ * at the finished block could not tell the two apart.
+ *
+ * So every path is pinned **on its own**, and the pinned text is the **exact**
+ * stripped text — not merely "there is no escape sequence in here". An exact
+ * text also catches a **second, weaker scanner**: a renderer that dropped the
+ * CSI sequences and let the OSC through would fail on the exact text even
+ * though the shared stripper had already removed both.
+ */
+describe('the control-sequence strip — one path at a time', () => {
+  it('strips the tool result in the result reader itself', () => {
+    const lines = toolResultLines(
+      {
+        toolUseId: 'c1',
+        content: { type: 'text', text: 'out\u001b[?1049h\u001b]0;pwned\u0007' },
+        isError: false,
+      },
+      undefined,
+    );
+
+    expect(lines).toEqual(['out']);
+  });
+
+  it('strips the output of a Bash run in the result reader itself', () => {
+    const lines = toolResultLines(
+      {
+        toolUseId: 'c1',
+        content: bashOutput({ stdout: 'out\u001b[2J\u001b]0;pwned\u0007' }),
+        isError: false,
+      },
+      undefined,
+    );
+
+    expect(lines).toEqual(['sandboxed', 'exit code 0', 'out']);
+  });
+
+  it('strips the tool block itself', () => {
+    const block = renderToolBlock('Bash\u001b[?1049h', 'ls\u001b]0;pwned\u0007', ['out\u001b[2J']);
+
+    expect(block).toBe('⏺ Bash(ls)\n  ⎿ out');
+  });
+
+  it('does not render an empty parenthesis for a summary that is only an escape', () => {
+    // The summary is tested **after** it is stripped: a summary that is only
+    // an escape is an empty summary, and an empty summary has no parentheses.
+    const block = renderToolBlock('Bash', '\u001b[2J', []);
+
+    expect(block).toBe('⏺ Bash');
+  });
+
+  it('strips the tool summary itself', () => {
+    expect(summarizeToolInput('Bash', { command: 'ls\u001b[?1049h' })).toBe('ls');
+    expect(summarizeToolInput('Bash', { command: 'ls\u001b]0;pwned\u0007' })).toBe('ls');
+  });
+
+  it('strips the approval prompt itself', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No rule matched.\u001b[2J',
+      },
+      'Bash\u001b]0;pwned\u0007',
+    );
+
+    expect(prompt).toBe(
+      [
+        'Bash needs your approval.',
+        '',
+        'No rule matched.',
+        '',
+        '❯ 1. Yes',
+        "  2. Yes, and don't ask again for this Bash call",
+        '  3. No, and tell the assistant what to do differently',
+      ].join('\n'),
+    );
+  });
+
+  it('strips the typed line itself', () => {
+    expect(inputEcho('x\u001b[?1049h')).toBe('> x');
+    expect(inputEcho('x\u001b]0;pwned\u0007')).toBe('> x');
+  });
+
+  it('strips the markdown itself', () => {
+    expect(renderMarkdown('a\u001b[2Jb')).toBe('ab');
+  });
+
+  it('strips the approval label itself', () => {
+    expect(approvalLabel('Bash\u001b]0;pwned\u0007')).toBe('Approval required for Bash');
+    expect(approvalLabel('')).toBe('Approval required for the tool');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* The Ink harness                                                             */
 /* -------------------------------------------------------------------------- */
 
@@ -773,6 +996,12 @@ function mountStreams(): {
  * `alternateScreen: false`, `incrementalRendering: true`, the streaming frame
  * rate and the screen-reader switch read from the environment. A test that
  * mounted through Ink's `render` directly would not exercise any of them.
+ *
+ * What is returned is the **frame** — what was on the terminal — and not the
+ * teardown. Ink writes a `show cursor` sequence when the instance is
+ * unmounted, and that sequence is Ink's own, not the app's; collecting the
+ * frame before the unmount is what lets a test say that the frame carries
+ * **no** escape sequence at all.
  */
 async function mountApp(props: AppProps, options: RenderOptions = {}): Promise<string> {
   const { stdout, stdin, stderr, text } = mountStreams();
@@ -785,8 +1014,9 @@ async function mountApp(props: AppProps, options: RenderOptions = {}): Promise<s
     ...options,
   });
   await instance.waitUntilRenderFlush();
+  const frame = text();
   instance.unmount();
-  return text();
+  return frame;
 }
 
 /** The events the app-level tests show. */
@@ -872,6 +1102,27 @@ describe('the app — the screen-reader tree', () => {
     expect(output).toContain('No permission rule matched.');
   });
 
+  it('puts no escape sequence on the terminal through the approval label', async () => {
+    // The ARIA label reaches the terminal through **Ink's** sanitiser, and
+    // Ink's sanitiser **preserves** OSC sequences — so a label that carried
+    // one would put it on the terminal verbatim. Only the **mount** can show
+    // that the label does not, which is why this test mounts the app.
+    const output = await withScreenReader(() =>
+      mountApp({
+        events: APP_EVENTS,
+        input: 'what next?',
+        approval: {
+          decision: APP_APPROVAL.decision,
+          toolName: 'Bash\u001b]0;pwned\u0007',
+        },
+      }),
+    );
+
+    expect(output).toContain('listbox: Approval required for Bash');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('pwned');
+  });
+
   it('reads the screen-reader switch from the environment', () => {
     const previous = process.env['INK_SCREEN_READER'];
     try {
@@ -949,5 +1200,23 @@ describe('the app — the mounted view', () => {
     expect(output).toContain('⏺ Hello there.');
     expect(output).toContain('⏺ Bash(ls -la)');
     expect(output).toContain('> what next?');
+  });
+
+  it('strips the control sequences the status line could carry', async () => {
+    // The status line is the last string in the app that is not stripped, and
+    // it is caller-supplied: it is whatever the caller put in it. The mount is
+    // the screen-reader one, because that is the path Ink's sanitiser keeps an
+    // OSC sequence on: the cell layout of the normal path drops it.
+    const output = await withScreenReader(() =>
+      mountApp({
+        events: APP_EVENTS,
+        input: 'what next?',
+        status: 'thinking\u001b]0;pwned\u0007',
+      }),
+    );
+
+    expect(output).toContain('thinking');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('pwned');
   });
 });

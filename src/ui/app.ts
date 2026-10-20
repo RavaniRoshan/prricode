@@ -64,6 +64,13 @@
  * are the plan's blocks, byte for byte — so the plan's contract and the
  * shipped view cannot drift apart.
  *
+ * That relationship is asserted **by the code**: the conversation is built
+ * from `renderMessages`' own blocks and from nothing else, so the plan's
+ * contract *is* the shipped view. It is checked by a **behavioural** test —
+ * the conversation's model blocks are the model's blocks. It is **not**
+ * observed by spying on the call: the call is an intra-module one, and an
+ * ESM namespace spy cannot see it.
+ *
  * ## What is observed and what is a implementation choice
  *
  * The audit records the target's **input and output formats** and the fact that
@@ -121,9 +128,18 @@ export const ARIA_LABELS = {
  *
  * **Implementation choice**, like the labels above. The tool is named, because the
  * question is about that tool.
+ *
+ * The name is **stripped** of its control sequences, and it has to be: Ink
+ * renders an `aria-label` into the screen-reader tree through its own
+ * sanitiser, and that sanitiser **preserves** OSC sequences (it strips the
+ * CSI ones and keeps the OSC ones). A label that carried an OSC would
+ * therefore put it on the terminal **verbatim** — the one path where the
+ * implementation's own stripper is not the last word. Every other string the app
+ * shows is stripped, and so is this one.
  */
 export function approvalLabel(toolName: string): string {
-  return `Approval required for ${toolName === '' ? 'the tool' : toolName}`;
+  const name = stripControlSequences(toolName);
+  return `Approval required for ${name === '' ? 'the tool' : name}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -257,7 +273,9 @@ export function inputEcho(text: string): string {
  * model's blocks, in the order they happened. The conversation is built **on**
  * the plan's `renderMessages` — the model's blocks in the shipped view are
  * the plan's blocks, byte for byte — so the plan's contract and the shipped
- * view cannot drift apart.
+ * view cannot drift apart. The relationship is asserted by the code and
+ * checked by a behavioural test; it is not observed by a spy, because the
+ * call is an intra-module one.
  */
 export function App(props: AppProps): ReactNode {
   const blocks = renderConversation(props.events);
@@ -339,10 +357,13 @@ export function App(props: AppProps): ReactNode {
     createElement(Text, null, inputEcho(input)),
   );
 
-  const statusRegion =
-    props.status === undefined || props.status === ''
-      ? null
-      : createElement(Text, { dimColor: true }, props.status);
+  const statusRegion = (() => {
+    // The status line is caller-supplied — it is whatever the caller put in
+    // it — so it is stripped like every other string the app shows.
+    const status = props.status === undefined ? '' : stripControlSequences(props.status);
+    if (status === '') return null;
+    return createElement(Text, { dimColor: true }, status);
+  })();
 
   return createElement(
     Box,

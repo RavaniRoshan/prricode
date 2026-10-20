@@ -66,11 +66,12 @@
  * question *"what may a model's text contain on its way to a terminal?"* — and
  * because the answer must be the **same** answer everywhere. The markdown
  * renderer is only one of the paths a model-controlled string takes: a tool
- * **result**, a tool **input summary**, an **approval prompt** and the **input
- * echo** reach the terminal too, and a protection that lives in one path is a
- * protection that a caller can route around. The message renderer, the prompt
- * renderer and the app therefore import this **one** function, so there is
- * exactly one scanner and exactly one set of rules.
+ * **result**, a tool **input summary**, an **approval prompt**, an **ARIA
+ * label** and the **input echo** reach the terminal too, and a protection that
+ * lives in one path is a protection that a caller can route around. The
+ * message renderer, the prompt renderer and the app therefore import this
+ * **one** function, so there is exactly one scanner and exactly one set of
+ * rules.
  *
  * ## What is observed and what is a implementation choice
  *
@@ -247,13 +248,22 @@ function segment(source: string): Segment[] {
  * scrollback the target's UI keeps. The renderer therefore drops every escape
  * sequence and every control character except the line feed and the tab.
  *
+ * The **OSC** sequences have to go as well, and they cannot be left to the
+ * terminal: Ink's own sanitiser (`ink/build/sanitize-ansi.js`) strips the CSI
+ * sequences but **preserves** the OSC ones, so an OSC that reached Ink — in a
+ * cell, in a screen-reader label, in any text node — would go on to the
+ * terminal verbatim. `ESC ] 52 ; … BEL` puts text on the clipboard and
+ * `ESC ] 0 ; … BEL` retitles the window. Nothing here is left for Ink to
+ * decide.
+ *
  * The stripper is a **scanner** and not a set of regular expressions: an
  * escape sequence's payload is defined by its terminator, and a regex that
  * guesses the terminator gets it wrong on exactly the inputs that matter.
  *
  * The stripper is the **shared** one: the message renderer, the prompt renderer
  * and the app import it from here, so a tool result, a tool summary, an
- * approval prompt and a typed line are all protected by the same rules.
+ * approval prompt, an ARIA label and a typed line are all protected by the
+ * same rules.
  */
 export function stripControlSequences(text: string): string {
   let out = '';

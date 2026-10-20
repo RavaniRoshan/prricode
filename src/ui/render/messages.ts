@@ -69,9 +69,25 @@
  *
  * The `Bash` tool reports whether the command ran **inside** the sandbox, the
  * reason it did not, the reason the sandbox **never came up**, the exemptions
- * that applied and how far they reach. The block shows all of them, because
- * "the command ran" and "the command ran *confined*" are different facts and a
- * reader must not have to guess which one happened.
+ * that applied, how far they reach, and what the backend's **availability
+ * probe** reported. The block shows all of them, because "the command ran"
+ * and "the command ran *confined*" are different facts and a reader must not
+ * have to guess which one happened. The availability report is not redundant
+ * either: on the unconfined path it is the **only** carrier of *why the
+ * backend was not used*.
+ *
+ * ## The strictness rule is shared, and it fails closed
+ *
+ * A call can be checked twice — the runtime checks the input, and checks it
+ * again when a hook rewrote it — and the **strictest** of the two decisions
+ * is the one that decided the call. The rule that says which one is stricter
+ * belongs to the **permission layer** (`permissionStrictness`, in
+ * `src/permissions/decision.ts`), and the renderer **shares** it rather than
+ * copying it: the renderer already depends on the permission vocabulary, and
+ * a second copy could only drift. The shared rule **fails closed** — a
+ * behavior outside the closed vocabulary, which the types forbid but a caller
+ * can still build at runtime, is the **strictest** one, and the renderer
+ * treats a call it cannot read as a denial rather than as an approval.
  *
  * ## Caller-supplied data is data
  *
@@ -86,6 +102,13 @@
  * control sequences by the shared stripper (`./markdown.ts`), the same one the
  * markdown renderer uses.
  *
+ * The strip is **per path**, and each path strips for itself: the result
+ * reader, the block renderer and the summary reader each strip their own
+ * input. The paths mask each other — the block renderer strips the result
+ * lines the reader produced — so the contract test pins each path's stripped
+ * text **exactly**, on its own, rather than looking at the finished block
+ * and hoping the right layer did the work.
+ *
  * ## What is observed and what is a implementation choice
  *
  * The audit pins the permission **vocabulary** — the behaviors, the sources and
@@ -97,13 +120,14 @@
  *     and the truncation limits;
  *   - the **denial marker's wording**: `denied (source: …, reason type: …)`;
  *   - the **sandbox status lines**: `sandboxed`, `not sandboxed: …`,
- *     `sandbox not established: …`, `sandbox exemptions: …` and
- *     `sandbox exemption scope: …`;
+ *     `sandbox not established: …`, `sandbox backend available`,
+ *     `sandbox backend unavailable: …`, `sandbox availability warning: …`,
+ *     `sandbox exemptions: …` and `sandbox exemption scope: …`;
  *   - the **tool-summary fields** the summary names;
  *   - the **unmatched-result report**: `unmatched tool result`.
  */
 
-import type { PermissionDecision } from '../../permissions/decision.js';
+import { permissionStrictness, type PermissionDecision } from '../../permissions/decision.js';
 import { isRecord, ownBoolean, ownNumber, ownString } from '../../session/event.js';
 import type { SessionEvent } from '../../session/event.js';
 import type { ToolResultEnvelope } from '../../tools/runner.js';
@@ -218,6 +242,24 @@ function ownStringArray(record: Record<string, unknown>, key: string): string[] 
     if (typeof member === 'string') out.push(member);
   }
   return out;
+}
+
+/**
+ * Read an own object member.
+ *
+ * **Own-property** on purpose, like every other reader in this repository: a
+ * member name in a tool's output is caller-supplied data, and
+ * `Object.prototype` carries members called `constructor` and `toString`. A
+ * member that is not an object is not a member the reader can read: the
+ * reader reads the object's **own** members.
+ */
+function ownRecord(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined {
+  if (!Object.hasOwn(record, key)) return undefined;
+  const value = record[key];
+  return isRecord(value) ? value : undefined;
 }
 
 /**
@@ -363,6 +405,18 @@ function contentLines(envelope: ToolResultEnvelope): string[] {
  * result that does not carry it. So each member is read on its own, and a
  * member that is absent is simply not shown.
  *
+ * Two members are **not** shown, and the reasons are the shape's own:
+ *
+ *   - `type` is the shape's **tag** — it is what says the content is a `Bash`
+ *     output at all, and not a fact about the run. The **caller**
+ *     (`contentLines`) reads it to tell an error from a text result;
+ *   - `text` is the **same content** as `stdout`, and is read only as the
+ *     fallback for a result that carries `stdout` alone.
+ *
+ * The **availability report** (`sandboxAvailability`) **is** shown: on the
+ * unconfined path it is the **only** carrier of *why the backend was not
+ * used*, so a reader must not have to guess.
+ *
  * **Implementation choice.** The wording of the status lines is this implementation's own.
  */
 function bashLines(content: Record<string, unknown>): string[] {
@@ -383,6 +437,25 @@ function bashLines(content: Record<string, unknown>): string[] {
   const establishment = ownString(content, 'sandboxEstablishmentReason');
   if (establishment !== undefined && establishment !== '') {
     lines.push(`sandbox not established: ${establishment}`);
+  }
+
+  // The **backend's own report**: whether it can run on this host at all. It
+  // is the only carrier of *why the backend was not used*, so it is shown.
+  const availability = ownRecord(content, 'sandboxAvailability');
+  if (availability !== undefined) {
+    const available = ownBoolean(availability, 'available') === true;
+    const why = ownString(availability, 'reason');
+    if (available) {
+      lines.push('sandbox backend available');
+    } else if (why !== undefined && why !== '') {
+      lines.push(`sandbox backend unavailable: ${why}`);
+    } else {
+      lines.push('sandbox backend unavailable');
+    }
+    const warning = ownString(availability, 'warning');
+    if (warning !== undefined && warning !== '') {
+      lines.push(`sandbox availability warning: ${warning}`);
+    }
   }
 
   const exemptions = ownStringArray(content, 'sandboxExemptions');
@@ -494,7 +567,9 @@ export function renderUserBlock(text: string): string {
  * it. The lines are capped, and the cap is **announced** rather than silent.
  *
  * Both the summary and the lines are **stripped**: they are caller-supplied,
- * and the block is what the terminal shows.
+ * and the block is what the terminal shows. The summary is tested **after** it
+ * is stripped, so a summary that is *only* an escape sequence is an empty
+ * summary — and an empty summary has no parentheses at all.
  *
  * **Implementation choice.** The block's shape — the marker, the indent and the result
  * marker — is this implementation's own.
@@ -505,7 +580,8 @@ export function renderToolBlock(
   lines: string[],
 ): string {
   const name = stripControlSequences(toolName);
-  const call = summary === '' ? name : `${name}(${stripControlSequences(summary)})`;
+  const summaryText = stripControlSequences(summary);
+  const call = summaryText === '' ? name : `${name}(${summaryText})`;
   const header = `${MESSAGE_MARKER} ${call}`;
   if (lines.length === 0) return header;
 
@@ -550,29 +626,51 @@ type Entry =
  * The stricter of two decisions.
  *
  * A `deny` wins over everything, an `ask` wins over an `allow`, and two
- * `allow`s are the first one. The rule is the permission layer's
- * (`src/permissions/decision.ts`); it is repeated here because the renderer
- * must not depend on the runtime it renders.
+ * `allow`s are the first one.
+ *
+ * The rule is the permission layer's **own** (`permissionStrictness`, in
+ * `src/permissions/decision.ts`), and it is **shared** rather than copied: the
+ * renderer already depends on the permission vocabulary — the decision type
+ * and the reason the prompt shows — so a second copy of the rule could only
+ * drift. The shared rule **fails closed**: a behavior outside the closed
+ * vocabulary, which the types forbid but a caller can still build at runtime,
+ * is the **strictest** one, and the renderer treats it as such.
  */
 function stricterDecision(
   first: PermissionDecision | undefined,
   second: PermissionDecision | undefined,
 ): PermissionDecision | undefined {
-  if (first === undefined) return second;
-  if (second === undefined) return first;
-  if (first.behavior === 'deny') return first;
-  if (second.behavior === 'deny') return second;
-  if (first.behavior === 'ask') return first;
-  if (second.behavior === 'ask') return second;
-  return first;
+  if (first === undefined) return second === undefined ? undefined : closedDecision(second);
+  if (second === undefined) return closedDecision(first);
+  if (permissionStrictness(second.behavior) > permissionStrictness(first.behavior)) {
+    return closedDecision(second);
+  }
+  return closedDecision(first);
+}
+
+/**
+ * The decision, with its behavior inside the closed vocabulary.
+ *
+ * A behavior outside the vocabulary is the **strictest** one — the shared
+ * rule fails closed — and the strictest behavior is `deny`. Normalising it
+ * is what makes the failure **visible**: the call is marked as a denial
+ * instead of being shown as a call that was allowed.
+ */
+function closedDecision(decision: PermissionDecision): PermissionDecision {
+  if (decision.behavior === 'allow' || decision.behavior === 'ask' || decision.behavior === 'deny') {
+    return decision;
+  }
+  return { ...decision, behavior: 'deny' };
 }
 
 /**
  * Fold the records into the entries of the list.
  *
  * A `tool_result` answers the tool call whose id is the envelope's
- * `toolUseId`, and a `permission_request` belongs to the most recent tool call
- * of the same tool that has no decision yet.
+ * `toolUseId`, and a `permission_request` belongs to the **most recent** tool
+ * call of the same tool — whether or not that call already carries a
+ * decision, because a call that is checked twice folds both requests into it
+ * and keeps the stricter one.
  *
  * A call may be checked **twice**: the runtime checks the input, and checks it
  * again when a hook rewrote it. The two requests are folded into the same
@@ -625,9 +723,10 @@ function fold(events: SessionEvent[], includeUserMessages: boolean): Entry[] {
         break;
       }
       case 'permission_request': {
-        // The most recent open call of the same tool: the prompt belongs to the
+        // The most recent call of the same tool: the prompt belongs to the
         // call it was asked about. A call that was checked twice collects both
-        // requests, and keeps the stricter decision.
+        // requests, and keeps the stricter decision — so a call that already
+        // carries a decision collects this one too.
         for (let index = openCalls.length - 1; index >= 0; index -= 1) {
           const candidate = openCalls[index];
           if (candidate === undefined) continue;
@@ -668,12 +767,44 @@ function fold(events: SessionEvent[], includeUserMessages: boolean): Entry[] {
  *
  * The user's own prompts are **not** blocks of this list: they are what the
  * input line shows. `renderConversation` is the app's fuller view, which shows
- * them too.
+ * them too — and it is built on **this** function's blocks, so the shipped
+ * view and the plan's contract cannot drift apart.
  */
 export function renderMessages(events: SessionEvent[]): string[] {
   if (!Array.isArray(events)) return [];
   const entries = fold(events, false);
   return entries.map((entry) => renderEntry(entry));
+}
+
+/**
+ * A user's own prompt, and where it belongs.
+ *
+ * The `modelIndex` is the number of the **model's** blocks that came before
+ * the prompt, so the prompt can be shown in the place it was said.
+ */
+type UserPrompt = Extract<Entry, { kind: 'user' }> & {
+  /** The number of the model's blocks that came before the prompt. */
+  readonly modelIndex: number;
+};
+
+/**
+ * The user's own prompts, and where each of them belongs.
+ *
+ * The count is the number of the **model's** entries that came before the
+ * prompt, and every model entry is exactly one model block — so the count is
+ * the index the prompt's block has to be shown at.
+ */
+function userPrompts(folded: Entry[]): UserPrompt[] {
+  const prompts: UserPrompt[] = [];
+  let modelIndex = 0;
+  for (const entry of folded) {
+    if (entry.kind === 'user') {
+      prompts.push({ ...entry, modelIndex });
+      continue;
+    }
+    modelIndex += 1;
+  }
+  return prompts;
 }
 
 /**
@@ -683,23 +814,30 @@ export function renderMessages(events: SessionEvent[]): string[] {
  * model produced; the app also shows what the user said, in the order it was
  * said, so this is the view the app mounts.
  *
- * The conversation is built **on** the plan's contract: the model's blocks are
- * `renderMessages`' own, so the shipped view and the plan's contract cannot
- * drift apart. The fold runs twice — once for the order and once inside
- * `renderMessages` — and it is the same pure fold both times.
+ * The conversation is built **on** the plan's contract, and it is built on it
+ * **structurally**: the model's blocks are `renderMessages`' own blocks, taken
+ * from `renderMessages` and from nothing else. The prompts are placed by the
+ * count of the model's entries that came before them, so a prompt sits where
+ * it was said. The shipped view and the plan's contract therefore cannot
+ * drift apart — there is no second copy of the model's blocks to drift.
  */
 export function renderConversation(events: SessionEvent[]): string[] {
   if (!Array.isArray(events)) return [];
-  const entries = fold(events, true);
+  const folded = fold(events, true);
+  const entries = userPrompts(folded);
   const model = renderMessages(events);
 
   const blocks: string[] = [];
   let index = 0;
   for (const entry of entries) {
-    if (entry.kind === 'user') {
-      blocks.push(renderUserBlock(entry.text));
-      continue;
+    while (index < entry.modelIndex) {
+      const block = model[index];
+      index += 1;
+      if (block !== undefined) blocks.push(block);
     }
+    blocks.push(renderUserBlock(entry.text));
+  }
+  while (index < model.length) {
     const block = model[index];
     index += 1;
     if (block !== undefined) blocks.push(block);
