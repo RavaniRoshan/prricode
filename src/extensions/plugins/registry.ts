@@ -29,12 +29,23 @@
  *     implementation-choice status live in `./manifest.ts`; this module applies it when
  *     a plugin is loaded, so a refused path is dropped from the manifest the
  *     record holds, and again when a command, a skill or an agent is read.
+ *     A refused path is **reported twice**: as a problem on the manifest the
+ *     record holds — so the record is self-describing — and as a log record.
  *   - A **collision** between two plugins that provide a skill — or a
  *     subagent — under the same name is **reported**, not dropped silently:
- *     the manager logs a warning naming both providers, and the resolved
+ *     the manager logs a warning naming the providers, and the resolved
  *     record carries the other providers in `collidesWith`. The names stay
- *     **un-namespaced** — a plugin's skill is named after its directory, as
- *     the target's plugin skills are.
+ *     **un-namespaced**: a plugin's skill is named after the skill directory
+ *     inside the plugin's own skills directory (and a plugin's subagent after
+ *     its file's basename), and the plugin's name does not become a prefix.
+ *
+ *     The justification is this implementation's **no-silent-drop** rule: nothing the
+ *     extension surface resolves is dropped without a report — a malformed
+ *     frontmatter is surfaced, a refused path is reported, an over-limit file
+ *     is surfaced. §2.8 says **nothing** about how a plugin's skill is
+ *     named, and nothing about what happens when two plugins ship the same
+ *     name, so both the naming and the collision handling are this implementation's
+ *     choices; the audit is cited for neither.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -179,7 +190,9 @@ export function findPluginManifest(root: string): string | undefined {
  * directory keys, the file keys and the command metadata's `source` — is
  * resolved against the plugin root and refused when it leaves it. A refused
  * path is **dropped** from the manifest the record holds, so no later
- * consumer can pick it up, and it is reported with its named reason.
+ * consumer can pick it up, and it is reported with its named reason — twice:
+ * as a **problem** on the manifest the record holds, so the record is
+ * self-describing, and as a **warning** the manager logs.
  *
  * Implementation choice — see the file header.
  */
@@ -188,6 +201,8 @@ export function containPluginPaths(
   manifest: PluginManifest,
 ): { manifest: PluginManifest; warnings: string[] } {
   const warnings: string[] = [];
+  // The manifest's own problems, plus the refusals this pass makes.
+  const problems = [...manifest.problems];
 
   const keep = (key: string, paths: readonly string[]): string[] => {
     const kept: string[] = [];
@@ -196,6 +211,9 @@ export function containPluginPaths(
       if (!resolution.ok) {
         warnings.push(
           `Refusing the plugin's \`${key}\` path \`${declared}\`: ${resolution.reason}`,
+        );
+        problems.push(
+          `the plugin's \`${key}\` path \`${declared}\` was refused: ${resolution.reason}`,
         );
         continue;
       }
@@ -233,12 +251,18 @@ export function containPluginPaths(
       warnings.push(
         `Refusing the plugin's \`commands\` path \`${entry.source}\`: ${resolution.reason}`,
       );
+      problems.push(
+        `the plugin's \`commands\` path \`${entry.source}\` was refused: ${resolution.reason}`,
+      );
       continue;
     }
     commands.push(entry);
   }
 
-  return { manifest: { ...manifest, directories, files, commands }, warnings };
+  return {
+    manifest: { ...manifest, directories, files, commands, problems },
+    warnings,
+  };
 }
 
 /**
@@ -364,6 +388,11 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
   const skillsOf = (plugin: PluginRecord): SkillContribution[] => {
     const contributions: SkillContribution[] = [];
     for (const declared of plugin.manifest?.directories['skills'] ?? []) {
+      // Defence in depth: the manifest containment (`containPluginPaths`)
+      // already dropped a declared skills path that leaves the root, and the
+      // per-skill-file check below refuses a skill file that does. This check
+      // is what refuses a skills **directory** that is no longer inside the
+      // root when the plugin is read — the directory is never walked.
       const resolution = resolvePluginPath(plugin.root, declared);
       if (!resolution.ok) {
         record({
@@ -385,6 +414,10 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
         // be a prototype key.
         if (!isSafeLookupName(entry)) continue;
         const skillFile = path.join(skillsDir, entry, 'SKILL.md');
+        // Defence in depth: the skills-directory check above refuses a
+        // directory that leaves the root, and the manifest containment drops
+        // a declared path that leaves it. This check is what refuses a
+        // **skill file** reached through a symlinked subdirectory.
         const fileResolution = resolvePluginPath(plugin.root, skillFile);
         if (!fileResolution.ok) {
           record({
@@ -408,6 +441,11 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
   const agentsOf = (plugin: PluginRecord): SubagentContribution[] => {
     const contributions: SubagentContribution[] = [];
     for (const declared of plugin.manifest?.directories['agents'] ?? []) {
+      // Defence in depth: the manifest containment (`containPluginPaths`)
+      // already dropped a declared agents path that leaves the root, and the
+      // per-agent-file check below refuses an agent file that does. This check
+      // is what refuses an agents **directory** that is no longer inside the
+      // root when the plugin is read — the directory is never walked.
       const resolution = resolvePluginPath(plugin.root, declared);
       if (!resolution.ok) {
         record({
@@ -429,6 +467,10 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
         const agentName = entry.slice(0, -'.md'.length);
         if (!isSafeLookupName(agentName)) continue;
         const agentFile = path.join(agentsDir, entry);
+        // Defence in depth: the agents-directory check above refuses a
+        // directory that leaves the root, and the manifest containment drops
+        // a declared path that leaves it. This check is what refuses an
+        // **agent file** that is a symlink out of the root.
         const fileResolution = resolvePluginPath(plugin.root, agentFile);
         if (!fileResolution.ok) {
           record({
@@ -452,15 +494,22 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
   const pluginsRoot = options.pluginsRoot;
 
   /**
-   * Report a name two plugins provide.
+   * Report a name two providers claim.
    *
-   * The names stay un-namespaced — a plugin's skill is named after its
-   * directory — so two plugins that ship the same name collide. The
-   * collision is **reported** rather than dropped silently; the first
-   * contribution wins, and the skill registry carries the other providers in
-   * `collidesWith`.
+   * The names stay un-namespaced — a plugin's skill is named after the skill
+   * directory inside the plugin's own skills directory — so two providers can
+   * ship the same name. The collision is **reported** rather than dropped
+   * silently; the first contribution wins, and the skill registry carries the
+   * other providers in `collidesWith`.
    *
-   * Implementation choice — see the file header.
+   * The report names the **situation**: two plugins that provide the same
+   * name, and the different case of **one** plugin that provides it twice —
+   * two `skills` directories in one plugin, say — which is a different
+   * problem and is reported as such.
+   *
+   * Implementation choice — see the file header. §2.8 says nothing about how a
+   * plugin's skill is named, nor about what happens when two providers ship
+   * the same name, so neither the naming nor the reporting is the target's.
    */
   const reportCollisions = (
     contributions: readonly { name: string; provider?: string; path: string }[],
@@ -478,10 +527,15 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
       if (reportedCollisions.has(key)) continue;
       reportedCollisions.add(key);
       const providers = bucket.map((contribution) => contribution.provider ?? contribution.path);
-      record({
-        level: 'warn',
-        message: `Two plugins provide the ${kind} \`${name}\` (${providers.join(', ')}); only the first one is used.`,
-      });
+      // One provider that ships the name twice is not two providers colliding.
+      const distinct = new Set(providers);
+      const message =
+        distinct.size === 1
+          ? `The plugin \`${providers[0]}\` provides the ${kind} \`${name}\` more than once (${bucket
+              .map((contribution) => `\`${contribution.path}\``)
+              .join(', ')}); only the first one is used.`
+          : `Two plugins provide the ${kind} \`${name}\` (${providers.join(', ')}); only the first one is used.`;
+      record({ level: 'warn', message });
     }
   };
 

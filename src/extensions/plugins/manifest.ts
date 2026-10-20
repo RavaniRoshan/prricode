@@ -157,7 +157,13 @@ export interface PluginManifest {
   commands: PluginCommandEntry[];
   /** The path the manifest was read from. */
   manifestPath: string;
-  /** The problems the parse found. */
+  /**
+   * The problems the manifest carries.
+   *
+   * The **parse** problems first, and then the paths the **containment**
+   * refused — so the record is self-describing: a consumer that reads only
+   * the manifest sees that a declared path was dropped, and why.
+   */
   problems: string[];
 }
 

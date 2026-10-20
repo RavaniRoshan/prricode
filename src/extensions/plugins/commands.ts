@@ -47,7 +47,8 @@
  * the symlink escape alike. The rule, its named reasons and its implementation-choice
  * status live in `./manifest.ts`; this module applies it to the commands path,
  * to the command file it reads, and to the `commandsMetadata` source it
- * matches a name against.
+ * matches a name against. Every refusal is **reported** — as a warning — so a
+ * consumer that reads only the warnings sees that a path was dropped.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -178,10 +179,55 @@ function holdsSkillInSubdirectory(directory: string): boolean {
 }
 
 /**
+ * The metadata whose `source` stays inside the plugin root.
+ *
+ * A metadata source is a manifest-declared path, so it is refused when it
+ * leaves the plugin root — an escaping source may not name a command. The
+ * refusal is **reported**, so a consumer that reads only the warnings sees
+ * that the metadata was dropped.
+ *
+ * Defence in depth: the manifest containment (`containPluginPaths` in
+ * `./registry.ts`) already drops a manifest command entry whose `source`
+ * escapes the root, so a source that reaches here has survived that check.
+ * This pass is what holds when the metadata is handed straight to the
+ * discovery, without a manifest — and it is what makes the refusal
+ * *observable*, so the check is pinned by a test.
+ */
+function containedMetadata(
+  root: string,
+  metadata: Readonly<Record<string, PluginCommandMetadata>>,
+): { metadata: Record<string, PluginCommandMetadata>; warnings: string[] } {
+  // A null-prototype object: a metadata key is caller-supplied data, so a key
+  // that names `__proto__` becomes an own property rather than the prototype.
+  const kept = Object.create(null) as Record<string, PluginCommandMetadata>;
+  const warnings: string[] = [];
+
+  for (const [key, entry] of Object.entries(metadata)) {
+    const source = entry?.source;
+    if (typeof source !== 'string') {
+      kept[key] = entry;
+      continue;
+    }
+    const resolution = resolvePluginPath(root, source);
+    if (!resolution.ok) {
+      warnings.push(
+        `Skipping plugin command metadata \`${key}\`: ${resolution.reason}`,
+      );
+      continue;
+    }
+    kept[key] = entry;
+  }
+
+  return { metadata: kept, warnings };
+}
+
+/**
  * The metadata key whose `source` resolves to a path.
  *
  * The lookup is an **own-property** check, so a metadata key that names an
- * inherited member of `Object.prototype` never matches.
+ * inherited member of `Object.prototype` never matches. The sources have
+ * already been contained — `containedMetadata` dropped every source that
+ * left the plugin root — so a source that reaches here is inside the root.
  */
 function metadataKeyForPath(
   metadata: Readonly<Record<string, PluginCommandMetadata>>,
@@ -192,11 +238,7 @@ function metadataKeyForPath(
   for (const [key, entry] of Object.entries(metadata)) {
     if (!isSafeLookupName(key)) continue;
     if (typeof entry?.source !== 'string') continue;
-    // A metadata source is a manifest-declared path, so it is refused when it
-    // leaves the plugin root — an escaping source may not name a command.
-    const resolution = resolvePluginPath(root, entry.source);
-    if (!resolution.ok) continue;
-    if (path.resolve(resolution.path) !== target) continue;
+    if (path.resolve(root, entry.source) !== target) continue;
     return key;
   }
   return undefined;
@@ -222,9 +264,21 @@ export function discoverPluginCommands(
   const commands: PluginCommand[] = [];
   const warnings: string[] = [];
 
+  // The metadata sources are contained first, so an escaping source may never
+  // name a command — and the refusal is reported.
+  const contained = containedMetadata(root, commandsMetadata);
+  warnings.push(...contained.warnings);
+  const metadata = contained.metadata;
+
   const addFileCommand = (filePath: string): void => {
     // The command file is read only when it is inside the plugin root — a
     // symlinked file may not smuggle a body out of the root.
+    //
+    // Defence in depth: the commands-path check below refuses a declared
+    // path that leaves the root, and the manifest containment
+    // (`containPluginPaths` in `./registry.ts`) drops a declared commands
+    // path that leaves it. This check is what refuses a **command file**
+    // that is a symlink out of the root.
     const resolution = resolvePluginPath(root, filePath);
     if (!resolution.ok) {
       warnings.push(
@@ -250,7 +304,7 @@ export function discoverPluginCommands(
     }
 
     const parsed = parseFrontmatter(text);
-    const metadataKey = metadataKeyForPath(commandsMetadata, root, resolution.path);
+    const metadataKey = metadataKeyForPath(metadata, root, resolution.path);
     const baseName = path.basename(resolution.path, '.md');
     const name = metadataKey === undefined ? `${plugin}:${baseName}` : `${plugin}:${metadataKey}`;
 
@@ -271,6 +325,11 @@ export function discoverPluginCommands(
   };
 
   for (const declared of commandsPaths) {
+    // Defence in depth: the manifest containment (`containPluginPaths` in
+    // `./registry.ts`) already dropped a declared commands path that leaves
+    // the root, and `addFileCommand` refuses a command file that does. This
+    // check is what refuses a commands **directory** that leaves the root
+    // before it is walked.
     const resolution = resolvePluginPath(root, declared);
     if (!resolution.ok) {
       warnings.push(`Skipping plugin command \`${resolution.path}\`: ${resolution.reason}`);
@@ -317,7 +376,7 @@ export function discoverPluginCommands(
   }
 
   // The inline commands: an entry with content and no source.
-  for (const [key, entry] of Object.entries(commandsMetadata)) {
+  for (const [key, entry] of Object.entries(metadata)) {
     if (!isSafeLookupName(key)) continue;
     if (typeof entry?.content !== 'string') continue;
     if (typeof entry?.source === 'string') continue;

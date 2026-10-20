@@ -20,20 +20,27 @@
  *   - the skill-save protocol: the five guidance modes, their wording, and the
  *     rule that selects the mode;
  *   - the plugin manifest schema (directory keys, file keys, the
- *     top-level/`experimental` split, the string/array value shapes) and the
- *     `broken` reason;
+ *     top-level/`experimental` split, the string/array value shapes), the
+ *     `broken` reason and the **candidate order**;
  *   - the plugin command discovery rules: the three naming shapes, the
  *     empty-directory warning, the byte limit and the body interning;
  *   - the marketplace install flow: refused versus failed, the two disable
  *     reasons, the enable hint, the version transition and the orphan marker;
  *   - the plugin **path boundary**: a manifest path that leaves the plugin
  *     root — lexically or through a symlink — is refused, for the commands,
- *     skills, agents and every other manifest-declared key;
+ *     skills, agents and every other manifest-declared key; each of the six
+ *     checks that holds that boundary is pinned **on its own**, so removing
+ *     one of them fails the suite;
+ *   - a refused path also lands in the manifest's own `problems`, so the
+ *     manifest record is self-describing;
  *   - the **collisions** between two plugins that provide the same skill or
- *     subagent name: they are reported, not dropped silently;
+ *     subagent name: they are reported, not dropped silently — and **one**
+ *     plugin that provides a name twice is reported as that, not as two
+ *     plugins colliding;
+ *   - the **discovery precedence** — `project > local > user > plugin > mcp`;
  *   - the **byte caps** on the skill and subagent definition files;
  *   - the IDE bridge's **action** validation: an action is a single path
- *     segment.
+ *     segment — empty, `.`, `..`, `/`, `\` and NUL are all refused.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -69,7 +76,9 @@ import {
 import {
   createSkillRegistry,
   SKILL_FILE_BYTE_LIMIT,
+  type DiscoverySource,
   type Skill,
+  type SkillContribution,
   type SkillRoot,
 } from '../../src/extensions/skills/registry.js';
 import {
@@ -256,6 +265,42 @@ describe('skill discovery', () => {
     expect(registry.list().map((skill) => skill.name)).toEqual([]);
     expect(registry.resolve('__proto__')).toBeUndefined();
     expect(({} as Record<string, unknown>)['__proto__']).toBe(Object.prototype);
+  });
+
+  it('resolves a name two sources provide by the precedence order: project, local, user, plugin, mcp', () => {
+    const base = tempDir();
+    const roots: SkillRoot[] = (['project', 'local', 'user'] as const).map((source) => {
+      const root = path.join(base, source);
+      writeSkill(root, 'shared');
+      return { path: root, source };
+    });
+    const plugin: SkillContribution = {
+      name: 'shared',
+      source: 'plugin',
+      path: '/plugins/demo/skills/shared/SKILL.md',
+      provider: 'demo',
+    };
+    const mcp: SkillContribution = {
+      name: 'shared',
+      source: 'mcp',
+      path: 'mcp://memory/shared',
+      provider: 'memory',
+    };
+
+    const winner = (
+      keptRoots: number,
+      kept: readonly SkillContribution[],
+    ): DiscoverySource | undefined =>
+      createSkillRegistry({
+        roots: roots.slice(roots.length - keptRoots),
+        contributions: kept,
+      }).resolve('shared')?.source;
+
+    expect(winner(3, [plugin, mcp])).toBe('project');
+    expect(winner(2, [plugin, mcp])).toBe('local');
+    expect(winner(1, [plugin, mcp])).toBe('user');
+    expect(winner(0, [plugin, mcp])).toBe('plugin');
+    expect(winner(0, [mcp])).toBe('mcp');
   });
 
   it('surfaces a skill file over the byte limit rather than reading it', () => {
@@ -1037,6 +1082,21 @@ describe('the plugin manifest schema', () => {
     expect(manager.load(atTheRoot).name).toBe('second');
   });
 
+  it('prefers the .claude-plugin/plugin.json candidate over plugin.json', () => {
+    const root = tempDir();
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'first' }),
+    );
+    writeFile(path.join(root, 'plugin.json'), JSON.stringify({ name: 'second' }));
+    writeFile(path.join(root, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+
+    const manager = createPluginManager();
+    const plugin = manager.load(root);
+
+    expect(plugin.name).toBe('first');
+  });
+
   it('applies what a plugin contributes', () => {
     const root = tempDir();
     writeFile(
@@ -1192,6 +1252,60 @@ describe('the plugin manifest schema', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Plugins: the collision report
+// ---------------------------------------------------------------------------
+
+describe('the plugin collision report', () => {
+  it('names the one plugin that provides a skill name twice', () => {
+    const root = tempDir();
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'demo', skills: ['skills', 'more-skills'] }),
+    );
+    writeFile(path.join(root, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeSkill(path.join(root, 'skills'), 'shared');
+    writeSkill(path.join(root, 'more-skills'), 'shared');
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    // Both are contributed — the collision is reported, not dropped.
+    const skills = manager.skills();
+    expect(skills.map((skill) => skill.provider)).toEqual(['demo', 'demo']);
+
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('demo');
+    expect(warning?.message).toContain('shared');
+    // One plugin providing the name twice is **not** two plugins colliding.
+    expect(warning?.message).not.toContain('Two plugins');
+    expect(warning?.message).not.toContain('demo, demo');
+  });
+
+  it('names the one plugin that provides a subagent name twice', () => {
+    const root = tempDir();
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'demo', agents: ['agents', 'more-agents'] }),
+    );
+    writeFile(path.join(root, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeFile(path.join(root, 'agents', 'planner.md'), '---\ndescription: P.\n---\n\nBody.\n');
+    writeFile(path.join(root, 'more-agents', 'planner.md'), '---\ndescription: P.\n---\n\nBody.\n');
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    const agents = manager.agents();
+    expect(agents.map((agent) => agent.provider)).toEqual(['demo', 'demo']);
+
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('demo');
+    expect(warning?.message).toContain('planner');
+    expect(warning?.message).not.toContain('Two plugins');
+    expect(warning?.message).not.toContain('demo, demo');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Plugins: the command discovery rules
 // ---------------------------------------------------------------------------
 
@@ -1243,6 +1357,26 @@ describe('the plugin command discovery rules', () => {
     expect(discovery.commands[0]?.name).toBe('demo:inline');
     expect(discovery.commands[0]?.path).toBe('<inline:demo:inline>');
     expect(discovery.commands[0]?.inline).toBe(true);
+  });
+
+  it('does not treat a metadata entry with both a source and content as an inline command', () => {
+    const root = tempDir();
+    writeFile(path.join(root, 'commands', 'hello.md'), '---\ndescription: Hi.\n---\n\nHello.\n');
+
+    const discovery = discoverPluginCommands({
+      plugin: 'demo',
+      root,
+      commandsPaths: ['commands'],
+      commandsMetadata: {
+        greeting: { source: 'commands/hello.md', content: 'Inline body.' },
+      },
+    });
+
+    // The entry names the **file** command; the inline body is not a command
+    // of its own.
+    expect(discovery.commands.map((command) => command.name)).toEqual(['demo:greeting']);
+    expect(discovery.commands[0]?.inline).toBe(false);
+    expect(discovery.commands[0]?.body).not.toContain('Inline body.');
   });
 
   it('warns, rather than errors, for a directory with no commands', () => {
@@ -1464,6 +1598,166 @@ describe('the plugin path boundary', () => {
     manager.load(root);
 
     expect(manager.commands('evil')).toHaveLength(0);
+    expect(
+      manager.logs().some((log) => log.message.includes('outside the plugin root')),
+    ).toBe(true);
+  });
+
+  it('refuses a symlinked skill subdirectory that points outside the plugin root', () => {
+    const { root, outside } = pluginAndOutside();
+    // The plugin's skills directory is inside its own root …
+    mkdirSync(path.join(root, 'skills'), { recursive: true });
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', skills: 'skills' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    // … and one of the skill directories inside it is a symlink that points
+    // outside the root.
+    writeSkill(path.join(outside, 'skills'), 'stolen');
+    symlinkSync(path.join(outside, 'skills', 'stolen'), path.join(root, 'skills', 'stolen'), 'dir');
+
+    // The outside skill is not discovered …
+    expect(manager.skills()).toHaveLength(0);
+    // … and the refusal names the escape.
+    const warning = manager.logs().find((log) => log.message.includes('outside the plugin root'));
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain('symlink');
+    expect(manager.logs().some((log) => log.message.includes('The body of stolen'))).toBe(
+      false,
+    );
+  });
+
+  it('refuses a symlinked agent file inside the plugin root that points outside it', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'planner.md'), '---\ndescription: Plans.\n---\n\nBody.\n');
+    mkdirSync(path.join(root, 'agents'), { recursive: true });
+    symlinkSync(path.join(outside, 'planner.md'), path.join(root, 'agents', 'leak.md'));
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', agents: 'agents' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    // The outside agent is not discovered …
+    expect(manager.agents()).toHaveLength(0);
+    // … and the refusal names the escape.
+    const warning = manager.logs().find((log) => log.message.includes('outside the plugin root'));
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain('symlink');
+  });
+
+  it('refuses a skills directory that escapes the plugin root, and names the directory', () => {
+    const { root, outside } = pluginAndOutside();
+    // The skills directory is inside the root when the plugin is loaded …
+    writeSkill(path.join(root, 'skills'), 'inside');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', skills: 'skills' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    // … and turns into a symlink that points outside it afterwards.
+    writeSkill(path.join(outside, 'skills'), 'stolen');
+    rmSync(path.join(root, 'skills'), { recursive: true, force: true });
+    symlinkSync(path.join(outside, 'skills'), path.join(root, 'skills'), 'dir');
+
+    expect(manager.skills()).toHaveLength(0);
+    const warning = manager.logs().find((log) => log.message.includes('outside the plugin root'));
+    expect(warning).toBeDefined();
+    // The refusal names the **directory** that escaped, not a file inside it.
+    expect(warning?.message).toContain(`\`${path.join(root, 'skills')}\``);
+  });
+
+  it('refuses an agents directory that escapes the plugin root, and names the directory', () => {
+    const { root, outside } = pluginAndOutside();
+    mkdirSync(path.join(root, 'agents'), { recursive: true });
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', agents: 'agents' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    writeFile(path.join(outside, 'agents', 'planner.md'), '---\ndescription: P.\n---\n\nBody.\n');
+    rmSync(path.join(root, 'agents'), { recursive: true, force: true });
+    symlinkSync(path.join(outside, 'agents'), path.join(root, 'agents'), 'dir');
+
+    expect(manager.agents()).toHaveLength(0);
+    const warning = manager.logs().find((log) => log.message.includes('outside the plugin root'));
+    expect(warning).toBeDefined();
+    // The refusal names the **directory** that escaped, not a file inside it.
+    expect(warning?.message).toContain(`\`${path.join(root, 'agents')}\``);
+  });
+
+  it('refuses a commands directory that escapes the plugin root, and never walks it', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'commands', 'leak.md'), 'TOP SECRET BODY');
+
+    const discovery = discoverPluginCommands({
+      plugin: 'evil',
+      root,
+      commandsPaths: ['../outside/commands'],
+    });
+
+    expect(discovery.commands).toHaveLength(0);
+    const warning = discovery.warnings.find((entry) => entry.includes('outside the plugin root'));
+    expect(warning).toBeDefined();
+    // The refusal names the **directory** that escaped …
+    expect(warning).toContain(`\`${path.join(outside, 'commands')}\``);
+    // … and nothing inside it is ever read.
+    expect(discovery.warnings.some((entry) => entry.includes('leak.md'))).toBe(false);
+  });
+
+  it('refuses a commands metadata source that escapes the plugin root, and reports it', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'secret.md'), 'TOP SECRET BODY');
+    writeFile(
+      path.join(root, 'commands', 'hello.md'),
+      '---\ndescription: Hi.\n---\n\nHello.\n',
+    );
+
+    const discovery = discoverPluginCommands({
+      plugin: 'evil',
+      root,
+      commandsPaths: ['commands'],
+      commandsMetadata: { greeting: { source: '../outside/secret.md' } },
+    });
+
+    // The escaping source never names a command …
+    expect(discovery.commands.map((command) => command.name)).toEqual(['evil:hello']);
+    // … and the refusal is reported.
+    const warning = discovery.warnings.find((entry) => entry.includes('greeting'));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('outside the plugin root');
+  });
+
+  it('records a refused manifest path in the manifest problems', () => {
+    const { root, outside } = pluginAndOutside();
+    writeSkill(path.join(outside, 'skills'), 'stolen');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', skills: '../outside/skills' }),
+    );
+
+    const manager = createPluginManager();
+    const plugin = manager.load(root);
+
+    // The manifest record is self-describing: it names the path it dropped …
+    const problems = plugin.manifest?.problems ?? [];
+    const problem = problems.find((entry) => entry.includes('skills'));
+    expect(problem).toBeDefined();
+    expect(problem).toContain('../outside/skills');
+    expect(problem).toContain('outside the plugin root');
+    // … and the log record is kept.
     expect(
       manager.logs().some((log) => log.message.includes('outside the plugin root')),
     ).toBe(true);
@@ -1989,6 +2283,35 @@ describe('the IDE bridge', () => {
 
     expect(response.ok).toBe(false);
     expect(response.error).toContain('action');
+  });
+
+  it('refuses an action that is empty, a dot, a dot-dot, or carries a separator or a NUL', async () => {
+    const configDir = tempDir();
+    writeFile(
+      path.join(configDir, 'ide', 'vscode.lock'),
+      JSON.stringify({ ide: 'vscode', port: 1234 }),
+    );
+
+    const seen: unknown[] = [];
+    const bridge = createIdeBridge({
+      configDir,
+      transport: {
+        send: async (_integration: IdeIntegration, request) => {
+          seen.push(request.action);
+          return { ok: true };
+        },
+      },
+    });
+
+    // Every shape the single-path-segment rule refuses.
+    for (const action of ['', '.', '..', 'a/b', 'a\\b', 'a\0b']) {
+      const response = await bridge.apply({ ide: 'vscode', action });
+
+      expect(response.ok).toBe(false);
+      expect(response.error).toContain('action');
+    }
+    // Nothing was sent.
+    expect(seen).toHaveLength(0);
   });
 
   it('applies an action outside the observed set, as a single path segment', async () => {
