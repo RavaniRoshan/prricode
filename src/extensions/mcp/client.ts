@@ -247,7 +247,7 @@ export {
   CLAUDE_AI_PROXY_HEADER,
   createCcrProxyFetch,
   createCliOwnedBearerFetch,
-  createAgentAiProxyFetch,
+  createFirstPartyProxyFetch,
   createFirstPartyApiMcpFetch,
 } from './fetch-variants.js';
 export type { McpFetch, McpFetchOptions } from './fetch-variants.js';

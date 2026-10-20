@@ -63,7 +63,7 @@ import {
   connectToServer,
   createCcrProxyFetch,
   createCliOwnedBearerFetch,
-  createAgentAiProxyFetch,
+  createFirstPartyProxyFetch,
   createFirstPartyApiMcpFetch,
   createStdioTransport,
   detectToolDescriptionChanges,
@@ -1214,7 +1214,7 @@ describe('the MCP auth failures', () => {
 describe('the MCP fetch variants', () => {
   it('has four distinct variants', () => {
     const variants = [
-      createAgentAiProxyFetch({ baseUrl: 'https://proxy.invalid' }),
+      createFirstPartyProxyFetch({ baseUrl: 'https://proxy.invalid' }),
       createFirstPartyApiMcpFetch(),
       createCliOwnedBearerFetch(),
       createCcrProxyFetch({ baseUrl: 'https://ccr.invalid' }),
@@ -1230,7 +1230,7 @@ describe('the MCP fetch variants', () => {
       return new Response('{}', { status: 200 });
     });
 
-    await createAgentAiProxyFetch({
+    await createFirstPartyProxyFetch({
       baseUrl: 'https://proxy.invalid/api',
       token: 'proxy-token',
       fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -1307,7 +1307,7 @@ describe('the MCP fetch variants', () => {
     });
     const asFetch = fetchImpl as unknown as typeof fetch;
 
-    await createAgentAiProxyFetch({ fetchImpl: asFetch })('https://a.invalid/mcp');
+    await createFirstPartyProxyFetch({ fetchImpl: asFetch })('https://a.invalid/mcp');
     await createFirstPartyApiMcpFetch({ fetchImpl: asFetch })('https://b.invalid/mcp');
     await createCliOwnedBearerFetch({ fetchImpl: asFetch })('https://c.invalid/mcp');
     await createCcrProxyFetch({ fetchImpl: asFetch })('https://d.invalid/mcp');
@@ -1352,7 +1352,7 @@ describe('the MCP fetch variants', () => {
     });
     const asFetch = fetchImpl as unknown as typeof fetch;
 
-    await createAgentAiProxyFetch({
+    await createFirstPartyProxyFetch({
       token: 'proxy-token',
       headers: { 'x-claude-ai-proxy': '0', authorization: 'Bearer caller-secret' },
       fetchImpl: asFetch,
@@ -1401,7 +1401,7 @@ describe('the MCP fetch variants', () => {
     // A JSON-parsed object carries `__proto__` as an **own** key.
     const raw = JSON.parse('{"__proto__":"value"}') as Record<string, string>;
 
-    await createAgentAiProxyFetch({
+    await createFirstPartyProxyFetch({
       fetchImpl: fetchImpl as unknown as typeof fetch,
     })('https://server.invalid/mcp', { headers: raw });
 

@@ -10,7 +10,7 @@
  *
  * The four variants are:
  *
- *   1. the **vendor first-party proxy** — the request is routed through the proxy, and
+ *   1. the **vendor's first-party proxy** — the request is routed through the proxy, and
  *      the caller's own credentials are **not** forwarded to the proxy host;
  *   2. the **first-party API** — the request goes to the endpoint as it is, and
  *      the token is presented in the first-party API's own key header, beside
@@ -30,7 +30,7 @@
  *
  *       | variant | URL | marker | credential |
  *       |---|---|---|---|
- *       | the vendor first-party proxy | `<baseUrl>/mcp` | `x-claude-ai-proxy: 1` | the proxy's own bearer |
+ *       | the vendor's first-party proxy | `<baseUrl>/mcp` | `x-claude-ai-proxy: 1` | the proxy's own bearer |
  *       | the first-party API | the endpoint as it is | `anthropic-version: 2023-06-01` | `x-api-key` |
  *       | the CLI-owned bearer | the endpoint as it is | — | `authorization`, the CLI's own |
  *       | the CCR proxy | `<baseUrl>/mcp` | `x-ccr-proxy: 1` | the proxy's own bearer |
@@ -65,7 +65,7 @@ export interface McpFetchOptions {
   fetchImpl?: typeof fetch;
 }
 
-/** The header of the vendor first-party proxy marker. */
+/** The header of the vendor's first-party proxy marker. */
 export const CLAUDE_AI_PROXY_HEADER = 'x-claude-ai-proxy';
 
 /** The header of the CCR proxy marker. */
@@ -152,12 +152,12 @@ function makeFetch(
 }
 
 /**
- * The vendor first-party proxy fetch.
+ * The vendor's first-party proxy fetch.
  *
  * The request is routed through the proxy, and the caller's own credentials are
  * **not** forwarded to the proxy host: the proxy presents its own bearer token.
  */
-export function createAgentAiProxyFetch(options: McpFetchOptions = {}): McpFetch {
+export function createFirstPartyProxyFetch(options: McpFetchOptions = {}): McpFetch {
   return makeFetch(
     (input) => proxyUrl(options.baseUrl, 'https://claude.ai/api'),
     (headers) => {

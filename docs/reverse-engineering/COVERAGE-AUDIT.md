@@ -421,7 +421,7 @@ Additional observed event names: `StatusLine`, `FileSuggestion`, `PermissionRequ
 - **Tool composition.** `composeMcpTool` builds the tool the model sees, and `capMcpInstructions` bounds the instructions it carries.
 - **Calling.** `callMCPTool`, with `callMCPToolWithUrlElicitationRetry` for the URL-elicitation case.
 - **Auth failures** are classified by `classifyMcpAuthFailure`, and `hasEraCodeInHttpErrorBody` inspects the error body.
-- **Fetch variants.** There are four: a vendor first-party proxy fetch (`createAgentAiProxyFetch`), a first-party API fetch (`createFirstPartyApiMcpFetch`), a CLI-owned bearer fetch (`createCliOwnedBearerFetch`), and a CCR proxy fetch (`createCcrProxyFetch`).
+- **Fetch variants.** There are four: a vendor first-party proxy fetch (`createFirstPartyProxyFetch`), a first-party API fetch (`createFirstPartyApiMcpFetch`), a CLI-owned bearer fetch (`createCliOwnedBearerFetch`), and a CCR proxy fetch (`createCcrProxyFetch`).
 - **Timeouts.** Four distinct ones: an armed-request timeout, a request timeout, a tool timeout, and a tool **idle** timeout.
 - **Teardown.** `detachAndCloseConnection`, `disposeServerConnectionDetached`, and `cleanupConnectedMcpClients`.
 - **Reconnect.** `inertReconnectShape` is the shape of a reconnect that is deliberately inert.

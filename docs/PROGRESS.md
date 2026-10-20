@@ -32,7 +32,7 @@
 - Ghidra: `12.1.4`, Linux x64; `GHIDRA_INSTALL_DIR=/home/shiva/opt/ghidra_12.1.4_PUBLIC`.
 - Java: `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64`.
 - Optional REA binary-layout Python environment: `/home/shiva/opt/rea-pwntools`, with pwntools 4.15.0, pyelftools 0.33, and Unicorn 2.1.2.
-- No authenticated model session or model request was started.
+- No authenticated model session or request was started.
 
 ## Evidence and decisions
 

@@ -19,7 +19,7 @@
 These apply to every task. Most values are copied verbatim from the REA coverage audit or the project brief. The exceptions are marked inline as `inference` (derived from third-party analysis of the target's transcript format, pending REA confirmation) or as a **project requirement** (a deliberate design decision this implementation makes because the target does not have it).
 
 - Target behavior is pinned to `2.1.303`. Anything observed only in later official documentation is **not** a target behavior.
-- The deliverable is **observable compatibility**, not reuse of Anthropic's private source or credentials. the vendor's site consumer subscription sessions and OAuth must not be collected, reused, or routed.
+- The deliverable is **observable compatibility**, not reuse of Anthropic's private source or credentials. the vendor's consumer subscription sessions and OAuth must not be collected, reused, or routed.
 - Credentials are **references only**: an environment variable name, a file path, or an OS credential-store key. No implementation may read a secret into a catalog, a settings file, a session record, a log line, or a fixture.
 - The provider catalog **must not select or read secrets** and **must not choose a destination** for them.
 - Multi-provider management is a **project requirement**, not part of the reference agent. It must be labelled as an extension everywhere it surfaces (UI, `--help`, docs, compatibility matrix).

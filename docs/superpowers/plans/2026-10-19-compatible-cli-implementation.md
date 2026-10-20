@@ -20,7 +20,7 @@
 - The deliverable is observable compatibility, not reuse of private source code or credentials. Separate target-compatible behavior from product extensions requested here.
 - Multi-provider management is a required product extension inspired by Kimi Code: simultaneous provider entries, protocol-specific adapters, a searchable/importable model catalog, and interactive `/provider` management plus a noninteractive command. It is not represented as a the reference agent feature.
 - Target-specific native findings remain unknown until REA returns a completed native Evidence record. The first execution task must resume that analysis through a retained or narrower Ghidra operation; do not treat timed-out operations as evidence.
-- Use only provider credentials authorized for the selected services. Do not collect, reuse, or route the vendor's site consumer subscription sessions/OAuth for this implementation. Keep secrets out of settings exports, sessions, debug logs, and fixtures.
+- Use only provider credentials authorized for the selected services. Do not collect, reuse, or route the vendor's consumer subscription sessions/OAuth for this implementation. Keep secrets out of settings exports, sessions, debug logs, and fixtures.
 - Permissions, path boundaries, shell execution, approval prompts, and credential redaction are enforced by implementation-owned code, independent of model instructions.
 - Each compatibility claim links to a pinned target contract row and identifies whether its evidence is official documentation, REA, bounded runtime observation, product requirement, inference, or unknown.
 - All feature domains below remain in the plan. Dependency ordering controls implementation sequence; it does not remove later domains from the target.
