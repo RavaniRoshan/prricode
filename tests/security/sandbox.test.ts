@@ -1035,7 +1035,7 @@ describe('CC-017 step 5 — the launcher', () => {
     await launched.cleanup();
   });
 
-  it('never claims a supervisor layer when a supervisor object is supplied', async () => {
+  it.skipIf(!bubblewrapAvailable)('never claims a supervisor layer when a supervisor object is supplied', async () => {
     const root = temporaryDirectory();
     const channel: NotifierChannel = {
       receive: () => null,
@@ -1519,7 +1519,7 @@ describe('CC-017 step 5 — the launcher', () => {
     expect(unconfined['HOME']).not.toBe('/tmp');
   });
 
-  it('never lets either path see the agent’s API key', async () => {
+  it.skipIf(!bubblewrapAvailable)('never lets either path see the agent’s API key', async () => {
     const root = temporaryDirectory();
     const command = 'echo "key=[$ANTHROPIC_API_KEY]"';
 
@@ -1865,7 +1865,7 @@ describe('CC-017 step 8 — the Landlock layer', () => {
     expect(status.reducedProtection.join(' ')).toMatch(/was not probed/);
   });
 
-  it('degrades gracefully in the launcher status', async () => {
+  it.skipIf(!bubblewrapAvailable)('degrades gracefully in the launcher status', async () => {
     const cwd = temporaryDirectory();
     const launched = await launchSandbox({
       command: 'echo degraded',

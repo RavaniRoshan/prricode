@@ -1270,7 +1270,7 @@ describe('CC-008b step 6 — the header of the tool', () => {
 /* -------------------------------------------------------------------------- */
 
 describe('the launcher\'s collection', () => {
-  it('caps the output at the collection point, not after it', async () => {
+  it.skipIf(!bubblewrapAvailable)('caps the output at the collection point, not after it', async () => {
     const root = temporaryDirectory();
     // A command that prints far more than the cap. The cap must bound what
     // the process **holds**, not only what the caller is told.
@@ -1290,7 +1290,7 @@ describe('the launcher\'s collection', () => {
     expect(result.truncated).toBe(true);
   });
 
-  it('never reports the readiness token as the command\'s output', async () => {
+  it.skipIf(!bubblewrapAvailable)('never reports the readiness token as the command\'s output', async () => {
     const root = temporaryDirectory();
     const launched = await launchSandbox({
       command: 'printf PARTIAL-OUTPUT',
