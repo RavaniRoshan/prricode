@@ -92,6 +92,10 @@
  *   - The **environment** a shell command runs in is a dependency as well: the
  *     process environment by default, and the session's own environment when the
  *     session supplies one.
+ *   - The **sandbox policy** is a dependency as well: the policy is session
+ *     state — it is built out of the settings document the loader merged — and
+ *     the `Bash` tool hands it to the launcher, which applies it. A session that
+ *     supplies none has no sandbox, and the tool says so in its result.
  *   - The file tools keep their path snapshot **per tool instance**, keyed by the
  *     tool-use id, exactly as the audit describes the file-write tool ("stash the
  *     permission decision keyed by `toolUseId`"). The snapshot is of the path the
@@ -121,6 +125,8 @@ import {
 import { safetyCheckForTool } from '../../permissions/prompts.js';
 import { reResolvePath, resolvePathTargets, type PathTargets } from '../../permissions/paths.js';
 import { type RuleSet } from '../../permissions/rules.js';
+import type { SandboxBackend } from '../../platform/sandbox/launcher.js';
+import type { SandboxPolicy } from '../../platform/sandbox/policy.js';
 
 import { TOOL_ERROR_CODES, type ToolRecheck } from '../registry.js';
 
@@ -141,6 +147,32 @@ export interface BuiltinToolDeps {
    * command inherits, and a session that wants a different one supplies it here.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The sandbox policy the shell commands run under.
+   *
+   * The policy is the session's: it comes from the settings document the loader
+   * merged (`SettingsLoadResult.sandboxPolicy`), and the `Bash` tool hands it to
+   * the launcher, which applies it.
+   *
+   * **`undefined` means the session has no sandbox at all.** The `Bash` tool then
+   * runs the command the way it has always run it. A configured session always
+   * supplies one: the settings loader builds a policy out of every settings
+   * document, and the default policy is this implementation's own.
+   */
+  sandboxPolicy?: SandboxPolicy;
+  /**
+   * The sandbox backend the launcher drives.
+   *
+   * The bubblewrap backend by default. It is a dependency rather than a constant
+   * so that the tool's routing can be exercised without the host's kernel.
+   */
+  sandboxBackend?: SandboxBackend;
+  /**
+   * The platform the sandbox policy is evaluated against.
+   *
+   * The host's own platform when it is not supplied.
+   */
+  sandboxPlatform?: string;
   /** The prompt. Consulted for a decision that would prompt. */
   canUseTool?: (
     ctx: ToolContext,

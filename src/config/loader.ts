@@ -42,7 +42,10 @@
  *     decision is a trust question that belongs to the session layer.
  *
  * The sandbox configuration *writer* lives in `schema.ts` (the settings-document
- * module), not here: this file has one responsibility, reading the tiers.
+ * module), not here: this file has one responsibility, reading the tiers. The
+ * sandbox **policy** is read here, though: the tiers are folded at block
+ * granularity into the merged document, and the `sandbox` block of the tier that
+ * wins it is the policy the `Bash` tool applies.
  */
 
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
@@ -55,10 +58,16 @@ import {
   SETTINGS_SOURCES,
   TIER_PRECEDENCE,
   SettingsTierEntry,
+  documentOf,
   mergeBlockwise,
   type SettingsSource,
   type SettingsTier,
 } from './tiers.js';
+import {
+  DEFAULT_SANDBOX_POLICY,
+  readSandboxPolicy,
+  type SandboxPolicy,
+} from '../platform/sandbox/policy.js';
 
 /** How a source's settings file was read. */
 export type SettingsReadMode = 'none' | 'as_read' | 'machine_admin';
@@ -92,6 +101,30 @@ export interface SettingsLoadResult {
   errors: SettingsLoadError[];
   readMode: Map<SettingsSource, SettingsReadMode>;
   linkedAway: SettingsSource[];
+  /**
+   * The sandbox policy the settings document carries.
+   *
+   * It is built out of the **merged** document — the tiers folded at block
+   * granularity — so a higher tier's `sandbox` block applies as a whole over a
+   * lower one, exactly as the audit states for a higher tier's block. A document
+   * that says nothing about the sandbox yields the default policy.
+   *
+   * The member is **optional** so that a hand-built result — the test doubles
+   * the permission layer carries — still type-checks; `loadSettings` always sets
+   * it. `sandboxPolicyOf` is the one place a caller should read it through.
+   */
+  readonly sandboxPolicy?: SandboxPolicy;
+}
+
+/**
+ * The sandbox policy of a loaded settings document.
+ *
+ * The default policy is the fallback, so a caller never has to decide what an
+ * absent policy means: a session without one has this implementation's default policy,
+ * which fails closed.
+ */
+export function sandboxPolicyOf(result: SettingsLoadResult): SandboxPolicy {
+  return result.sandboxPolicy ?? DEFAULT_SANDBOX_POLICY;
 }
 
 type ReadStatus = 'missing' | 'ok' | 'invalid';
@@ -238,6 +271,31 @@ export function classifyProjectSettingsPath(
 }
 
 /**
+ * The merged settings document.
+ *
+ * The tiers are folded from the **lowest** precedence to the highest, at **block**
+ * granularity, so the highest tier that defines a block wins **as a whole** — the
+ * rule the audit states for a higher tier's block ("a higher tier's block applies
+ * as a whole over any lower tier and is never merged key by key"). The `sandbox`
+ * block is one of those blocks: the project tier's block replaces the user tier's
+ * block, and the two are never merged key by key.
+ *
+ * The fold uses this implementation's own `TIER_PRECEDENCE` composition, which the settings
+ * conformance table labels a implementation choice rather than an observed literal.
+ */
+function mergedDocument(tiers: ReadonlyMap<SettingsSource, SettingsTier>): Record<string, unknown> {
+  let merged: Record<string, unknown> = {};
+  for (const source of [...TIER_PRECEDENCE].reverse()) {
+    const tier = tiers.get(source);
+    if (tier === undefined) continue;
+    const document = documentOf(tier);
+    if (!isPlainObject(document)) continue;
+    merged = mergeBlockwise(merged, document);
+  }
+  return merged;
+}
+
+/**
  * Read every settings tier and report what each one contributed.
  */
 export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
@@ -339,5 +397,9 @@ export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
     if (tier) tiers.set(source, tier);
   }
 
-  return { tiers, errors, readMode, linkedAway };
+  // The sandbox policy is read out of the **merged** document, so the tier that
+  // wins the `sandbox` block decides the policy — as a whole.
+  const sandboxPolicy = readSandboxPolicy(mergedDocument(tiers));
+
+  return { tiers, errors, readMode, linkedAway, sandboxPolicy };
 }
