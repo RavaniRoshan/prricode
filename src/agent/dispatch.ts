@@ -3,7 +3,7 @@
  * they run in, and the groups they may run in.
  *
  * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.4 (Agent loop and tool
- * dispatch) and the `CC-010` milestone of
+ * dispatch) and the `CC-010b` milestone of
  * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
  *
  * ## What this module is
@@ -12,46 +12,61 @@
  * turns the provider's event stream into those calls, and it describes **how**
  * they are dispatched: the order, and the grouping.
  *
- * ## The ordering rule — a implementation choice, not an observed target behaviour
+ * ## The scheduling rule — the target's observed rule
  *
- * The plan's Step 5 says: "two tool calls in one assistant message are
- * executed **in the order they appear**, and each result is appended **before**
- * the next provider request is issued."
+ * **The target's scheduler is per tool, not per message.** The REA read the
+ * scheduler out of the target's source (the executor `Rs` in
+ * `chunk-ehmvy572.js`), and the record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-tool-scheduling.md`:
  *
- * **That ordering is a implementation choice.** The audit is explicit about it (§2.4,
- * "Partial", and §4 item 4): "the exact **scheduling of concurrent tool calls**
- * — whether several `tool_use` blocks in one assistant message run in parallel
- * or in sequence, and the point at which the next model request is issued — was
- * not traced"; the audit's exit-gate table repeats it: "the **scheduling order**
- * of concurrent tool calls and the point at which the next model request is
- * issued" is one of the three bounded REA residuals. It is one of the three
- * items the REA coverage audit could not close, because "every call in these
- * functions is a **member call** (`this.x(...)`), which REA does not resolve into
- * a `calls` relation".
+ *   - every tool declares whether it is **concurrency safe**;
+ *   - the **concurrency-safe** calls of one assistant message run **in
+ *     parallel** — several are in flight at once;
+ *   - a call that is **not** concurrency safe runs **alone** and is a
+ *     **barrier**: the queue stops at it, and nothing else starts until it has
+ *     finished;
+ *   - the **next model request** is issued only after **every** call of that
+ *     assistant message has produced its result;
+ *   - the results are **emitted** in block order for the non-safe calls and in
+ *     **completion order** for the concurrency-safe ones.
  *
- * So this implementation does **not** claim that the target runs its tool calls
- * sequentially. It runs them sequentially because that is what the plan
- * specifies, and the plan's order is an **inference**, not an observation. The
- * ordering here is therefore labelled a implementation choice wherever it surfaces.
+ * The target's own gate is a queue walk: a queued call may start when nothing
+ * is executing, or when every executing call is itself concurrency safe; a
+ * queued call that is **not** concurrency safe and cannot start **breaks** the
+ * walk, so the calls listed after it wait for it. That is exactly the
+ * grouping {@link scheduleToolCalls} produces: the **maximal runs** of
+ * concurrency-safe calls, with every non-safe call alone between them.
  *
- * ## The groups and the `parallel` flag agree
+ * **A tool that does not declare the flag is not concurrency safe.** That is
+ * the target's own default — the flag is read inside a `try`, and the `catch`
+ * says `false`.
  *
- * `groupToolCalls` returns both a `parallel` flag and the groups, and the two
- * are never allowed to disagree:
+ * ## The per-tool flags
  *
- *   - **sequential** — every call is its own group, so the flag is `false`;
- *   - **parallel** — the calls that may run together share one group, so the
- *     flag is `true`.
+ * The target's own tools declare the flag like this:
  *
- * A caller may therefore trust either one: the flag says *whether* the calls
- * may run together, and the groups say *which* ones may. The invariant is
- * pinned by the contract test.
+ * | tool | concurrency safe |
+ * |---|---|
+ * | `Glob` | yes |
+ * | `Grep` | yes |
+ * | the notebook **read** tool | yes |
+ * | `WebFetch` | yes |
+ * | `Read` | yes |
+ * | the MCP "wait for server" tool | no |
+ * | `Bash` | only when the command is **read-only** |
+ * | every other tool | no — it declares nothing |
  *
- * This implementation's **runtime** dispatches sequentially: the default mode is
- * `sequential`, and `groupToolCalls` is the classifier that says so. The
- * parallel mode is the seam a later task uses to start the calls of a group
- * concurrently; it is not the default, because the target's concurrent
- * scheduling order is a bounded residual.
+ * This implementation has **no notebook-read tool**: its `NotebookEdit`
+ * mutates a file, so it is not concurrency safe by the same reasoning. Every
+ * other built-in tool — `Edit`, `Write`, `Task`, `TodoWrite` — mutates or
+ * delegates, so it declares nothing and is not concurrency safe.
+ *
+ * ## The mode-driven plan
+ *
+ * {@link groupToolCalls} is the **mode-driven** plan: it says whether a set of
+ * calls may run together (`parallel`) or one after the other (`sequential`).
+ * It is kept for the callers that ask for a mode, and the runtime's own
+ * scheduling is the observed per-tool rule of {@link scheduleToolCalls}.
  */
 
 import type { ProviderEvent } from '../provider/drivers/types.js';
@@ -101,6 +116,25 @@ export interface ToolCallGroups {
   groups: string[][];
 }
 
+/**
+ * One group of the observed schedule.
+ *
+ * A group is either a **maximal run** of concurrency-safe calls — they run
+ * together — or a **single** call that is not concurrency safe, which runs
+ * alone and is a barrier.
+ */
+export interface ScheduledGroup {
+  /** The tool-use ids of the group, in the order the calls appear. */
+  ids: string[];
+  /**
+   * Whether the calls of the group run together.
+   *
+   * It is `false` for a call that is not concurrency safe: that call runs
+   * alone.
+   */
+  parallel: boolean;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The classifier                                                              */
 /* -------------------------------------------------------------------------- */
@@ -132,8 +166,13 @@ export function toolCallsFrom(events: ProviderEvent[]): ToolCall[] {
  *     flag is `true`.
  *
  * The mode is the **only** thing that decides the shape: the calls themselves
- * carry no dependency information, so this implementation cannot derive a finer grouping
- * than "all of them" or "each of them", and it does not pretend to.
+ * carry no dependency information, so this implementation cannot derive a
+ * finer grouping than "all of them" or "each of them", and it does not pretend
+ * to.
+ *
+ * **This is the mode-driven plan.** The runtime's own scheduling is the
+ * observed per-tool rule of {@link scheduleToolCalls}, which groups by the
+ * tool's own concurrency-safety flag rather than by a mode.
  */
 export function groupToolCalls(
   calls: ToolCall[],
@@ -152,8 +191,8 @@ export function groupToolCalls(
  * Flatten a dispatch plan into the order the calls run in.
  *
  * The groups are read in order, and the calls of a group in the order they
- * appear in it. For the sequential plan — this implementation's default — this is the
- * order the calls appear in the assistant message.
+ * appear in it. For the sequential plan this is the order the calls appear in
+ * the assistant message.
  */
 export function callsInPlan(calls: ToolCall[], groups: ToolCallGroups): ToolCall[] {
   const byId = new Map<string, ToolCall>();
@@ -166,4 +205,43 @@ export function callsInPlan(calls: ToolCall[], groups: ToolCallGroups): ToolCall
     }
   }
   return ordered;
+}
+
+/**
+ * The observed schedule of the tool calls of one assistant message.
+ *
+ * The groups are the **maximal runs** of concurrency-safe calls, with every
+ * call that is not concurrency safe alone between them:
+ *
+ *   - a concurrency-safe call joins the run of safe calls before it, or starts
+ *     one;
+ *   - a call that is not concurrency safe is **alone** and **breaks** the run:
+ *     the calls after it wait for it, because it is a barrier.
+ *
+ * That is the target's queue walk: a queued call may start when nothing is
+ * executing, or when every executing call is itself concurrency safe, and a
+ * queued call that is not concurrency safe and cannot start **breaks** the
+ * walk.
+ *
+ * The predicate is the tool's **own** flag. A tool that does not declare the
+ * flag is not concurrency safe — the target's own default.
+ */
+export function scheduleToolCalls(
+  calls: ToolCall[],
+  isConcurrencySafe: (call: ToolCall) => boolean,
+): ScheduledGroup[] {
+  const groups: ScheduledGroup[] = [];
+  for (const call of calls) {
+    const safe = isConcurrencySafe(call);
+    const last = groups[groups.length - 1];
+    if (safe && last !== undefined && last.parallel) {
+      // The call joins the run of safe calls before it.
+      last.ids.push(call.id);
+      continue;
+    }
+    // A safe call starts a run; a call that is not concurrency safe stands
+    // alone, and the run after it starts fresh.
+    groups.push({ ids: [call.id], parallel: safe });
+  }
+  return groups;
 }

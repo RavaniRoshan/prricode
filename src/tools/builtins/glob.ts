@@ -117,6 +117,13 @@ export function createGlobTool(deps: BuiltinToolDeps): ToolDefinition<GlobInput,
     inputSchema: GLOB_INPUT_SCHEMA,
     mutatesFiles: false,
 
+    // A search is **concurrency safe**: the target's `Glob` tool declares the
+    // flag, so the call may run beside the other concurrency-safe calls of the
+    // same assistant message.
+    isConcurrencySafe(): boolean {
+      return true;
+    },
+
     async checkPermissions(_input, ctx: ToolContext) {
       return checkToolPermissions(ctx, deps);
     },

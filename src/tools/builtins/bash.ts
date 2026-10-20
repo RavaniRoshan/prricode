@@ -17,6 +17,12 @@
  * the rule engine's job, not the tool's, and the engine splits on `&&`, `||`, `;`,
  * `|`, `|&`, `&` and newlines with **no cap** on the number of parts.
  *
+ * **A shell command is concurrency safe only when it is read-only.** The
+ * target's `Bash` tool declares the flag as
+ * `isConcurrencySafe(e){return this.isReadOnly?.(e)??!1}`, and the read-only
+ * rule is the target's own: it lives in `src/tools/readonly.ts`, and this
+ * tool's flag is that rule.
+ *
  * **The `dangerouslyDisableSandbox` flag is not a permission bypass.** The sandbox
  * is a separate layer from the permissions, and the flag never skips a permission
  * rule: the permission check runs on the command whether the flag is set or not.
@@ -138,6 +144,7 @@ import { spawn, type ChildProcess} from 'node:child_process';
 
 import { ToolExecutionError, TOOL_ERROR_CODES, type ToolDefinition } from '../registry.js';
 import type { PermissionDecision, ToolContext } from '../../permissions/decision.js';
+import { isReadOnlyCommand } from '../readonly.js';
 import {
   SandboxRefusedError,
   bubblewrapBackend,
@@ -779,6 +786,20 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
     description: 'Run a shell command.',
     inputSchema: BASH_INPUT_SCHEMA,
     mutatesFiles: false,
+
+    /**
+     * A shell command is concurrency safe **only when it is read-only**.
+     *
+     * The target's `Bash` tool declares the flag as
+     * `isConcurrencySafe(e){return this.isReadOnly?.(e)??!1}` — the command
+     * itself decides. The read-only rule is the target's own, and it lives in
+     * `src/tools/readonly.ts`.
+     */
+    isConcurrencySafe(input: BashInput): boolean {
+      const command = readInputField(input, 'command');
+      if (typeof command !== 'string') return false;
+      return isReadOnlyCommand(command);
+    },
 
     async checkPermissions(input, ctx: ToolContext) {
       const decision = await checkToolPermissions(ctx, deps);

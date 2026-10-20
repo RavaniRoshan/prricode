@@ -4,7 +4,7 @@
  *
  * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.4 (Agent loop and tool
  * dispatch), §2.5 (Permissions) and §2.6 (Sessions, persistence, and resumption),
- * and the `CC-010` milestone of
+ * and the `CC-010` and `CC-010b` milestones of
  * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
  *
  * ## The cycle
@@ -19,25 +19,42 @@
  * and it **persists every event through the store as it goes**. The turn ends
  * when the provider reports a stop reason with no pending tool call.
  *
+ * The tool calls of one assistant message do **not** all run one after the
+ * other: the scheduler is per tool, and the rule is below.
+ *
  * The audit records the pieces: "the agent turn is a streaming
  * `beta.messages.create`" and "response events are consumed as `stream_event`s"
  * (§2.4); "permission decisions are threaded back to the model through the tool
  * result, so the model observes the decision and its reason type" (§2.4); and
  * the session's transcript is the append-only JSONL log (§2.6).
  *
- * ## The dispatch order is a implementation choice
+ * ## The scheduling is the target's observed rule
  *
- * The runtime runs the tool calls of one assistant message **in the order they
- * appear**, and it appends each result **before** the next provider request is
- * issued.
+ * The runtime schedules the tool calls of one assistant message **per tool,
+ * not per message**:
  *
- * **That is a implementation choice, not an observed target behaviour.** The audit is
- * explicit (§2.4, "Partial", and §4 item 4): "the exact **scheduling of
- * concurrent tool calls** — whether several `tool_use` blocks in one assistant
- * message run in parallel or in sequence, and the point at which the next model
- * request is issued — was not traced". It is one of the three bounded REA
- * residuals. This implementation therefore runs them sequentially because the plan says
- * so, and the module says so rather than claiming the target does.
+ *   - every tool declares whether it is **concurrency safe**;
+ *   - the **concurrency-safe** calls of one assistant message run **in
+ *     parallel** — several are in flight at once;
+ *   - a call that is **not** concurrency safe runs **alone** and is a
+ *     **barrier**: the queue stops at it, and nothing else starts until it has
+ *     finished;
+ *   - the **next provider request** is issued only after **every** call of
+ *     that assistant message has produced its result;
+ *   - the results are **emitted** in block order for the non-safe calls and in
+ *     **completion order** for the concurrency-safe ones.
+ *
+ * The evidence is the target's own scheduler — the executor `Rs` in
+ * `chunk-ehmvy572.js` — and the record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-tool-scheduling.md`.
+ * The REA closed the audit's open question: whether the tool calls of one
+ * assistant message run in parallel or in sequence, and where the next request
+ * is issued. The answer is the rule above.
+ *
+ * **A tool that does not declare the flag is not concurrency safe.** That is
+ * the target's own default, and it is what the built-in tools rely on: `Glob`,
+ * `Grep`, `Read` and `WebFetch` declare the flag, `Bash` declares it **only
+ * for a read-only command**, and every other built-in tool declares nothing.
  *
  * ## The permission integration
  *
@@ -170,6 +187,11 @@
  * continues, so the answer is carried in the transcript and reaches the model
  * in the session's next request.
  *
+ * A refusal **inside a group of concurrency-safe calls** ends the turn when the
+ * group is over: the calls that ran beside it have produced their results, and
+ * those results are in the transcript. The calls queued **behind** the group do
+ * not run.
+ *
  * ## An oversized tool result is stubbed too
  *
  * The content-replacement mechanism exists so that an oversized tool result
@@ -238,6 +260,7 @@ import {
   type SessionStore,
 } from '../session/store.js';
 import type { ToolDefinition, ToolRegistry, ToolRecheck } from '../tools/registry.js';
+import { isToolConcurrencySafe } from '../tools/registry.js';
 import { runTool, type ToolResultEnvelope } from '../tools/runner.js';
 
 import {
@@ -252,7 +275,7 @@ import {
   toolResultBlock,
   type ProviderTurnSource,
 } from './context.js';
-import { callsInPlan, groupToolCalls, toolCallsFrom, type ToolCall } from './dispatch.js';
+import { scheduleToolCalls, toolCallsFrom, type ToolCall } from './dispatch.js';
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                              */
@@ -498,8 +521,25 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
       };
     }
 
+    /**
+     * The chain the records go through.
+     *
+     * A tool call that runs beside another one produces its records at the
+     * same time, and the store's append is asynchronous. The chain keeps the
+     * transcript's order the order the records were produced in.
+     */
+    let appendChain: Promise<void> = Promise.resolve();
+
     const append = async (event: SessionEvent): Promise<void> => {
-      await deps.store.append(handle, event);
+      // The records go through a **chain**, so the transcript's order is the
+      // order the records were produced in — even when several tool calls run
+      // at the same time and produce their records at the same time.
+      const next = appendChain.then(() => deps.store.append(handle, event));
+      appendChain = next.then(
+        () => undefined,
+        () => undefined,
+      );
+      await next;
       events.push(event);
     };
 
@@ -616,40 +656,51 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           call.id !== '' ? call : { ...call, id: idFactory() },
         );
 
-        // The tool calls of this assistant message. **Implementation choice**: they run
-        // in the order they appear — see the module header.
-        const plan = groupToolCalls(calls);
-        const order = callsInPlan(calls, plan);
+        // The tool calls of this assistant message. The target's scheduler is
+        // **per tool**: a call whose tool declares itself concurrency safe runs
+        // beside the other safe calls of the message, and a call that is not
+        // concurrency safe runs alone and is a barrier — see the module header.
+        const groups = scheduleToolCalls(calls, isConcurrencySafeCall);
+        const byId = new Map<string, ToolCall>();
+        for (const call of calls) byId.set(call.id, call);
         const resultBlocks: ProviderContentBlock[] = [];
         let refused = false;
 
-        for (const call of order) {
-          if (isAborted(signal)) return aborted();
-
-          await append({
-            ...base(),
-            t: 'tool_call',
-            id: call.id,
-            name: call.name,
-            input: call.input,
-          });
-
+        /**
+         * Run one call and record its result.
+         *
+         * The call's result is pushed into the round's blocks **when it
+         * finishes**, so the results of the concurrency-safe calls are emitted
+         * in **completion order** — the order they were produced in.
+         */
+        const runCall = async (call: ToolCall): Promise<CallOutcome> => {
           const outcome = await dispatchCall(call, input.sessionId, signal, recordDecision);
-          if (outcome.kind === 'aborted') return aborted();
+          if (outcome.kind === 'aborted') {
+            // The tool was abandoned: its result is neither appended nor sent
+            // back to the provider.
+            return { kind: 'aborted', name: call.name };
+          }
 
           const envelope = outcome.envelope;
           if (envelope === undefined) {
-            return failed(`The ${call.name} call produced no result.`);
+            return {
+              kind: 'failed',
+              name: call.name,
+              message: `The ${call.name} call produced no result.`,
+            };
           }
 
           if (outcome.kind === 'failed') {
-            return failed(outcome.message ?? `The ${call.name} call failed.`);
+            return {
+              kind: 'failed',
+              name: call.name,
+              message: outcome.message ?? `The ${call.name} call failed.`,
+            };
           }
 
           // The answer the model observes: the call's own result, or — for a
           // refusal — the `<tool_use_error>` wrapper the target produces.
           const answer = outcome.kind === 'refused' ? refusalEnvelope(envelope) : envelope;
-          await append({ ...base(), t: 'tool_result', envelope: answer });
 
           // The **within-turn** push is stubbed too. The content-replacement
           // mechanism exists so that an oversized tool result does not come
@@ -667,10 +718,63 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           );
           resultBlocks.push(toolResultBlock(call.id, stub ?? answer.content, answer.isError));
 
-          if (outcome.kind === 'refused') {
-            // The call did not run. It is answered with the refusal, and the
-            // turn ends here.
-            refused = true;
+          await append({ ...base(), t: 'tool_result', envelope: answer });
+
+          return { kind: outcome.kind, name: call.name };
+        };
+
+        for (const group of groups) {
+          if (isAborted(signal)) return aborted();
+
+          const groupCalls: ToolCall[] = [];
+          for (const id of group.ids) {
+            const call = byId.get(id);
+            if (call !== undefined) groupCalls.push(call);
+          }
+
+          // The calls of the group are recorded before they run, so the
+          // transcript carries the whole message's calls before any of them
+          // produced a result.
+          for (const call of groupCalls) {
+            await append({
+              ...base(),
+              t: 'tool_call',
+              id: call.id,
+              name: call.name,
+              input: call.input,
+            });
+          }
+
+          if (group.parallel) {
+            // The concurrency-safe calls run **together**. Each one appends its
+            // own result when it finishes, so the results are emitted in
+            // **completion order** — the order the calls produced them.
+            const outcomes = await Promise.all(groupCalls.map((call) => runCall(call)));
+            for (const outcome of outcomes) {
+              if (outcome.kind === 'aborted') return aborted();
+              if (outcome.kind === 'failed') {
+                return failed(outcome.message ?? `The ${outcome.name} call failed.`);
+              }
+              if (outcome.kind === 'refused') refused = true;
+            }
+          } else {
+            // The call that is not concurrency safe runs **alone**.
+            for (const call of groupCalls) {
+              const outcome = await runCall(call);
+              if (outcome.kind === 'aborted') return aborted();
+              if (outcome.kind === 'failed') {
+                return failed(outcome.message ?? `The ${outcome.name} call failed.`);
+              }
+              if (outcome.kind === 'refused') {
+                refused = true;
+                break;
+              }
+            }
+          }
+
+          if (refused) {
+            // The turn ends with the refusal, and the calls queued behind it do
+            // not run.
             break;
           }
         }
@@ -710,6 +814,18 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
   }
 
   /**
+   * Whether a call may run beside another call.
+   *
+   * The flag is the **tool's own**, read per call: a tool that declares
+   * itself concurrency safe says so, and a tool that declares nothing is not
+   * concurrency safe — the target's own default. A tool the registry does not
+   * hold is not concurrency safe either: there is no definition to read.
+   */
+  function isConcurrencySafeCall(call: ToolCall): boolean {
+    return isToolConcurrencySafe(deps.registry.get(call.name), call.input);
+  }
+
+  /**
    * Run one tool call.
    *
    * The call goes through the runner, which owns the order — **check
@@ -723,7 +839,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
     sessionId: string,
     signal: AbortSignal | undefined,
     recordDecision: DecisionRecorder,
-  ): Promise<CallOutcome> {
+  ): Promise<DispatchOutcome> {
     const holder: DecisionHolder = { decision: undefined };
     const ctx = toolContextFor(call, sessionId);
 
@@ -916,11 +1032,21 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 interface CallOutcome {
   /** What happened to the call. */
   kind: 'ran' | 'refused' | 'failed' | 'aborted';
+  /** The name of the tool the call named. */
+  name: string;
   /** The runner's envelope, when the call produced one. */
   envelope?: ToolResultEnvelope;
   /** The message of a failure. */
   message?: string;
 }
+
+/**
+ * The outcome of the dispatch of one tool call.
+ *
+ * It is the call's outcome without the tool's name: the name belongs to the
+ * call, and the dispatch knows it.
+ */
+type DispatchOutcome = Omit<CallOutcome, 'name'>;
 
 /**
  * Records the decision a call was governed by.

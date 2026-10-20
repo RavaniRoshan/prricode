@@ -21,6 +21,13 @@
  * registry holds the definitions and the runner (`src/tools/runner.ts`) owns the
  * order: check permissions → validate input → execute → wrap the result.
  *
+ * **A tool also declares whether it is concurrency safe.** The target's
+ * scheduler is per tool: a call whose tool declares itself concurrency safe
+ * runs beside the other safe calls of the same assistant message, and a call
+ * that is not concurrency safe runs alone and is a barrier. **A tool that does
+ * not declare the flag is not concurrency safe** — the target's own default,
+ * and the `catch` around the flag's read. See {@link isToolConcurrencySafe}.
+ *
  * **The file-mutating tool set has one source of truth.** The set is exactly
  * `["Edit", "Write", "NotebookEdit"]`, and it is **derived** from
  * `FILE_MUTATING_TOOL_NAMES` in `src/permissions/rules.ts` rather than duplicated
@@ -68,6 +75,24 @@ export interface ToolDefinition<I = unknown, O = unknown> {
   inputSchema: unknown;
   /** Whether the tool writes to the filesystem. */
   mutatesFiles: boolean;
+  /**
+   * Whether the call may run **beside** another call.
+   *
+   * The target's scheduler is **per tool, not per message**: every tool
+   * declares whether it is concurrency safe, the safe calls of one assistant
+   * message run **together**, and a call that is not concurrency safe runs
+   * **alone** and is a **barrier** — the queue stops at it, and nothing else
+   * starts until it has finished.
+   *
+   * **A tool that does not declare the flag is not concurrency safe.** That is
+   * the target's own default: the flag is read inside a `try`, and a tool
+   * without it — or one whose flag throws — is treated as not concurrency
+   * safe. See {@link isToolConcurrencySafe}.
+   *
+   * The flag is a **method** and not a property, so a tool that declares a
+   * narrower input type stays assignable to the registry's own type.
+   */
+  isConcurrencySafe?(input: I): boolean;
   /**
    * The tool's own permission check.
    *
@@ -149,6 +174,37 @@ export interface ToolRecheck {
 export const FILE_MUTATING_TOOLS: readonly string[] = Object.freeze([
   ...FILE_MUTATING_TOOL_NAMES,
 ]);
+
+/**
+ * Whether a call may run beside another call.
+ *
+ * The target reads the flag **per tool call**, from the tool definition, and
+ * wraps the read in a `try`: a tool that does not declare the flag is **not**
+ * concurrency safe, and a flag that throws is not concurrency safe either.
+ * That is the target's own default, and it is the rule this implementation
+ * follows.
+ *
+ * A tool the registry does not hold is not concurrency safe: there is no
+ * definition to read the flag from.
+ *
+ * **The target also requires the call's input to validate** before it reads
+ * the flag, and a call whose input does not validate is therefore not
+ * concurrency safe. This implementation does not run the tool's validator a
+ * second time to find that out: the runner refuses a call whose input does
+ * not validate before it does anything, so the only difference is the
+ * scheduling of a call that was going to fail anyway.
+ */
+export function isToolConcurrencySafe(tool: ToolDefinition | undefined, input: unknown): boolean {
+  if (tool === undefined) return false;
+  const flag = tool.isConcurrencySafe;
+  if (flag === undefined) return false;
+  try {
+    return flag.call(tool, input) === true;
+  } catch {
+    // The target's own default: a flag that throws is not concurrency safe.
+    return false;
+  }
+}
 
 /** Whether a tool writes to the filesystem. */
 export function isFileMutatingTool(name: string): boolean {

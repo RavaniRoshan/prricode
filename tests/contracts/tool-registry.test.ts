@@ -35,6 +35,7 @@ import {
   TOOL_ERROR_CODES,
   ToolExecutionError,
   createToolRegistry,
+  isToolConcurrencySafe,
   type ToolDefinition,
   type ToolRegistry,
   type ToolRecheck,
@@ -2902,5 +2903,85 @@ describe('the permission decision the tools carry', () => {
     };
 
     expect(rewritten.updatedInput).toEqual({ file_path: '/work/rewritten.txt' });
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The concurrency-safety flag                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The concurrency-safety flag.
+ *
+ * The target's scheduler is **per tool**: every tool declares whether it is
+ * concurrency safe, the safe calls of one assistant message run together, and
+ * a call that is not concurrency safe runs alone and is a barrier. **A tool
+ * that does not declare the flag is not concurrency safe** — the target's own
+ * default, and the `catch` around the flag's read.
+ */
+describe('the concurrency-safety flag', () => {
+  it('is not declared by a tool that does not declare it', () => {
+    const tool = stubTool({ name: 'Silent' });
+
+    expect(tool.isConcurrencySafe).toBeUndefined();
+    expect(isToolConcurrencySafe(tool, {})).toBe(false);
+  });
+
+  it('is not declared for a tool the registry does not hold', () => {
+    expect(isToolConcurrencySafe(undefined, {})).toBe(false);
+  });
+
+  it('is false for a flag that throws', () => {
+    const tool = stubTool({
+      name: 'Broken',
+      isConcurrencySafe() {
+        throw new Error('the flag could not be read');
+      },
+    });
+
+    expect(isToolConcurrencySafe(tool, {})).toBe(false);
+  });
+
+  it('is read per call, from the tool that was called', () => {
+    const tool = stubTool({
+      name: 'Picky',
+      isConcurrencySafe(input: unknown) {
+        return (input as { safe?: boolean }).safe === true;
+      },
+    });
+
+    expect(isToolConcurrencySafe(tool, { safe: true })).toBe(true);
+    expect(isToolConcurrencySafe(tool, { safe: false })).toBe(false);
+  });
+
+  it('is declared by the read-only built-in tools', () => {
+    const tools = createBuiltinTools(builtinDeps());
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+    for (const name of ['Glob', 'Grep', 'Read', 'WebFetch']) {
+      expect([name, isToolConcurrencySafe(byName.get(name), {})]).toEqual([name, true]);
+    }
+  });
+
+  it('is not declared by the built-in tools that mutate or delegate', () => {
+    const tools = createBuiltinTools(builtinDeps());
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+    // `NotebookEdit` is this implementation's notebook tool, and it **mutates**
+    // a file: the target's notebook **read** tool is the concurrency-safe one.
+    for (const name of ['Edit', 'Write', 'NotebookEdit', 'Task', 'TodoWrite']) {
+      expect([name, isToolConcurrencySafe(byName.get(name), {})]).toEqual([name, false]);
+    }
+  });
+
+  it('is declared by the Bash tool only for a read-only command', () => {
+    const tool = createBashTool(builtinDeps());
+
+    expect(isToolConcurrencySafe(tool, { command: 'ls' })).toBe(true);
+    expect(isToolConcurrencySafe(tool, { command: 'cat file' })).toBe(true);
+    expect(isToolConcurrencySafe(tool, { command: 'rm -rf /' })).toBe(false);
+    expect(isToolConcurrencySafe(tool, { command: 'echo hello > out.txt' })).toBe(false);
+    // A command the tool cannot read is not read-only.
+    expect(isToolConcurrencySafe(tool, { command: 42 })).toBe(false);
   });
 });

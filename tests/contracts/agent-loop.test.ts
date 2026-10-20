@@ -220,6 +220,15 @@ interface FakeToolOptions {
   onRecheck?: (input: unknown) => void;
   /** Whether the tool's execution waits for this promise. */
   wait?: Promise<void>;
+  /**
+   * Whether the tool declares itself concurrency safe.
+   *
+   * `undefined` means the tool declares **nothing**, which is the target's own
+   * default: a tool that does not declare the flag is not concurrency safe.
+   */
+  concurrencySafe?: boolean;
+  /** The execution, when the test needs to control it. */
+  run?: (input: unknown) => Promise<unknown>;
 }
 
 function fakeTool(options: FakeToolOptions): ToolDefinition {
@@ -234,10 +243,92 @@ function fakeTool(options: FakeToolOptions): ToolDefinition {
       options.onRecheck?.(input);
       return { decision: options.recheck };
     },
+    isConcurrencySafe:
+      options.concurrencySafe === undefined ? undefined : () => options.concurrencySafe === true,
     execute: async (input: unknown) => {
       options.onExecute?.(input);
+      if (options.run !== undefined) return options.run(input);
       if (options.wait !== undefined) await options.wait;
       return options.output ?? 'ok';
+    },
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The concurrency tracker                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The calls that are in flight at the same time.
+ *
+ * The tracker is the **mechanism** the scheduling tests use: a call that
+ * enters and leaves it is in flight, and the peak it records is the number of
+ * calls that were in flight **at the same time**. A peak of one is a
+ * sequential run; a peak of two is an overlap.
+ */
+class Concurrency {
+  /** The calls in flight right now. */
+  private active = 0;
+
+  /** The largest number of calls that were in flight at the same time. */
+  private peak = 0;
+
+  /** The order the calls entered and left. */
+  readonly log: string[] = [];
+
+  /** A call starts. */
+  enter(name: string): void {
+    this.active += 1;
+    if (this.active > this.peak) this.peak = this.active;
+    this.log.push(`enter:${name}`);
+  }
+
+  /** A call ends. */
+  leave(name: string): void {
+    this.active -= 1;
+    this.log.push(`leave:${name}`);
+  }
+
+  /** The largest number of calls that were in flight at the same time. */
+  get peakConcurrency(): number {
+    return this.peak;
+  }
+
+  /** The calls in flight right now. */
+  get inFlight(): number {
+    return this.active;
+  }
+}
+
+/**
+ * A gate that opens when `parties` calls have arrived.
+ *
+ * The gate is how the tests **prove** an overlap rather than infer it: a call
+ * that waits at the gate cannot finish until another call has arrived, so two
+ * calls that both wait at the gate are in flight at the same time — and two
+ * calls that are run one after the other cannot both be at the gate, so the
+ * gate times out instead.
+ */
+function meetingGate(parties: number, timeoutMs = 500): { arrive(): Promise<void>; timedOut(): boolean } {
+  let arrived = 0;
+  let release: () => void = () => {};
+  const opened = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let expired = false;
+  const timer = setTimeout(() => {
+    expired = true;
+    release();
+  }, timeoutMs);
+  return {
+    async arrive(): Promise<void> {
+      arrived += 1;
+      if (arrived >= parties) release();
+      await opened;
+      clearTimeout(timer);
+    },
+    timedOut(): boolean {
+      return expired;
     },
   };
 }
@@ -1285,6 +1376,209 @@ describe('the tool-call dispatch', () => {
         expect(plan.groups.every((group) => group.length === 1)).toBe(true);
       }
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The scheduling                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The scheduling of the tool calls of one assistant message.
+ *
+ * The target's scheduler is **per tool, not per message**: every tool declares
+ * whether it is concurrency safe, the safe calls of a message run **together**,
+ * a call that is not concurrency safe runs **alone** and is a **barrier**, and
+ * the next model request is issued only after **every** call of the message
+ * has produced its result.
+ *
+ * The tests below prove the overlap with a **gate**: a call that waits at the
+ * gate cannot finish until another call has arrived, so two calls that both
+ * wait at the gate were in flight at the same time.
+ */
+describe('the tool-call scheduling', () => {
+  /** The events of a turn that makes three tool calls. */
+  function threeCallTurn(): ProviderEvent[] {
+    return [
+      { type: 'message_start', messageId: 'msg_01', model: 'test-model' },
+      { type: 'tool_use', id: 'toolu_a', name: 'First', input: { n: 1 } },
+      { type: 'tool_use', id: 'toolu_b', name: 'Second', input: { n: 2 } },
+      { type: 'tool_use', id: 'toolu_c', name: 'Third', input: { n: 3 } },
+      { type: 'message_stop', stopReason: 'tool_use' },
+    ];
+  }
+
+  it('runs two concurrency-safe calls of one message at the same time', async () => {
+    const tracker = new Concurrency();
+    const gate = meetingGate(2);
+
+    const waiting = (name: string) =>
+      fakeTool({
+        name,
+        concurrencySafe: true,
+        run: async () => {
+          tracker.enter(name);
+          await gate.arrive();
+          tracker.leave(name);
+          return name;
+        },
+      });
+
+    const { runtime } = harness({
+      rounds: [{ events: threeCallTurn() }, { events: finalTurn() }],
+      tools: [waiting('First'), waiting('Second'), waiting('Third')],
+    });
+
+    const result = await runtime.runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    // The two calls of the first group met at the gate: neither of them waited
+    // for the timeout, and they were in flight at the same time.
+    expect(gate.timedOut()).toBe(false);
+    expect(tracker.peakConcurrency).toBeGreaterThanOrEqual(2);
+  });
+
+  it('runs a call that is not concurrency safe alone, and stops the queue at it', async () => {
+    const tracker = new Concurrency();
+    const gate = meetingGate(2);
+    /** What the unsafe call saw when it started. */
+    let inFlightAtStart = -1;
+
+    const safe = (name: string) =>
+      fakeTool({
+        name,
+        concurrencySafe: true,
+        run: async () => {
+          tracker.enter(name);
+          await gate.arrive();
+          tracker.leave(name);
+          return name;
+        },
+      });
+
+    const unsafe = fakeTool({
+      name: 'Second',
+      run: async () => {
+        // The call that is not concurrency safe runs **alone**: nothing else is
+        // in flight when it starts.
+        inFlightAtStart = tracker.inFlight;
+        tracker.enter('Second');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        tracker.leave('Second');
+        return 'second';
+      },
+    });
+
+    const { runtime } = harness({
+      rounds: [{ events: threeCallTurn() }, { events: finalTurn() }],
+      tools: [safe('First'), unsafe, safe('Third')],
+    });
+
+    const result = await runtime.runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    // Nothing was running when the unsafe call started.
+    expect(inFlightAtStart).toBe(0);
+    // The unsafe call is a **barrier**: the call behind it waits for it, so
+    // the third call did not meet the first one at the gate.
+    expect(gate.timedOut()).toBe(true);
+    expect(tracker.log.indexOf('leave:Second')).toBeLessThan(tracker.log.indexOf('enter:Third'));
+    // The first and the third call are in different groups, so they never ran
+    // at the same time.
+    expect(tracker.peakConcurrency).toBe(1);
+  });
+
+  it('issues the next model request only after every call has produced its result', async () => {
+    const tracker = new Concurrency();
+    const gate = meetingGate(2);
+    const resultsAtRequest: number[] = [];
+
+    const waiting = (name: string, delayMs: number) =>
+      fakeTool({
+        name,
+        concurrencySafe: true,
+        run: async () => {
+          tracker.enter(name);
+          if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+          await gate.arrive();
+          tracker.leave(name);
+          return name;
+        },
+      });
+
+    const { runtime, store } = harness({
+      rounds: [{ events: threeCallTurn() }, { events: finalTurn() }],
+      tools: [waiting('First', 0), waiting('Second', 30), waiting('Third', 0)],
+      onRequest: () => {
+        resultsAtRequest.push(store.appended.filter((event) => event.t === 'tool_result').length);
+      },
+    });
+
+    const result = await runtime.runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    // The first request carried no result; the second carried **all three**.
+    expect(resultsAtRequest).toEqual([0, 3]);
+  });
+
+  it('runs a tool that does not declare the flag on its own', async () => {
+    const tracker = new Concurrency();
+    const gate = meetingGate(2, 200);
+
+    const waiting = (name: string) =>
+      fakeTool({
+        name,
+        // No `concurrencySafe`: the tool declares **nothing**, which is the
+        // target's own default — a tool that does not declare the flag is not
+        // concurrency safe.
+        run: async () => {
+          tracker.enter(name);
+          await gate.arrive();
+          tracker.leave(name);
+          return name;
+        },
+      });
+
+    const { runtime } = harness({
+      rounds: [{ events: threeCallTurn() }, { events: finalTurn() }],
+      tools: [waiting('First'), waiting('Second'), waiting('Third')],
+    });
+
+    const result = await runtime.runTurn(input);
+
+    expect(result.stopReason).toBe('end_turn');
+    // The calls ran one after the other: the gate never opened on a second
+    // arrival, and only one call was ever in flight.
+    expect(gate.timedOut()).toBe(true);
+    expect(tracker.peakConcurrency).toBe(1);
+  });
+
+  it('emits the results of the concurrency-safe calls in completion order', async () => {
+    const order: string[] = [];
+
+    const waiting = (name: string, delayMs: number) =>
+      fakeTool({
+        name,
+        concurrencySafe: true,
+        run: async () => {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          order.push(name);
+          return name;
+        },
+      });
+
+    const { runtime, driver } = harness({
+      rounds: [{ events: threeCallTurn() }, { events: finalTurn() }],
+      tools: [waiting('First', 30), waiting('Second', 5), waiting('Third', 15)],
+    });
+
+    await runtime.runTurn(input);
+
+    // The calls finished in the order their work took, and the results are
+    // emitted in that order.
+    expect(order).toEqual(['Second', 'Third', 'First']);
+    const blocks = toolResultBlocks(driver.requests[1]!);
+    expect(blocks.map((block) => block.toolUseId)).toEqual(['toolu_b', 'toolu_c', 'toolu_a']);
   });
 });
 
