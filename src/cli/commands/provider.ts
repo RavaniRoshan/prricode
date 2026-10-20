@@ -35,6 +35,13 @@
  * connections are untouched. The active-connection resolution refuses to select
  * an unusable connection and **names it** in the error, so the user is told
  * *which* connection is broken rather than being told that "something" is.
+ *
+ * ## What this module shares
+ *
+ * The result record, the extension label, the argument parser, the table
+ * renderer and the state file live in `src/cli/commands/shared.ts` — one home
+ * for the pieces two commands use, so the two cannot drift. See that module's
+ * header for why the parser is there and not in `src/cli/args.ts`.
  */
 
 import {
@@ -50,54 +57,21 @@ import { credentialStatus } from '../../provider/credentials.js';
 import { isProviderRoute, type ProviderRoute } from '../../provider/routes.js';
 import { driverFor } from '../../provider/drivers/index.js';
 import type { ProviderRequest } from '../../provider/drivers/types.js';
-import { EXIT_FAILURE, EXIT_SUCCESS, EXIT_USAGE } from '../output.js';
+import { EXIT_FAILURE, EXIT_SUCCESS } from '../output.js';
 
-/* -------------------------------------------------------------------------- */
-/* The result                                                                   */
-/* -------------------------------------------------------------------------- */
-
-/**
- * What a command produced.
- *
- * **Implementation choice.** The audit records the target's exit codes ("`1` for a
- * failed session lookup and `2` for an argument error") but records no
- * command-result shape. This implementation's own commands return this record: the exit
- * code, the text for each stream, and the machine-readable payload.
- *
- * The payload is what the non-interactive form writes as its JSON document, so
- * the two never disagree.
- */
-export interface CommandResult {
-  /** The exit code: `0` success, `1` failure, `2` a usage error. */
-  exitCode: number;
-  /** The text written to stdout. */
-  stdout: string;
-  /** The text written to stderr. */
-  stderr: string;
-  /** The machine-readable payload, when the command produced one. */
-  data?: unknown;
-}
-
-/* -------------------------------------------------------------------------- */
-/* The extension label                                                          */
-/* -------------------------------------------------------------------------- */
-
-/**
- * The label the extension carries.
- *
- * **Project requirement** (plan §Global Constraints): "Multi-provider management
- * is a **project requirement**, not part of the reference agent. It must be labelled as
- * an extension everywhere it surfaces (UI, `--help`, docs, compatibility
- * matrix)."
- *
- * The constant is the single wording the command surfaces use, so the label
- * cannot drift between the text output, the JSON document and the help.
- */
-export const PROVIDER_EXTENSION_NOTICE =
-  'The multi-provider manager is a project extension, not part of the reference agent.';
-
-/** The shorter form of the label, used in a heading. */
-export const PROVIDER_EXTENSION_LABEL = 'project extension - not part of the reference agent';
+import {
+  PROVIDER_EXTENSION_LABEL,
+  PROVIDER_EXTENSION_NOTICE,
+  errorMessageOf,
+  failure,
+  flagValue,
+  parseInvocation,
+  renderTable,
+  updateProviderStateFile,
+  usageError,
+  type CommandInvocation,
+  type CommandResult,
+} from './shared.js';
 
 /* -------------------------------------------------------------------------- */
 /* The credential view                                                          */
@@ -164,6 +138,12 @@ function credentialKindOf(ref: CredentialRef): ProviderCredentialView['kind'] {
  * Why a credential reference cannot be resolved, in the words of its kind.
  *
  * The message names the **reference**, never a value.
+ *
+ * The keychain case is reached when the reference is **incomplete** — an empty
+ * service or an empty account. The registry refuses such a connection, so the
+ * command cannot produce one; the view function is exported, though, and a
+ * caller that hands it a hand-built connection must still get an answer that
+ * names the store entry rather than a wrong kind's wording.
  */
 function unresolvedReason(ref: CredentialRef): string {
   switch (ref.kind) {
@@ -371,6 +351,8 @@ export interface ProviderProbeRequest {
    * return value that the command writes out — the command redacts it.
    */
   credential: string;
+  /** The model the probe asks for. Defaults to {@link PROVIDER_PROBE_MODEL}. */
+  model?: string;
 }
 
 /** What a probe reports. */
@@ -390,25 +372,64 @@ export type ProviderProbe = (request: ProviderProbeRequest) => Promise<ProviderP
 export const PROVIDER_PROBE_TIMEOUT_MS = 10_000;
 
 /**
+ * The shape of the probe request.
+ *
+ * **Observed** (audit §2.2, "Application call sites"): "API-key verification: a
+ * `max_tokens: 1` request with `messages: [{ role: "user", content: "test" }]`",
+ * posted to `/v1/messages` (audit §2.2: "the client posts to `/v1/messages`").
+ *
+ * A probe that asked the endpoint for anything else would report the wrong
+ * thing: `https://api.anthropic.com/` answers a `GET /` with a **404**, so a
+ * probe that reads the root path reports every healthy connection as unusable.
+ */
+export const PROVIDER_PROBE_MAX_TOKENS = 1;
+
+/** The message the probe sends. */
+export const PROVIDER_PROBE_MESSAGE = 'test';
+
+/**
+ * The model the probe asks for.
+ *
+ * The audit's verification names the request's shape but not its model; the
+ * probe asks for the cheapest model this implementation's catalog knows, so the check
+ * costs as little as a check can.
+ */
+export const PROVIDER_PROBE_MODEL = 'claude-haiku-4-5';
+
+/**
  * The default probe: one request to the connection's endpoint.
  *
  * The request carries the credential the way the route's own driver builds
  * it, so the probe exercises the same auth shape a real request would. The
  * response is reported by its status; the credential never leaves this
  * function.
+ *
+ * **The shape.** The request is the audit's own **API-key verification**
+ * (audit §2.2): a `POST` to `/v1/messages` with `max_tokens: 1` and the
+ * message `[{ role: "user", content: "test" }]`. The **route's** driver builds
+ * the URL and the body, so a route whose wire shape is its own asks its own
+ * question; the first-party route — the default one — asks the audit's.
+ *
+ * **A 2xx is a success.** Any other status is reported: `401` and `403` as a
+ * refused credential, anything else as the endpoint's own status.
  */
 export async function defaultProviderProbe(request: ProviderProbeRequest): Promise<ProviderProbeResult> {
+  let url: string;
   let headers: Record<string, string>;
+  let body: string;
   try {
     const driver = driverFor(request.route);
     const probeRequest: ProviderRequest = {
-      model: 'provider-probe',
-      maxTokens: 1,
-      messages: [],
+      model: request.model ?? PROVIDER_PROBE_MODEL,
+      maxTokens: PROVIDER_PROBE_MAX_TOKENS,
+      messages: [{ role: 'user', content: PROVIDER_PROBE_MESSAGE }],
       tools: [],
       stream: false,
     };
-    headers = driver.buildHeaders(probeRequest, request.credential);
+    url = driver.buildUrl(probeRequest, request.baseUrl);
+    const built = driver.buildBody(probeRequest, request.credential);
+    headers = built.headers;
+    body = typeof built.body === 'string' ? built.body : JSON.stringify(built.body);
   } catch (error) {
     return {
       ok: false,
@@ -417,19 +438,27 @@ export async function defaultProviderProbe(request: ProviderProbeRequest): Promi
   }
 
   try {
-    const response = await fetch(request.baseUrl, {
-      method: 'GET',
+    const response = await fetch(url, {
+      method: 'POST',
       headers,
+      body,
       signal: AbortSignal.timeout(PROVIDER_PROBE_TIMEOUT_MS),
     });
     const status = response.status;
+    // The body is **not** read: the probe reports the status, and a response
+    // body is never part of the answer. It is cancelled so the socket is
+    // released rather than left open.
+    const stream = response.body;
+    if (stream !== null) await stream.cancel().catch(() => undefined);
     if (status === 401 || status === 403) {
       return { ok: false, status, message: `the endpoint refused the credential (HTTP ${status})` };
     }
-    if (status >= 400) {
-      return { ok: false, status, message: `the endpoint answered HTTP ${status}` };
+    // **A 2xx is a success** and nothing else is: a redirect is not an answer
+    // the probe can use, and an error is the endpoint's own status.
+    if (status >= 200 && status < 300) {
+      return { ok: true, status, message: `the endpoint answered HTTP ${status}` };
     }
-    return { ok: true, status, message: `the endpoint answered HTTP ${status}` };
+    return { ok: false, status, message: `the endpoint answered HTTP ${status}` };
   } catch (error) {
     return {
       ok: false,
@@ -448,10 +477,20 @@ export interface ProviderCommandOptions {
   env?: NodeJS.ProcessEnv;
   /** The probe the `test` operation uses. Defaults to {@link defaultProviderProbe}. */
   probe?: ProviderProbe;
+  /**
+   * Where the manager's state is kept.
+   *
+   * When it is set, a verb that changes the connection table writes the state
+   * back, so a **later invocation** sees the change. Without it the registry
+   * is the caller's own and lives only as long as the caller holds it.
+   */
+  statePath?: string;
+  /** The model the probe asks for. */
+  probeModel?: string;
 }
 
 /* -------------------------------------------------------------------------- */
-/* The invocation                                                               */
+/* The verbs                                                                    */
 /* -------------------------------------------------------------------------- */
 
 /** The verbs the provider command knows. */
@@ -459,6 +498,11 @@ export const PROVIDER_VERBS = ['list', 'add', 'remove', 'use', 'test'] as const;
 
 /** One of the provider command's verbs. */
 export type ProviderVerb = (typeof PROVIDER_VERBS)[number];
+
+/** Whether a string is one of the provider command's verbs. */
+function isProviderVerb(value: string): value is ProviderVerb {
+  return (PROVIDER_VERBS as readonly string[]).includes(value);
+}
 
 /**
  * The flags the provider command knows.
@@ -486,172 +530,6 @@ const PROVIDER_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   '--allow-untrusted-endpoint',
 ]);
 
-/** A parsed invocation of a manager command. */
-export interface CommandInvocation {
-  /** The verb, when one was given. */
-  verb?: string;
-  /** The operands — the arguments that are not flags and not the verb. */
-  operands: string[];
-  /** The flag values, keyed by flag name. */
-  flags: ReadonlyMap<string, readonly string[]>;
-  /** Whether the command was given in the flag form (`--provider list`). */
-  flagForm: boolean;
-  /** The format the output is rendered in. */
-  format: 'text' | 'json';
-  /** Whether the help was asked for. */
-  help: boolean;
-}
-
-/** The result of parsing an invocation. */
-export type InvocationParse =
-  | { ok: true; invocation: CommandInvocation }
-  | { ok: false; message: string };
-
-/**
- * The vocabulary a manager command is parsed with.
- */
-export interface InvocationSpec {
-  /** The flag that names the command in the flag form (`--provider`). */
-  commandFlag: string;
-  /** The word that may lead the arguments (`provider`). */
-  commandWord: string;
-  /** The flags that take a value. */
-  valueFlags: ReadonlySet<string>;
-  /** The flags that take no value. */
-  booleanFlags: ReadonlySet<string>;
-}
-
-/**
- * Parse a manager command's arguments.
- *
- * Two forms are accepted and they run the **same** operations:
- *
- *   - the **subcommand** form — `provider list`, `provider use prod`;
- *   - the **non-interactive flag** form — `--provider list`, `--provider use
- *     prod` — which is machine-readable by default.
- *
- * The flag form is recognized by its command flag (`--provider` here,
- * `--catalog` there); the flag that follows it is the verb.
- */
-export function parseInvocation(args: readonly string[], spec: InvocationSpec): InvocationParse {
-  const { valueFlags, booleanFlags } = spec;
-  const flags = new Map<string, string[]>();
-  const operands: string[] = [];
-  let verb: string | undefined;
-  let flagForm = false;
-  let help = false;
-  let format: 'text' | 'json' | undefined;
-
-  const record = (name: string, values: readonly string[]): void => {
-    const existing = flags.get(name);
-    if (existing === undefined) flags.set(name, [...values]);
-    else existing.push(...values);
-  };
-
-  const queue = [...args];
-  let cursor = 0;
-
-  // The command's own name may lead the arguments — `provider list` — so the
-  // command reads the same whether it is called as `list` or as `provider
-  // list`. The flag form is recognized by its command flag.
-  if (queue[0] === spec.commandWord) cursor = 1;
-
-  // The command flag comes first in the flag form.
-  if (queue[cursor] === spec.commandFlag) {
-    flagForm = true;
-    cursor += 1;
-    const next = queue[cursor];
-    if (next !== undefined && !isFlagToken(next)) {
-      verb = next;
-      cursor += 1;
-    }
-  }
-
-  while (cursor < queue.length) {
-    const token = queue[cursor];
-    cursor += 1;
-    if (token === undefined) continue;
-
-    if (!isFlagToken(token)) {
-      if (verb === undefined) {
-        verb = token;
-        continue;
-      }
-      operands.push(token);
-      continue;
-    }
-
-    let name = token;
-    let inline: string | undefined;
-    const equals = token.indexOf('=');
-    if (token.startsWith('--') && equals !== -1) {
-      name = token.slice(0, equals);
-      inline = token.slice(equals + 1);
-    }
-
-    if (booleanFlags.has(name)) {
-      if (inline !== undefined) {
-        return { ok: false, message: `Error: ${name} does not take a value.` };
-      }
-      record(name, []);
-      if (name === '--help') help = true;
-      if (name === '--json') format = 'json';
-      continue;
-    }
-
-    if (valueFlags.has(name)) {
-      let value = inline;
-      if (value === undefined) {
-        const next = queue[cursor];
-        if (next === undefined) {
-          return { ok: false, message: `Error: ${name} requires a value.` };
-        }
-        value = next;
-        cursor += 1;
-      }
-      record(name, [value]);
-      if (name === '--format') {
-        if (value !== 'text' && value !== 'json') {
-          return { ok: false, message: `Error: Invalid output format "${value}".` };
-        }
-        format = value;
-      }
-      continue;
-    }
-
-    return { ok: false, message: `Error: unknown option '${token}'.` };
-  }
-
-  const resolvedFormat: 'text' | 'json' = format ?? (flagForm ? 'json' : 'text');
-
-  const invocation: CommandInvocation = {
-    operands,
-    flags,
-    flagForm,
-    format: resolvedFormat,
-    help,
-    ...(verb === undefined ? {} : { verb }),
-  };
-  return { ok: true, invocation };
-}
-
-/** The last value of a flag. */
-function flagValue(invocation: CommandInvocation, name: string): string | undefined {
-  const values = invocation.flags.get(name);
-  if (values === undefined || values.length === 0) return undefined;
-  return values[values.length - 1];
-}
-
-/** Every value of a flag. */
-function flagValues(invocation: CommandInvocation, name: string): string[] {
-  return [...(invocation.flags.get(name) ?? [])];
-}
-
-/** Whether a token is a flag. */
-function isFlagToken(token: string): boolean {
-  return token.length > 1 && token.startsWith('-');
-}
-
 /* -------------------------------------------------------------------------- */
 /* The help                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -676,7 +554,8 @@ Verbs:
   test <id>                resolve the connection's credential and test the endpoint
 
 Options:
-  --name <name>            the connection's display name (add)
+  --name <name>            the connection's display name (add); one word: a
+                           whitespace or a control character is refused
   --route <route>          the provider route: firstParty, gateway, bedrock,
                            foundry, anthropicAws, anthropicGoogleCloud, mantle
                            or vertex (add)
@@ -697,6 +576,10 @@ Options:
 
 A credential is a reference, never a value: name an environment variable, a
 file, or an OS credential-store entry. The commands never print a value.
+
+A connection id is a key: 1 to 64 letters, digits, dots, dashes or
+underscores, starting with a letter or a digit. It never carries a
+whitespace, a control character or a path separator.
 `;
 
 /* -------------------------------------------------------------------------- */
@@ -709,7 +592,7 @@ file, or an OS credential-store entry. The commands never print a value.
  * @param args The command's arguments — the subcommand form (`list`) or the
  *   non-interactive flag form (`--provider list`).
  * @param registry The connection registry.
- * @param options The environment and the probe.
+ * @param options The environment, the probe and the state file.
  */
 export async function providerCommand(
   args: string[],
@@ -725,7 +608,7 @@ export async function providerCommand(
   if (!parsed.ok) return usageError(parsed.message);
   const invocation = parsed.invocation;
 
-  if (invocation.help || invocation.verb === undefined) {
+  if (invocation.help || invocation.verb === undefined || invocation.verb === 'help') {
     return {
       exitCode: EXIT_SUCCESS,
       stdout: PROVIDER_COMMAND_HELP,
@@ -744,23 +627,27 @@ export async function providerCommand(
     );
   }
 
+  if (!isProviderVerb(verb)) {
+    return usageError(
+      `Error: unknown provider command "${verb}". The commands are: ${PROVIDER_VERBS.join(', ')}.`,
+    );
+  }
+
   switch (verb) {
     case 'list':
       return listCommand(registry, invocation, options);
     case 'add':
       return addCommand(registry, invocation, options);
     case 'remove':
-      return removeCommand(registry, invocation);
+      return removeCommand(registry, invocation, options);
     case 'use':
       return useCommand(registry, invocation, options);
     case 'test':
       return testCommand(registry, invocation, options);
-    case 'help':
-      return { exitCode: EXIT_SUCCESS, stdout: PROVIDER_COMMAND_HELP, stderr: '' };
-    default:
-      return usageError(
-        `Error: unknown provider command "${verb}". The commands are: ${PROVIDER_VERBS.join(', ')}.`,
-      );
+    default: {
+      const unknown: never = verb;
+      throw new Error(`unknown provider verb: ${JSON.stringify(unknown)}`);
+    }
   }
 }
 
@@ -844,6 +731,8 @@ async function addCommand(
   if (invocation.operands.length > 1) {
     return usageError('Error: the provider command "add" takes one connection id.');
   }
+  const idProblem = connectionIdProblem(id);
+  if (idProblem !== undefined) return usageError(idProblem);
   if (registry.get(id) !== undefined) {
     return failure(`a connection with id "${id}" already exists`);
   }
@@ -852,6 +741,8 @@ async function addCommand(
   if (name.trim() === '') {
     return usageError('Error: the connection needs a non-empty name.');
   }
+  const nameProblem = connectionNameProblem(name);
+  if (nameProblem !== undefined) return usageError(nameProblem);
 
   const routeValue = flagValue(invocation, '--route') ?? 'firstParty';
   if (!isProviderRoute(routeValue)) {
@@ -911,6 +802,9 @@ async function addCommand(
     }
   }
 
+  const persisted = await persistConnections(registry, options);
+  if (persisted !== undefined) return persisted;
+
   const data = {
     type: 'provider.connection',
     extension: PROVIDER_EXTENSION_NOTICE,
@@ -945,6 +839,7 @@ async function addCommand(
 async function removeCommand(
   registry: ProviderRegistry,
   invocation: CommandInvocation,
+  options: ProviderCommandOptions,
 ): Promise<CommandResult> {
   const id = invocation.operands[0];
   if (id === undefined || id.trim() === '') {
@@ -955,6 +850,9 @@ async function removeCommand(
   if (!removed) {
     return failure(`no connection with id "${id}"`);
   }
+
+  const persisted = await persistConnections(registry, options);
+  if (persisted !== undefined) return persisted;
 
   const data = {
     type: 'provider.connection.removed',
@@ -1007,6 +905,9 @@ async function useCommand(
   } catch (error) {
     return failure(errorMessageOf(error));
   }
+
+  const persisted = await persistConnections(registry, options);
+  if (persisted !== undefined) return persisted;
 
   const data = {
     type: 'provider.active',
@@ -1079,7 +980,13 @@ async function testCommand(
 
   let outcome: ProviderProbeResult;
   try {
-    outcome = await probe({ connection, baseUrl, route: connection.route, credential });
+    outcome = await probe({
+      connection,
+      baseUrl,
+      route: connection.route,
+      credential,
+      ...(options.probeModel === undefined ? {} : { model: options.probeModel }),
+    });
   } catch (error) {
     // The probe may have put the credential into its error; it is redacted out
     // before the message is reported.
@@ -1172,55 +1079,201 @@ function credentialRefOf(
 }
 
 /**
- * Remove every occurrence of a secret from a message.
+ * The pattern a connection id must match.
  *
- * The split-and-join form is used on purpose: the secret is not a regular
- * expression, so a secret that carries a metacharacter cannot break the
- * redaction (or smuggle a replacement through it).
+ * Conservative on purpose. An id is a **key** in a table and a token on a
+ * command line: it carries no whitespace, no control character and no path
+ * separator, so it can never split a table row, break a column or name a file
+ * outside the configuration directory.
  */
-export function redact(text: string, secret: string): string {
-  if (secret === '') return text;
-  return text.split(secret).join('[redacted]');
-}
+const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-/** The message of an error. */
-function errorMessageOf(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  return String(error);
-}
-
-/** A usage error. */
-function usageError(message: string): CommandResult {
-  return { exitCode: EXIT_USAGE, stdout: '', stderr: `${message}\n` };
-}
-
-/** A failure. */
-function failure(message: string): CommandResult {
-  return { exitCode: EXIT_FAILURE, stdout: '', stderr: `${message}\n` };
+/**
+ * The problem with a connection id, or `undefined` when there is none.
+ *
+ * The message **names the offending value**. The value is quoted with
+ * `JSON.stringify`, so a value that carries a newline is shown escaped rather
+ * than breaking the line the message is on.
+ */
+function connectionIdProblem(id: string): string | undefined {
+  if (hasWhitespaceOrControl(id)) {
+    return `Error: the connection id ${JSON.stringify(id)} may not carry a whitespace or a control character.`;
+  }
+  if (!CONNECTION_ID_PATTERN.test(id)) {
+    return (
+      `Error: the connection id ${JSON.stringify(id)} is not a valid id. ` +
+      'An id is 1 to 64 letters, digits, dots, dashes or underscores, and it starts with a letter or a digit.'
+    );
+  }
+  return undefined;
 }
 
 /**
- * Render a table.
+ * The problem with a connection's display name, or `undefined` when there is
+ * none.
  *
- * The columns are padded to their widest cell, so the output is readable and
- * the rows stay one per record.
+ * A name is shown in a **table row**, so a whitespace in it — two of them,
+ * especially — would break the row the reader parses. The name is therefore
+ * one word.
  */
-function renderTable(headers: readonly string[], rows: readonly (readonly string[])[]): string[] {
-  const widths: number[] = headers.map((header) => header.length);
-  for (const row of rows) {
-    for (let index = 0; index < headers.length; index += 1) {
-      const cell = row[index] ?? '';
-      const current = widths[index] ?? 0;
-      if (cell.length > current) widths[index] = cell.length;
+function connectionNameProblem(name: string): string | undefined {
+  if (hasWhitespaceOrControl(name)) {
+    return `Error: the connection name ${JSON.stringify(name)} may not carry a whitespace or a control character.`;
+  }
+  return undefined;
+}
+
+/** Whether a string carries a whitespace or a control character. */
+function hasWhitespaceOrControl(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code === undefined) continue;
+    // A control character is anything below the space, the space itself, and
+    // the delete character. The line and paragraph separators are control
+    // characters too.
+    if (code <= 0x20 || code === 0x7f || code === 0x2028 || code === 0x2029) return true;
+  }
+  return false;
+}
+
+/**
+ * Write the connection table back to the state file.
+ *
+ * The result is `undefined` when there is nothing to write or when the write
+ * succeeded, and a **failure** when the write did not: a verb that reports
+ * success while the change did not survive the process is exactly the lie the
+ * state file exists to prevent.
+ */
+async function persistConnections(
+  registry: ProviderRegistry,
+  options: ProviderCommandOptions,
+): Promise<CommandResult | undefined> {
+  const statePath = options.statePath;
+  if (statePath === undefined) return undefined;
+  try {
+    await updateProviderStateFile(statePath, { connections: [...registry.list()] });
+  } catch (error) {
+    return failure(`the provider state could not be written: ${errorMessageOf(error)}`);
+  }
+  return undefined;
+}
+
+/**
+ * The shortest **prefix** of a secret that is redacted.
+ *
+ * A prefix shorter than this is too short to be a meaningful part of a
+ * secret, and redacting it would take ordinary words out of the message.
+ */
+export const REDACTION_PREFIX_FLOOR = 8;
+
+/**
+ * Remove every occurrence of a secret from a message.
+ *
+ * The redaction covers **four** forms of the secret, because a probe that
+ * mishandles a secret does not usually paste it back verbatim:
+ *
+ *   - the secret itself;
+ *   - the secret **trimmed** — the resolver trims a value, so the trimmed
+ *     form is the one that reaches the provider;
+ *   - the secret **normalized** — its whitespace collapsed, which is what a
+ *     message that re-spaces a secret looks like; the matcher folds the case
+ *     too, so an upper-cased secret is the same form;
+ *   - a **prefix** of any of those, down to a floor of
+ *     {@link REDACTION_PREFIX_FLOOR} characters. A truncated or masked secret
+ *     (`sk-ant-do-no`) is still a leak.
+ *
+ * The matching is **case-insensitive** and **literal**: the secret is never
+ * compiled into a pattern, so a secret that carries a regular-expression
+ * metacharacter cannot break the redaction (or smuggle a replacement through
+ * it).
+ *
+ * **The prefix rule over-redacts on purpose.** A message that happens to carry
+ * a prefix of the secret loses that word. A lost word is a cosmetic problem;
+ * a leaked prefix is a leaked credential.
+ */
+export function redact(text: string, secret: string): string {
+  if (secret === '') return text;
+  let out = text;
+  for (const form of secretForms(secret)) {
+    out = replaceAllInsensitive(out, form, '[redacted]');
+    for (let length = form.length - 1; length >= REDACTION_PREFIX_FLOOR; length -= 1) {
+      out = replaceAllInsensitive(out, form.slice(0, length), '[redacted]');
     }
   }
+  return out;
+}
 
-  const render = (cells: readonly string[]): string =>
-    headers
-      .map((_, index) => (cells[index] ?? '').padEnd(widths[index] ?? 0))
-      .join('  ')
-      .trimEnd();
+/**
+ * The forms of a secret that are redacted.
+ *
+ * The longest form comes first, so the whole secret is replaced before one of
+ * its prefixes is. The **case** is not a form: the matcher folds it, so a
+ * form that differs only in case would be the same form.
+ */
+function secretForms(secret: string): string[] {
+  const forms: string[] = [];
+  const add = (value: string): void => {
+    if (value === '') return;
+    if (forms.includes(value)) return;
+    forms.push(value);
+  };
 
-  return [render(headers), ...rows.map((row) => render(row))];
+  const trimmed = secret.trim();
+  add(secret);
+  add(trimmed);
+  add(collapseWhitespace(trimmed));
+
+  return forms.sort((left, right) => right.length - left.length);
+}
+
+/** Collapse every run of whitespace into a single space. */
+function collapseWhitespace(value: string): string {
+  let out = '';
+  let pending = false;
+  for (const character of value) {
+    if (isWhitespace(character)) {
+      pending = out !== '';
+      continue;
+    }
+    if (pending) {
+      out += ' ';
+      pending = false;
+    }
+    out += character;
+  }
+  return out;
+}
+
+/** Whether a character is a whitespace. */
+function isWhitespace(character: string): boolean {
+  return (
+    character === ' ' ||
+    character === '\t' ||
+    character === '\n' ||
+    character === '\r' ||
+    character === '\f' ||
+    character === '\v'
+  );
+}
+
+/**
+ * Replace every occurrence of a needle, ignoring case.
+ *
+ * The needle is **not** a pattern: the search is a plain substring search on
+ * the folded strings, so a needle that carries a regular-expression
+ * metacharacter is matched literally.
+ */
+function replaceAllInsensitive(text: string, needle: string, replacement: string): string {
+  if (needle === '') return text;
+  const haystack = text.toLowerCase();
+  const pattern = needle.toLowerCase();
+  let out = '';
+  let cursor = 0;
+  for (;;) {
+    const at = haystack.indexOf(pattern, cursor);
+    if (at === -1) break;
+    out += text.slice(cursor, at) + replacement;
+    cursor = at + pattern.length;
+  }
+  return cursor === 0 ? text : out + text.slice(cursor);
 }

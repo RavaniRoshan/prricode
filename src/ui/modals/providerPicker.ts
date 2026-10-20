@@ -14,31 +14,51 @@
  *     value. There is no code path here that could show one: the entry carries
  *     a reference and a status, and nothing else.
  *   - **An unusable connection is visible, not hidden.** A connection whose
- *     credential cannot be resolved is listed with its status, so the user can
- *     see which entry is broken and pick another.
+ *     credential cannot be resolved is listed with its status **and** with the
+ *     fact that it cannot be used, so the user can see which entry is broken
+ *     and pick another.
  *
- * ## Why the module has no imports
+ * ## What this module imports, and why
  *
  * The picker is a **model**, not a renderer: it turns a list of entries into
- * the lines a terminal shows and manages the selection. The Ink application
- * (`src/ui/app.ts`) owns the rendering and the key handling, and the manager
- * command owns the entries. Keeping this module free of both means the two
- * surfaces cannot disagree about what a connection is, and it keeps the picker
- * testable without a terminal.
+ * the lines a terminal shows and manages the selection. It imports two things
+ * from the manager's shared module (`src/cli/commands/shared.ts`):
+ *
+ *   - the **extension label**, so the picker and the commands cannot drift
+ *     apart in their wording — the picker used to keep its own copy of the
+ *     sentence, and two copies of a label is one copy too many;
+ *   - the **table renderer**, so the columns are padded the same way in both
+ *     surfaces.
+ *
+ * Both are pure functions with no state, so the picker stays testable
+ * without a terminal and without the commands themselves.
+ *
+ * ## How the entries get here
+ *
+ * The manager command owns the connections; the picker only shows them. The
+ * bridge is {@link providerPickerEntries}, which takes the command's own
+ * connection views — structurally, so the picker does not have to import the
+ * command module — and turns them into the entries it renders.
  */
+
+import {
+  PROVIDER_EXTENSION_LABEL,
+  PROVIDER_EXTENSION_NOTICE,
+  renderTable,
+} from '../../cli/commands/shared.js';
 
 /**
  * The label the picker carries.
  *
  * **Project requirement** (plan §Global Constraints): the extension "must be
  * labelled as an extension everywhere it surfaces (UI, `--help`, docs,
- * compatibility matrix)". The wording matches the command surfaces'.
+ * compatibility matrix)". The wording is the command surfaces' wording: it is
+ * imported, not copied.
  */
-export const PROVIDER_PICKER_NOTICE =
-  'The multi-provider manager is a project extension, not part of the reference agent.';
+export const PROVIDER_PICKER_NOTICE = PROVIDER_EXTENSION_NOTICE;
 
 /** The shorter form of the label, used in the heading. */
-export const PROVIDER_PICKER_LABEL = 'project extension - not part of the reference agent';
+export const PROVIDER_PICKER_LABEL = PROVIDER_EXTENSION_LABEL;
 
 /**
  * The marker of the selected entry.
@@ -71,6 +91,56 @@ export interface ProviderPickerEntry {
   credentialStatus: string;
   /** The credential's reference — never the credential. */
   credentialReference: string;
+}
+
+/**
+ * A connection, as the manager command describes it.
+ *
+ * The shape is **structural** on purpose: the picker does not import the
+ * command module, so the two surfaces stay independent, and the manager
+ * command's own view satisfies this shape without an adapter.
+ */
+export interface ProviderPickerSource {
+  /** The connection's id. */
+  id: string;
+  /** The connection's display name. */
+  name: string;
+  /** The route the connection talks to. */
+  route: string;
+  /** The effective base URL. */
+  baseUrl: string;
+  /** Whether the connection is the active one. */
+  active: boolean;
+  /** The credential's status, its reference and whether it can be used. */
+  credential: {
+    /** The credential's status — never the credential. */
+    status: string;
+    /** Whether the connection can be used as it stands. */
+    usable: boolean;
+    /** The credential's reference — never the credential. */
+    reference: string;
+  };
+}
+
+/**
+ * The picker's entries, from the manager command's connection views.
+ *
+ * The bridge is one-directional and total: every connection becomes an entry,
+ * so an unusable connection is **visible** rather than hidden.
+ */
+export function providerPickerEntries(
+  sources: readonly ProviderPickerSource[],
+): ProviderPickerEntry[] {
+  return sources.map((source) => ({
+    id: source.id,
+    name: source.name,
+    route: source.route,
+    baseUrl: source.baseUrl,
+    active: source.active,
+    usable: source.credential.usable,
+    credentialStatus: source.credential.status,
+    credentialReference: source.credential.reference,
+  }));
 }
 
 /** The picker's state. */
@@ -117,7 +187,9 @@ export function providerPickerModel(
  *
  * The heading carries the label, and the selected entry is marked with the
  * picker's marker. The credential column carries the **reference** and the
- * **status** — never a value.
+ * **status** — never a value — and the last column says whether the
+ * connection can be used, so an unusable connection is visible as such and
+ * not only as a status word.
  */
 export function providerPickerLines(model: ProviderPickerModel): string[] {
   const rows = model.entries.map((entry) => [
@@ -127,8 +199,12 @@ export function providerPickerLines(model: ProviderPickerModel): string[] {
     entry.baseUrl,
     entry.credentialReference,
     entry.credentialStatus,
+    entry.usable ? 'yes' : 'no',
   ]);
-  const table = renderTable(['ID', 'NAME', 'ROUTE', 'BASE URL', 'CREDENTIAL', 'STATUS'], rows);
+  const table = renderTable(
+    ['ID', 'NAME', 'ROUTE', 'BASE URL', 'CREDENTIAL', 'STATUS', 'USABLE'],
+    rows,
+  );
 
   const lines: string[] = [];
   lines.push(`${model.title} (${PROVIDER_PICKER_LABEL})`);
@@ -184,31 +260,6 @@ export function selectedProviderPickerEntry(
 /* -------------------------------------------------------------------------- */
 /* The helpers                                                                  */
 /* -------------------------------------------------------------------------- */
-
-/**
- * Render a table.
- *
- * The columns are padded to their widest cell, so the rows line up and each
- * record stays on one line.
- */
-function renderTable(headers: readonly string[], rows: readonly (readonly string[])[]): string[] {
-  const widths: number[] = headers.map((header) => header.length);
-  for (const row of rows) {
-    for (let index = 0; index < headers.length; index += 1) {
-      const cell = row[index] ?? '';
-      const current = widths[index] ?? 0;
-      if (cell.length > current) widths[index] = cell.length;
-    }
-  }
-
-  const render = (cells: readonly string[]): string =>
-    headers
-      .map((_, index) => (cells[index] ?? '').padEnd(widths[index] ?? 0))
-      .join('  ')
-      .trimEnd();
-
-  return [render(headers), ...rows.map((row) => render(row))];
-}
 
 /** Clamp a number into a range. */
 function clamp(value: number, low: number, high: number): number {

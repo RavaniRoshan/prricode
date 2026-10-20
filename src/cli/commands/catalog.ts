@@ -33,6 +33,14 @@
  * only credential the module ever names is a **reference** — an environment
  * variable name, a file path, or an OS credential-store key — and only in the
  * JSON document, as the connection's own reference.
+ *
+ * ## The persistence
+ *
+ * A verb that changes the state — `refresh` and `override` — writes the
+ * catalog table to the **state file** when one is configured, so that the
+ * effect survives the process. Without a state file the caller owns the store
+ * and the effect lasts as long as the caller holds it; the command says which
+ * of the two it is, and never claims a durability it does not have.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -46,15 +54,23 @@ import {
 } from '../../provider/catalog.js';
 import { ROUTE_NAMES, isProviderRoute, type ProviderRoute } from '../../provider/routes.js';
 import type { Connection, ProviderRegistry } from '../../provider/registry.js';
-import { EXIT_FAILURE, EXIT_SUCCESS, EXIT_USAGE } from '../output.js';
+import { EXIT_FAILURE, EXIT_SUCCESS } from '../output.js';
 
 import {
   PROVIDER_EXTENSION_LABEL,
   PROVIDER_EXTENSION_NOTICE,
+  errorMessageOf,
+  failure,
+  flagValue,
+  flagValues,
   parseInvocation,
+  readProviderStateFile,
+  updateProviderStateFile,
+  usageError,
+  type CatalogStateEntry,
   type CommandInvocation,
   type CommandResult,
-} from './provider.js';
+} from './shared.js';
 
 /* -------------------------------------------------------------------------- */
 /* The overrides                                                                */
@@ -203,13 +219,22 @@ export interface CatalogCommandOptions {
    * The catalog table.
    *
    * The caller owns it: a caller that wants a refresh to be visible to a
-   * later listing passes the **same** store to both.
+   * later listing passes the **same** store to both. When it is absent and a
+   * state file is configured, the table is read from that file.
    */
   catalogs?: CatalogStore;
   /** Where a connection's catalog is read from. */
   sources?: CatalogSourceResolver;
   /** The fetcher a URL catalog is read with. */
   fetch?: (url: string) => Promise<{ json(): Promise<unknown> }>;
+  /**
+   * Where the manager's state is kept.
+   *
+   * When it is set, a verb that changes the catalog table writes it back, so
+   * that a **later invocation** sees the change — a refresh is durable, and a
+   * user's override survives it.
+   */
+  statePath?: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -221,6 +246,11 @@ export const CATALOG_VERBS = ['list', 'search', 'show', 'refresh', 'override'] a
 
 /** One of the catalog command's verbs. */
 export type CatalogVerb = (typeof CATALOG_VERBS)[number];
+
+/** Whether a string is one of the catalog command's verbs. */
+function isCatalogVerb(value: string): value is CatalogVerb {
+  return (CATALOG_VERBS as readonly string[]).includes(value);
+}
 
 /**
  * The flags the catalog command knows.
@@ -303,34 +333,47 @@ export async function catalogCommand(
   if (!parsed.ok) return usageError(parsed.message);
   const invocation = parsed.invocation;
 
-  if (invocation.help || invocation.verb === undefined) {
+  if (invocation.help || invocation.verb === undefined || invocation.verb === 'help') {
     return { exitCode: EXIT_SUCCESS, stdout: CATALOG_COMMAND_HELP, stderr: '' };
   }
 
-  const store = options.catalogs ?? createCatalogStore();
+  const verb = invocation.verb;
+  if (!isCatalogVerb(verb)) {
+    return usageError(
+      `Error: unknown catalog command "${verb}". The commands are: ${CATALOG_VERBS.join(', ')}.`,
+    );
+  }
 
-  switch (invocation.verb) {
+  let store = options.catalogs;
+  if (store === undefined && options.statePath !== undefined) {
+    try {
+      store = await catalogStoreFromStateFile(options.statePath);
+    } catch (error) {
+      return failure(errorMessageOf(error));
+    }
+  }
+  const catalogs = store ?? createCatalogStore();
+
+  switch (verb) {
     case 'list':
-      return listCommand(registry, store, invocation, options, undefined);
+      return listCommand(registry, catalogs, invocation, options, undefined);
     case 'search': {
       const query = queryOf(invocation);
       if (query === undefined || query.trim() === '') {
         return usageError('Error: the catalog command "search" needs a query.');
       }
-      return listCommand(registry, store, invocation, options, query);
+      return listCommand(registry, catalogs, invocation, options, query);
     }
     case 'show':
-      return showCommand(registry, store, invocation, options);
+      return showCommand(registry, catalogs, invocation, options);
     case 'refresh':
-      return refreshCommand(registry, store, invocation, options);
+      return refreshCommand(registry, catalogs, invocation, options);
     case 'override':
-      return overrideCommand(registry, store, invocation, options);
-    case 'help':
-      return { exitCode: EXIT_SUCCESS, stdout: CATALOG_COMMAND_HELP, stderr: '' };
-    default:
-      return usageError(
-        `Error: unknown catalog command "${invocation.verb}". The commands are: ${CATALOG_VERBS.join(', ')}.`,
-      );
+      return overrideCommand(registry, catalogs, invocation, options);
+    default: {
+      const unknown: never = verb;
+      throw new Error(`unknown catalog verb: ${JSON.stringify(unknown)}`);
+    }
   }
 }
 
@@ -505,6 +548,9 @@ async function refreshCommand(
   };
   store.set(connection.value.id, record);
 
+  const persisted = await persistCatalogs(store, options);
+  if (persisted !== undefined) return persisted;
+
   const data = {
     type: 'catalog.refreshed',
     extension: PROVIDER_EXTENSION_NOTICE,
@@ -524,6 +570,9 @@ async function refreshCommand(
   const lines = [
     `Refreshed the catalog of the provider connection "${connection.value.id}": ${catalog.models.length} models.`,
     'The connection itself was not touched.',
+    options.statePath === undefined
+      ? 'The refresh rewrote the catalog table, and the overrides survive it.'
+      : 'The refresh was written to the provider state, and the overrides survive it.',
     PROVIDER_EXTENSION_NOTICE,
   ];
   return { exitCode: EXIT_SUCCESS, stdout: `${lines.join('\n')}\n`, stderr: '', data };
@@ -588,6 +637,9 @@ async function overrideCommand(
 
   store.set(connection.value.id, record);
 
+  const persisted = await persistCatalogs(store, options);
+  if (persisted !== undefined) return persisted;
+
   const data = {
     type: 'catalog.override',
     extension: PROVIDER_EXTENSION_NOTICE,
@@ -611,6 +663,9 @@ async function overrideCommand(
   const lines = [
     `The catalog of the provider connection "${connection.value.id}" now overrides "${modelId}".`,
     'The override survives a refresh.',
+    options.statePath === undefined
+      ? 'The override is in the catalog table, and it survives a refresh.'
+      : 'The override was written to the provider state, so it survives the process.',
     PROVIDER_EXTENSION_NOTICE,
   ];
   return { exitCode: EXIT_SUCCESS, stdout: `${lines.join('\n')}\n`, stderr: '', data };
@@ -752,6 +807,106 @@ function parseCatalog(raw: string, connectionId: string): unknown {
 }
 
 /* -------------------------------------------------------------------------- */
+/* The persistence                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The catalog table, in the persisted form.
+ *
+ * The overrides are written as **pairs** and **triples** rather than as maps,
+ * because the persisted form is JSON and a JSON object cannot carry a
+ * non-string key.
+ */
+export function catalogStateOf(store: CatalogStore): CatalogStateEntry[] {
+  const entries: CatalogStateEntry[] = [];
+  for (const id of store.ids()) {
+    const record = store.get(id);
+    if (record === undefined) continue;
+    entries.push({
+      connectionId: id,
+      catalog: record.catalog,
+      displayNames: [...record.overrides.displayNames.entries()],
+      providerIds: [...record.overrides.providerIds.entries()].flatMap(([modelId, routes]) =>
+        [...routes.entries()].map(([route, providerId]) => [modelId, route, providerId] as const),
+      ),
+    });
+  }
+  return entries;
+}
+
+/**
+ * The catalog table the persisted form describes.
+ *
+ * A record whose catalog is not there is skipped: a persisted entry that
+ * cannot be read is not a catalog.
+ */
+export function catalogStoreOfState(entries: readonly CatalogStateEntry[]): CatalogStore {
+  const records: Array<readonly [string, CatalogRecord]> = [];
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== 'object') continue;
+    if (typeof entry.connectionId !== 'string' || entry.connectionId === '') continue;
+    if (entry.catalog === null || typeof entry.catalog !== 'object') continue;
+
+    const overrides = createCatalogOverrides();
+    for (const pair of entry.displayNames ?? []) {
+      if (!Array.isArray(pair) || pair.length < 2) continue;
+      const modelId = pair[0];
+      const displayName = pair[1];
+      if (typeof modelId !== 'string' || typeof displayName !== 'string') continue;
+      overrides.displayNames.set(modelId, displayName);
+    }
+    for (const triple of entry.providerIds ?? []) {
+      if (!Array.isArray(triple) || triple.length < 3) continue;
+      const modelId = triple[0];
+      const route = triple[1];
+      const providerId = triple[2];
+      if (typeof modelId !== 'string' || typeof providerId !== 'string') continue;
+      if (!isProviderRoute(route)) continue;
+      const routes = overrides.providerIds.get(modelId) ?? new Map<ProviderRoute, string>();
+      routes.set(route, providerId);
+      overrides.providerIds.set(modelId, routes);
+    }
+
+    records.push([entry.connectionId, { catalog: entry.catalog, overrides }]);
+  }
+  return createCatalogStore(records);
+}
+
+/**
+ * The catalog table the state file holds.
+ *
+ * A file that is not there is an empty table: a manager that has never been
+ * used has no catalogs.
+ */
+export async function catalogStoreFromStateFile(path: string): Promise<CatalogStore> {
+  const state = await readProviderStateFile(path);
+  if (state === undefined) return createCatalogStore();
+  return catalogStoreOfState(state.catalogs);
+}
+
+/**
+ * Write the catalog table back to the state file.
+ *
+ * The result is `undefined` when there is nothing to write or when the write
+ * succeeded, and a **failure** when the write did not: a verb that reports a
+ * durable change while the change died with the process is exactly the lie
+ * the state file exists to prevent.
+ */
+async function persistCatalogs(
+  store: CatalogStore,
+  options: CatalogCommandOptions,
+): Promise<CommandResult | undefined> {
+  const statePath = options.statePath;
+  if (statePath === undefined) return undefined;
+  try {
+    await updateProviderStateFile(statePath, { catalogs: catalogStateOf(store) });
+  } catch (error) {
+    return failure(`the provider state could not be written: ${errorMessageOf(error)}`);
+  }
+  return undefined;
+}
+
+/* -------------------------------------------------------------------------- */
 /* The helpers                                                                  */
 /* -------------------------------------------------------------------------- */
 
@@ -861,34 +1016,3 @@ function queryOf(invocation: CommandInvocation): string | undefined {
   if (query === undefined) return undefined;
   return query;
 }
-
-/** The last value of a flag. */
-function flagValue(invocation: CommandInvocation, name: string): string | undefined {
-  const values = invocation.flags.get(name);
-  if (values === undefined || values.length === 0) return undefined;
-  return values[values.length - 1];
-}
-
-/** Every value of a flag. */
-function flagValues(invocation: CommandInvocation, name: string): string[] {
-  return [...(invocation.flags.get(name) ?? [])];
-}
-
-/** The message of an error. */
-function errorMessageOf(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  return String(error);
-}
-
-/** A usage error. */
-function usageError(message: string): CommandResult {
-  return { exitCode: EXIT_USAGE, stdout: '', stderr: `${message}\n` };
-}
-
-/** A failure. */
-function failure(message: string): CommandResult {
-  return { exitCode: EXIT_FAILURE, stdout: '', stderr: `${message}\n` };
-}
-
-export type { CommandResult } from './provider.js';
