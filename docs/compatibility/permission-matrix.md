@@ -65,6 +65,7 @@ This implementation adds one reason kind, **`noRuleMatch`**, to distinguish "no 
 - A hook approval whose arguments the tool cannot verify produces a **`safetyCheck` denial** whose message states that nothing was fetched, and it is **not** reported as a user denial.
 - A hook's `updatedInput` is what the tool receives, and a rewritten input the tool's own validator rejects **denies** the call.
 - A hook approval may replace the **generic prompt** (the no-rule-matched case) only. It may **not** replace a `subcommandResults` escalation — the hook cannot approve the sub-commands a partially matching allow rule did not cover.
+- A hook that rewrites the input triggers a **whole** re-check of the rewritten input — the same rules, mode, safety check and hook semantics — and the re-check may only **restrict** the call. A rewrite therefore cannot escape the deny list, the ask list, the allow scope, or the mode dispatch. The re-check's own hook keeps its **denial** but loses its **approval** and its **rewrite**, because the approval was given for the original call.
 - An approval carrying `classifierApprovable: false` cannot be laundered by an `auto` classifier: the result is `ask`, not `allow`.
 
 ## The remote transport dispatcher (REA observed)
@@ -120,6 +121,8 @@ Each of these was a real defect in an earlier the reference agent release. This 
 | A hook approval cannot replace a `subcommandResults` escalation | implementation choice | same file |
 | `classifierApprovable: false` cannot be laundered by the auto review | implementation choice | same file |
 | The approval prompt shows the command text and the resolved destinations | implementation choice | `tests/security/permission-rules.test.ts` — "the approval prompt" |
+| A hook rewrite triggers the **whole** permission re-check, and the stricter of the two verdicts wins | implementation choice | `tests/contracts/tool-registry.test.ts` — the rewrite tests (ask-covered path, allow scope, `acceptEdits` working directory, and the negative control) |
+| The path the check approved is the path that is re-resolved, and a swap between the two is refused | implementation choice | same file — the "path was re-resolved" and "swapped while the re-check ran" tests |
 | The transport dispatcher's shape, including the dropped non-string `request_id` | REA observed | same file — "dispatcher" |
 | The computer-folder and repository-trust names are configuration, and an unrecognised one is refused | implementation choice (unpinned) | same file — "dispatcher" |
 | The "don't ask again" rule computation and its 5-rule cap | Documented only (the write is not implemented) | `tests/contracts/permission-decision.test.ts` |
