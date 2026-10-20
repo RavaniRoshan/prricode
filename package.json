@@ -10,6 +10,8 @@
   "packageManager": "bun@1.4.3",
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "build:clean": "rm -rf dist",
+    "build:verify": "vitest run tests/compatibility/packaging.test.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

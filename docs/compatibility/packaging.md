@@ -70,7 +70,7 @@ The report goes to the **standard error** so that it never mixes with the answer
 | Test runtime | Node `24.21.0` |
 | The artifact | `dist/agent`, 87.2 MiB (91 473 888 bytes), 161 modules bundled |
 | The build | ~0.4 s (23 ms bundle + 372 ms compile) |
-| The suite | ~1.2 s for the build **and** all eight assertions |
+| The suite | ~1.2 s for the build **and** all ten assertions |
 
 | Platform | Built | Exercised | Notes |
 |---|---|---|---|
