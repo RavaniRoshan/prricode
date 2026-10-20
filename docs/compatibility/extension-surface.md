@@ -219,7 +219,7 @@ The result of `installPluginFromMarketplace` carries `{ success, message, depNot
 
 **Implementation choice.** §2.8 says nothing about a plugin reaching outside its own root, so the rule is this implementation's. The plan's Global Constraint requires "path boundaries … enforced by **implementation-owned** code, independent of model instructions".
 
-A manifest-declared path is used only when it is inside the plugin root — **lexically** and through **`realpath`** — and a refusal carries one of two named reasons: *"it resolves outside the plugin root"* or *"it is a symlink that resolves outside the plugin root"*. The check applies to the commands, the skills, the agents, the metadata sources and every other manifest key. A path that does not exist is allowed and the caller reports *"it does not exist"*.
+A manifest-declared path is used only when it is inside the plugin root — **lexically** and through **`realpath`** — and a refusal carries one of two named reasons: *"it resolves outside the plugin root"* or *"it is a symlink that resolves outside the plugin root"*. The check applies to the commands, the skills, the agents, the metadata sources and every other manifest key. A path that does not exist is allowed; the **commands** key reports *"it does not exist"*, while a declared **skills** or **agents** path that does not exist is dropped silently.
 
 **Pinned by:** `tests/contracts/extensions.test.ts` — the path-boundary tests.
 
@@ -268,7 +268,7 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 - an **action is validated as a single path segment** — no empty, `.`, `..`, `/`, `\` or NUL — before anything is sent;
 - the default transport **refuses a host that is not a loopback address**.
 
-**Pinned by:** `tests/contracts/extensions.test.ts` — the IDE action and byte-cap tests.
+**Pinned by:** `tests/contracts/extensions.test.ts` — the IDE action and IDE transport tests.
 
 ## The telemetry destination
 
