@@ -46,6 +46,8 @@ The results test enforces it, and two consequences follow:
 
 ## The measured rows
 
+| Row | Area | Feature | Evidence class | Outcome | What was measured | Linked test | Pinning test | Reproduce |
+|---|---|---|---|---|---|---|---|---|
 | F-01 | CLI | CLI entry, flags, subcommands | REA observed | partial | The parser reproduces the target's structure and the six subcommands, but the audit enumerates only the flags this implementation's own surface needs, so the flag surface is partial. | `tests/compatibility/scenarios.test.ts` — "F-01 cli entry and flags" | `tests/contracts/cli-surface.test.ts` — "ends the flag parsing at --" | `npx vitest run tests/compatibility/scenarios.test.ts -t "F-01 cli entry and flags"` |
 | F-02 | CLI | Headless (`--print`) and output formats | REA observed | partial | The headless rule and the three output formats are reproduced; the audit pins the formats and not the documents a run writes. | `tests/compatibility/scenarios.test.ts` — "F-02 headless print and the output formats" | `tests/contracts/cli-surface.test.ts` — "writes exactly one JSON document and exits 0 on success" | `npx vitest run tests/compatibility/scenarios.test.ts -t "F-02 headless print and the output formats"` |
 | F-03 | Configuration | Configuration file tiers | REA observed | match | The five tiers and both observed orderings are reproduced exactly. | `tests/compatibility/scenarios.test.ts` — "F-03 the five settings tiers" | `tests/contracts/settings-precedence.test.ts` — "declares the two distinct orderings and the project-side set" | `npx vitest run tests/compatibility/scenarios.test.ts -t "F-03 the five settings tiers"` |
@@ -88,6 +90,21 @@ The results test enforces it, and two consequences follow:
 | F-38 | Command line | The command-line surface | REA observed | partial | The parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the patterns and the validation messages are reproduced; the rest of the boolean set is deliberately kept pure, which is a deviation from the audit's rule. | `tests/compatibility/scenarios.test.ts` — "F-38 the command-line surface" | `tests/contracts/cli-surface.test.ts` — "keeps the optional value of --resume" | `npx vitest run tests/compatibility/scenarios.test.ts -t "F-38 the command-line surface"` |
 | F-39 | Command line | The interactive terminal UI | Implementation choice | unknown | The audit records no TUI drawing at all, so the target's terminal UI at 2.1.303 was not established and nothing was compared; this implementation's renderer is its own. | `tests/compatibility/scenarios.test.ts` — "F-39 the interactive terminal ui" | `tests/contracts/ui-render.test.ts` — "produces one block per assistant message" | `npx vitest run tests/compatibility/scenarios.test.ts -t "F-39 the interactive terminal ui"` |
 | F-40 | Provider | The multi-provider manager surfaces | Project requirement | partial | The project requirement is met — the `/provider` command, the catalog browser, the picker, the credential status vocabulary and the two credential columns — but the target has no such surface, so no target behaviour is matched. | `tests/compatibility/scenarios.test.ts` — "F-40 the multi-provider manager surfaces" | `tests/contracts/provider-command.test.ts` — "provider list prints one row per connection with its id, name, route, base URL, and credential status" | `npx vitest run tests/compatibility/scenarios.test.ts -t "F-40 the multi-provider manager surfaces"` |
+
+## The conformance documents
+
+The per-area conformance tables live beside this one, and every row of them names its evidence class and the test that pins it:
+
+| Document | Covers |
+|---|---|
+| [`command-surface.md`](command-surface.md) | the parser, the flag sets, the validation messages, this implementation's CLI choices, the output contracts |
+| [`provider-catalog.md`](provider-catalog.md) | the eight routes, the catalog, the adapters, the manager surfaces |
+| [`session-format.md`](session-format.md) | the storage layout, the record format, resume, compaction, the carried prompts |
+| [`permission-matrix.md`](permission-matrix.md) | the decision vocabulary, the rules, the modes, the hooks, the transport |
+| [`extension-surface.md`](extension-surface.md) | the MCP control surface, the hooks, the skills, the plugins, the subagents, the IDE |
+| [`sandbox-surface.md`](sandbox-surface.md) | the five layers, the policy, the decision mapping, the environment |
+| [`tool-surface.md`](tool-surface.md) | the built-in tools, the runner, the write path |
+| [`settings-precedence.md`](settings-precedence.md) | the settings tiers and the two orderings |
 
 ## The honest gaps
 
