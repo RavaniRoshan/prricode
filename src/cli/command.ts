@@ -199,8 +199,8 @@ Options:
 Commands:
   attach, logs, stop, kill, respawn, rm
 
-The multi-provider manager (an extension, not part of the reference agent) is reached
-through the /provider command.
+The multi-provider manager is a project extension, not part of the reference agent. It
+is reached through the /provider command.
 `;
 
 /* -------------------------------------------------------------------------- */

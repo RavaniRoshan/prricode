@@ -432,7 +432,7 @@ describe('the packaged executable', () => {
     // whitespace is flattened before the sentence is looked for.
     const help = result.stdout.replace(/\s+/g, ' ');
     expect(help).toContain(
-      'The multi-provider manager (an extension, not part of the reference agent) is reached through the /provider command.',
+      'The multi-provider manager is a project extension, not part of the reference agent. It is reached through the /provider command.',
     );
   });
 

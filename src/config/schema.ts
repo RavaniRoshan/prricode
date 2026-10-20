@@ -40,7 +40,7 @@
  *     home directory of another user is not resolved by this implementation.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -254,11 +254,12 @@ export function writeSandboxSettings(opts: {
     sandbox: canonicalizeSandboxPaths(opts.sandbox),
   };
 
-  // The configuration directory holds a 0600 file, so it is created 0700 as well.
-  // An existing directory keeps its own permissions.
-  const configDirExisted = existsSync(configDir);
+  // The configuration directory holds a 0600 file, so it is created 0700 as
+  // well — and an existing directory is narrowed to the same mode, because the
+  // mode `mkdir` sets is filtered through the process's umask and a directory
+  // that already existed may carry a wider one.
   mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  if (!configDirExisted) chmodSync(configDir, 0o700);
+  chmodSync(configDir, 0o700);
 
   writeFileSync(settingsPath, `${JSON.stringify(document, null, 2)}\n`, {
     encoding: 'utf8',
