@@ -1359,21 +1359,65 @@ diverge.
 - Produces: the target's **skip rules** for the skill scan, and a subagent catalogue that
   is **re-read across a restart** and **reconstructed by name** on resume.
 
-- [ ] **Step 1: Write the failing test** — a `SKILL.md` over 1 MB, one that is not a
+- [x] **Step 1: Write the failing test** — a `SKILL.md` over 1 MB, one that is not a
   regular file, an entry named `synced` and a disabled plugin's entry are **skipped**; a
   subagent definition without a `description` is **refused by name**; a definition
   changed on disk is **re-read**.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement the skill scan's skip rules.**
-- [ ] **Step 4: Implement the subagent catalogue's lifecycle** — the recursive scan, the
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement the skill scan's skip rules.**
+- [x] **Step 4: Implement the subagent catalogue's lifecycle** — the recursive scan, the
   `name`+`description` requirement, the reload, and the by-name reconstruction on resume.
-- [ ] **Step 5: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 6: Update the conformance document.**
-- [ ] **Step 7: Commit.**
+- [x] **Step 5: Run it to verify it passes** — expected: PASS.
+- [x] **Step 6: Update the conformance document.**
+- [x] **Step 7: Commit.**
   ```bash
   git add src/extensions tests/contracts/extensions.test.ts docs/compatibility/extension-surface.md
   git commit -m "fix(extensions): the skill scan and the subagent catalogue match the target"
   ```
+
+
+**Result:** the standalone skill scan and the subagent catalogue now follow the target's
+rules, and every one of them **fires**.
+
+*The standalone skill scan.* A root is scanned with a **single `readdir`** — depth 1, not
+recursive — and the skill file is the **fixed name `SKILL.md`**. The skips are the
+target's: an entry that is not a directory or a symlink, the reserved entry name
+`synced`, an entry whose name contains `:` in the synced scan, an entry whose plugin is
+disabled, a `SKILL.md` that is not a regular file, one over **1 000 000 bytes**, a skill
+whose own name is reserved, and a directory that cannot be read. And the one thing that
+is **not** a skip: a **frontmatter parse failure** is reported at error level and the
+frontmatter is **ignored** — the skill still loads. The standalone list and the plugin
+list stay two separate lists, and the standalone skills come **first** in the merge. The
+scan is cached per process and dropped on a reload.
+
+*The subagent catalogue.* A definition is a markdown file with YAML frontmatter, its
+**file name is free-form** — the name comes from the frontmatter — and the scan is a
+**recursive `*.md` scan** that follows symlinks, skips a directory it has already
+visited and gives up after three seconds. A definition needs a `name` **and** a
+`description`; a missing description is refused **by name**, and so is a name that
+starts with a dash, is longer than 256 characters, or contains a colon. Two sources that
+define the same name are resolved by the target's precedence — built-in, plugin, user
+settings, project settings, feature flags, machine policy. The catalogue is cached in
+memory, dropped on a reload, and **re-read across a restart**; a resumed session's agent
+is reconstructed **by name** against the freshly read catalogue, and the implementation
+says so when the agent is no longer available.
+
+**The one rule that cannot fire on its own.** The **reconstruction by name** needs the
+main-thread agent's *name*, and this implementation's transcript vocabulary has **no
+record that carries it**. The rule is therefore **conditional on the member being
+present** — the caller supplies the name — and the conformance document says so. No
+field was added to any persisted record.
+
+**Two deliberate differences, both documented.** The **host catalog** skill source is
+not a filesystem directory and this implementation has no such source; the merged list is
+where it would have entered. And the target's **within-tier last-writer** rule was
+changed to "first declared wins", because the target's rule would change the
+plugin-collision report that `CC-013b` pinned.
+
+**Verified.** Twenty-six new or rewritten tests, and test-first was checked against
+`HEAD` in a throwaway worktree: **19** of them fail there, and the rest are regression
+guards that already held. The suite is green at **1920 tests** and `npx tsc --noEmit`
+is clean.
 
 ### CC-012 — Hooks
 
@@ -1741,7 +1785,7 @@ that reason.
 ---
 
 
-**Result (fix round 2, after `CC-005b`, `CC-003b` and `CC-010b`):** The measured totals are **22 `match`**, **11 `partial`**, **6 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. The six `mismatch` rows are `F-18` (this implementation's permission-feedback member names), `F-21` (this implementation's seventh permission reason kind), `F-24` (the target's observed `transcriptSource` marker), `F-34` (no native sandbox helper), `F-35` (no seccomp-notify listener) and `F-38` (the pure boolean-flag set). `F-07` and `F-08` moved to `match` when `CC-005b` implemented the target's observed Bedrock+Mantle routing of the `anthropic.*` models, and `F-04` moved to `match` when `CC-003b` implemented the target's observed per-top-level-key settings merge, and `F-17` moved to `match` when `CC-010b` implemented the target's observed tool-call scheduling. The three `unknown` rows are `F-36` (no whole-image native inventory), `F-37` (the target's sandbox routing is unobserved) and `F-39` (the target's terminal UI is unobserved).
+**Result (fix round 2, after `CC-005b`, `CC-003b`, `CC-010b` and `CC-011b`):** The measured totals are **23 `match`**, **10 `partial`**, **6 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. The six `mismatch` rows are `F-18` (this implementation's permission-feedback member names), `F-21` (this implementation's seventh permission reason kind), `F-24` (the target's observed `transcriptSource` marker), `F-34` (no native sandbox helper), `F-35` (no seccomp-notify listener) and `F-38` (the pure boolean-flag set). `F-07` and `F-08` moved to `match` when `CC-005b` implemented the target's observed Bedrock+Mantle routing of the `anthropic.*` models, and `F-04` moved to `match` when `CC-003b` implemented the target's observed per-top-level-key settings merge, and `F-17` moved to `match` when `CC-010b` implemented the target's observed tool-call scheduling. The three `unknown` rows are `F-36` (no whole-image native inventory), `F-37` (the target's sandbox routing is unobserved) and `F-39` (the target's terminal UI is unobserved).
 
 **One rule, applied to every row:** a **difference of any kind** from the target's *observed* behavior — including a member the target has and this implementation does not — is a `mismatch`. Every "What was measured" cell is the harness's own `detail` string and the results test compares the two. A probe that observes nothing this implementation produced, that compares a value with itself, or that asserts a constant, fails the suite, and a stale total fails it too.
 

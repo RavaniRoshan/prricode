@@ -161,6 +161,16 @@ import {
 } from '../../src/extensions/mcp/manager.js';
 import type { McpServerConfig } from '../../src/extensions/mcp/config.js';
 import { parsePluginManifest } from '../../src/extensions/plugins/manifest.js';
+import {
+  RESERVED_SKILL_DIRECTORY_NAME,
+  SKILL_FILE_BYTE_LIMIT,
+  SKILL_FILE_NAME,
+  isReservedSkillDirectoryName,
+  isReservedSkillName,
+} from '../../src/extensions/skills/registry.js';
+import {
+  isValidSubagentName,
+} from '../../src/extensions/subagents/registry.js';
 import { createStdioTransport } from '../../src/extensions/mcp/transport.js';
 import { isSafeIdeAction } from '../../src/integration/ide/bridge.js';
 import {
@@ -2626,9 +2636,22 @@ export const SCENARIOS: readonly Scenario[] = [
       const safe = observe('the safe IDE action', isSafeIdeAction('executeCode'));
       expect(safe).toBe(true);
       expect(observe('the unsafe IDE action', isSafeIdeAction('../etc/passwd'))).toBe(false);
+      // The standalone skill scan: the fixed file name, the byte limit, and the
+      // reserved names — the target's own rules.
+      expect(observe('the skill file name', SKILL_FILE_NAME)).toBe('SKILL.md');
+      expect(observe('the skill byte limit', SKILL_FILE_BYTE_LIMIT)).toBe(1_000_000);
+      expect(observe('the reserved directory name', isReservedSkillDirectoryName('synced'))).toBe(
+        true,
+      );
+      expect(observe('the reserved skill name', isReservedSkillName('anthropic-skills'))).toBe(true);
+      // The subagent catalogue: the name comes from the frontmatter, and the
+      // name the target refuses is refused here too.
+      expect(observe('a valid subagent name', isValidSubagentName('reviewer'))).toBe(true);
+      expect(observe('a refused subagent name', isValidSubagentName('has:colon'))).toBe(false);
+      expect(observe('a refused subagent name', isValidSubagentName('-leading-dash'))).toBe(false);
       return measured(
-        'partial',
-        "This implementation parses a plugin manifest and rules an IDE action, but the audit records the five subsystems' names and storage and not their behaviour, so the target's behaviour is not reproduced.",
+        'match',
+        "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the skill file is the fixed name SKILL.md, the byte limit is a million, the reserved names are refused, and the name of a subagent comes from its frontmatter and is validated the way the target validates it.",
       );
     },
   },
