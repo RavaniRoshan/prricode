@@ -1071,14 +1071,14 @@ describe('the target\'s per-model route override', () => {
         const audited = providerIds[targetKey] === null && typeof mantleId === 'string';
         const served = providerIdFor(model, route) !== undefined;
         // This implementation's own behaviour, **observed** rather than recomputed.
-        const cloneFallsBack = !served && resolveModelRoute(catalog, id, route) === 'mantle';
+        const implementationFallsBack = !served && resolveModelRoute(catalog, id, route) === 'mantle';
 
         if (audited) {
           auditedCases += 1;
           // This implementation never falls back *less* than the audit says.
-          expect(cloneFallsBack).toBe(true);
+          expect(implementationFallsBack).toBe(true);
         }
-        if (cloneFallsBack && !audited) {
+        if (implementationFallsBack && !audited) {
           extra.push(`${id}@${route}`);
         }
       }

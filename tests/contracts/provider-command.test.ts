@@ -718,7 +718,7 @@ describe('the provider manager command', () => {
     const help = await providerCommand(['--help'], registry);
     expect(help.exitCode).toBe(0);
     expect(help.stdout.toLowerCase()).toContain('extension');
-    expect(help.stdout.toLowerCase()).toContain('not a the reference agent feature');
+    expect(help.stdout.toLowerCase()).toContain('not part of the reference agent');
   });
 
   it('shows a keychain credential as configured without ever reading the OS credential store', async () => {

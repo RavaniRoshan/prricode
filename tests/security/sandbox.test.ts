@@ -1403,8 +1403,8 @@ describe('CC-017 step 5 — the launcher', () => {
 
   it('does not leak the host environment into an exempt command', async () => {
     const root = temporaryDirectory();
-    const command = 'echo "marker=[$CLONE_SANDBOX_HOST_MARKER]"';
-    process.env['CLONE_SANDBOX_HOST_MARKER'] = 'host-secret';
+    const command = 'echo "marker=[$IMPLEMENTATION_SANDBOX_HOST_MARKER]"';
+    process.env['IMPLEMENTATION_SANDBOX_HOST_MARKER'] = 'host-secret';
     try {
       const launched = await launchSandbox({
         command,
@@ -1417,7 +1417,7 @@ describe('CC-017 step 5 — the launcher', () => {
       expect(result.stdout).toContain('marker=[]');
       expect(result.stdout).not.toContain('host-secret');
     } finally {
-      delete process.env['CLONE_SANDBOX_HOST_MARKER'];
+      delete process.env['IMPLEMENTATION_SANDBOX_HOST_MARKER'];
     }
   });
 

@@ -1,14 +1,15 @@
-# An observably-compatible the reference agent implementation
+# An independently implemented coding-agent CLI
 
-An independently implemented coding-agent CLI, written from scratch against the
-**static** structure of `the pinned reference build @ 2.1.303` (Linux x86-64, SHA-256
+A coding-agent CLI written from scratch against the **static** structure of a
+pinned reference build (`2.1.303`, Linux x86-64, SHA-256
 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`), plus a
-**multi-provider manager** the target does not have.
+**multi-provider manager** the reference build does not have.
 
-> **What "observably compatible" means here.** No Anthropic source, credential or
-> private API was used. The target binary was read **statically** — its extracted
-> JavaScript and its Ghidra output — and every behavior this implementation reproduces is
-> traced to a named artifact in that evidence, recorded in
+> **What "observably compatible" means here.** No vendor source, credential or
+> private API was used. The reference binary was read **statically** — its
+> extracted JavaScript and its Ghidra output — and every behavior this
+> implementation reproduces is traced to a named artifact in that evidence,
+> recorded in
 > [`docs/reverse-engineering/COVERAGE-AUDIT.md`](docs/reverse-engineering/COVERAGE-AUDIT.md)
 > and **measured** in
 > [`docs/compatibility/results.md`](docs/compatibility/results.md).
@@ -72,8 +73,8 @@ The built executable needs **neither** the host's Node **nor** the host's
    wherever it surfaces — the output, the `--help`, every machine-readable
    document and the picker.
 3. **Every compatibility claim names its evidence class.** A claim is either
-   `REA observed`, `Documented only` or a labelled `implementation choice`, and the
-   report measures it rather than asserting it.
+   `REA observed`, `Documented only` or a labelled `implementation choice`, and
+   the report measures it rather than asserting it.
 
 ## The honest gaps
 

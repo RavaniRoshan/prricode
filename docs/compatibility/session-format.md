@@ -67,6 +67,8 @@ The record variants are: a **message** record (user, assistant, tool call, tool 
 - Zero matches yields `Error: --resume requires a valid session ID or session title when used with --print. Usage: agent -p --resume <session-id|title>`, plus `. Provided value "<value>" is not a UUID and does not match any session title.` when a value was supplied.
 - A session id that is not in the store yields `No conversation found with session ID: <id>` and exit code 1.
 
+> **One deliberate difference, stated plainly.** The target's usage hint names the target's own program; this one names this implementation's. The **shape** of the message is the target's.
+
 This implementation's `SessionSummary` carries an optional `title` and an optional `modifiedAt` so the ambiguity error is expressible. The title is **derived from the first user message**, because this implementation's vocabulary has no title record — a implementation choice, labelled.
 
 ### Attaching versus replaying
@@ -106,11 +108,13 @@ The failure-reason vocabulary is `not_found_explicit_id`, `processing_error`, `l
 
 ## The `--continue` behavior
 
-`--continue` takes **no** session id: the store selects the **newest** session for the working directory. This implementation's two failure messages are the target's:
+`--continue` takes **no** session id: the store selects the **newest** session for the working directory. The three failure messages are the target's:
 
 - `No conversation found to continue` — there is nothing to continue.
 - `The agent exited: could not continue the previous session (<reason>). Run agent --resume to pick a session, or start a new one.` — the failure happened **before** the restore.
 - `The agent exited: startup failed after restoring the previous session (<reason>).` — the failure happened **after** the restore.
+
+> **One deliberate difference, stated plainly.** The target's two exit messages open with the **product's own name**; these open with this implementation's own name, and the `--resume` hint names this implementation's program rather than the target's. The **shape**, the wording and the reason placeholder are the target's. This is a naming choice, not an observation, and it is the one place where this implementation knowingly differs from the target's observed text.
 
 A session that is **already running in the background** is **reported** rather than silently continued.
 

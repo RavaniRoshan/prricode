@@ -1,4 +1,4 @@
-# Research report — the pinned reference build (2.1.303) compatible implementation
+# Research report — the pinned reference build (2.1.303), compatible implementation
 
 **Date:** 2026-10-19
 **Depth:** deep
@@ -24,27 +24,27 @@ Five findings change the plan materially. First, the provider protocol is not on
 
 The plan's `CC-006` task must produce eight drivers. The wire shapes are not variations on one theme.
 
-**First-party (Anthropic).** `POST <baseUrl>/v1/messages`; headers `x-api-key` **or** `authorization: Bearer` (never both), `anthropic-version: 2023-06-01`, `content-type: application/json`; optional `anthropic-beta` header. The body carries `model`, `messages`, `max_tokens` (required), and optionally `system`, `stream`, `tools`, `tool_choice`, `temperature`, `top_p`, `top_k`, `stop_sequences`, `thinking`, `output_config`. The target's own canonical path adds a `?beta=true` path marker, which is a client-side artifact with no meaning on Bedrock or Vertex. ([vendor source], [vendor source])
+**First-party (Anthropic).** `POST <baseUrl>/v1/messages`; headers `x-api-key` **or** `authorization: Bearer` (never both), `anthropic-version: 2023-06-01`, `content-type: application/json`; optional `anthropic-beta` header. The body carries `model`, `messages`, `max_tokens` (required), and optionally `system`, `stream`, `tools`, `tool_choice`, `temperature`, `top_p`, `top_k`, `stop_sequences`, `thinking`, `output_config`. The target's own canonical path adds a `?beta=true` path marker, which is a client-side artifact with no meaning on Bedrock or Vertex. ([vendor API docs: en api messages], [vendor docs: en llm gateway protocol])
 
-**Streaming.** SSE framing is `event: <name>` followed by `data: <json>`, with the JSON `type` mirroring the event name. The sequence is `message_start` → (`content_block_start` → N× `content_block_delta` → `content_block_stop`)* → one or more `message_delta` → final `message_stop`; `ping` may interleave anywhere; errors arrive as `event: error`. Crucially, `usage` in the `message_delta` event is **cumulative, not incremental** — a driver that accumulates it will double-count. ([vendor source])
+**Streaming.** SSE framing is `event: <name>` followed by `data: <json>`, with the JSON `type` mirroring the event name. The sequence is `message_start` → (`content_block_start` → N× `content_block_delta` → `content_block_stop`)* → one or more `message_delta` → final `message_stop`; `ping` may interleave anywhere; errors arrive as `event: error`. Crucially, `usage` in the `message_delta` event is **cumulative, not incremental** — a driver that accumulates it will double-count. ([vendor API docs: en build with streaming])
 
 **Bedrock.** `POST <baseUrl>/model/<modelId>/invoke` or `/model/<modelId>/invoke-with-response-stream`. The body field is `anthropic_version: "bedrock-2023-05-31"`; `model` lives in the URL, not the body; `stream` is **removed** from the body. Betas travel in the body's `anthropic_beta` **array**, not a header — the opposite of first-party. Auth is SigV4 against service `bedrock` via the default AWS chain, unless `AWS_BEARER_TOKEN_BEDROCK` is set, in which case the bearer token takes precedence and suppresses SigV4. (https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModel.html, https://raw.githubusercontent.com/anthropics/anthropic-sdk-typescript/main/packages/bedrock-sdk/src/client.ts)
 
-Bedrock streaming is **not SSE at all**: `/invoke-with-response-stream` returns a binary `application/vnd.amazon.eventstream` whose frames carry a `chunk` member holding a JSON blob of the Anthropic event, and a frame with a non-200 status surfaces as an `error` event. The target rejects a rewritten content type with a specific message rather than guessing. A driver that assumes SSE here will fail on every Bedrock stream. ([vendor source], https://raw.githubusercontent.com/anthropics/anthropic-sdk-python/main/src/anthropic/lib/bedrock/_stream_decoder.py)
+Bedrock streaming is **not SSE at all**: `/invoke-with-response-stream` returns a binary `application/vnd.amazon.eventstream` whose frames carry a `chunk` member holding a JSON blob of the Anthropic event, and a frame with a non-200 status surfaces as an `error` event. The target rejects a rewritten content type with a specific message rather than guessing. A driver that assumes SSE here will fail on every Bedrock stream. ([vendor docs: en amazon bedrock], https://raw.githubusercontent.com/anthropics/anthropic-sdk-python/main/src/anthropic/lib/bedrock/_stream_decoder.py)
 
-**Mantle.** Anthropic-native (`POST <baseUrl>/v1/messages`, model in the body), base `https://bedrock-mantle.<region>.api.aws/anthropic`, betas in the `anthropic-beta` **header** alongside `anthropic-version: 2023-06-01`. ([vendor source])
+**Mantle.** Anthropic-native (`POST <baseUrl>/v1/messages`, model in the body), base `https://bedrock-mantle.<region>.api.aws/anthropic`, betas in the `anthropic-beta` **header** alongside `anthropic-version: 2023-06-01`. ([vendor docs: en amazon bedrock])
 
 *Scope note.* AWS also offers an Anthropic-native endpoint under `bedrock-runtime` (`/anthropic/v1/messages`). That is an **AWS API capability, not a the reference agent route**, and it is not one of the eight routes the REA audit observed. This implementation's route set is exactly those eight.
 
-**Vertex.** `POST <host>/v1/projects/<project>/locations/<location>/publishers/anthropic/models/<model>:rawPredict` or `:streamRawPredict`. Body field `anthropic_version: "vertex-2023-10-16"`; `model` is **not** in the body; `stream` **is** retained in the body — unlike Bedrock. Auth is a Google OAuth2 bearer with the `cloud-platform` scope; the SDK explicitly refuses to fall back to an Anthropic API key. Host conventions: `global` → `aiplatform.googleapis.com`, `us` → `aiplatform.us.rep.googleapis.com`, `eu` → `aiplatform.eu.rep.googleapis.com`, otherwise `{region}-aiplatform.googleapis.com`. Model ids carry `@YYYYMMDD` suffixes. Google Cloud reads only **one** `anthropic-beta` header and ignores the rest, so multiple betas must be in a single header. (https://raw.githubusercontent.com/anthropics/anthropic-sdk-typescript/main/packages/vertex-sdk/src/client.ts, [vendor source])
+**Vertex.** `POST <host>/v1/projects/<project>/locations/<location>/publishers/anthropic/models/<model>:rawPredict` or `:streamRawPredict`. Body field `anthropic_version: "vertex-2023-10-16"`; `model` is **not** in the body; `stream` **is** retained in the body — unlike Bedrock. Auth is a Google OAuth2 bearer with the `cloud-platform` scope; the SDK explicitly refuses to fall back to an Anthropic API key. Host conventions: `global` → `aiplatform.googleapis.com`, `us` → `aiplatform.us.rep.googleapis.com`, `eu` → `aiplatform.eu.rep.googleapis.com`, otherwise `{region}-aiplatform.googleapis.com`. Model ids carry `@YYYYMMDD` suffixes. Google Cloud reads only **one** `anthropic-beta` header and ignores the rest, so multiple betas must be in a single header. (https://raw.githubusercontent.com/anthropics/anthropic-sdk-typescript/main/packages/vertex-sdk/src/client.ts, [vendor API docs: en api beta headers])
 
-**Foundry.** Anthropic-native at `https://<resource>.services.ai.azure.com/anthropic/v1/messages`, but the body's `model` is the **Azure deployment name**, not a model id. Auth is `x-api-key` **or** an Entra ID bearer with scope `https://ai.azure.com/.default`, never both. `ANTHROPIC_FOUNDRY_RESOURCE` must be a bare resource name; a URL there is rejected with a specific message. The two base-URL variables are offered as *alternatives* in the documentation, and their precedence when both are set is not stated **in the documentation** — but the target's own bundled adapter (`chunk-m5c0c57d.js`) resolves it: `baseURL` and `resource` are **mutually exclusive** and supplying both throws `baseURL and resource are mutually exclusive`. This implementation should therefore throw rather than pick a winner. ([vendor source], [vendor source])
+**Foundry.** Anthropic-native at `https://<resource>.services.ai.azure.com/anthropic/v1/messages`, but the body's `model` is the **Azure deployment name**, not a model id. Auth is `x-api-key` **or** an Entra ID bearer with scope `https://ai.azure.com/.default`, never both. `ANTHROPIC_FOUNDRY_RESOURCE` must be a bare resource name; a URL there is rejected with a specific message. The two base-URL variables are offered as *alternatives* in the documentation, and their precedence when both are set is not stated **in the documentation** — but the target's own bundled adapter (`chunk-m5c0c57d.js`) resolves it: `baseURL` and `resource` are **mutually exclusive** and supplying both throws `baseURL and resource are mutually exclusive`. This implementation should therefore throw rather than pick a winner. ([vendor API docs: en build with in microsoft foundry], [vendor docs: en microsoft foundry])
 
 **Beta flags are not portable.** Bedrock rejects the **whole request** with `400 "invalid beta flag"` for an unrecognized flag, and Bedrock's spelling of some betas differs from Anthropic's (`advanced-tool-use-2025-11-20` versus `tool-search-tool-2025-10-19`). A driver that copies a beta list verbatim between platforms will break. The plan's `CC-006` therefore needs a per-driver beta translation table. (https://github.com/envoyproxy/ai-gateway/issues/2512)
 
 **Disagreement.** Whether `bedrock-runtime` `count-tokens` is generally available is contested: the target's gateway contract lists `/model/{model}/count-tokens` as an optional Bedrock endpoint, AWS's own documentation says count-tokens is only available on `bedrock-mantle`, the Python SDK hard-raises "not supported in Bedrock yet", and the TypeScript SDK has an open PR for it. The plan's Bedrock driver must therefore treat count-tokens as *possibly unavailable* and fall back rather than assume.
 
-**Corrected by direct REA.** Two of the wire-shape findings above were re-derived from the target's own bundled adapters (`chunk-1njnz05e.js`, `chunk-jdnh8sjs.js`, `chunk-m5c0c57d.js`) and the binary is authoritative where it disagrees with the public SDKs. The pinned binary: sets `anthropic_version` itself when the body lacks it; moves the `anthropic-beta` **header** into the body's `anthropic_beta` array, split and **trimmed**; **deletes** `model` and `stream` from the Bedrock body but only `model` from the Vertex body; selects the Vertex endpoint suffix from `body.stream`; **deletes the `beta` search parameter** on both; and throws `baseURL and resource are mutually exclusive` for Foundry. The audit's §2.2a records the exact literals and messages. ([vendor source], https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.md, https://github.com/anthropics/anthropic-sdk-typescript/pull/1081)
+**Corrected by direct REA.** Two of the wire-shape findings above were re-derived from the target's own bundled adapters (`chunk-1njnz05e.js`, `chunk-jdnh8sjs.js`, `chunk-m5c0c57d.js`) and the binary is authoritative where it disagrees with the public SDKs. The pinned binary: sets `anthropic_version` itself when the body lacks it; moves the `anthropic-beta` **header** into the body's `anthropic_beta` array, split and **trimmed**; **deletes** `model` and `stream` from the Bedrock body but only `model` from the Vertex body; selects the Vertex endpoint suffix from `body.stream`; **deletes the `beta` search parameter** on both; and throws `baseURL and resource are mutually exclusive` for Foundry. The audit's §2.2a records the exact literals and messages. ([vendor docs: en llm gateway protocol], https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.md, https://github.com/anthropics/anthropic-sdk-typescript/pull/1081)
 
 ### 2. Multi-provider connection managers (this implementation's extension)
 
@@ -90,41 +90,41 @@ One problem is unsolved in every library: the "flash of incomplete markdown" whi
 
 ### 4. Session persistence, resume, fork, and compaction
 
-**Storage layout.** Transcripts live at `~/.claude/projects/<project>/<session-id>.jsonl` — one file per session, one JSON object per line, append-only. The project directory name is derived from the working directory path with non-alphanumeric characters replaced by `-`, truncated at 200 characters with a hash of the full path appended. The storage root is relocatable via `CLAUDE_CONFIG_DIR`, and the project directory name can be pinned with `CLAUDE_CODE_PROJECT_DIR_NAME`. Transcripts are deleted after 30 days by default (`cleanupPeriodDays`); `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `--no-session-persistence` suppress writes. ([vendor source])
+**Storage layout.** Transcripts live at `~/.claude/projects/<project>/<session-id>.jsonl` — one file per session, one JSON object per line, append-only. The project directory name is derived from the working directory path with non-alphanumeric characters replaced by `-`, truncated at 200 characters with a hash of the full path appended. The storage root is relocatable via `CLAUDE_CONFIG_DIR`, and the project directory name can be pinned with `CLAUDE_CODE_PROJECT_DIR_NAME`. Transcripts are deleted after 30 days by default (`cleanupPeriodDays`); `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `--no-session-persistence` suppress writes. ([vendor docs: en sessions])
 
-**Disagreement on the project-directory encoding.** Anthropic's documentation says every non-alphanumeric character becomes `-`; an independent crate that measured real transcript stores reports that only `/` and `.` become `-` with everything else passing through, making the mapping lossy and non-injective (`a/b.c`, `a/b/c`, and `a-b-c` collide). This implementation should implement the documented rule and tolerate collisions. ([vendor source])
+**Disagreement on the project-directory encoding.** Anthropic's documentation says every non-alphanumeric character becomes `-`; an independent crate that measured real transcript stores reports that only `/` and `.` become `-` with everything else passing through, making the mapping lossy and non-injective (`a/b.c`, `a/b/c`, and `a-b-c` collide). This implementation should implement the documented rule and tolerate collisions. ([third-party crate: latest codes transcript index])
 
-**There is no centralized session index.** A session is identified by the UUID in the filename, the project slug directory, and fields embedded in each line. (https://github.com/weirdgiraffe/reference-agent-sessions-explorer/blob/main/docs/JSONL-SCHEMA.md)
+**There is no centralized session index.** A session is identified by the UUID in the filename, the project slug directory, and fields embedded in each line. ([third-party tool: code sessions explorer blob main docs JSONL SCHEMA])
 
-**Line schema.** Every line is a flat JSON object discriminated by a top-level `type`. Observed types: `assistant`, `attachment`, `user`, `system`, `last-prompt`, `queue-operation`, `pr-link`, `agent-name`, `custom-title`, `file-history-snapshot`, `permission-mode`, plus `progress` lines that are deliberately excluded from the parent chain. The common envelope carries `type`, `sessionId`, `uuid`, `parentUuid`, `timestamp`, `cwd`, `entrypoint`, `gitBranch`, `isSidechain`, `userType`, `version`, and `message`. Content blocks are `text`, `thinking` (persisted with the text empty and only a `signature` kept), `tool_use` (`id: toolu_…`), and `tool_result` (`tool_use_id`, `content`, `is_error`). (https://github.com/coo-labs/tjsonl/blob/main/spec/transcript-schema-spec.md, [vendor source])
+**Line schema.** Every line is a flat JSON object discriminated by a top-level `type`. Observed types: `assistant`, `attachment`, `user`, `system`, `last-prompt`, `queue-operation`, `pr-link`, `agent-name`, `custom-title`, `file-history-snapshot`, `permission-mode`, plus `progress` lines that are deliberately excluded from the parent chain. The common envelope carries `type`, `sessionId`, `uuid`, `parentUuid`, `timestamp`, `cwd`, `entrypoint`, `gitBranch`, `isSidechain`, `userType`, `version`, and `message`. Content blocks are `text`, `thinking` (persisted with the text empty and only a `signature` kept), `tool_use` (`id: toolu_…`), and `tool_result` (`tool_use_id`, `content`, `is_error`). (https://github.com/coo-labs/tjsonl/blob/main/spec/transcript-schema-spec.md, [third-party tool: status plugin blob main json specs transcript schema])
 
-**Resume is not a file replay.** The loader indexes messages into a `uuid → message` map, picks the newest leaf, walks *backwards* through `parentUuid` to get the effective chain, then applies projections (compaction boundary, preserved segments, content replacements). File order is write order only; dead branches from a rewind or fork remain in the file and are pruned. Four views of the same messages coexist: raw transcript, UI scrollback, active query view, and API wire view. (https://github.com/sweetcornna/open-reference-agent/blob/main/docs/en/internals/session-transcript-persistence.md)
+**Resume is not a file replay.** The loader indexes messages into a `uuid → message` map, picks the newest leaf, walks *backwards* through `parentUuid` to get the effective chain, then applies projections (compaction boundary, preserved segments, content replacements). File order is write order only; dead branches from a rewind or fork remain in the file and are pruned. Four views of the same messages coexist: raw transcript, UI scrollback, active query view, and API wire view. ([third-party implementation: open code blob main docs en internals session transcript persistence])
 
-**Selection.** `--continue` means the most recent session in the current directory, *skipping* live background sessions, `-p`/Agent-SDK sessions, and sessions whose first prompt was `/loop`; `-p --continue` includes them. `--resume <id>` resolves the current project directory and its git worktrees first, then every other project — and the cross-project search resolves **only when exactly one** other project holds a transcript for that id, otherwise it reports "No conversation found with session ID". ([vendor source])
+**Selection.** `--continue` means the most recent session in the current directory, *skipping* live background sessions, `-p`/Agent-SDK sessions, and sessions whose first prompt was `/loop`; `-p --continue` includes them. `--resume <id>` resolves the current project directory and its git worktrees first, then every other project — and the cross-project search resolves **only when exactly one** other project holds a transcript for that id, otherwise it reports "No conversation found with session ID". ([vendor docs: en sessions])
 
-**Fork.** `/branch` (alias `/fork`) copies the transcript into a new file, rewrites `sessionId` on the copied messages, and rebuilds the `parentUuid` chain; the original file is untouched. It runs in the *same* process, so "allow for this session" grants carry over, whereas `--fork-session` starts a separate process and they do not. **Disagreement:** Anthropic's public docs describe fork as creating a new session seeded with a copy of the history, while the internals guide says `--fork-session` does *not* copy a file and instead materializes a new transcript on the next write. ([vendor source], https://github.com/sweetcornna/open-reference-agent/blob/main/docs/en/internals/session-transcript-persistence.md)
+**Fork.** `/branch` (alias `/fork`) copies the transcript into a new file, rewrites `sessionId` on the copied messages, and rebuilds the `parentUuid` chain; the original file is untouched. It runs in the *same* process, so "allow for this session" grants carry over, whereas `--fork-session` starts a separate process and they do not. **Disagreement:** Anthropic's public docs describe fork as creating a new session seeded with a copy of the history, while the internals guide says `--fork-session` does *not* copy a file and instead materializes a new transcript on the next write. ([vendor docs: en sessions], [third-party implementation: open code blob main docs en internals session transcript persistence])
 
-**Compaction is a boundary marker, not a deletion.** A `type: "system"`, `subtype: "compact_boundary"` line with `content: "Conversation compacted"`, a `compactMetadata: {preTokens, trigger}` object, `logicalParentUuid` pointing at the last pre-compact message, and `parentUuid: null`. The summary itself is a separate `user` line flagged `isCompactSummary: true`. `compactMetadata` may also carry `postTokens`, `durationMs`, `messagesSummarized`, and a `preservedSegment.{headUuid, anchorUuid, tailUuid}` for partial compaction, whose preserved tail is re-attached during recovery. Separately, oversized `tool_result` content is replaced with a stub plus a `content-replacement` entry, so the large payload does not return to context on resume. ([vendor source], https://github.com/coo-labs/tjsonl/blob/main/spec/transcript-schema-spec.md)
+**Compaction is a boundary marker, not a deletion.** A `type: "system"`, `subtype: "compact_boundary"` line with `content: "Conversation compacted"`, a `compactMetadata: {preTokens, trigger}` object, `logicalParentUuid` pointing at the last pre-compact message, and `parentUuid: null`. The summary itself is a separate `user` line flagged `isCompactSummary: true`. `compactMetadata` may also carry `postTokens`, `durationMs`, `messagesSummarized`, and a `preservedSegment.{headUuid, anchorUuid, tailUuid}` for partial compaction, whose preserved tail is re-attached during recovery. Separately, oversized `tool_result` content is replaced with a stub plus a `content-replacement` entry, so the large payload does not return to context on resume. ([third-party tool: status plugin blob main json specs transcript schema], https://github.com/coo-labs/tjsonl/blob/main/spec/transcript-schema-spec.md)
 
-**The format is explicitly unstable.** Anthropic states the entry format is internal and "changes between versions, so scripts that parse these files directly can break on any release"; the feature request for a published schema was closed as `not_planned`. A 2.0→2.1 break moved subagent sidechains out of the main JSONL into separate `subagents/agent-<id>.jsonl` files. The parent chain is not an invariant either: dangling references truncate a resume to a few messages, and a second compaction in one process can orphan hundreds of rows. ([vendor source], https://github.com/anthropics/reference-agent/issues/22526, https://github.com/anthropics/reference-agent/issues/55818)
+**The format is explicitly unstable.** Anthropic states the entry format is internal and "changes between versions, so scripts that parse these files directly can break on any release"; the feature request for a published schema was closed as `not_planned`. A 2.0→2.1 break moved subagent sidechains out of the main JSONL into separate `subagents/agent-<id>.jsonl` files. The parent chain is not an invariant either: dangling references truncate a resume to a few messages, and a second compaction in one process can orphan hundreds of rows. ([vendor docs: en sessions], [vendor tracker: code issues 22526], [vendor tracker: code issues 55818])
 
-**Provenance warning.** Nine of the claims in this section — the per-session sibling directories, the resume-by-leaf-walk algorithm, the four coexisting views, the `/resume` swap semantics, the `--fork-session` mechanism, the compaction boundary shape, the compaction variants, the content-replacement mechanism, and the read-side migration list — all cite one unaffiliated repository (`github.com/sweetcornna/open-reference-agent`). A further four (`isCompactSummary`, the "phantom parentUuid" truncation, the dangling `logicalParentUuid` case, and the `file-history-snapshot` shadowing hazard) rest on individual issue reports and one repair tool. These are **single-source** claims about a genuinely internal format. The plan therefore treats the whole resume/compaction model as **`inference`** and schedules a REA confirmation before any of it becomes a compatibility row. This implementation may implement the shape, but it must not claim compatibility with it until the binary confirms it.
+**Provenance warning.** Nine of the claims in this section — the per-session sibling directories, the resume-by-leaf-walk algorithm, the four coexisting views, the `/resume` swap semantics, the `--fork-session` mechanism, the compaction boundary shape, the compaction variants, the content-replacement mechanism, and the read-side migration list — all cite one unaffiliated repository (`[third-party source: sweetcornna open code]`). A further four (`isCompactSummary`, the "phantom parentUuid" truncation, the dangling `logicalParentUuid` case, and the `file-history-snapshot` shadowing hazard) rest on individual issue reports and one repair tool. These are **single-source** claims about a genuinely internal format. The plan therefore treats the whole resume/compaction model as **`inference`** and schedules a REA confirmation before any of it becomes a compatibility row. This implementation may implement the shape, but it must not claim compatibility with it until the binary confirms it.
 
 **Peer formats for comparison.** Codex CLI writes `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO-ts>-<uuid>.jsonl` with `{timestamp, type, payload}` lines, pairing tool calls by `call_id` and compressing idle rollouts to `.jsonl.zst`. OpenCode moved to SQLite with an ordered `session_message` table. Cline **rewrites the whole file** on change rather than appending. Aider uses a rolling Markdown log, not JSONL. (https://github.com/skillsynchq/txcript/blob/main/docs/formats/codex.md, https://github.com/diegoami/opencode-session-browser/blob/main/docs/OPENCODE_STORAGE.md, https://github.com/Upnit-b/cline-coding-agent/blob/main/docs/troubleshooting/task-history-recovery.mdx)
 
 ### 5. Permission models and known failure modes
 
-**Rule precedence.** the reference agent evaluates rules **deny → ask → allow**, and the **first match wins with specificity irrelevant**: a broad `Bash(aws *)` deny beats a narrower `Bash(aws s3 ls)` allow, and an allow rule can never carve an exception out of a deny. `permissions.ask` beats `allow` and still prompts even in `bypassPermissions`. A *bare* tool-name deny (`Bash`) removes the tool from the model's context entirely; a *scoped* deny (`Bash(rm *)`) leaves it visible but blocks matching calls. ([vendor source])
+**Rule precedence.** the reference agent evaluates rules **deny → ask → allow**, and the **first match wins with specificity irrelevant**: a broad `Bash(aws *)` deny beats a narrower `Bash(aws s3 ls)` allow, and an allow rule can never carve an exception out of a deny. `permissions.ask` beats `allow` and still prompts even in `bypassPermissions`. A *bare* tool-name deny (`Bash`) removes the tool from the model's context entirely; a *scoped* deny (`Bash(rm *)`) leaves it visible but blocks matching calls. ([vendor docs: en permissions])
 
-**Bash matching.** Compound commands are split on `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines, and each sub-command must match independently. Wrappers are stripped before matching (`timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin`, `noglob`, bare `xargs`) but `direnv exec`, `devbox run`, `mise exec`, `npx`, and `docker exec` are **not**. Bash rules match *command text, not program identity*: `Bash(curl *)` does not stop `/usr/bin/curl` or `sh -c 'curl …'`, and the documentation says outright that these are "not a security boundary around the program". Redirect targets are checked as file operations, against the Edit rules for writes and the Read rules for `< file`. ([vendor source])
+**Bash matching.** Compound commands are split on `&&`, `||`, `;`, `|`, `|&`, `&`, and newlines, and each sub-command must match independently. Wrappers are stripped before matching (`timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin`, `noglob`, bare `xargs`) but `direnv exec`, `devbox run`, `mise exec`, `npx`, and `docker exec` are **not**. Bash rules match *command text, not program identity*: `Bash(curl *)` does not stop `/usr/bin/curl` or `sh -c 'curl …'`, and the documentation says outright that these are "not a security boundary around the program". Redirect targets are checked as file operations, against the Edit rules for writes and the Read rules for `< file`. ([vendor docs: en permissions])
 
-**Path rules.** Four anchors: `//path` (filesystem root), `~/path` (home), `/path` (**relative to the settings source**, not absolute — a common misconfiguration), and `path`/`./path` (working directory). Deny and ask patterns match a single-segment directory at any depth; allow patterns match only at the anchored depth. `!` negation works only within the same settings file. Symlink semantics are asymmetric: an allow rule requires **both** the requested path and the resolved target to match, while a deny rule fires if **either** matches. ([vendor source])
+**Path rules.** Four anchors: `//path` (filesystem root), `~/path` (home), `/path` (**relative to the settings source**, not absolute — a common misconfiguration), and `path`/`./path` (working directory). Deny and ask patterns match a single-segment directory at any depth; allow patterns match only at the anchored depth. `!` negation works only within the same settings file. Symlink semantics are asymmetric: an allow rule requires **both** the requested path and the resolved target to match, while a deny rule fires if **either** matches. ([vendor docs: en permissions])
 
-**Modes.** Six: `default` (UI label Manual), `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`. Deny rules block in every mode; allow rules have no effect in `bypassPermissions`. `acceptEdits` auto-approves Edit/Write plus `mkdir, touch, rm, rmdir, mv, cp, sed`, but only for paths inside the working directory or an added directory and only after a symlink check. `auto` replaces prompts with a classifier review and **fails closed** when the review returns no verdict. The review is **server-side by default** in current releases (server-side review from v2.1.281/2.1.282, on by default for gateways and cloud providers from v2.1.278); the *local* model call is the **fallback**, not the primary path. The local model is selected by `CLAUDE_CODE_AUTO_MODE_MODEL` (which requires v2.1.302 and takes a full model id set through `settings.json` `env`, not a process environment variable), and server-side review can be disabled with `CLAUDE_CODE_AUTO_MODE_SERVER=0`. This implementation must not assume the target makes a local classifier call. `dontAsk` auto-denies anything that would prompt, and denies `AskUserQuestion`, MCP tools marked `requiresUserInteraction`, and network-path reads even if allow-listed. `plan` never auto-approves a file edit. Start-mode precedence is `--permission-mode` flag → `permissions.defaultMode` → built-in default, and `auto`/`bypassPermissions` written into a settings file are **ignored**. ([vendor source], [vendor source])
+**Modes.** Six: `default` (UI label Manual), `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`. Deny rules block in every mode; allow rules have no effect in `bypassPermissions`. `acceptEdits` auto-approves Edit/Write plus `mkdir, touch, rm, rmdir, mv, cp, sed`, but only for paths inside the working directory or an added directory and only after a symlink check. `auto` replaces prompts with a classifier review and **fails closed** when the review returns no verdict. The review is **server-side by default** in current releases (server-side review from v2.1.281/2.1.282, on by default for gateways and cloud providers from v2.1.278); the *local* model call is the **fallback**, not the primary path. The local model is selected by `CLAUDE_CODE_AUTO_MODE_MODEL` (which requires v2.1.302 and takes a full model id set through `settings.json` `env`, not a process environment variable), and server-side review can be disabled with `CLAUDE_CODE_AUTO_MODE_SERVER=0`. This implementation must not assume the target makes a local classifier call. `dontAsk` auto-denies anything that would prompt, and denies `AskUserQuestion`, MCP tools marked `requiresUserInteraction`, and network-path reads even if allow-listed. `plan` never auto-approves a file edit. Start-mode precedence is `--permission-mode` flag → `permissions.defaultMode` → built-in default, and `auto`/`bypassPermissions` written into a settings file are **ignored**. ([vendor docs: en permission modes], [vendor docs: en agent sdk permissions])
 
-**Hooks.** PreToolUse hooks run *before* the permission prompt. A hook returning `allow` does **not** override a deny or ask rule; a hook returning `deny` holds in every mode. Multiple PreToolUse hooks combine as deny > defer > ask > allow. A `PermissionRequest` hook uses `hookSpecificOutput.decision.behavior` and can rewrite the input via `updatedInput`. A behavioral change in a later release removed the old `allow`-overrides-`ask` behavior **without a deprecation warning**. ([vendor source], https://github.com/anthropics/reference-agent/issues/36059)
+**Hooks.** PreToolUse hooks run *before* the permission prompt. A hook returning `allow` does **not** override a deny or ask rule; a hook returning `deny` holds in every mode. Multiple PreToolUse hooks combine as deny > defer > ask > allow. A `PermissionRequest` hook uses `hookSpecificOutput.decision.behavior` and can rewrite the input via `updatedInput`. A behavioral change in a later release removed the old `allow`-overrides-`ask` behavior **without a deprecation warning**. ([vendor docs: en hooks guide], [vendor tracker: code issues 36059])
 
-**Sandbox is orthogonal to permissions.** The Bash sandbox has an auto-allow mode and a regular mode; even in auto-allow, a matching deny rule still blocks. The dangerous part: a sandbox-blocked command can be retried with `dangerouslyDisableSandbox`, and a matching **allow rule also approves the retry** — so the mitigation is an ask rule on that specific form. And the sandbox protects configuration paths while **Read, Edit, WebFetch, MCP servers, and hooks all run outside it**. ([vendor source])
+**Sandbox is orthogonal to permissions.** The Bash sandbox has an auto-allow mode and a regular mode; even in auto-allow, a matching deny rule still blocks. The dangerous part: a sandbox-blocked command can be retried with `dangerouslyDisableSandbox`, and a matching **allow rule also approves the retry** — so the mitigation is an ask rule on that specific form. And the sandbox protects configuration paths while **Read, Edit, WebFetch, MCP servers, and hooks all run outside it**. ([vendor docs: en sandboxing])
 
 **Known failure modes this implementation must not reproduce.** This is the most important section for this implementation's own security posture.
 
@@ -140,13 +140,13 @@ One problem is unsolved in every library: the "flash of incomplete markdown" whi
 | Hooks as a bypass | A marketplace plugin can install a hook that rewrites `settings.local.json` to permanently allow a command | — |
 | Project settings trusted | `enableAllProjectMcpServers` / `enabledMcpjsonServers` are not blocked from project scope the way `bypassPermissions` is | CVE-2025-59536 |
 
-(https://github.com/anthropics/reference-agent/pull/36645, https://github.com/anthropics/reference-agent/issues/27493, https://adversa.ai/blog/critical-reference-agent-vulnerability-deny-rules-silently-bypassed-because-security-checks-cost-too-many-tokens/, https://www.securityweek.com/, https://codeant.ai/security-research/reference-agent-macos-parent-directory-toctou-vulnerability, https://adversa.ai/blog/the-approval-prompt-is-lying-to-you-symlink-rce-in-five-ai-coding-agents-reference-agent-cursor-antigravity-copilot-grok-build/, https://www.microsoft.com/en-us/security/blog/2026/06/05/securing-ci-cd-in-agentic-world-reference-agent-github-action-case/, https://flatt.tech/research/posts/poisoning-reference-agent-one-github-issue-to-break-the-supply-chain/)
+([vendor tracker: code pull 36645], [vendor tracker: code issues 27493], [third-party write-up: critical code vulnerability deny rules silently bypassed because security checks cost too many tokens], https://www.securityweek.com/, [third-party write-up: security research code macos parent directory toctou vulnerability], [third-party write-up: the approval prompt is lying to you symlink rce in five ai coding agents code cursor antigravity copilot grok build], [third-party write-up: security blog 2026 06 05 securing ci cd in agentic world code github action case], [third-party write-up: posts poisoning code one github issue to break the supply chain])
 
 **Two CVE attributions in the first research pass were wrong, and are corrected here.** CVE-2026-54316 is **GHSA-fg94-h982-f3mm, "Out-of-Band Data Exfiltration via Pre-Approved HuggingFace Domain in WebFetch"**, published 2026-06-13, severity medium — it is *not* the command-validation issue, and it post-dates the release the first pass said fixed it. The severity disagreement in that first pass was attached to the wrong advisory: the Anthropic advisory's own rating is "medium", while the 9.1 figure and the August 2026 Hacker News item belong to a different story. Separately, the symlink advisory GHSA-4q92-rfm6-2cqx (CVE-2026-25724) was published 2026-02-06, so it cannot have been "fixed in 2.1.7" (2026-01-14) — the 2.1.7 changelog entry is a *different* fix, about wildcard rules matching compound commands with shell operators. GHSA-pmw4-pwvc-3hx2 (CVE-2025-54794) is a Research Preview advisory from 2025-08-01, roughly fifteen months before the target. The "2.1.217 parent-directory TOCTOU" and "2.1.128 sensitive-`/proc`" attributions come from third-party blogs and **could not be confirmed against the changelog**; they are recorded here as *failure classes*, not as dated target facts. The one symlink fix that **is** confirmed by the 2.1.251 changelog is "file tools following a symlink swapped inside the working directory after the permission check" plus "Grep and Glob not applying `Read(...)` deny rules to files reached through a symlinked search path" — and 2.1.303 is six weeks past it.
 
 **A structural conclusion.** A survey of eleven open-source coding agents found that ten use command guards that inspect commands as plain strings while the shell rewrites them first — string-level validation is a structurally inadequate control for an agent that hands commands to a real shell. This implementation's rule evaluator must therefore either parse the command the way the shell will, or refuse to make a security claim. (https://labs.cloudsecurityalliance.org/research/csa-research-note-ai-coding-agent-ci-prompt-injection-20260807/)
 
-**Disagreement — narrower than it first looked.** The current documentation says an allow rule must match **every** sub-command (so `Bash(safe-cmd *)` does not approve `safe-cmd && other-cmd`) and that deny/ask fire if **any** sub-command matches. That is exactly what issue #20085 describes, so the documentation and the issue **agree**. The outlier is a third-party reading of the March 2026 bundle in PR #36645, which is **closed, unmerged**, proposes a plugin rather than an upstream fix, and whose key quote is self-contradictory: it says the matcher "explicitly skips compound commands when evaluating allow-rules (`skipCompoundCheck: false`)" — and a flag named `skipCompoundCheck` set to *false* means *do not* skip. This implementation's choice is per-sub-command evaluation with deny/ask firing on any match, which matches the documentation and is the strictest reading. ([vendor source], https://github.com/anthropics/reference-agent/pull/36645, https://github.com/anthropics/reference-agent/issues/20085)
+**Disagreement — narrower than it first looked.** The current documentation says an allow rule must match **every** sub-command (so `Bash(safe-cmd *)` does not approve `safe-cmd && other-cmd`) and that deny/ask fire if **any** sub-command matches. That is exactly what issue #20085 describes, so the documentation and the issue **agree**. The outlier is a third-party reading of the March 2026 bundle in PR #36645, which is **closed, unmerged**, proposes a plugin rather than an upstream fix, and whose key quote is self-contradictory: it says the matcher "explicitly skips compound commands when evaluating allow-rules (`skipCompoundCheck: false`)" — and a flag named `skipCompoundCheck` set to *false* means *do not* skip. This implementation's choice is per-sub-command evaluation with deny/ask firing on any match, which matches the documentation and is the strictest reading. ([vendor docs: en permissions], [vendor tracker: code pull 36645], [vendor tracker: code issues 20085])
 
 ### 6. MCP and hooks ecosystem
 
@@ -154,13 +154,13 @@ One problem is unsolved in every library: the "flash of incomplete markdown" whi
 
 **This is not a genuine source disagreement.** The spec repository's *current* schema (`schema/2026-07-28/schema.ts`) declares `LATEST_PROTOCOL_VERSION = "2026-07-28"` and `UNSUPPORTED_PROTOCOL_VERSION = -32022`; the earlier finding quoted the *frozen* `schema/2025-11-25/schema.ts` as if it showed the current latest. The only lag is a third-party aggregator site that still labels `2025-11-25` "Latest Stable". This implementation must support both eras, because a server that answers `initialize` and one that answers `server/discover` must both work. (https://modelcontextprotocol.info/specification)
 
-**Transports.** Standard transports are stdio (newline-delimited JSON-RPC over a client-launched subprocess; stdout must contain only MCP messages) and Streamable HTTP. `2026-07-28` removes the GET endpoint and `Last-Event-ID` resumability, and in that revision servers do not initiate JSON-RPC requests at all — server-to-client requests are replaced by an `InputRequiredResult` the client retries with. The target supports a wider set than the spec: `stdio`, `http`, `sse` (deprecated), `ws`, and an in-process `"type": "sdk"` server. (https://modelcontextprotocol.io/specification/2026-07-28/basic/transports, [vendor source])
+**Transports.** Standard transports are stdio (newline-delimited JSON-RPC over a client-launched subprocess; stdout must contain only MCP messages) and Streamable HTTP. `2026-07-28` removes the GET endpoint and `Last-Event-ID` resumability, and in that revision servers do not initiate JSON-RPC requests at all — server-to-client requests are replaced by an `InputRequiredResult` the client retries with. The target supports a wider set than the spec: `stdio`, `http`, `sse` (deprecated), `ws`, and an in-process `"type": "sdk"` server. (https://modelcontextprotocol.io/specification/2026-07-28/basic/transports, [vendor docs: en mcp])
 
-**The target's batching is confirmed.** `MCP_SERVER_CONNECTION_BATCH_SIZE` defaults to 3 for local stdio servers and `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` to 20 for remote; `MCP_TIMEOUT` defaults to 30,000 ms and `MCP_CONNECT_TIMEOUT_MS` to 5,000 ms. A user-quoted binary fragment shows the two pools running concurrently with a hardcoded retry schedule of `[500, 1500, 4000]` and no jitter. ([vendor source], https://github.com/anthropics/reference-agent/issues/83495)
+**The target's batching is confirmed.** `MCP_SERVER_CONNECTION_BATCH_SIZE` defaults to 3 for local stdio servers and `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` to 20 for remote; `MCP_TIMEOUT` defaults to 30,000 ms and `MCP_CONNECT_TIMEOUT_MS` to 5,000 ms. A user-quoted binary fragment shows the two pools running concurrently with a hardcoded retry schedule of `[500, 1500, 4000]` and no jitter. ([vendor docs: en env vars], [vendor tracker: code issues 83495])
 
-**Hook events.** The hooks reference documents **33** events. Two names that the target's static analysis surfaced — `StatusLine` and `FileSuggestion` — are **not** hook events; they are settings keys holding a display-only command handler. This implementation must not treat them as decision points. ([vendor source])
+**Hook events.** The hooks reference documents **33** events. Two names that the target's static analysis surfaced — `StatusLine` and `FileSuggestion` — are **not** hook events; they are settings keys holding a display-only command handler. This implementation must not treat them as decision points. ([vendor docs: en hooks])
 
-**Handler contract.** Handler types are `command`, `http`, `mcp_tool`, `prompt`, `agent`; all matching hooks in a group run in parallel. The common payload carries `session_id`, `prompt_id`, `transcript_path`, `cwd`, `scratchpad_dir`, `permission_mode`, `effort.level`, and `hook_event_name`. The exit-code contract is `0` = success (apply the JSON output), `2` = blocking error on a blockable event, anything else = non-blocking error. Matchers are either an exact string (when they contain only letters, digits, `_`, `-`, space, `,`, `|`) or an **unanchored** JavaScript regular expression. ([vendor source])
+**Handler contract.** Handler types are `command`, `http`, `mcp_tool`, `prompt`, `agent`; all matching hooks in a group run in parallel. The common payload carries `session_id`, `prompt_id`, `transcript_path`, `cwd`, `scratchpad_dir`, `permission_mode`, `effort.level`, and `hook_event_name`. The exit-code contract is `0` = success (apply the JSON output), `2` = blocking error on a blockable event, anything else = non-blocking error. Matchers are either an exact string (when they contain only letters, digits, `_`, `-`, space, `,`, `|`) or an **unanchored** JavaScript regular expression. ([vendor docs: en hooks])
 
 **MCP security requirements.** Streamable HTTP servers must validate `Origin` (403 on invalid) and bind only to localhost; token passthrough is forbidden; clients must consider SSRF when following OAuth discovery URLs; local server consent must show the exact command, flag it as potentially dangerous code execution, and **sandbox spawned servers**; OAuth URLs must be restricted to `http`/`https` and never opened through a shell; tool metadata is untrusted, and hosts must obtain explicit user consent before invoking any tool. (https://modelcontextprotocol.io/specification/2025-11-25/basic/transports, https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices)
 
@@ -202,11 +202,11 @@ Two further prohibitions follow from the kernel headers. For `SECCOMP_RET_USER_N
 
 **Namespaces** are the substrate, not a boundary. Unprivileged user namespaces expand the unprivileged-reachable kernel surface — one study counts roughly 40 kernel CVEs in five years attributable to userns-reachable code — and distributions respond by *restricting* userns, which the vendor's own documentation tells users to work around for `bwrap`. `chroot` is not a security boundary; `pivot_root` alone restricts nothing but root. (https://edera.dev/stories/user-namespaces-are-not-a-security-boundary, https://arxiv.org/html/2509.18548v2)
 
-**The target's own sandbox.** the reference agent on Linux/WSL2 uses **bubblewrap + socat**; the optional seccomp filter is a separate npm package that only adds Unix-domain-socket blocking. Network isolation works by *removing* the network namespace so all traffic must go through host proxies over bind-mounted Unix sockets. The sandbox covers the Bash/PowerShell/Monitor tools only — Read, Write, WebFetch, MCP servers, and hooks run outside it. Default read access is "most of the machine, including credential files such as `~/.ssh` and `~/.aws/credentials`", and by default a failed sandbox start **falls back to running unsandboxed**. ([vendor source], https://github.com/anthropics/sandbox-runtime)
+**The target's own sandbox.** the reference agent on Linux/WSL2 uses **bubblewrap + socat**; the optional seccomp filter is a separate npm package that only adds Unix-domain-socket blocking. Network isolation works by *removing* the network namespace so all traffic must go through host proxies over bind-mounted Unix sockets. The sandbox covers the Bash/PowerShell/Monitor tools only — Read, Write, WebFetch, MCP servers, and hooks run outside it. Default read access is "most of the machine, including credential files such as `~/.ssh` and `~/.aws/credentials`", and by default a failed sandbox start **falls back to running unsandboxed**. ([vendor docs: en sandboxing], https://github.com/anthropics/sandbox-runtime)
 
 **Verified locally on this host** (kernel `6.6.87.2-microsoft-standard-WSL2`): `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` returns **ABI 3** — the full filesystem right set including `FS_TRUNCATE`, but **no TCP/UDP network rights** (v4/v10), no `FS_IOCTL_DEV` (v5), and no `LANDLOCK_SCOPE_*` (v6), so network policy must come from a network namespace plus a proxy, never from Landlock. `user_notif` is present in `/proc/sys/kernel/seccomp/actions_avail`, and unprivileged user namespaces work. A minimal USER_NOTIF target inside a nested PID namespace confirmed that a supervisor **from outside that namespace** receives the target's *host* PID, that `pidfd_open` succeeds, and that `readlink("/proc/<req.pid>/cwd")` and `/exe` both resolve — so the target's supervisor pattern is sound across a nested PID namespace, provided the target's PID namespace is a descendant of the listener's (otherwise `req.pid` may be 0). The observed ioctl constants match the pinned binary's Evidence exactly: `SECCOMP_IOCTL_NOTIF_RECV` = `0xc0502100` and `SECCOMP_IOCTL_NOTIF_SEND` = `0xc0182101`.
 
-**Reference designs.** Codex CLI on Linux uses a `codex-linux-sandbox` helper combining bubblewrap, Landlock, and seccomp. Sandlock is the closest published analogue to the target's helper — Landlock plus seccomp-BPF plus seccomp user notification in a single unprivileged sandbox, no root, no cgroups, no containers, ~5 ms startup — but it requires **Linux 6.12+** for network rules and IPC scoping. Anthropic's own model is that filesystem isolation and network isolation are *both* required. For genuinely hostile code the industry answer is a microVM (Firecracker/E2B) or gVisor, because containers share one kernel across all tenants. (https://github.com/multikernel/sandlock, https://www.anthropic.com/engineering/reference-agent-sandboxing, https://northflank.com/blog/how-to-sandbox-ai-agents)
+**Reference designs.** Codex CLI on Linux uses a `codex-linux-sandbox` helper combining bubblewrap, Landlock, and seccomp. Sandlock is the closest published analogue to the target's helper — Landlock plus seccomp-BPF plus seccomp user notification in a single unprivileged sandbox, no root, no cgroups, no containers, ~5 ms startup — but it requires **Linux 6.12+** for network rules and IPC scoping. Anthropic's own model is that filesystem isolation and network isolation are *both* required. For genuinely hostile code the industry answer is a microVM (Firecracker/E2B) or gVisor, because containers share one kernel across all tenants. (https://github.com/multikernel/sandlock, [web source: engineering code sandboxing], https://northflank.com/blog/how-to-sandbox-ai-agents)
 
 ---
 
@@ -333,31 +333,31 @@ The target was built 2026-10-18 (`BUILD_TIME: "2026-10-18T20:20:57Z"`, `GIT_SHA:
 ## 11. Full source list
 
 **Anthropic / the reference agent documentation**
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
+- [vendor docs: en llm gateway protocol]
+- [vendor docs: en amazon bedrock]
+- [vendor docs: en google vertex ai]
+- [vendor docs: en microsoft foundry]
+- [vendor docs: en sessions]
+- [vendor docs: en checkpointing]
+- [vendor docs: en permissions]
+- [vendor docs: en permission modes]
+- [vendor docs: en hooks]
+- [vendor docs: en hooks guide]
+- [vendor docs: en agent sdk permissions]
+- [vendor docs: en agent sdk sessions]
+- [vendor docs: en agent sdk session storage]
+- [vendor docs: en sandboxing]
+- [vendor docs: en mcp]
+- [vendor docs: en env vars]
+- [vendor docs: en changelog]
+- [vendor docs: en errors]
+- [vendor docs: en security]
+- [vendor docs: en vs code]
+- [vendor API docs: en api messages]
+- [vendor API docs: en api beta headers]
+- [vendor API docs: en build with streaming]
+- [vendor API docs: en build with on vertex ai]
+- [vendor API docs: en build with in microsoft foundry]
 
 **Anthropic SDK source**
 - https://raw.githubusercontent.com/anthropics/anthropic-sdk-typescript/main/packages/bedrock-sdk/src/client.ts
@@ -372,7 +372,7 @@ The target was built 2026-10-18 (`BUILD_TIME: "2026-10-18T20:20:57Z"`, `GIT_SHA:
 
 **Cloud provider documentation**
 - https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_InvokeModel.html
-- [vendor source]
+- [web source: latest userguide model parameters anthropic messages request response]
 - https://docs.aws.amazon.com/bedrock/latest/userguide/inference-messages-api.md
 
 **MCP specification**
@@ -493,24 +493,24 @@ The target was built 2026-10-18 (`BUILD_TIME: "2026-10-18T20:20:57Z"`, `GIT_SHA:
 - https://github.com/vitest-dev/vitest/discussions/4631
 
 **Session and transcript format**
-- https://github.com/weirdgiraffe/reference-agent-sessions-explorer/blob/main/docs/JSONL-SCHEMA.md
+- [third-party tool: code sessions explorer blob main docs JSONL SCHEMA]
 - https://github.com/coo-labs/tjsonl/blob/main/spec/transcript-schema-spec.md
-- [vendor source]
-- https://github.com/sweetcornna/open-reference-agent/blob/main/docs/en/internals/session-transcript-persistence.md
-- [vendor source]
-- https://github.com/anthropics/reference-agent/issues/100824
-- https://github.com/anthropics/reference-agent/issues/53516
-- https://github.com/anthropics/reference-agent/issues/60845
-- https://github.com/anthropics/reference-agent/issues/89380
-- https://github.com/anthropics/reference-agent/issues/22526
-- https://github.com/anthropics/reference-agent/issues/24304
-- https://github.com/anthropics/reference-agent/issues/46603
-- https://github.com/anthropics/reference-agent/issues/49996
-- https://github.com/anthropics/reference-agent/issues/55818
-- https://github.com/anthropics/reference-agent/issues/92849
-- https://github.com/anthropics/reference-agent/issues/26212
-- https://github.com/anthropics/reference-agent/issues/96619
-- https://github.com/anthropics/reference-agent/issues/69364
+- [third-party tool: status plugin blob main json specs transcript schema]
+- [third-party implementation: open code blob main docs en internals session transcript persistence]
+- [third-party crate: latest codes transcript index]
+- [vendor tracker: code issues 100824]
+- [vendor tracker: code issues 53516]
+- [vendor tracker: code issues 60845]
+- [vendor tracker: code issues 89380]
+- [vendor tracker: code issues 22526]
+- [vendor tracker: code issues 24304]
+- [vendor tracker: code issues 46603]
+- [vendor tracker: code issues 49996]
+- [vendor tracker: code issues 55818]
+- [vendor tracker: code issues 92849]
+- [vendor tracker: code issues 26212]
+- [vendor tracker: code issues 96619]
+- [vendor tracker: code issues 69364]
 - https://github.com/ymonster/cc_jsonl_fix
 - https://github.com/skillsynchq/txcript/blob/main/docs/formats/codex.md
 - https://github.com/kvsankar/agent-history/blob/master/docs/codex-format.md
@@ -520,36 +520,36 @@ The target was built 2026-10-18 (`BUILD_TIME: "2026-10-18T20:20:57Z"`, `GIT_SHA:
 - https://vshulcz.github.io/deja-vu/registry/cline.html
 - https://gist.github.com/idvorkin/4c46af32afa94a7dacedb685f2bc56f2
 - https://aider.chat/docs/usage/commands.html
-- [vendor source]
+- [package contents: dist skills coding agent sessions references]
 
 **Permissions and security**
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- [vendor source]
-- https://github.com/anthropics/reference-agent/pull/36645
-- https://github.com/anthropics/reference-agent/issues/36059
-- https://github.com/anthropics/reference-agent/issues/20085
-- https://github.com/anthropics/reference-agent/issues/27493
-- https://github.com/anthropics/reference-agent/issues/83495
-- https://github.com/anthropics/reference-agent/issues/21705
-- https://github.com/anthropics/reference-agent/security/advisories/GHSA-4q92-rfm6-2cqx
-- https://github.com/anthropics/reference-agent/security/advisories/GHSA-66m2-gx93-v996
-- https://github.com/anthropics/reference-agent/security/advisories/GHSA-pmw4-pwvc-3hx2
-- https://adversa.ai/blog/critical-reference-agent-vulnerability-deny-rules-silently-bypassed-because-security-checks-cost-too-many-tokens/
-- https://adversa.ai/blog/the-approval-prompt-is-lying-to-you-symlink-rce-in-five-ai-coding-agents-reference-agent-cursor-antigravity-copilot-grok-build/
-- https://codeant.ai/security-research/reference-agent-macos-parent-directory-toctou-vulnerability
-- https://startdebugging.net/2026/08/reference-agent-2-1-251-four-ways-around-the-permission-check/
-- https://www.microsoft.com/en-us/security/blog/2026/06/05/securing-ci-cd-in-agentic-world-reference-agent-github-action-case/
-- https://www.promptarmor.com/resources/hijacking-reference-agent-via-injected-marketplace-plugins
-- https://flatt.tech/research/posts/poisoning-reference-agent-one-github-issue-to-break-the-supply-chain/
+- [vendor docs: en permissions]
+- [vendor docs: en permission modes]
+- [vendor docs: en agent sdk permissions]
+- [vendor docs: en sandboxing]
+- [vendor docs: en hooks]
+- [vendor docs: en hooks guide]
+- [vendor docs: en security]
+- [vendor tracker: code pull 36645]
+- [vendor tracker: code issues 36059]
+- [vendor tracker: code issues 20085]
+- [vendor tracker: code issues 27493]
+- [vendor tracker: code issues 83495]
+- [vendor tracker: code issues 21705]
+- [vendor tracker: code security advisories GHSA 4q92 rfm6 2cqx]
+- [vendor tracker: code security advisories GHSA 66m2 gx93 v996]
+- [vendor tracker: code security advisories GHSA pmw4 pwvc 3hx2]
+- [third-party write-up: critical code vulnerability deny rules silently bypassed because security checks cost too many tokens]
+- [third-party write-up: the approval prompt is lying to you symlink rce in five ai coding agents code cursor antigravity copilot grok build]
+- [third-party write-up: security research code macos parent directory toctou vulnerability]
+- [third-party write-up: 08 code 2 1 251 four ways around the permission check]
+- [third-party write-up: security blog 2026 06 05 securing ci cd in agentic world code github action case]
+- [third-party write-up: resources hijacking code via injected marketplace plugins]
+- [third-party write-up: posts poisoning code one github issue to break the supply chain]
 - https://labs.cloudsecurityalliance.org/research/csa-research-note-ai-coding-agent-ci-prompt-injection-20260807/
 - https://labs.cloudsecurityalliance.org/research/csa-research-note-ai-coding-agent-cicd-secrets-20260808-csa/
 - https://www.securityweek.com/
-- https://thehackernews.com/2026/08/reference-agent-and-gemini-cli-flaws-let.html
+- [third-party write-up: 08 code and gemini cli flaws let]
 - https://tracebit.com/blog/code-exec-deception-gemini-ai-cli-hijack
 - https://xplo1t-sec.github.io/posts/exploiting-a-parsing-flaw-in-gemini-cli-to-execute-any-command/
 - https://arxiv.org/pdf/2510.26328

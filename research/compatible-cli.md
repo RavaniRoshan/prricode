@@ -12,23 +12,23 @@ The reference agent’s documented product surface is much larger than a prompt 
 
 ### 1. User-visible behavior and interaction model
 
-The published CLI supports both interactive sessions and non-interactive print runs. Its session surface includes initial prompts, piped input, continuing the latest conversation in a working directory, and resuming by session identifier or name. Print mode supports text, JSON, and streaming JSON output. Interactive mode adds transcript navigation, interruption, tool-activity inspection, history search, queued prompts, and session controls. These are suitable first compatibility contracts because they can be exercised as explicit user scenarios. [CLI usage]([vendor source]), [interactive mode]([vendor source])
+The published CLI supports both interactive sessions and non-interactive print runs. Its session surface includes initial prompts, piped input, continuing the latest conversation in a working directory, and resuming by session identifier or name. Print mode supports text, JSON, and streaming JSON output. Interactive mode adds transcript navigation, interruption, tool-activity inspection, history search, queued prompts, and session controls. These are suitable first compatibility contracts because they can be exercised as explicit user scenarios. [CLI usage]([vendor docs: en cli usage]), [interactive mode]([vendor docs: en interactive mode])
 
-The tool set covers code and shell work, with documented built-ins including file read/search, shell, edit/write, and agent tools. the reference agent exposes configurable permission behavior. The current docs say Auto is the built-in starting mode for interactive terminal and VS Code sessions in v2.1.283 and later, subject to startup and policy constraints; `default` is the configuration value for the mode labeled Manual. The plan must pin the exact target version and test the actual starting mode instead of treating “default” as a timeless product behavior. [Tools]([vendor source]), [security]([vendor source]), [permission modes]([vendor source])
+The tool set covers code and shell work, with documented built-ins including file read/search, shell, edit/write, and agent tools. the reference agent exposes configurable permission behavior. The current docs say Auto is the built-in starting mode for interactive terminal and VS Code sessions in v2.1.283 and later, subject to startup and policy constraints; `default` is the configuration value for the mode labeled Manual. The plan must pin the exact target version and test the actual starting mode instead of treating “default” as a timeless product behavior. [Tools]([vendor docs: en tools]), [security]([vendor docs: en security]), [permission modes]([vendor docs: en permission modes#which mode a session starts in])
 
-Project instructions and memory are separate from hard enforcement. `CLAUDE.md`, documented `AGENTS.md` support, rules, and auto memory supply context, while permission settings and hooks govern actions. This distinction matters for a reimplementation: prompt context can inform an agent, but a tool runner must enforce access decisions outside the model. [Memory]([vendor source]), [permissions]([vendor source])
+Project instructions and memory are separate from hard enforcement. `CLAUDE.md`, documented `AGENTS.md` support, rules, and auto memory supply context, while permission settings and hooks govern actions. This distinction matters for a reimplementation: prompt context can inform an agent, but a tool runner must enforce access decisions outside the model. [Memory]([vendor docs: en memory]), [permissions]([vendor docs: en permissions])
 
 ### 2. CLI, configuration, and environment contract
 
-The published command and flag surface includes interactive/print operation, input and output formats, session resume/continue, settings injection, model and effort selection, tool filtering, permission mode, hooks, MCP and plugins, directory scope, debug controls, and several service and background execution modes. The list is version-sensitive; the reference says `agent --help` is not exhaustive. The official pages therefore give a strong starting contract, but not a substitute for inspecting and probing a pinned binary. [CLI usage]([vendor source])
+The published command and flag surface includes interactive/print operation, input and output formats, session resume/continue, settings injection, model and effort selection, tool filtering, permission mode, hooks, MCP and plugins, directory scope, debug controls, and several service and background execution modes. The list is version-sensitive; the reference says `agent --help` is not exhaustive. The official pages therefore give a strong starting contract, but not a substitute for inspecting and probing a pinned binary. [CLI usage]([vendor docs: en cli usage])
 
-Settings have user, shared-project, project-local, and managed scopes. The documented precedence for matching keys is managed settings, CLI `--settings`, project-local, shared-project, and user settings, with special merging and per-key command-line overrides. `~/.claude.json` stores other global configuration and should not be confused with `settings.json`. Environment-variable precedence varies by feature; for example, `--model` can override `ANTHROPIC_MODEL`, while `CLAUDE_CODE_EFFORT_LEVEL` can override the effort flag. Configuration compatibility should be tested as explicit precedence tables, not implemented as one generic “last value wins” rule. [Settings]([vendor source]), [environment variables]([vendor source])
+Settings have user, shared-project, project-local, and managed scopes. The documented precedence for matching keys is managed settings, CLI `--settings`, project-local, shared-project, and user settings, with special merging and per-key command-line overrides. `~/.claude.json` stores other global configuration and should not be confused with `settings.json`. Environment-variable precedence varies by feature; for example, `--model` can override `ANTHROPIC_MODEL`, while `CLAUDE_CODE_EFFORT_LEVEL` can override the effort flag. Configuration compatibility should be tested as explicit precedence tables, not implemented as one generic “last value wins” rule. [Settings]([vendor docs: en settings]), [environment variables]([vendor docs: en env vars])
 
-Context discovery also has an opt-out: `--bare` skips discovery of several instruction and extension sources, including `CLAUDE.md`, hooks, skills, subagents, plugins, and MCP servers. Slash commands are dynamic and can come from built-ins, skills, legacy command files, plugins, and MCP. These surfaces should be recorded in the evidence matrix and scheduled as separate compatibility work rather than assumed to be one static command table. [CLI usage]([vendor source]), [slash commands]([vendor source])
+Context discovery also has an opt-out: `--bare` skips discovery of several instruction and extension sources, including `CLAUDE.md`, hooks, skills, subagents, plugins, and MCP servers. Slash commands are dynamic and can come from built-ins, skills, legacy command files, plugins, and MCP. These surfaces should be recorded in the evidence matrix and scheduled as separate compatibility work rather than assumed to be one static command table. [CLI usage]([vendor docs: en cli usage]), [slash commands]([vendor docs: en slash commands])
 
 ### 3. Extension and integration interfaces
 
-MCP supports local stdio and remote HTTP, with legacy SSE documented, and can expose tools, prompts, and resources. Hooks attach behavior to lifecycle events and may invoke shell commands, HTTP endpoints, MCP tools, prompts, or agents. Skills package Markdown instructions and supporting files. Subagents define delegated prompts and configurable tools, permissions, models, hooks, and skills. Plugins bundle several of these pieces. VS Code integration has its own CLI packaging and editor-context behavior. These interfaces are individually substantial and should receive independent subplans after the core CLI contract is stable. [MCP]([vendor source]), [hooks]([vendor source]), [skills]([vendor source]), [subagents]([vendor source]), [plugins]([vendor source]), [IDE integrations]([vendor source])
+MCP supports local stdio and remote HTTP, with legacy SSE documented, and can expose tools, prompts, and resources. Hooks attach behavior to lifecycle events and may invoke shell commands, HTTP endpoints, MCP tools, prompts, or agents. Skills package Markdown instructions and supporting files. Subagents define delegated prompts and configurable tools, permissions, models, hooks, and skills. Plugins bundle several of these pieces. VS Code integration has its own CLI packaging and editor-context behavior. These interfaces are individually substantial and should receive independent subplans after the core CLI contract is stable. [MCP]([vendor docs: en mcp]), [hooks]([vendor docs: en hooks]), [skills]([vendor docs: en skills]), [subagents]([vendor docs: en sub agents]), [plugins]([vendor docs: en plugins]), [IDE integrations]([vendor docs: en ide integrations])
 
 The official interfaces describe supported formats and user-visible scope, not private orchestration details or every version-specific edge case. The reconstruction should label each finding as observed in the target, documented, inferred, or still unknown. A documentation claim must not be reported as a runtime observation.
 
@@ -36,7 +36,7 @@ The official interfaces describe supported formats and user-visible scope, not p
 
 The requested provider surface is broader than the reference agent’s built-in access routes: this implementation should let a user configure several providers concurrently, each with an explicit protocol driver, endpoint, credential reference, and one or more model entries with capabilities and default-selection metadata. Kimi Code documents a concrete example of this interaction: its `/provider` manager adds/removes providers; protocol types include Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, Google GenAI, Vertex AI, and Kimi’s compatible endpoint; models are declared against providers with context and capability metadata. Its provider-import workflow reads a public catalog, falls back to a bundled snapshot offline, and supports a custom registry. This is a useful product reference, not a requirement to copy its storage format or import trust model. [Kimi Code providers and models](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/providers)
 
-For the target compatibility layer, current the reference agent setup documentation lists direct API-key use and managed cloud routes including Amazon Bedrock, Google Cloud’s Agent Platform, and Microsoft Foundry. Preserve these as distinct authentication/provider adapters where the target release documents them; a general provider manager can additionally expose OpenAI-compatible gateways and direct model APIs. Keep provider selection, model catalog metadata, and credential resolution separate: catalogs may suggest model/endpoints, but must not silently choose or read a credential. Store credential references (environment/credential-store handles) instead of plaintext API values in ordinary settings and logs. [the reference agent setup and provider access]([vendor source])
+For the target compatibility layer, current the reference agent setup documentation lists direct API-key use and managed cloud routes including Amazon Bedrock, Google Cloud’s Agent Platform, and Microsoft Foundry. Preserve these as distinct authentication/provider adapters where the target release documents them; a general provider manager can additionally expose OpenAI-compatible gateways and direct model APIs. Keep provider selection, model catalog metadata, and credential resolution separate: catalogs may suggest model/endpoints, but must not silently choose or read a credential. Store credential references (environment/credential-store handles) instead of plaintext API values in ordinary settings and logs. [the reference agent setup and provider access]([vendor docs: en setup])
 
 The multi-provider catalog and `/provider`-style interface are explicit project requirements from the user, informed by Kimi Code. They are not evidence that the reference agent itself supports a simultaneous provider catalog. A compatibility matrix should separate target-parity features from requested product extensions.
 
@@ -44,9 +44,9 @@ The multi-provider catalog and `/provider`-style interface are explicit project 
 
 The current Consumer Terms (effective October 8, 2025) prohibit using the vendor's services to develop competing products, reverse engineer the services, and automated access except through an API key or where expressly permitted. The Commercial Terms (effective June 17, 2025) contain related prohibitions for offerings covered by those terms. Which agreement applies depends on the access route and account. This report does not determine whether a particular independent client or analysis activity is lawful; the terms are a project gate, not a legal conclusion. [Consumer Terms](https://www.anthropic.com/legal/consumer-terms), [Commercial Terms](https://www.anthropic.com/legal/commercial-terms)
 
-The reference agent’s legal and compliance page tells third-party developers to use API keys through the vendor's console or supported cloud providers and restricts offering the vendor's site login, collecting subscription credentials, or routing Free/Pro/Max credentials through a third-party app. Its subscription sign-in exception is for running the unmodified the reference agent binary under stated conditions. A compatible implementation should therefore avoid reusing consumer OAuth or private subscription sessions and should use a provider credential that its owner is authorized to use. Confirm the current applicable terms before service integration. [Legal and compliance]([vendor source])
+The reference agent’s legal and compliance page tells third-party developers to use API keys through the vendor's console or supported cloud providers and restricts offering the vendor's site login, collecting subscription credentials, or routing Free/Pro/Max credentials through a third-party app. Its subscription sign-in exception is for running the unmodified the reference agent binary under stated conditions. A compatible implementation should therefore avoid reusing consumer OAuth or private subscription sessions and should use a provider credential that its owner is authorized to use. Confirm the current applicable terms before service integration. [Legal and compliance]([vendor docs: en legal and compliance])
 
-Permission checks, sandbox boundaries, command approval, and credential handling are central security concerns for any coding CLI with filesystem and shell access. These are documented the vendor's documented safeguards and useful engineering requirements; the pages do not establish that every independent client has a legal duty to reproduce their exact implementation. [Security]([vendor source])
+Permission checks, sandbox boundaries, command approval, and credential handling are central security concerns for any coding CLI with filesystem and shell access. These are documented the vendor's documented safeguards and useful engineering requirements; the pages do not establish that every independent client has a legal duty to reproduce their exact implementation. [Security]([vendor docs: en security])
 
 ### 6. Comparable projects and evaluation practice
 
@@ -80,24 +80,24 @@ GitHub issue examples are individual reports only. OpenCode issue #23703 reports
 
 ### Official the reference agent and Anthropic sources
 
-- [CLI usage]([vendor source])
-- [Interactive mode]([vendor source])
-- [Tools]([vendor source])
-- [Permissions]([vendor source])
-- [Permission modes]([vendor source])
-- [Security]([vendor source])
-- [Memory]([vendor source])
-- [Settings]([vendor source])
-- [Environment variables]([vendor source])
-- [Slash commands]([vendor source])
-- [MCP]([vendor source])
-- [Hooks]([vendor source])
-- [Skills]([vendor source])
-- [Subagents]([vendor source])
-- [Plugins]([vendor source])
-- [IDE integrations]([vendor source])
-- [Advanced setup and provider access]([vendor source])
-- [Legal and compliance]([vendor source])
+- [CLI usage]([vendor docs: en cli usage])
+- [Interactive mode]([vendor docs: en interactive mode])
+- [Tools]([vendor docs: en tools])
+- [Permissions]([vendor docs: en permissions])
+- [Permission modes]([vendor docs: en permission modes])
+- [Security]([vendor docs: en security])
+- [Memory]([vendor docs: en memory])
+- [Settings]([vendor docs: en settings])
+- [Environment variables]([vendor docs: en env vars])
+- [Slash commands]([vendor docs: en slash commands])
+- [MCP]([vendor docs: en mcp])
+- [Hooks]([vendor docs: en hooks])
+- [Skills]([vendor docs: en skills])
+- [Subagents]([vendor docs: en sub agents])
+- [Plugins]([vendor docs: en plugins])
+- [IDE integrations]([vendor docs: en ide integrations])
+- [Advanced setup and provider access]([vendor docs: en setup])
+- [Legal and compliance]([vendor docs: en legal and compliance])
 - [Consumer Terms](https://www.anthropic.com/legal/consumer-terms)
 - [Commercial Terms](https://www.anthropic.com/legal/commercial-terms)
 

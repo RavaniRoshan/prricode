@@ -94,7 +94,7 @@ export interface MatrixRow {
   /** The evidence class, canonicalised. */
   readonly canonicalEvidenceClass: EvidenceClass;
   /** This implementation's own status. */
-  readonly cloneStatus: string;
+  readonly implementationStatus: string;
   /** The task that owns the row. */
   readonly owningTask: string;
   /** The tests the matrix names for the row. */
@@ -169,7 +169,7 @@ export function parseMatrix(markdown: string): MatrixRow[] {
     // The last three columns are read from the **end** of the row: four of the
     // matrix's rows carry a pipe inside a cell, and reading the tail keeps the
     // implementation status, the owning task and the test ref correct for them too.
-    const cloneStatus = cells[cells.length - 3] ?? '';
+    const implementationStatus = cells[cells.length - 3] ?? '';
     const owningTask = cells[cells.length - 2] ?? '';
     const testRef = cells[cells.length - 1] ?? '';
     rows.push({
@@ -179,7 +179,7 @@ export function parseMatrix(markdown: string): MatrixRow[] {
       status,
       evidenceClass,
       canonicalEvidenceClass: canonicalizeEvidenceClass(evidenceClass),
-      cloneStatus,
+      implementationStatus,
       owningTask,
       testRef,
       cellCount: cells.length,

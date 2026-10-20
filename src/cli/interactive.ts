@@ -692,30 +692,17 @@ type ReactModule = typeof import('react');
 type UiModule = typeof import('../ui/app.js');
 
 /**
- * The modules the default mount is built from.
- *
- * The specifiers are **computed**, so the bundler does not follow them: the
- * terminal UI — and the React runtime it draws with — are loaded when an
- * interactive session actually starts, and not before. A headless run never
- * loads them, and the **packaged binary does not carry them**: Ink pulls in
- * `react-devtools-core`, an **optional** peer dependency of Ink that the
- * implementation's dependency set does not include, so a bundle that reaches Ink cannot
- * be built. The packaging milestone owns that dependency; until it is added,
- * the terminal UI is loaded on demand and a bundled artifact reports that the
- * UI is not available.
- */
-const REACT_MODULE = 'react';
-const UI_MODULE = '../ui/app.ts';
-
-/**
  * Load the terminal UI.
  *
  * The two modules are loaded **on demand**: the mount is the only thing that
- * needs them, and a headless run must not pay for them.
+ * needs them, and a headless run must not pay for them. The specifiers are
+ * **literal**, so the bundler follows them and the **packaged binary carries
+ * the terminal UI** — a dynamic import with a literal specifier is bundled,
+ * but the module is only *evaluated* when the promise is awaited.
  */
 async function loadUi(): Promise<{ react: ReactModule; ui: UiModule }> {
-  const react = (await import(REACT_MODULE)) as ReactModule;
-  const ui = (await import(UI_MODULE)) as UiModule;
+  const react = (await import('react')) as ReactModule;
+  const ui = (await import('../ui/app.js')) as UiModule;
   return { react, ui };
 }
 

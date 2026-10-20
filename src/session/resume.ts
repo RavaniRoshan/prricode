@@ -1598,8 +1598,11 @@ export const CONTINUE_BACKGROUND_RUNNING_MESSAGE =
  * The message the target prints when the failure happened **after** the
  * restore.
  *
- * **Observed** (audit §2.6): "`The agent exited: startup failed after
- * restoring the previous session (<reason>).`"
+ * **Observed** (audit §2.6), with one deliberate difference: the target's
+ * text opens with the **product's own name**, and this implementation names
+ * itself instead. The shape, the wording and the reason placeholder are the
+ * target's; the leading name is not. That difference is recorded in
+ * `docs/compatibility/session-format.md`.
  */
 export const CONTINUE_FAILED_AFTER_RESTORE_MESSAGE =
   'The agent exited: startup failed after restoring the previous session ({reason}).';
@@ -1608,9 +1611,10 @@ export const CONTINUE_FAILED_AFTER_RESTORE_MESSAGE =
  * The message the target prints when the failure happened **before** the
  * restore.
  *
- * **Observed** (audit §2.6): "`The agent exited: could not continue the
- * previous session (<reason>). Run agent --resume to pick a session, or start
- * a new one.`"
+ * **Observed** (audit §2.6), with the same deliberate difference: the
+ * target's text opens with the **product's own name**, and this
+ * implementation names itself instead. The shape and the wording are the
+ * target's.
  */
 export const CONTINUE_FAILED_BEFORE_RESTORE_MESSAGE =
   'The agent exited: could not continue the previous session ({reason}). Run agent --resume to pick a session, or start a new one.';
@@ -1618,9 +1622,9 @@ export const CONTINUE_FAILED_BEFORE_RESTORE_MESSAGE =
 /**
  * The message a `--continue` failure is reported with.
  *
- * The two texts are the target's, and the **reason** is the text the
- * parentheses hold: the lookup's own report, or the message of the error that
- * failed the run.
+ * The two texts are the target's apart from the **leading name** — see the
+ * constants' own notes — and the **reason** is the text the parentheses hold:
+ * the lookup's own report, or the message of the error that failed the run.
  */
 export function continueFailureMessage(reason: string, afterRestore: boolean): string {
   const template = afterRestore

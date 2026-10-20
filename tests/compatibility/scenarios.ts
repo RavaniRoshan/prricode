@@ -290,7 +290,7 @@ export interface Scenario {
  * that observes a value outside it has measured nothing, and the harness
  * refuses the observation.
  */
-const CLONE_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
+const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   // The command line.
   parseArgs,
   // The providers.
@@ -552,7 +552,7 @@ function isBareConstant(value: unknown): boolean {
  * probe made.
  */
 function provenanceOf(value: unknown): Provenance {
-  if (CLONE_EXPORTS.has(value)) {
+  if (IMPLEMENTATION_EXPORTS.has(value)) {
     return isBareConstant(value) ? 'bare-constant' : 'implementation-export';
   }
   const channels = currentRun?.channels ?? [];
@@ -602,7 +602,7 @@ export async function observeCall<T>(
   if (run === undefined) {
     throw new Error(`observeCall("${label}") was called outside a measurement`);
   }
-  if (!isCloneCallable(fn)) {
+  if (!isImplementationCallable(fn)) {
     throw new Error(
       `observeCall("${label}") called something that is not a reimplementation export: a probe may only call what this implementation exports`,
     );
@@ -635,8 +635,8 @@ function membersOf(value: unknown): readonly unknown[] {
  * A value is one when it is a reimplementation export, the result of a call to one, or a
  * member of such a value.
  */
-function isCloneValue(value: unknown): boolean {
-  if (CLONE_EXPORTS.has(value)) return true;
+function isImplementationValue(value: unknown): boolean {
+  if (IMPLEMENTATION_EXPORTS.has(value)) return true;
   const channels = currentRun?.channels ?? [];
   return channels.some((channel) => channel.delivered() === value);
 }
@@ -646,8 +646,8 @@ function isCloneValue(value: unknown): boolean {
  *
  * It is either a reimplementation export, or a method of a value the probe observed.
  */
-function isCloneCallable(fn: unknown): boolean {
-  if (CLONE_EXPORTS.has(fn)) return true;
+function isImplementationCallable(fn: unknown): boolean {
+  if (IMPLEMENTATION_EXPORTS.has(fn)) return true;
   const observations = currentRun?.observations ?? [];
   return observations.some((observation) => membersOf(observation.value).includes(fn));
 }

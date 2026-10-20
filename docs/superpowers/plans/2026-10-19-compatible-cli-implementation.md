@@ -1,4 +1,4 @@
-# Full the reference agent CLI-Compatible Implementation: Implementation Plan
+# Full CLI-Compatible Implementation: Implementation Plan
 
 > **Plan status:** Draft for user review. This is the full feature-parity program for a pinned target release; it is not an MVP plan. Native REA findings are not yet available, so target-specific native behavior remains an explicit prerequisite and open item.
 >
