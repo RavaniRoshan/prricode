@@ -1036,6 +1036,37 @@ export interface PreToolUseHookApproval {
   git commit -m "test(ui): every strip site carries a hostile input of its own"
   ```
 
+### CC-014b — The interactive session host
+
+**Why this task exists.** The Ink terminal UI was built in `CC-015` — the renderers, the ARIA roles and labels, the app shell — and it is **correct**, but **nothing mounts it**. `renderApp` has no production caller and `src/cli/command.ts` refuses an interactive run with *"The interactive terminal UI is not implemented here yet."* This implementation is therefore **headless-only in practice**, which is the largest functional gap between it and the product the plan describes.
+
+**Files:** Create `src/cli/interactive.ts`; Modify `src/cli/command.ts`; Modify `src/cli/args.ts`; Create `tests/contracts/interactive-session.test.ts`.
+
+**Interfaces:**
+- Consumes: `src/ui/app.ts` (`renderApp`, `AppProps`, `PendingApproval`), `src/ui/render/messages.ts` (`renderConversation`), `src/agent/loop.ts` (`AgentRuntime`, `AgentRuntimeDeps.approveAsk`), `src/session/store.ts` (`createSessionStore`, `readAllSessionEvents`), `src/cli/commands/manager.ts` (`isManagerCommand`, `runManagerText`), `src/cli/args.ts` (`ParsedRunArgs`).
+- Produces: `runInteractiveSession(parsed: ParsedRunArgs, context: InteractiveContext): Promise<number>` in `src/cli/interactive.ts`; `CommandOptions.runInteractive` is **defaulted** to it, so an interactive run works without a caller supplying the seam.
+
+- [ ] **Step 1: Write the failing test** — an interactive session **mounts the app**, a submitted line **runs a turn**, the turn's records appear in the app's `events`, and a tool call that needs approval **raises the app's approval prompt** and the user's answer **decides the call**.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the interactive host does not exist.
+- [ ] **Step 3: Implement the host** in `src/cli/interactive.ts` — it **owns the state** the controlled app renders: the session's records, the typed line, the pending approval and the status line. It mounts the app, and it drives a turn on submit.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Write the failing approval test** — a tool call the rules do not cover reaches the app's approval prompt **with the tool's name and the decision's reason**, and the user's answer **resolves the call**; a denial is a denial.
+- [ ] **Step 6: Implement the approval bridge** — the runtime's `approveAsk` seam is how the host learns that a call is pending and how the user's answer reaches it. The bridge must not deadlock: a turn that waits for an answer must be able to re-render the app while it waits.
+- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 8: Write the failing slash-command test** — a line beginning with `/provider` or `/catalog` runs the manager instead of the model, and any other line is a prompt.
+- [ ] **Step 9: Implement the slash command** — the manager's own helpers (`isManagerCommand`, `runManagerText`) already exist and are tested; the host calls them.
+- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 11: Default the seam** in `src/cli/command.ts` — an interactive run uses the host unless the caller supplies its own `runInteractive`. The current refusal message becomes the fallback **only** when the app cannot mount (no TTY).
+- [ ] **Step 12: Commit.**
+  ```bash
+  git add src/cli tests/contracts/interactive-session.test.ts
+  git commit -m "feat(cli): the interactive session host"
+  ```
+
+**Design note.** The app is **controlled** — it takes `events`, `input`, `approval` and `status` as props and calls back — so the host is a small state machine over the session, and the Ink instance is a view of it. The turn runs while the app is mounted, so the host must be able to re-render **during** a turn: the approval is the case that matters, because the runtime waits for the user's answer mid-turn.
+
+**Implementation choices.** The target's own interactive behavior — the prompt's wording, the keybindings, the layout — is **not** observed by the audit, so every one of them is a implementation choice and must be labelled as such in the module header.
+
 ### CC-016 — Provider manager surfaces (`/provider`, catalog browsing)
 
 **Files:** Create `src/cli/commands/provider.ts`, `src/cli/commands/catalog.ts`, `src/ui/modals/providerPicker.ts`; Create `tests/contracts/provider-command.test.ts`.
