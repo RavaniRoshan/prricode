@@ -1924,31 +1924,25 @@ compare at all.
   git commit -m "test(compat): the partial rows compare the whole contract"
   ```
 
-### CC-027 — The tools the target has and this implementation does not
+### CC-027 — The tool inventory: the target's 91 tools
 
-**Why this task exists.** A sweep of the target's own tool inventory found that the
-target defines **at least sixteen** tools and this implementation has **ten**. Six were
-never named in the audit and are not here:
+**Why this task exists.** A sweep of the target's own tool factory found the target
+defines **91 tools** through it, and this implementation has **ten**. The audit names
+eleven. Six were never named anywhere: `WebSearch`, `NotebookRead`, `AskUserQuestion`,
+`ExitPlanMode`, `Skill` as a tool, and the target's `Agent` (this implementation's
+`Task`).
 
-| the target's tool | the state here |
-|---|---|
-| `WebSearch` | **absent** — the audit never names it, and there is no implementation |
-| `NotebookRead` | **absent** — the audit never names it; only `NotebookEdit` is here |
-| `AskUserQuestion` | **absent** — the audit never names it |
-| `ExitPlanMode` | **absent** — the audit never names it |
-| `Skill` | **absent as a tool** — the audit covers the skill *system* (§2.8) but not the tool |
-| `Agent` | the target's `Agent` tool is this implementation's `Task` |
-
-A gold-standard clone has the target's tool inventory. Each of these is a user-visible
-capability, and each has to be **established** before it can be implemented: what its
-input is, what it does, what it returns, and what the permission rules say about it.
+**The record.** `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-surfaces.md`
+enumerates the ninety-one with their search hints, and the **alias table** beside them
+(`Task`→`Agent`, `KillShell`/`KillBash`→`TaskStop`, `ListPeers`→`ListAgents`,
+`Brief`→`SendUserMessage`, and the MCP resource tools).
 
 **Files:** the tool modules the reading names; `src/tools/registry.ts`; the permission
 rules; the tests.
 
 - [ ] **Step 1: Read each tool from the source** — its name, its input schema, its
-  description, its output, its permission behaviour and its concurrency safety. Record it
-  in `/home/shiva/opt/reference-agent-rea/analysis/findings-missing-tools.md`.
+  description, its output, its permission behaviour, its concurrency safety and its
+  aliases. Record it in `findings-missing-tools.md`.
 - [ ] **Step 2: Write the failing test** for each tool, in the owning task's suite.
 - [ ] **Step 3: Implement** each tool, and the permission rules that govern it.
 - [ ] **Step 4: Run it to verify it passes** — expected: PASS.
@@ -1957,10 +1951,8 @@ rules; the tests.
 - [ ] **Step 6: Commit.**
   ```bash
   git add src/tools src/permissions tests/contracts docs/compatibility
-  git commit -m "feat(tools): the tools the target has and this implementation did not"
+  git commit -m "feat(tools): the target's tool inventory"
   ```
-
----
 
 ### CC-028 — The surfaces the audit never covered
 
@@ -2000,6 +1992,272 @@ documents.
   ```bash
   git add src docs/compatibility docs/reverse-engineering tests
   git commit -m "feat: the surfaces the audit never covered"
+  ```
+
+### CC-029 — The settings document: 183 keys and two sibling config systems
+
+**Why this task exists.** The target's settings **document** — 183 top-level keys with the target's own descriptions, plus `permissions` (7 keys), `sandbox` (16), a **workspace config** (29) and a **flat managed config** (22) — was never enumerated. The audit covers the merge **algorithm**; the document's **shape** is the product's configuration surface, and a clone that accepts ten keys is not a clone.
+
+**Files:** Modify `src/config/schema.ts`; Modify `src/config/tiers.ts`; Modify `tests/contracts/settings-precedence.test.ts`; Modify `docs/compatibility/settings-precedence.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the settings document: 183 keys and two sibling config systems"
+  ```
+
+### CC-030 — The slash-command registry: 92 commands
+
+**Why this task exists.** The target registers **92** in-session command names, with descriptions, aliases and argument hints. The audit's command-line section covers the **parser** and the six session subcommands; the command surface itself was never opened — so the clone has none of it.
+
+**Files:** Modify `src/cli/commands/manager.ts`; Create `src/cli/commands/slash.ts`; Modify `src/cli/interactive.ts`; Modify `tests/contracts/cli-surface.test.ts`; Modify `docs/compatibility/command-surface.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the slash-command registry: 92 commands"
+  ```
+
+### CC-031 — The CLI surface: the complete flag list and the subcommand tree
+
+**Why this task exists.** The target has **~60** subcommands in eight groups and a flag list of 85 value-taking (11 repeatable), 45 boolean, 14 optional-value and 10 command tokens. The audit says "roughly ninety value-taking flags and forty boolean ones" and enumerates only the flags this implementation needs.
+
+**Files:** Modify `src/cli/args.ts`; Modify `src/cli/command.ts`; Modify `tests/contracts/cli-surface.test.ts`; Modify `docs/compatibility/command-surface.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the cli surface: the complete flag list and the subcommand tree"
+  ```
+
+### CC-032 — The browser surface
+
+**Why this task exists.** The target has a **browser** surface — 22 tools, plus a **second, independent embedded implementation** with its own assets. The audit does not mention a browser at all. This is a whole feature area the clone does not know exists.
+
+**Files:** Create the browser tool modules; Modify `src/tools/registry.ts`; Modify the permission rules; Modify the tests; Modify `docs/compatibility/extension-surface.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the browser surface"
+  ```
+
+### CC-033 — The self-hosted runner
+
+**Why this task exists.** The target has a **self-hosted runner** surface: 9 tools and 30 `SELF_HOSTED_RUNNER_*` environment variables. Nothing in the audit mentions it.
+
+**Files:** Create the runner tool modules; Modify `src/tools/registry.ts`; Modify the tests; Modify `docs/compatibility/extension-surface.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the self-hosted runner"
+  ```
+
+### CC-034 — The agent-team surface
+
+**Why this task exists.** The target has **agent teams**: `SendMessage`, `ListAgents`, `SubagentHandback`, a teammate mode, cross-session inbound, and a name-collision ledger. The clone's `Task` tool delegates to a subagent; the target also lets agents message **each other**. Nothing in the audit mentions it.
+
+**Files:** Modify `src/tools/builtins/task.ts`; Modify `src/agent/`; Modify the tests; Modify `docs/compatibility/extension-surface.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the agent-team surface"
+  ```
+
+### CC-035 — The channels surface
+
+**Why this task exists.** MCP servers can declare a `claude/channel` capability and push **inbound** messages, with six admission-decision kinds. The clone's MCP surface is request/response only. Nothing in the audit mentions it.
+
+**Files:** Modify `src/extensions/mcp/`; Modify the tests; Modify `docs/compatibility/extension-surface.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the channels surface"
+  ```
+
+### CC-036 — The IDE integration surface
+
+**Why this task exists.** The target's IDE surface is **18 IDEs** with per-OS process keywords, a lock-file protocol and a diagnostics subsystem. The audit has one line about it.
+
+**Files:** Modify `src/integration/ide/`; Modify the tests; Modify `docs/compatibility/extension-surface.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the ide integration surface"
+  ```
+
+### CC-037 — The five auth flows
+
+**Why this task exists.** The target has **five** distinct authentication flows — first-party, local, MCP, a SEP-990 OIDC, and host/device/org. The audit covers the credential **model** (references, never values); the **flows** were never traced.
+
+**Files:** Modify `src/provider/credentials.ts`; Modify `src/provider/registry.ts`; Modify the tests; Modify `docs/compatibility/provider-catalog.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the five auth flows"
+  ```
+
+### CC-038 — The endpoint catalogue and the corporate proxy
+
+**Why this task exists.** The target carries a **network-endpoint and egress-firewall catalogue** and a corporate-proxy surface. The audit's endpoint section is the **per-provider** policy, which is a different thing.
+
+**Files:** Modify `src/provider/routes.ts`; Modify the sandbox policy; Modify the tests; Modify `docs/compatibility/provider-catalog.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the endpoint catalogue and the corporate proxy"
+  ```
+
+### CC-039 — The embedded assets: the native addons and the plugin API
+
+**Why this task exists.** The target embeds **253 assets**, including **two native x86-64 `.node` addons** — a clipboard and an audio capture — that the audit's native section never mentions, and a **16 698-line plugin TypeScript API**. The addons are separate ELF files, so even the timed-out whole-image inventory would not have covered them.
+
+**Files:** Modify the packaging; Modify the extension surface; Modify the tests; Modify `docs/compatibility/packaging.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the embedded assets: the native addons and the plugin api"
+  ```
+
+### CC-040 — The plugin and marketplace protocol, and the autoupdater
+
+**Why this task exists.** The target's plugin system has **10** marketplace source types, **7** plugin source types, a 46-key manifest, a 70-key frontmatter list, and a whole **plugin autoupdater** with seven outcomes and seven failure codes. The audit covers the manifest schema and the install flow only.
+
+**Files:** Modify `src/extensions/plugins/`; Modify the tests; Modify `docs/compatibility/extension-surface.md`.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the plugin and marketplace protocol, and the autoupdater"
+  ```
+
+### CC-041 — The remaining surfaces: cost, output styles, the status line, prompts, checkpoints, the rule templates
+
+**Why this task exists.** Six smaller surfaces the audit never opened: **cost and usage accounting**, **output styles**, the **status line**, the **prompt-management** surface (`prompt.section`, the `type:"prompt"` command kind, and flags such as `/heapdump` and `permission-prompt-tool`), **checkpointing**, and the target's own **git and GitHub rule templates** (`git checkout -b *`, `gh pr create --title * --body *`, …). Each is either implemented or named as a gap.
+
+**Files:** Modify the modules each reading names; Modify the tests; Modify the conformance documents.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the remaining surfaces: cost, output styles, the status line, prompts, checkpoints, the rule templates"
+  ```
+
+### CC-042 — The reference catalogues: 1 275 environment variables and 3 084 telemetry events
+
+**Why this task exists.** The target reads **1 275** environment variables and emits **3 084** `tengu_*` telemetry events. These are not features but **reference surfaces**: a clone that ignores a variable the target honours behaves differently, and one that emits a different event name is not observable in the same way. The catalogues are recorded, and the parts that change behaviour are implemented.
+
+**Files:** Create the catalogues; Modify the settings loader, the environment reader and the telemetry; Modify the tests.
+
+- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+  the behaviour, the file and the offset for every claim.
+- [ ] **Step 2: Write the failing test** for what the reading established.
+- [ ] **Step 3: Implement** it, and the rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+  and the report says what was compared.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src tests/contracts docs/compatibility
+  git commit -m "feat: the reference catalogues: 1 275 environment variables and 3 084 telemetry events"
   ```
 
 ### CC-020 — The divergence layer: PRRICODE as a product of its own

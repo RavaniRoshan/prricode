@@ -739,3 +739,48 @@ The precise next actions are listed in §6 and mirrored in `docs/PROGRESS.md`.
 - The semantic graphs are **partial** by construction: the parent result budget, the per-file semantic-node ceiling, the transfer byte budget, and the semantic-unknown ceiling all truncate. Coverage numbers describe what REA retained, not what the artifact contains.
 - The `ev_da577...`, `ev_3cdd...`, `ev_592...`, `ev_832...`, `ev_27fa...`, `ev_88e9...`, and `ev_9ba...` multi-module records remain valid evidence but are **superseded for semantic-graph purposes** by the per-module records, which are not truncated for the same modules.
 - Official the reference agent documentation is referenced for product context only. Where documentation and this audit differ, the audit reports the artifact.
+
+---
+
+## 8. The surfaces this audit did not cover
+
+**This section was added after a sweep of the target's own registries, and it changes the
+size of the target.** The requirement groups in §2 are a *contract* — a list of behaviours
+this implementation set out to reproduce. They are not the target's whole surface. A
+systematic enumeration of the target's own registries found the surfaces below, **none of
+which §2 opened**, and each of which is a real capability.
+
+The record is `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-surfaces.md`.
+
+| # | The surface | What the target has | The audit's coverage |
+|---|---|---|---|
+| 1 | **The settings document** | **183** top-level keys, plus `permissions` (7), `sandbox` (16), and **two whole sibling config systems** — a workspace config (29 keys) and a flat managed config (22) | §2.7 covers the **merge algorithm**; the document's **shape** was never enumerated |
+| 2 | **The in-session slash commands** | **92** distinct command names, with descriptions, aliases and argument hints | §2.10 covers the **parser** and the six session subcommands; the command surface was never opened |
+| 3 | **The CLI surface** | **~60** subcommands in eight groups, and the **complete** flag list: 85 value-taking (11 repeatable), 45 boolean, 14 optional-value, 10 command tokens | §2.10 says "roughly ninety value-taking flags and forty boolean ones" and enumerates only what this implementation needs |
+| 4 | **The tool inventory** | **91** tools through one factory, plus the alias table | §2.4 and §2.5 cover the tool-result **shaping** and the permission **rules**; the inventory names 11 |
+| 5 | **Telemetry** | **3 084** `tengu_*` event names, and a second prefix-less family | §2 mentions about twenty |
+| 6 | **Environment variables** | **1 275** names — 1 168 in the target's own lazy namespace | §2 mentions about fifteen |
+| 7 | **A browser surface** | 22 tools, plus a **second, independent embedded implementation** with its own assets | nothing — the audit does not mention a browser |
+| 8 | **The plugin and marketplace protocol** | 10 marketplace source types, 7 plugin source types, a 46-key manifest, a 70-key frontmatter list, and a whole **plugin autoupdater** | §2.8 covers the manifest schema and the install flow |
+| 9 | **The IDE integration** | 18 IDEs with per-OS process keywords, a lock-file protocol, a diagnostics subsystem | §2.8 has an IDE row, and the surface is one line |
+| 10 | **Channels** | MCP servers with a `claude/channel` capability pushing **inbound** messages, and six admission-decision kinds | nothing |
+| 11 | **A self-hosted runner** | 9 tools and 30 `SELF_HOSTED_RUNNER_*` environment variables | nothing |
+| 12 | **The endpoint catalogue** | a network-endpoint and egress-firewall catalogue, and a corporate-proxy surface | §2.1 covers the **per-provider** endpoint policy; the catalogue is a different thing |
+| 13 | **The embedded assets** | 253 assets, including **two native x86-64 `.node` addons** — a clipboard and an audio capture — a 16 698-line plugin TypeScript API, an eval subsystem, an error-code catalogue | §2.9 covers the native sandbox; the addons are separate ELF files and were never mentioned |
+| 14 | **Agent teams** | `SendMessage`, `ListAgents`, `SubagentHandback`, a teammate mode, cross-session inbound, a name-collision ledger | nothing |
+| 15 | **Compaction, checkpointing and cost as configuration** | 9 settings, 4 commands, about 30 telemetry events | §2.4 records compaction as unknown |
+| 16 | **The auth flows** | **five** distinct flows — first-party, local, MCP, a SEP-990 OIDC, and host/device/org | §2.1 covers the credential **model**; the flows were never traced |
+| 17 | **A crash reporter** | a Sentry error boundary | nothing |
+| 18 | **The prompt surface** | `prompt.section`, a `type:"prompt"` command kind, and flags such as `/heapdump`, `pause-memory`, `edit-chrome-settings`, `permission-prompt-tool` | nothing |
+| 19 | **The target's own rule templates** | the built-in git and GitHub rule templates — `git checkout -b *`, `gh pr create --title * --body *`, … | §2.5 has the rule **syntax**; the target's own **templates** were never read |
+| 20 | **The on-disk surfaces outside the configuration root** | IDE lock files, the plugin zip cache, `known_marketplaces_claudeai.json` | §2.6 covers the layout **inside** the root |
+
+**What this means for the report.** The compatibility matrix in
+`docs/compatibility/feature-matrix.md` measures **42 rows**, and every row is a behaviour
+this implementation reproduces or does not. It is not a statement that the target has
+forty-two features. The twenty surfaces above are the target's *rest*, and each one is
+either implemented or named as a gap — the plan now carries them as milestones.
+
+**What is still not established, inside the surfaces the audit did open**, is unchanged and
+is in §4: the compaction behaviour, the whole-image native inventory, the sandbox routing
+and the terminal UI.
