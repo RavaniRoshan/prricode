@@ -24,6 +24,17 @@
  * rule *in the list* that matches is the rule that matched — never a more specific
  * one that happens to appear later.
  *
+ * **The order is the target's own**, established by reading the target's source:
+ * the record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
+ * §1. The target's core engine (`chunk-4jsg44k7.js:3749432`) consults the deny
+ * list at its first two steps, the ask list at its third and fifth and the allow
+ * list at its seventh, and the target's own written-out form of the order is the
+ * layer enumeration in `chunk-8fgrwnc5.js:238819` — `bare-deny` → `path-deny` →
+ * `path-rule-ask` → `bare-ask` → `path-mode-ask` → `allow`. The **mode** does not
+ * change the order: the lists are consulted before the mode's own semantics in
+ * every mode.
+ *
  * **Compound commands** are split on `&&`, `||`, `;`, `|`, `|&`, `&` and newlines, and
  * every sub-command is matched independently. There is **no sub-command cap**: the
  * target had a 50-sub-command cap that silently skipped every deny check and

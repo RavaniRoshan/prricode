@@ -13,6 +13,29 @@
  *               `user_abort` | `user_reject` | `unknown`
  *   - reason type: `rule` | `safetyCheck` | `other`
  *
+ * **The precedence between the three lists is the target's own.** It was
+ * established by reading the target's source; the record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
+ * §1, and every claim there carries a file and a byte offset. The rule is:
+ *
+ *   - the lists are consulted **`deny` → `ask` → `allow`**, and the first list
+ *     that produces a decision wins;
+ *   - **the mode does not change the order.** The lists are consulted *before*
+ *     the mode's own semantics, in every mode. The two places where a mode
+ *     touches a list are the target's: `bypassPermissions` never consults the
+ *     **allow** list at all (the mode allows instead), and `plan` refuses a
+ *     write **before** the allow list is consulted (so an allow rule never
+ *     auto-approves an edit);
+ *   - the **same** command in two lists is decided by the earlier list: a
+ *     command in all three is **denied**. Within one list the **first** rule
+ *     that matches is the rule that matched, and specificity is irrelevant.
+ *
+ * The target's own written-out form of the order is the layer enumeration in
+ * `chunk-8fgrwnc5.js:238819` — `bare-deny` → `path-deny` → `path-rule-ask` →
+ * `bare-ask` → `path-mode-ask` → `allow` — and the core engine
+ * (`chunk-4jsg44k7.js:3749432`) consults the deny list at its first two steps,
+ * the ask list at its third and fifth, and the allow list at its seventh.
+ *
  * The **modes** are exactly six — `default` (UI label Manual, alias `manual`),
  * `acceptEdits`, `plan`, `auto`, `dontAsk` and `bypassPermissions` — and they behave
  * as the audit and the research describe them:
@@ -37,6 +60,17 @@
  * model call as the fallback. This implementation never assumes a local model call: the
  * review is supplied by the caller as a callback, and **which** path the review uses
  * is not implemented in this module.
+ *
+ * **In `auto` mode an ask rule is a denial, not a prompt.** The target's rule is
+ * that a check only a person may answer has nobody to answer it in a mode that
+ * replaces the prompt with the classifier, so the call is refused: the target's
+ * own message is "Only the auto-mode classifier can allow <tool>: this call trips
+ * a check only a person may answer, and nobody is asked about this tool's calls"
+ * (`chunk-4jsg44k7.js:1036375`, the auto-mode gate, and `:1035945`, the denial
+ * it returns). The target applies the rule to a tool that declares an auto-mode
+ * classifier action; this implementation has no per-tool auto action, so the
+ * rule is applied to every tool in `auto` mode — the target's *rule* without the
+ * target's *condition*.
  *
  * The **start-mode precedence** is `--permission-mode` flag → `permissions.defaultMode`
  * → the built-in default. `auto` and `bypassPermissions` written into a settings
@@ -675,6 +709,15 @@ function withReason<T extends PermissionDecision>(decision: T, toolName: string)
  * The lists are scanned `deny` → `ask` → `allow`, and the first rule **in a list**
  * that matches is the rule that matched: specificity is irrelevant, and an allow
  * rule can never carve an exception out of a deny.
+ *
+ * **The order is the target's own.** It was read out of the target's source; the
+ * record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
+ * §1. The target's core engine (`chunk-4jsg44k7.js:3749432`) consults the deny
+ * list at its first two steps, the ask list at its third and fifth and the allow
+ * list at its seventh, and the target's own written-out form of the order is the
+ * layer enumeration in `chunk-8fgrwnc5.js:238819` — `bare-deny` → `path-deny` →
+ * `path-rule-ask` → `bare-ask` → `path-mode-ask` → `allow`.
  *
  * Returns `undefined` when nothing matched, so the caller can escalate to a prompt.
  * The decision never carries a rewritten tool input — a rule is a pure predicate.
@@ -1528,9 +1571,22 @@ function workingDirectoryDecision(
  * verdict is a denial. An allow rule is still an allow — the user already approved
  * it — while a call that would prompt is sent to the review.
  *
- * An explicit `permissions.ask` rule still forces a prompt: the classifier may
- * deny the call outright, but it may not turn the ask into an allow. A hook
- * approval that the classifier may not approve cannot become an allow either.
+ * **The ask list is consulted before the allow list.** The order is the
+ * target's own (`deny` → `ask` → `allow`), and it does not change with the
+ * mode: the target's core engine consults the ask list before the allow list in
+ * every mode (`chunk-4jsg44k7.js:3749432`; the record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
+ * §1). An ask rule therefore beats an allow rule in `auto` mode too.
+ *
+ * **An ask rule is a denial in `auto` mode.** The check is one only a person may
+ * answer, and the auto mode replaces the prompt with the classifier, so nobody
+ * is asked: the target refuses the call, and its own message is "Only the
+ * auto-mode classifier can allow <tool>: this call trips a check only a person
+ * may answer, and nobody is asked about this tool's calls"
+ * (`chunk-4jsg44k7.js:1036375` and `:1035945`).
+ *
+ * A hook approval that the classifier may not approve cannot become an allow
+ * either.
  */
 async function decideAuto(
   ctx: ToolContext,
@@ -1539,6 +1595,10 @@ async function decideAuto(
   asked: RuleDecision | undefined,
   hookApproval: HookApproval | undefined,
 ): Promise<PermissionDecision> {
+  // The ask list first: the precedence is `deny` → `ask` → `allow`, and it does
+  // not change with the mode.
+  if (asked) return autoModeAskDenial(ctx, asked);
+
   const allowed = evaluateListOutcome(rules, rules.allow, 'allow', ctx);
   if (allowed.decision) return allowed.decision;
 
@@ -1552,7 +1612,6 @@ async function decideAuto(
       reason:
         'The auto-mode review returned no verdict, so the call is denied: the review fails closed.',
     };
-    if (asked?.rule) decision.rule = asked.rule;
     return decision;
   }
 
@@ -1564,7 +1623,6 @@ async function decideAuto(
       reasonType: 'other',
       reason: `The auto-mode review blocked this call${category}.`,
     };
-    if (asked?.rule) decision.rule = asked.rule;
     return decision;
   }
 
@@ -1579,20 +1637,7 @@ async function decideAuto(
       reason:
         'The auto-mode review approved this call, but the hook approval cannot be approved by a classifier, so it requires approval.',
     };
-    // The ask rule still speaks for the call: its attribution is not dropped by
-    // the branch that refuses to let the classifier launder the approval.
-    if (asked?.rule) decision.rule = asked.rule;
     if (hookApproval.decision.updatedInput !== undefined) {
-      decision.updatedInput = hookApproval.decision.updatedInput;
-    }
-    return decision;
-  }
-
-  if (asked) {
-    // An explicit ask rule still forces a prompt: the classifier does not turn an
-    // ask into an allow.
-    const decision: PermissionDecision = { ...asked };
-    if (hookApproval?.decision.updatedInput !== undefined) {
       decision.updatedInput = hookApproval.decision.updatedInput;
     }
     return decision;
@@ -1607,6 +1652,24 @@ async function decideAuto(
   if (hookApproval?.decision.updatedInput !== undefined) {
     decision.updatedInput = hookApproval.decision.updatedInput;
   }
+  return decision;
+}
+
+/**
+ * The `auto` mode's denial of a call an **ask** rule covers.
+ *
+ * The check is one only a person may answer, and the auto mode replaces the
+ * prompt with the classifier — so nobody is asked and the call is refused. The
+ * wording is the target's own (`chunk-4jsg44k7.js:1035945`).
+ */
+function autoModeAskDenial(ctx: ToolContext, asked: RuleDecision): PermissionDecision {
+  const decision: PermissionDecision = {
+    behavior: 'deny',
+    source: 'classifier',
+    reasonType: 'other',
+    reason: `Only the auto-mode classifier can allow ${ctx.toolName}: this call trips a check only a person may answer, and nobody is asked about this tool's calls`,
+  };
+  if (asked.rule) decision.rule = asked.rule;
   return decision;
 }
 

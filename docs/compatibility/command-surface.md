@@ -371,6 +371,38 @@ Headless mode is forced by a **non-TTY stdout**. The headless decision is `--pri
 
 The **input format** is `text` or `stream-json`; the **output format** is `text`, `json` or `stream-json`.
 
+## The documents a run writes (REA observed)
+
+**Source of truth:** the target's own source, read into
+`/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md` §2.
+Every claim below carries a file and a byte offset there.
+
+| Format | stdout | stderr | Exit code |
+|---|---|---|---|
+| `text` | the result document's `result` text, plus a newline | the failure's detail, when the run failed | `0` on success, `1` on failure |
+| `json` | **exactly one** document: the **result** document | — | as above |
+| `stream-json` | **one document per line**, one per message, the **result** last | — | as above |
+
+The **result document** is the target's own, and this implementation builds it: the member set, the member **order** and the nested shapes are the target's (`chunk-pj5cyqhw.js:300922` for the success variant, `:326977` for the error variant, `:178563` for the `usage` object and `:288789` for a `permission_denials` entry). The target builds the document by spreading the **common** members, then the **variant** members, then `type`, `duration_ms` and `uuid` (`chunk-pj5cyqhw.js:171561`), and this implementation does the same — so the members arrive on the wire in the target's order.
+
+The members the target fills and this implementation cannot are the target's **own defaults**: `total_cost_usd` is `0` and `modelUsage` is the empty record (this implementation has no cost model and no per-model ledger), and `duration_api_ms` is `0` (this implementation does not time the provider's requests separately from the turn). The `usage` object is the target's own zeroed object with the token counts filled in (`chunk-05nax923.js:11`).
+
+A `--print` run **is a session**: the result document carries a `session_id`, and the session's transcript is appended to disk as the turn runs — the append-only JSONL the [session format](session-format.md) describes — unless `--no-session-persistence` turns it off. The split is: **stdout carries the format's output; the disk carries the transcript.**
+
+### The three divergences this milestone keeps, in the output
+
+**Implementation choice, deliberate.** Each is pinned by a contract test this milestone does not own (`tests/contracts/cli-surface.test.ts`), and each is **named** here rather than hidden.
+
+| # | The target's own behaviour | This implementation | Why |
+|---|---|---|---|
+| 1 | the error variant's `subtype` is one of `error_during_execution`, `error_max_turns`, `error_max_budget_usd` and `error_max_structured_output_retries` (`chunk-pj5cyqhw.js:326977`) | `error` | the `CC-014` contract test pins `subtype: 'error'` for a failed run, in both the `json` and the "no result event" cases |
+| 2 | a run that produced **no** result document writes `Error: No messages returned from query` to **stderr**, writes **nothing** to stdout and exits `1` (`chunk-e7w77ts3.js:529318`) | a document that says the run failed | the `CC-014` contract test pins a document on stdout for that case |
+| 3 | the `text` format writes the result's text at the **end of the turn** and, on a failure, the format's own line on stdout (`Execution error`, `Error: Reached max turns (n)`, …) with the failure's detail on stderr (`chunk-e7w77ts3.js:445913`) | the assistant's text as it arrives, and nothing on stdout for a failure | the `CC-014` contract test pins the text format's stdout and stderr for both the success and the failure case |
+
+The **stream-json** documents are this implementation's **events**, one per line, with the target's **result** document last. The target's own documents are the SDK message kinds — `system`/`init`, `assistant`, `user`, `stream_event` and `result` (`chunk-pj5cyqhw.js:333857`, `:261767`, `:239906`, `:352585`) — and this implementation's event vocabulary is its own; the result document is the target's, because the target's `json` format writes exactly that document.
+
+**Pinned by:** `tests/contracts/headless-output.test.ts` — the result document's members and their order, the three formats' stdout, and the turn's own accounting.
+
 ## The validation messages (REA observed)
 
 Every message below is the target's, verbatim.
@@ -533,7 +565,7 @@ This implementation reads the shape the target's own SDK protocol uses: the stan
 | The **default model** | `claude-sonnet-4-5` | the audit does not record the target's default model |
 | The **version** | this implementation's own `package.json` version | this implementation does not claim to be the reference agent |
 | The **help text** | this implementation's own, **generated** from the vocabulary and the tree | the audit records the flag names and no help text; generating it means the help and the parser cannot drift apart |
-| The **output documents** | this implementation's own shapes | the audit pins the three formats and nothing about what a document contains |
+| The **output documents** | the **result** document is the target's own — its member set, its member order and its nested shapes; the other documents are this implementation's own events | the audit pinned the three formats and nothing about the documents; the reading that establishes them is `findings-permissions-and-headless.md` §2, and the three divergences this milestone keeps are named above |
 | The **exit codes** | `0` success, `1` failure, `2` an argument error | the audit records this implementation's two known ones |
 | The **gateway condition** | the settings key `useGateway` | the target's condition (`Br() \|\| aet() \|\| cet()`) is not resolved in the REA record |
 | The **manager surfaces** | `/provider`, `catalog`, and their `--provider` / `--catalog` forms | a **project extension** — see [`provider-catalog.md`](provider-catalog.md) |

@@ -193,6 +193,109 @@ describe('rule precedence', () => {
   });
 });
 
+/**
+ * The precedence between the three lists, as the target's own source states it.
+ *
+ * The record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
+ * §1: the target's core engine (`chunk-4jsg44k7.js:3749432`) consults the deny
+ * list at its first two steps, the ask list at its third and fifth, and the
+ * allow list at its seventh, and the target's own written-out form of the order
+ * is the layer enumeration in `chunk-8fgrwnc5.js:238819` — `bare-deny` →
+ * `path-deny` → `path-rule-ask` → `bare-ask` → `path-mode-ask` → `allow`.
+ */
+describe('the precedence between the three lists', () => {
+  it('lets the deny list win over the ask list and the allow list', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'rm -rf /tmp/x' } }), {
+      rules: rules({
+        deny: ['Bash(rm *)'],
+        ask: ['Bash(rm *)'],
+        allow: ['Bash(rm *)'],
+      }),
+      mode: 'default',
+    });
+
+    expect(decision.behavior).toBe('deny');
+    expect(decision.rule?.content).toBe('Bash(rm *)');
+  });
+
+  it('lets the ask list win over the allow list', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'rm -rf /tmp/x' } }), {
+      rules: rules({ ask: ['Bash(rm *)'], allow: ['Bash(rm *)'] }),
+      mode: 'default',
+    });
+
+    expect(decision.behavior).toBe('ask');
+    expect(decision.rule?.content).toBe('Bash(rm *)');
+  });
+
+  it('does not let the mode change the order: the ask list beats the allow list in every mode', async () => {
+    const modes = [
+      'default',
+      'manual',
+      'acceptEdits',
+      'plan',
+      'auto',
+      'dontAsk',
+      'bypassPermissions',
+    ] as const;
+
+    for (const mode of modes) {
+      const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+        rules: rules({ ask: ['Bash(git push *)'], allow: ['Bash(git push *)'] }),
+        mode,
+      });
+
+      // The order is fixed: the lists are consulted before the mode's own
+      // semantics, so the mode can never turn an ask into an allow.
+      expect(decision.behavior, `mode ${mode}`).not.toBe('allow');
+      expect(decision.rule?.content, `mode ${mode}`).toBe('Bash(git push *)');
+    }
+  });
+
+  it('lets the deny list win over the ask list and the allow list in every mode', async () => {
+    const modes = [
+      'default',
+      'manual',
+      'acceptEdits',
+      'plan',
+      'auto',
+      'dontAsk',
+      'bypassPermissions',
+    ] as const;
+
+    for (const mode of modes) {
+      const decision = await checkPermission(tool({ input: { command: 'rm -rf /tmp/x' } }), {
+        rules: rules({
+          deny: ['Bash(rm *)'],
+          ask: ['Bash(rm *)'],
+          allow: ['Bash(rm *)'],
+        }),
+        mode,
+      });
+
+      expect(decision.behavior, `mode ${mode}`).toBe('deny');
+    }
+  });
+
+  it('keeps the ask rule when the mode would otherwise allow the call', async () => {
+    // `bypassPermissions` allows everything the deny list did not block, and
+    // `acceptEdits` allows an edit inside the working directory. The ask list is
+    // consulted before the mode, so the ask holds in both.
+    const bypassed = await checkPermission(
+      tool({ input: { command: 'git push origin main' } }),
+      { rules: rules({ ask: ['Bash(git push *)'] }), mode: 'bypassPermissions' },
+    );
+    expect(bypassed.behavior).toBe('ask');
+
+    const accepted = await checkPermission(
+      tool({ toolName: 'Edit', input: { file_path: '/work/a.txt' } }),
+      { rules: rules({ ask: ['Edit(a.txt)'] }), mode: 'acceptEdits' },
+    );
+    expect(accepted.behavior).toBe('ask');
+  });
+});
+
 describe('compound commands', () => {
   it('matches every sub-command independently and names only the offending ones', () => {
     const decision = evaluateRules(rules({ ask: ['Bash(b)'] }), tool({ input: { command: 'a && b' } }));
@@ -1351,16 +1454,32 @@ describe('the compound-command escalation', () => {
 });
 
 describe('the auto-mode review', () => {
-  it('does not let the classifier turn an ask rule into an allow', async () => {
+  it('denies an ask rule in auto mode, because nobody is asked there', async () => {
     const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
       rules: rules({ ask: ['Bash(git push *)'] }),
       mode: 'auto',
       classifier: async () => ({ verdict: 'allow' as const }),
     });
 
-    // An explicit `permissions.ask` rule still forces a prompt: the classifier
-    // reviews the call, but it may not turn the ask into an allow.
-    expect(decision.behavior).toBe('ask');
+    // The target's own rule: the check is one only a person may answer, and the
+    // auto mode replaces the prompt with the classifier, so nobody is asked and
+    // the call is refused. The target's own message names the reason.
+    // (`chunk-4jsg44k7.js:1036375` and `:1035945`.)
+    expect(decision.behavior).toBe('deny');
+    expect(decision.reason).toContain('Only the auto-mode classifier can allow Bash');
+    expect(decision.rule?.content).toBe('Bash(git push *)');
+  });
+
+  it('lets the ask rule beat an allow rule in auto mode', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules({ ask: ['Bash(git push *)'], allow: ['Bash(git push *)'] }),
+      mode: 'auto',
+      classifier: async () => ({ verdict: 'allow' as const }),
+    });
+
+    // The precedence is `deny` → `ask` → `allow`, and the mode does not change
+    // it: the ask list is consulted before the allow list in every mode.
+    expect(decision.behavior).toBe('deny');
     expect(decision.rule?.content).toBe('Bash(git push *)');
   });
 
@@ -1420,7 +1539,7 @@ describe('the auto-mode review', () => {
 
     // The ask rule still speaks for the call: its attribution is not dropped by
     // the branch that refuses to let the classifier launder the approval.
-    expect(decision.behavior).toBe('ask');
+    expect(decision.behavior).toBe('deny');
     expect(decision.rule?.content).toBe('Bash(git push *)');
   });
 });

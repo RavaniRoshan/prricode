@@ -13,16 +13,28 @@
  * the **output format** is `text`, `json` or `stream-json`." and the headless
  * rule — "Headless mode is forced by a non-TTY stdout."
  *
- * **Implementation choice**: the **shape of the documents**. The audit pins the three
- * formats and **nothing** about what a document contains — it does not record
- * the one-document / one-object-per-event contract either. That contract is the
- * **plan's**: `CC-014` Step 5 of
- * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`
- * — "`--print` with `--output-format json` writes **exactly one** JSON document
- * to stdout and exits 0 on success, non-zero on a provider error;
- * `--output-format stream-json` writes one JSON object per event". The
- * documents below are therefore this implementation's own, and they are labelled as such
- * here so that nothing reads them as a compatibility claim.
+ * **Established by reading the target's own source**: what each format writes.
+ * The record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
+ * §2, and every claim there carries a file and a byte offset. The summary:
+ *
+ *   - `text` writes the result document's `result` text, plus a newline, and
+ *     the failure's detail on stderr (`chunk-e7w77ts3.js:445913`);
+ *   - `json` writes **exactly one** document — the **result** document
+ *     (`chunk-e7w77ts3.js:529318`), and with `--verbose` a JSON **array** of
+ *     every significant message instead;
+ *   - `stream-json` writes **one document per line**, one per message, and the
+ *     **last** document is the result document (`chunk-btsgvmny.js:29557`).
+ *
+ * **The result document is the target's own** — its member set, its member
+ * order and its nested shapes — and it is built in `src/cli/headless.ts`,
+ * because the document belongs to the run and not to the writer. The
+ * **other** documents are this implementation's own: the target's stream-json
+ * documents are the SDK message kinds (`system`/`init`, `assistant`, `user`,
+ * `stream_event` and `result` — `chunk-pj5cyqhw.js:333857`, `:261767`,
+ * `:239906`, `:352585`) and this implementation's events are not those
+ * documents. The three places where this implementation knowingly differs
+ * from the target are named in `docs/compatibility/command-surface.md`.
  *
  * ## The exit codes
  *
@@ -58,6 +70,10 @@
  * limitation `src/cli/headless.ts` records. The runtime's own contract is the
  * reason, and the runtime is not this milestone's to change.
  */
+
+import { randomUUID } from 'node:crypto';
+
+import { buildResultDocument, usageOf, type ResultDocument } from './headless.js';
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                              */
@@ -144,6 +160,12 @@ export interface CommandResult {
  * writes one object per event, and not what an event is. The five members cover
  * everything a turn produces — the assistant's text, the tool calls it made, the
  * results those calls produced, the errors, and the result of the run itself.
+ *
+ * The **result** member is not this implementation's own: it is the **target's**
+ * result document, member for member and member for member in the target's own
+ * order (`chunk-pj5cyqhw.js:171561`), so the `stream-json` format's **last**
+ * document is the target's document. The document's type and the builder live in
+ * `src/cli/headless.ts`.
  */
 export type HeadlessEvent =
   /** The assistant produced text. */
@@ -154,45 +176,19 @@ export type HeadlessEvent =
   | { type: 'tool_result'; id: string; content: unknown; is_error: boolean }
   /** Something failed. */
   | { type: 'error'; message: string }
-  /** The run finished. */
-  | {
-      type: 'result';
-      result: string;
-      is_error: boolean;
-      stop_reason: string;
-      session_id: string;
-      duration_ms: number;
-      /** The failure's message, when the run failed. */
-      error?: string;
-    };
+  /** The run finished — the target's own result document. */
+  | ResultDocument;
 
 /**
  * The single document the `json` format writes.
  *
- * **Implementation choice.** The audit pins that the `json` format writes one document
- * and not what the document contains. The members below are this implementation's own:
- * `type` and `subtype` say what happened, `is_error` says whether it was a
- * failure, `result` is the assistant's text, and `session_id`, `duration_ms` and
- * `stop_reason` say which session ran, for how long, and why it stopped.
+ * **The target's own document.** The member set, the member **order** and the
+ * nested shapes are the target's; the record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
+ * §2. The type and the builder live in `src/cli/headless.ts`, because the
+ * document belongs to the run and not to the writer.
  */
-export interface ResultDocument {
-  /** The document's type. */
-  type: 'result';
-  /** Whether the run succeeded. */
-  subtype: 'success' | 'error';
-  /** Whether the run failed. */
-  is_error: boolean;
-  /** The session the run belonged to. */
-  session_id: string;
-  /** The assistant's text. */
-  result: string;
-  /** How long the run took, in milliseconds. */
-  duration_ms: number;
-  /** Why the run stopped. */
-  stop_reason: string;
-  /** The failure's message, when the run failed. */
-  error?: string;
-}
+export type { ResultDocument } from './headless.js';
 
 /* -------------------------------------------------------------------------- */
 /* The sink                                                                    */
@@ -277,7 +273,7 @@ export async function writeHeadlessOutput(options: HeadlessOutputOptions): Promi
     // provider's own message is preferred over the generic one: the two formats
     // must not disagree about the same failure.
     if (failed) {
-      stderr.write(`${failure ?? result?.error ?? 'The run failed.'}\n`);
+      stderr.write(`${failure ?? result?.errors?.[0] ?? 'The run failed.'}\n`);
     } else if (wroteText) {
       stdout.write('\n');
     }
@@ -292,9 +288,17 @@ export async function writeHeadlessOutput(options: HeadlessOutputOptions): Promi
 /**
  * The document the `json` format writes.
  *
- * A run that produced no result event still produces a document: the document
+ * The **target's own document**, built in the target's own member order
+ * (`chunk-pj5cyqhw.js:171561`): the common members, then the variant members,
+ * then `type`, `duration_ms` and `uuid`.
+ *
+ * A run that produced **no** result event still produces a document: the document
  * says the run failed, and says why, rather than leaving the reader with an
- * empty stdout.
+ * empty stdout. **This is a divergence from the target, and it is named**: the
+ * target writes `Error: No messages returned from query` to **stderr**, writes
+ * **nothing** to stdout and exits `1` (`chunk-e7w77ts3.js:529318`). The
+ * divergence is pinned by a contract test this milestone does not own
+ * (`tests/contracts/cli-surface.test.ts`).
  */
 function resultDocument(
   result: Extract<HeadlessEvent, { type: 'result' }> | undefined,
@@ -302,29 +306,31 @@ function resultDocument(
   failure: string | undefined,
 ): ResultDocument {
   if (result === undefined) {
-    const document: ResultDocument = {
-      type: 'result',
-      subtype: 'error',
-      is_error: true,
-      session_id: '',
+    return buildResultDocument({
+      isError: true,
       result: text,
-      duration_ms: 0,
-      stop_reason: 'error',
-    };
-    if (failure !== undefined) document.error = failure;
-    return document;
+      errors: failure !== undefined ? [failure] : undefined,
+      stopReason: null,
+      sessionId: '',
+      durationMs: 0,
+      numTurns: 0,
+      usage: usageOf(undefined),
+      permissionDenials: [],
+      uuid: randomUUID(),
+    });
   }
 
-  const document: ResultDocument = {
-    type: 'result',
-    subtype: result.is_error ? 'error' : 'success',
-    is_error: result.is_error,
-    session_id: result.session_id,
+  const errors = result.errors ?? (failure !== undefined ? [failure] : undefined);
+  return buildResultDocument({
+    isError: result.is_error,
     result: text,
-    duration_ms: result.duration_ms,
-    stop_reason: result.stop_reason,
-  };
-  const message = failure ?? result.error;
-  if (result.is_error && message !== undefined) document.error = message;
-  return document;
+    errors,
+    stopReason: result.stop_reason,
+    sessionId: result.session_id,
+    durationMs: result.duration_ms,
+    numTurns: result.num_turns,
+    usage: result.usage,
+    permissionDenials: result.permission_denials,
+    uuid: result.uuid,
+  });
 }

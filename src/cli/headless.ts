@@ -14,6 +14,38 @@
  * (`src/cli/args.ts`); this module is what a headless run **does** once the
  * decision is made.
  *
+ * The rule is the target's own: `chunk-0y0ptpy9.js:3856` reads
+ * `return n||t||o||!process.stdout.isTTY` over `--print`/`-p`, `--init-only`,
+ * `--sdk-url` and the stdout's TTY-ness.
+ *
+ * ## The documents a run writes
+ *
+ * **Established by reading the target's source.** The record is
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
+ * §2, and every claim there carries a file and a byte offset.
+ *
+ * | Format | stdout |
+ * |---|---|
+ * | `text` | the result document's `result` text, plus a newline |
+ * | `json` | **exactly one** document: the **result** document |
+ * | `stream-json` | **one document per line**, one per message, the **result** last |
+ *
+ * The **result document** is the target's own, and this module builds it: the
+ * member set, the member **order** and the nested shapes are the target's
+ * (`chunk-pj5cyqhw.js:300922` for the success variant, `:326977` for the error
+ * variant, `:178563` for the `usage` object and `:288789` for a
+ * `permission_denials` entry). The target builds the document by spreading the
+ * **common** members, then the **variant** members, then `type`, `duration_ms`
+ * and `uuid` (`chunk-pj5cyqhw.js:171561`), and this module does the same, so
+ * the members arrive on the wire in the target's order.
+ *
+ * **One deliberate divergence, named.** The target's error variant's `subtype`
+ * is one of `error_during_execution`, `error_max_turns`, `error_max_budget_usd`
+ * and `error_max_structured_output_retries`; this implementation's is `error`.
+ * The value is pinned by a contract test this milestone does not own
+ * (`tests/contracts/cli-surface.test.ts`), and the divergence is recorded in
+ * `docs/compatibility/command-surface.md`.
+ *
  * ## The events
  *
  * The run produces the **same** events whatever the output format is, and the
@@ -23,6 +55,12 @@
  *
  * **Implementation choice**: the event union is this implementation's own. The audit pins that the
  * `stream-json` format writes one object per event, and not what an event is.
+ * The target's own stream-json documents are the SDK message kinds —
+ * `system`/`init`, `assistant`, `user`, `stream_event` and `result`
+ * (`chunk-pj5cyqhw.js:333857`, `:261767`, `:239906`, `:352585`) — and this
+ * implementation's events are not those documents. The **result** document is
+ * the target's, because the target's `json` format writes exactly that
+ * document.
  *
  * ## The turn is the runtime's
  *
@@ -55,12 +93,262 @@
  * session model is a later milestone's surface.
  */
 
-import type { AgentRuntime } from '../agent/loop.js';
+import { randomUUID } from 'node:crypto';
+
+import type { AgentRuntime, TurnPermissionDenial, TurnUsage } from '../agent/loop.js';
 import { toolResultId, type SessionEvent } from '../session/event.js';
 
 import type { HeadlessEvent } from './output.js';
 
 export type { HeadlessEvent } from './output.js';
+
+/* -------------------------------------------------------------------------- */
+/* The documents                                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The token usage the target's result document carries.
+ *
+ * **The target's own shape** — `chunk-pj5cyqhw.js:178563` is the schema and
+ * `chunk-05nax923.js:11` is the target's **zeroed** usage object, which is the
+ * value a run that spent no tokens carries. The member **order** is the
+ * zeroed object's, because that is the order the target puts on the wire.
+ */
+export interface HeadlessUsage {
+  /** The thinking tokens, counted inside `output_tokens`. */
+  output_tokens_details: { thinking_tokens: number };
+  /** The input tokens the run spent. */
+  input_tokens: number;
+  /** The tokens written to the cache. */
+  cache_creation_input_tokens: number;
+  /** The tokens read from the cache. */
+  cache_read_input_tokens: number;
+  /** The output tokens the run spent. */
+  output_tokens: number;
+  /** The server-side tool requests the run made. */
+  server_tool_use: { web_search_requests: number; web_fetch_requests: number };
+  /** The service tier the run was served on. */
+  service_tier: string;
+  /** The cache writes, by their time to live. */
+  cache_creation: { ephemeral_1h_input_tokens: number; ephemeral_5m_input_tokens: number };
+  /** The geography the inference ran in. */
+  inference_geo: string;
+  /** The per-iteration usage, when the request ran several iterations. */
+  iterations: unknown[];
+  /** The speed the request ran at. */
+  speed: string;
+  /** The outcome of a fallback-credit token the request presented. */
+  fallback_credit: unknown;
+}
+
+/**
+ * The usage of one model, as the target's `modelUsage` records it.
+ *
+ * The target's own shape — `chunk-pj5cyqhw.js:180551`.
+ */
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  thinkingTokens?: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  webSearchRequests: number;
+  costUSD: number;
+  contextWindow: number;
+  maxOutputTokens: number;
+  canonicalModel?: string;
+  provider?: string;
+  costBasis?: 'list' | 'managed' | 'unknown';
+}
+
+/**
+ * A permission denial the target's result document carries.
+ *
+ * The target's own shape — `chunk-pj5cyqhw.js:288789`:
+ * `{tool_name, tool_use_id, tool_input}`.
+ */
+export interface PermissionDenial {
+  /** The tool the refused call named. */
+  tool_name: string;
+  /** The id of the refused call. */
+  tool_use_id: string;
+  /** The input the refused call would have run. */
+  tool_input: Record<string, unknown>;
+}
+
+/**
+ * The result document — the `json` format's **one** document, and the
+ * `stream-json` format's **last**.
+ *
+ * **The target's own document.** The member set and the member **order** are
+ * the target's: the target builds it by spreading the **common** members, then
+ * the **variant** members, and then `type`, `duration_ms` and `uuid`
+ * (`chunk-pj5cyqhw.js:171561`), and this module does the same.
+ *
+ * The members this implementation cannot fill are the target's own defaults:
+ * `total_cost_usd` is `0` (this implementation has no cost model — the
+ * target's own zeroed result carries `0` too, `chunk-05nax923.js:1868`),
+ * `modelUsage` is the empty record (the same member, the same default), and
+ * `duration_api_ms` is `0` (this implementation does not time the provider's
+ * requests separately from the turn).
+ */
+export interface ResultDocument {
+  /** Whether the run failed. */
+  is_error: boolean;
+  /** The time the run spent in provider requests. */
+  duration_api_ms: number;
+  /** The number of provider rounds the run made. */
+  num_turns: number;
+  /** The provider's own stop reason, when it reported one. */
+  stop_reason: string | null;
+  /** The session the run belonged to. */
+  session_id: string;
+  /** The cost the run incurred. */
+  total_cost_usd: number;
+  /** The token usage the run spent. */
+  usage: HeadlessUsage;
+  /** The usage, per model. */
+  modelUsage: Record<string, ModelUsage>;
+  /** The calls a permission rule refused. */
+  permission_denials: PermissionDenial[];
+  /** What the run was. */
+  subtype: 'success' | 'error';
+  /** The assistant's text. */
+  result: string;
+  /** The failures, when the run failed. */
+  errors?: string[];
+  /** The document's type. */
+  type: 'result';
+  /** How long the run took. */
+  duration_ms: number;
+  /** The document's id. */
+  uuid: string;
+}
+
+/**
+ * The target's **zeroed** usage object.
+ *
+ * `chunk-05nax923.js:11` — the usage a run that spent no tokens carries. The
+ * member order is that object's, because that is the order the target puts on
+ * the wire.
+ */
+export const ZERO_USAGE: HeadlessUsage = {
+  output_tokens_details: { thinking_tokens: 0 },
+  input_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+  output_tokens: 0,
+  server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+  service_tier: 'standard',
+  cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 },
+  inference_geo: '',
+  iterations: [],
+  speed: 'standard',
+  fallback_credit: null,
+};
+
+/**
+ * The usage a turn's accounting maps onto.
+ *
+ * The **runtime's** numbers — `src/agent/loop.ts` — in the target's wire
+ * shape. The members the runtime does not know stay at the target's own
+ * zeroed values.
+ */
+export function usageOf(usage: TurnUsage | undefined): HeadlessUsage {
+  return {
+    ...ZERO_USAGE,
+    output_tokens_details: { ...ZERO_USAGE.output_tokens_details },
+    server_tool_use: { ...ZERO_USAGE.server_tool_use },
+    cache_creation: { ...ZERO_USAGE.cache_creation },
+    iterations: [...ZERO_USAGE.iterations],
+    ...(usage === undefined
+      ? {}
+      : {
+          input_tokens: usage.inputTokens,
+          output_tokens: usage.outputTokens,
+          cache_creation_input_tokens: usage.cacheCreationInputTokens,
+          cache_read_input_tokens: usage.cacheReadInputTokens,
+        }),
+  };
+}
+
+/**
+ * The denials a turn's accounting maps onto.
+ *
+ * The **runtime's** records — `src/agent/loop.ts` — in the target's wire
+ * shape (`chunk-pj5cyqhw.js:288789`).
+ */
+export function denialsOf(
+  denials: readonly TurnPermissionDenial[] | undefined,
+): PermissionDenial[] {
+  if (denials === undefined) return [];
+  return denials.map((denial) => ({
+    tool_name: denial.toolName,
+    tool_use_id: denial.toolUseId,
+    tool_input: isPlainRecord(denial.input) ? denial.input : {},
+  }));
+}
+
+/** Whether a value is a plain record. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Build the result document.
+ *
+ * The **common** members, then the **variant** members, then `type`,
+ * `duration_ms` and `uuid` — the target's own order
+ * (`chunk-pj5cyqhw.js:171561`).
+ */
+export function buildResultDocument(input: {
+  /** Whether the run failed. */
+  isError: boolean;
+  /** The assistant's text. */
+  result: string;
+  /** The failures, when the run failed. */
+  errors?: readonly string[];
+  /** The provider's own stop reason. */
+  stopReason: string | null;
+  /** The session the run belonged to. */
+  sessionId: string;
+  /** How long the run took. */
+  durationMs: number;
+  /** The number of provider rounds the run made. */
+  numTurns: number;
+  /** The token usage the run spent. */
+  usage: HeadlessUsage;
+  /** The calls a permission rule refused. */
+  permissionDenials: PermissionDenial[];
+  /** The document's id. */
+  uuid: string;
+}): ResultDocument {
+  const common = {
+    is_error: input.isError,
+    duration_api_ms: 0,
+    num_turns: input.numTurns,
+    stop_reason: input.stopReason,
+    session_id: input.sessionId,
+    total_cost_usd: 0,
+    usage: input.usage,
+    modelUsage: {} as Record<string, ModelUsage>,
+    permission_denials: input.permissionDenials,
+  };
+  const variant = input.isError
+    ? {
+        subtype: 'error' as const,
+        result: input.result,
+        ...(input.errors !== undefined ? { errors: [...input.errors] } : {}),
+      }
+    : { subtype: 'success' as const, result: input.result };
+  return {
+    ...common,
+    ...variant,
+    type: 'result',
+    duration_ms: input.durationMs,
+    uuid: input.uuid,
+  };
+}
 
 /* -------------------------------------------------------------------------- */
 /* The options                                                                 */
@@ -110,15 +398,24 @@ export async function* runHeadless(options: HeadlessOptions): AsyncIterable<Head
   const failed = turn.stopReason === 'error' || turn.stopReason === 'aborted';
   const message = turn.message;
 
-  yield {
-    type: 'result',
+  // The result event **is** the target's result document: the same members, in
+  // the same order, so the `stream-json` format's last document is the target's
+  // document and the `json` format's one document is the same object.
+  yield buildResultDocument({
+    isError: failed,
     result: assistantText(turn.events),
-    is_error: failed,
-    stop_reason: turn.stopReason,
-    session_id: options.sessionId,
-    duration_ms: Math.max(0, now() - startedAt),
-    ...(failed && message !== undefined ? { error: message } : {}),
-  };
+    errors: failed && message !== undefined ? [message] : undefined,
+    // The **provider's** stop reason, when it reported one: the target's result
+    // document carries the provider's own reason, and it is nullable
+    // (`chunk-pj5cyqhw.js:326977`).
+    stopReason: turn.providerStopReason ?? null,
+    sessionId: options.sessionId,
+    durationMs: Math.max(0, now() - startedAt),
+    numTurns: turn.numTurns ?? 0,
+    usage: usageOf(turn.usage),
+    permissionDenials: denialsOf(turn.permissionDenials),
+    uuid: randomUUID(),
+  });
 }
 
 /* -------------------------------------------------------------------------- */

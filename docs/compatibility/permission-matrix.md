@@ -22,7 +22,9 @@ This implementation adds **no** reason kind: the vocabulary is the target's six,
 
 | Behavior | Evidence class | Notes |
 |---|---|---|
-| Precedence is deny → ask → allow | REA observed | |
+| Precedence is deny → ask → allow | REA observed | Read out of the target's own source: the record is `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md` §1. The target's core engine (`chunk-4jsg44k7.js:3749432`) consults the deny list at its first two steps, the ask list at its third and fifth, and the allow list at its seventh; the target's own written-out form of the order is the layer enumeration in `chunk-8fgrwnc5.js:238819` — `bare-deny` → `path-deny` → `path-rule-ask` → `bare-ask` → `path-mode-ask` → `allow`. |
+| The **mode does not change the order** | REA observed | The lists are consulted **before** the mode's own semantics, in every mode. The two places a mode touches a list are the target's: `bypassPermissions` never consults the **allow** list at all, and `plan` refuses a write **before** the allow list is consulted. |
+| The same command in two lists is decided by the **earlier** list | REA observed | A command in all three is **denied**; a command in the ask and the allow lists is an **ask**. Within one list the **first** matching rule is the rule that matched, and specificity is irrelevant. |
 | The **first** match wins and **specificity is irrelevant** | REA observed | A broad deny beats a narrower allow; an allow can never carve an exception out of a deny. |
 | Rules are **pure predicates** — they never rewrite the tool input | implementation choice, deliberate | Only **hooks** rewrite input. A rule that silently changed what runs would be a security defect. |
 | Compound commands split on `&&`, `\|\|`, `;`, `\|`, `\|&`, `&`, and newlines, each sub-command matched independently | Documented only | The pinned binary's splitting is not derived; the shape comes from the product documentation. |
@@ -45,7 +47,10 @@ This implementation adds **no** reason kind: the vocabulary is the target's six,
 |---|---|---|---|---|---|---|
 | `deny` | blocks | blocks | blocks | blocks | blocks | **blocks** |
 | `allow` | allows | allows | **never auto-approves an edit** | review decides | — | **no effect** |
-| `ask` | prompts | prompts | prompts | **still prompts** (the classifier may deny, but its allow never converts an ask into an allow) | **denies** | **still prompts** |
+| `ask` | prompts | prompts | prompts | **denies** — the check is one only a person may answer, and the auto mode asks no one | **denies** | **still prompts** |
+
+- The `auto` row is the target's own rule: the auto mode replaces the prompt with the classifier, so a check only a person may answer has nobody to answer it and the call is refused. The target's own message is *"Only the auto-mode classifier can allow `<tool>`: this call trips a check only a person may answer, and nobody is asked about this tool's calls"* (`chunk-4jsg44k7.js:1036375` and `:1035945`). The target applies the rule to a tool that declares an auto-mode classifier action; this implementation has no per-tool auto action, so the rule is applied to every tool in `auto` mode — the target's *rule* without the target's *condition*.
+- The `ask` row holds in **every** mode, `bypassPermissions` included: the ask list is consulted before the mode's own semantics, so the mode can never turn an ask into an allow.
 
 - `dontAsk` denies `AskUserQuestion`, MCP tools marked `requiresUserInteraction`, network-path reads, and org-ask connector tools **even if allow-listed**, and never consults `canUseTool`.
 - `acceptEdits` auto-approves the edit/write tool set plus `mkdir, touch, rm, rmdir, mv, cp, sed` — but only for paths inside the working directory or an **added** directory, and only after a symlink check. `rm`/`rmdir` on a **critical path** still prompt. The critical-path list is a **implementation choice** (root, home, the working directory and its ancestors, `~/.claude`, `~/.ssh`, `~/.aws`, `<cwd>/.git`); the audit names none.
@@ -133,7 +138,11 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | The decision vocabulary is exactly the four closed sets | REA observed | F-19 | `tests/contracts/permission-decision.test.ts` — "uses only the closed behavior, source and reason-type vocabularies" |
 | The **reason kinds** are exactly the target's six — `rule`, `subcommandResults`, `permissionPromptTool`, `sandboxOverride`, `workingDir`, `safetyCheck` — and there is no seventh | REA observed (audit §2.5) | F-21 | same file — "uses exactly the target's six reason kinds" |
 | The generic prompt — the ask that exists only because no rule matched — is the target's `permissionPromptTool`, and this implementation's own `noRuleMatched` marker says which prompt a hook's approval may replace | REA observed (the kind) + implementation choice (the marker) | F-21 | same file — "keeps the generic prompt's own reason text", "labels the acceptEdits no-rule-matched case as permissionPromptTool" |
-| Precedence is deny → ask → allow, first match wins, specificity irrelevant | REA observed | F-20 | same file — "rule precedence" |
+| Precedence is deny → ask → allow, first match wins, specificity irrelevant | REA observed | F-20 | same file — "rule precedence", "the precedence between the three lists" |
+| The **mode does not change the order**, and the ask list beats the allow list in every mode | REA observed | F-20 | same file — "does not let the mode change the order: the ask list beats the allow list in every mode" |
+| The same command in two lists is decided by the **earlier** list | REA observed | F-20 | same file — "lets the deny list win over the ask list and the allow list", "lets the ask list win over the allow list" |
+| An ask rule holds when the mode would otherwise allow the call | REA observed | F-20 | same file — "keeps the ask rule when the mode would otherwise allow the call" |
+| In `auto` mode an ask rule is a **denial**, because nobody is asked there | REA observed (the rule) + implementation choice (the per-tool condition) | F-20 | same file — "denies an ask rule in auto mode, because nobody is asked there" |
 | A rule never rewrites the tool input | implementation choice | F-20 | same file — "never rewrites the tool input from a rule" (compile-time `updatedInput?: never` pin) |
 | Compound commands split on all seven operators, with no sub-command cap | implementation choice | F-20 | `tests/security/permission-rules.test.ts` — the 51-part and 501-part tests |
 | An allow rule needs every sub-command; deny/ask fire on any | implementation choice | F-20 | same file |

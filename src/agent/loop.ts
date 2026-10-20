@@ -251,6 +251,7 @@ import type {
   ProviderMessage,
   ProviderRequest,
   StopReason,
+  Usage,
 } from '../provider/drivers/types.js';
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../session/event.js';
 import {
@@ -301,6 +302,37 @@ export interface TurnInput {
  */
 export type TurnStopReason = 'end_turn' | 'max_tokens' | 'tool_use' | 'aborted' | 'error';
 
+/**
+ * A permission denial the turn recorded.
+ *
+ * The **runtime's** record of a call a permission rule refused. The headless
+ * result document carries it in the target's wire shape
+ * (`tool_name`, `tool_use_id`, `tool_input`); the mapping lives in
+ * `src/cli/headless.ts`, so the runtime does not know the wire.
+ */
+export interface TurnPermissionDenial {
+  /** The tool the call named. */
+  toolName: string;
+  /** The id of the call. */
+  toolUseId: string;
+  /** The input the call would have run. */
+  input: unknown;
+}
+
+/**
+ * The token usage a turn accumulated.
+ *
+ * The **runtime's** accounting: the provider's own numbers, summed over the
+ * turn's rounds. The headless result document carries it in the target's wire
+ * shape; the mapping lives in `src/cli/headless.ts`.
+ */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
 /** One turn's result. */
 export interface TurnResult {
   /** The records the turn appended, in the order they were appended. */
@@ -324,6 +356,18 @@ export interface TurnResult {
    * that could not be opened from a provider that failed.
    */
   message?: string;
+  /**
+   * The number of provider rounds the turn made.
+   *
+   * The target's result document carries the count as `num_turns`
+   * (`chunk-pj5cyqhw.js:326977`), and the target's own builder sets it to the
+   * number of turns the loop ran (`chunk-e7w77ts3.js:353540`).
+   */
+  numTurns?: number;
+  /** The token usage the turn accumulated. */
+  usage?: TurnUsage;
+  /** The calls a permission rule refused. */
+  permissionDenials?: TurnPermissionDenial[];
 }
 
 /** The agent runtime. */
@@ -508,17 +552,43 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
   async function runTurn(input: TurnInput, signal?: AbortSignal): Promise<TurnResult> {
     const events: SessionEvent[] = [];
 
+    /**
+     * The turn's own accounting.
+     *
+     * The three members are the ones the target's result document carries
+     * (`num_turns`, `usage` and `permission_denials`); the runtime produces the
+     * numbers and the headless module shapes them into the document.
+     */
+    let numTurns = 0;
+    const usage: TurnUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    };
+    const permissionDenials: TurnPermissionDenial[] = [];
+
+    /** The turn's result, with the turn's own accounting attached. */
+    const accounted = (
+      result: Omit<TurnResult, 'numTurns' | 'usage' | 'permissionDenials'>,
+    ): TurnResult => ({
+      ...result,
+      numTurns,
+      usage: { ...usage },
+      permissionDenials: [...permissionDenials],
+    });
+
     let handle: SessionHandle;
     try {
       handle = await handleFor(input.sessionId);
     } catch (error) {
       // The session could not be opened: there is nowhere to record the turn,
       // so the turn reports the store's own reason instead of a bare `error`.
-      return {
+      return accounted({
         events,
         stopReason: 'error',
         message: `The session '${input.sessionId}' could not be opened: ${messageOf(error)}`,
-      };
+      });
     }
 
     /**
@@ -550,7 +620,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         t: 'provider_event',
         event: { type: 'error', message: ABORTED_MESSAGE, retryable: false },
       });
-      return { events, stopReason: 'aborted', message: ABORTED_MESSAGE };
+      return accounted({ events, stopReason: 'aborted', message: ABORTED_MESSAGE });
     };
 
     /** The turn failed. */
@@ -560,7 +630,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
         t: 'provider_event',
         event: { type: 'error', message, retryable: false },
       });
-      return { events, stopReason: 'error', message };
+      return accounted({ events, stopReason: 'error', message });
     };
 
     /**
@@ -625,14 +695,25 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 
         const summary = summarise(collected.events);
 
+        // The round is a provider request: it counts as a turn, and its usage
+        // joins the turn's total. The stream's `message_stop` carries the
+        // **cumulative** usage of the request, so the last one is the round's.
+        numTurns += 1;
+        if (summary.usage !== undefined) {
+          usage.inputTokens += summary.usage.inputTokens ?? 0;
+          usage.outputTokens += summary.usage.outputTokens ?? 0;
+          usage.cacheCreationInputTokens += summary.usage.cacheCreationInputTokens ?? 0;
+          usage.cacheReadInputTokens += summary.usage.cacheReadInputTokens ?? 0;
+        }
+
         // The provider reported an error: the turn ends with it.
         if (summary.error !== undefined) {
-          return {
+          return accounted({
             events,
             stopReason: 'error',
             providerStopReason: summary.stopReason,
             message: summary.error.message,
-          };
+          });
         }
 
         if (summary.text !== '') {
@@ -641,11 +722,11 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 
         // No pending tool call: the turn ends with the provider's stop reason.
         if (summary.calls.length === 0) {
-          return {
+          return accounted({
             events,
             stopReason: mapStopReason(summary.stopReason),
             providerStopReason: summary.stopReason,
-          };
+          });
         }
 
         // The tool calls of this assistant message. A provider that sends an
@@ -701,6 +782,19 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           // The answer the model observes: the call's own result, or — for a
           // refusal — the `<tool_use_error>` wrapper the target produces.
           const answer = outcome.kind === 'refused' ? refusalEnvelope(envelope) : envelope;
+
+          // A call a permission rule refused is a **denial** the turn records:
+          // the target's result document carries the denials in its
+          // `permission_denials` member, and this is where the runtime learns
+          // of them. A call the registry does not hold is not a denial — no
+          // permission was ever asked for it.
+          if (outcome.kind === 'refused' && isPermissionDenial(envelope)) {
+            permissionDenials.push({
+              toolName: call.name,
+              toolUseId: call.id,
+              input: call.input,
+            });
+          }
 
           // The **within-turn** push is stubbed too. The content-replacement
           // mechanism exists so that an oversized tool result does not come
@@ -783,11 +877,11 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           // The turn ends with the refusal. The stop reason is the provider's
           // own, mapped: a provider that stopped with `max_tokens` is reported
           // as `max_tokens`, not as `tool_use`.
-          return {
+          return accounted({
             events,
             stopReason: mapStopReason(summary.stopReason),
             providerStopReason: summary.stopReason,
-          };
+          });
         }
 
         // The assistant's message and the results go into the conversation, and
@@ -1081,6 +1175,13 @@ interface TurnSummary {
   stopReason: StopReason | undefined;
   /** The error the provider reported, when it reported one. */
   error: Extract<ProviderEvent, { type: 'error' }> | undefined;
+  /**
+   * The cumulative usage the stream reported.
+   *
+   * The wire's `message_delta` usage is **cumulative**, so the last
+   * `message_stop` of the round carries the round's total.
+   */
+  usage: Usage | undefined;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1094,6 +1195,7 @@ function summarise(events: ProviderEvent[]): TurnSummary {
   let text = '';
   let stopReason: StopReason | undefined;
   let error: Extract<ProviderEvent, { type: 'error' }> | undefined;
+  let usage: Usage | undefined;
   for (const event of events) {
     switch (event.type) {
       case 'text_delta':
@@ -1101,6 +1203,8 @@ function summarise(events: ProviderEvent[]): TurnSummary {
         break;
       case 'message_stop':
         stopReason = event.stopReason;
+        // The stream's usage is cumulative, so the last one is the round's total.
+        if (event.usage !== undefined) usage = event.usage;
         break;
       case 'error':
         error = event;
@@ -1109,7 +1213,22 @@ function summarise(events: ProviderEvent[]): TurnSummary {
         break;
     }
   }
-  return { text, calls: toolCallsFrom(events), stopReason, error };
+  return { text, calls: toolCallsFrom(events), stopReason, error, usage };
+}
+
+/**
+ * Whether a refused call is a **permission denial**.
+ *
+ * The target's result document carries the calls a permission rule refused in
+ * its `permission_denials` member. Two refusals are denials: the call a rule
+ * **denied**, and the call that **asked** and had nobody to ask — with no
+ * prompt surface an ask is terminal, so it is an implicit denial. A call the
+ * registry does not hold is not a denial: no permission was ever asked for it.
+ */
+function isPermissionDenial(envelope: ToolResultEnvelope): boolean {
+  const kind = envelope.non_execution_kind;
+  if (kind === 'permission_denied' || kind === 'permission_unresolved') return true;
+  return envelope.permission_decision?.decision === 'deny';
 }
 
 /**
