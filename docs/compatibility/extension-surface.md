@@ -149,6 +149,25 @@ The tool that saves a skill is described by a capability set (`review`, `card`, 
 
 The mode is selected as follows: a **remote call**, or a call with an `agentId`, or a file list containing no `skill.md` (compared case-insensitively by basename), all select `report_unsaved`. Otherwise the session's tools are inspected: when the mode would be `send_file` but there is no send-capable tool, the answer is `no_save_tool`; otherwise the mode stands. The folder note is appended only for a known mode.
 
+## The extension-point registry
+
+The target exposes a fixed set of extension points, and a plugin or SDK host registers a handler for each:
+
+```
+tool.call        tool.check         tool.describe      command.run      command.describe
+config.set       config.describe    telemetry.log      telemetry.mark   prompt.submit
+prompt.fill      prompt.edit        prompt.change      prompt.autocomplete
+prompt.suggest   prompt.section     prompt.context     prompt.attachment
+prompt.mention   prompt.compose     agent.offer        agent.spawn      skill.prompt
+attribution.text session.start     session.receive    session.append   session.send
+session.compact  session.attach     session.detach     session.measure  session.end
+turn.start       turn.step          turn.complete      ui.scroll        ui.focus
+```
+
+Two carry a documented default. `tool.call` is given a `tool_use_id` when the caller did not supply one, of the form `toolu_<uuid without dashes>`. `telemetry.log` is given a destination of `anthropic` unless the caller asked for `collector`.
+
+**The skill frontmatter rule.** A skill's frontmatter must carry a **text** description. The `skill.prompt` extension point validates it: it finds the first of `source`, `pluginName`, `path`, or `frontmatterProblem` whose value is not a string, and throws `$.skill.prompt: called with a frontmatter that <that> is no text`; when the frontmatter is itself a plain string it throws `$.skill.prompt: called with a frontmatter that is no text`. The resolved skill then carries a `source`, defaulting to `built-in`.
+
 ## Plugins
 
 ### The marketplace install flow
@@ -183,3 +202,5 @@ The result of `installPluginFromMarketplace` carries `{ success, message, depNot
 | The skill override modes are exactly four, and the resolution order is settings → session → policy/flag | REA observed | `tests/contracts/extensions.test.ts` (the `CC-013` task) |
 | The skill-save protocol selects its mode by the target's rule and uses the target's wording | REA observed | same file |
 | The marketplace install reports the disable reason, the enable hint, and distinguishes refused from failed | REA observed | same file |
+| The extension-point registry is the fixed set above, with `tool.call`'s generated `tool_use_id` and `telemetry.log`'s default destination | REA observed | same file |
+| The skill frontmatter must carry a text description, and the target's exact error text is used | REA observed | same file |
