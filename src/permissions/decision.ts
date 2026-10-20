@@ -53,6 +53,32 @@
  * approval. A hook approval that carries `classifierApprovable: false` cannot be
  * laundered into an approval by the auto-mode review.
  *
+ * **IMPLEMENTATION CHOICE (CC-007b) — the `PreToolUse` hook seam.** The target changed the
+ * `PreToolUse` behaviour in a later release without a deprecation warning, so the
+ * target's own behaviour at `2.1.303` is ambiguous from the outside. This implementation
+ * picks the **stricter** of the target's two behaviours, and this header is where
+ * that choice is recorded:
+ *
+ *   - **an `allow` never overrides a deny or an ask rule** — a `PreToolUse` hook's
+ *     approval cannot rescue a call the rules refuse, in any mode;
+ *   - **a `deny` holds in every mode, `bypassPermissions` included** — a
+ *     `PreToolUse` hook's denial is a denial the mode dispatch never sees.
+ *
+ * The seam is the `preToolUseHook` member of `CheckPermissionOptions`, and its call
+ * site is **after the ask list and before the mode's semantics**: the rules speak
+ * first, the hook speaks second, and the mode speaks last. The `PermissionRequest`
+ * seam is consulted in the same place, and the **stricter** of the two decisions
+ * wins, so the two seams can never cancel each other.
+ *
+ * **A `PreToolUse` hook's rewrite is checked again, in full.** The rewrite is the
+ * input the tool would receive, so the whole check runs again against the
+ * **effective** input — the same rules, the same mode, the same safety check — and
+ * the re-check may only **restrict** the call. The re-check's hook keeps its
+ * denial but loses its approval and its rewrite, because the approval was given
+ * for the original call. The `PermissionRequest` seam's rewrite is re-checked by
+ * the tool runner instead (`src/tools/runner.ts`), which owns the write path; the
+ * `PreToolUse` seam has no such runner, so the permission engine re-checks it.
+ *
  * **A hook approval replaces only the generic prompt.** The case where no rule
  * matched at all (`noRuleMatch`) is the one the hook's approval replaces; the
  * **escalation** of a compound command an allow rule covered only in part
@@ -104,6 +130,17 @@
  *     key, so it is resolved through the **observed** `TOP_LEVEL_KEY_ORDER`
  *     (`policySettings`, `flagSettings`, `userSettings`). The project-side tiers
  *     are not part of that observed order, so they do not define a `defaultMode`.
+ *   - **The `PreToolUse` seam's strictness is a implementation choice** — see the
+ *     `IMPLEMENTATION CHOICE (CC-007b)` paragraph above. This implementation picks the stricter of the
+ *     target's two behaviours, and the choice is pinned by
+ *     `tests/contracts/permission-hook.test.ts`.
+ *   - **An `ask` from a `PreToolUse` hook is the pending question** and **a `defer`
+ *     is no opinion**: the permission decision vocabulary has exactly three
+ *     behaviors (`allow`, `deny`, `ask`), so a deferral has no word in it and the
+ *     normal permission path decides.
+ *   - The permission layer owns its **own** strictness table (`allow` < `ask` <
+ *     `deny`). The hooks module has one of its own — it ranks four values, because
+ *     it knows `defer` — and the permission layer does not depend on it.
  */
 
 import path from 'node:path';
@@ -275,6 +312,24 @@ export interface CheckPermissionOptions {
    */
   hook?: (ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
   /**
+   * The `PreToolUse` hook, run **after the deny list and the ask list** and
+   * **before the mode's semantics**.
+   *
+   * The hook may deny the call, approve it, ask for the user's decision, and
+   * rewrite the tool input. Its **allow never overrides a deny rule or an ask
+   * rule**, and its **deny holds in every mode**, `bypassPermissions` included:
+   * that is this implementation's pick of the stricter of the target's two behaviours, and
+   * it is recorded in the module header.
+   *
+   * The option's type is the plan's, so a caller written against the plan works
+   * unchanged. The hooks module's approval carries no `source` and no
+   * `reasonType`, so it is mapped into a `PermissionDecision` by
+   * `createPreToolUseHook` in `src/permissions/prompts.ts`.
+   */
+  preToolUseHook?: (
+    ctx: ToolContext,
+  ) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
+  /**
    * The prompt. Only consulted for a decision that would prompt, and **never** in
    * `dontAsk`.
    */
@@ -360,6 +415,43 @@ export const PERSISTED_RULES_SETTINGS_PATH = '.claude/settings.local.json';
 
 /** The maximum number of rules the "don't ask again" affordance persists. */
 export const MAX_PERSISTED_RULES = 5;
+
+/**
+ * The strictness of a permission behavior.
+ *
+ * The audit's table is `allow: 1`, `ask: 2`, `deny: 3`: the **stricter** decision
+ * wins a merge, and the reason is taken from the stricter one.
+ *
+ * The table lives in the **permission layer** because the permission vocabulary
+ * has no `defer`: the hooks module ranks four values, because it knows `defer`,
+ * and the permission layer must not depend on it. The keys are the closed
+ * behavior vocabulary, so a lookup can only ever name one of the three values.
+ */
+export const PERMISSION_STRICTNESS: Readonly<Record<PermissionBehavior, number>> = Object.freeze({
+  allow: 1,
+  ask: 2,
+  deny: 3,
+});
+
+/**
+ * The strictness of a behavior.
+ *
+ * A behavior outside the closed vocabulary — which the types forbid, but a
+ * caller can still build at runtime — is treated as the **strictest**: the
+ * permission engine fails closed.
+ */
+export function permissionStrictness(behavior: PermissionBehavior): number {
+  switch (behavior) {
+    case 'deny':
+      return PERMISSION_STRICTNESS.deny;
+    case 'ask':
+      return PERMISSION_STRICTNESS.ask;
+    case 'allow':
+      return PERMISSION_STRICTNESS.allow;
+    default:
+      return PERMISSION_STRICTNESS.deny;
+  }
+}
 
 /**
  * Resolve the `manual` alias.
@@ -516,8 +608,11 @@ interface HookApproval {
  * The order is: the host-level gates first (they block everything), then the
  * safety check (independent of the rule engine and holding in every mode), then
  * the deny list (a deny rule blocks in every mode), then the ask list, then the
- * `PermissionRequest` hook (an approval never overrides a deny or an ask rule),
- * and finally the mode's own semantics.
+ * two hook seams — the `PreToolUse` seam and the `PermissionRequest` seam, whose
+ * **stricter** decision wins — and finally the mode's own semantics.
+ *
+ * Neither hook seam can override a deny or an ask rule, and a denial from either
+ * holds in every mode, `bypassPermissions` included.
  */
 export async function checkPermission(
   ctx: ToolContext,
@@ -554,31 +649,163 @@ export async function checkPermission(
   // 3. The ask list. An ask rule beats a hook approval.
   const asked = evaluateRuleList(rules, rules.ask, 'ask', ctx);
 
-  // 4. The hook runs **after** the deny list, so an approval can never override a
-  //    deny rule, and an ask rule is never overridden by it either.
+  // 4. The hook seams. Both run **after** the deny list, so an approval can never
+  //    override a deny rule, and an ask rule is never overridden by one either. A
+  //    denial from either seam holds in every mode: it is returned immediately,
+  //    before the mode dispatch ever runs.
+  const preToolUse = opts.preToolUseHook ? await opts.preToolUseHook(ctx) : undefined;
+  if (preToolUse?.behavior === 'deny') return attachWarnings(preToolUse, warnings);
+
+  const permissionRequest = opts.hook ? await opts.hook(ctx) : undefined;
+  if (permissionRequest?.behavior === 'deny') return attachWarnings(permissionRequest, warnings);
+
+  // The **stricter** of the two decisions wins, so the two seams cannot cancel
+  // each other: an approval on one side cannot cancel a denial on the other.
+  const hookDecision = combineHookDecisions(preToolUse, permissionRequest);
+
   let hookApproval: HookApproval | undefined;
-  const hookDecision = opts.hook ? await opts.hook(ctx) : undefined;
-  if (hookDecision) {
-    if (hookDecision.behavior === 'deny') return attachWarnings(hookDecision, warnings);
-    if (hookDecision.behavior === 'allow') {
-      hookApproval = { decision: hookDecision, overridden: asked !== undefined };
-    }
+  if (hookDecision?.behavior === 'allow') {
+    hookApproval = { decision: hookDecision, overridden: asked !== undefined };
   }
 
   // 5. The mode's own semantics.
-  const decision = applyHookApproval(
+  let decision = applyHookApproval(
     await decideForMode(ctx, opts, mode, rules, asked, hookApproval),
     hookApproval,
   );
 
-  // 6. The prompt is consulted for a decision that would prompt — never in
+  // 6. A hook that asked: the call is the pending question. An ask is stricter
+  //    than an allow, so it replaces one; a denial stands, and an ask that is
+  //    already there keeps the reason it came with.
+  if (hookDecision?.behavior === 'ask' && decision.behavior === 'allow') {
+    decision = hookAskDecision(hookDecision);
+  }
+
+  // 7. The rewrite. The `PreToolUse` seam's rewrite is the input the tool would
+  //    receive, so the whole check runs again against the **effective** input.
+  let promptCtx = ctx;
+  const effectiveInput = hookDecision?.updatedInput;
+  if (preToolUse?.updatedInput !== undefined && effectiveInput !== undefined) {
+    const rechecked = await recheckEffectiveInput(ctx, opts, effectiveInput);
+    // The re-check may only **restrict** the call: the stricter verdict wins.
+    decision = stricterDecision(decision, rechecked);
+    if (decision.updatedInput === undefined) {
+      decision = { ...decision, updatedInput: effectiveInput };
+    }
+    // The prompt shows the call that will really run.
+    promptCtx = { ...ctx, input: effectiveInput };
+  }
+
+  // 8. The prompt is consulted for a decision that would prompt — never in
   //    `dontAsk`, which denies instead of asking.
   if (decision.behavior === 'ask' && mode !== 'dontAsk' && opts.canUseTool) {
-    const resolved = await opts.canUseTool(ctx, decision);
+    const resolved = await opts.canUseTool(promptCtx, decision);
     if (resolved) return attachWarnings(resolved, warnings);
   }
 
   return attachWarnings(withReason(decision, ctx.toolName), warnings);
+}
+
+/**
+ * The stricter of two decisions.
+ *
+ * The re-check of a rewritten input may only **restrict** the call: it never
+ * widens what the first check allowed. A `deny` wins over everything, an `ask`
+ * wins over an `allow`, and two `allow`s are the first one.
+ */
+function stricterDecision(first: PermissionDecision, second: PermissionDecision): PermissionDecision {
+  return permissionStrictness(second.behavior) > permissionStrictness(first.behavior)
+    ? second
+    : first;
+}
+
+/**
+ * The decision the two hook seams make together.
+ *
+ * The **stricter** decision wins, and the reason is taken from the stricter one —
+ * the audit's merge rule. A tie goes to the `PermissionRequest` seam, because it
+ * is the later event.
+ *
+ * A rewrite is never lost: when the decision that won carries no rewrite but the
+ * other seam did, the rewrite rides along, because it is the input the tool would
+ * receive.
+ */
+function combineHookDecisions(
+  preToolUse: PermissionDecision | undefined,
+  permissionRequest: PermissionDecision | undefined,
+): PermissionDecision | undefined {
+  if (preToolUse === undefined) return permissionRequest;
+  if (permissionRequest === undefined) return preToolUse;
+
+  const winner =
+    permissionStrictness(permissionRequest.behavior) >= permissionStrictness(preToolUse.behavior)
+      ? permissionRequest
+      : preToolUse;
+  const loser = winner === permissionRequest ? preToolUse : permissionRequest;
+  if (winner.updatedInput !== undefined) return winner;
+  if (loser.updatedInput === undefined) return winner;
+  return { ...winner, updatedInput: loser.updatedInput };
+}
+
+/**
+ * A hook's question, as the decision layer sees it.
+ *
+ * The hook asked for a human decision, so the call is the pending question. The
+ * reason the hook gave is kept; a hook that gave none gets the default text.
+ */
+function hookAskDecision(decision: PermissionDecision): PermissionDecision {
+  const reason = decision.reason ?? 'A hook asked for this call to be approved.';
+  return { ...decision, behavior: 'ask', reason, message: decision.message ?? reason };
+}
+
+/**
+ * The hook a **re-check** sees.
+ *
+ * The re-check evaluates the input a hook rewrote, so the hook's **approval** must
+ * not rescue that input: the approval was given for the original call, and a
+ * rewrite must not be able to launder itself through the very hook that performed
+ * it. The hook's **denial** still speaks, though — a hook that denies a path must
+ * not be bypassed by a rewrite onto that path — and the hook's rewrite is
+ * dropped, because the rewrite has already been applied.
+ */
+function denialOnly(
+  hook:
+    | ((ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>)
+    | undefined,
+): ((ctx: ToolContext) => Promise<PermissionDecision | undefined>) | undefined {
+  if (hook === undefined) return undefined;
+  return async (ctx: ToolContext) => {
+    const decision = await hook(ctx);
+    if (decision === undefined) return undefined;
+    if (decision.behavior === 'deny') return decision;
+    return undefined;
+  };
+}
+
+/**
+ * The whole check, run again for a rewritten input.
+ *
+ * It is the same check the original input received — the same rules, the same
+ * mode, the same safety check — with the **effective** (rewritten) input, so a
+ * rewrite cannot escape the deny list, the ask list, the allow scope or the mode
+ * dispatch.
+ *
+ * The **hooks** are the one difference: they keep their denial and lose their
+ * approval and their rewrite (see `denialOnly`). The **prompt** is not consulted
+ * either: it is consulted once, for the final decision.
+ */
+async function recheckEffectiveInput(
+  ctx: ToolContext,
+  opts: CheckPermissionOptions,
+  effectiveInput: unknown,
+): Promise<PermissionDecision> {
+  const effectiveCtx: ToolContext = { ...ctx, input: effectiveInput };
+  return checkPermission(effectiveCtx, {
+    ...opts,
+    preToolUseHook: denialOnly(opts.preToolUseHook),
+    hook: denialOnly(opts.hook),
+    canUseTool: undefined,
+  });
 }
 
 /**

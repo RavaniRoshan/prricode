@@ -11,6 +11,13 @@
  * input is never executed. The rule engine lives in `src/permissions/rules.ts` and
  * never rewrites anything.
  *
+ * **The `PreToolUse` seam goes through the same path.** `createPreToolUseHook` maps
+ * the hooks module's `PreToolUse` approval into the permission decision vocabulary
+ * and runs the tool's validator and the safety check against the **effective**
+ * input, exactly as the `PermissionRequest` seam does. The mapping lives here, in
+ * the permission layer, because the approval the hooks module produces carries a
+ * `decision.behavior` and nothing else.
+ *
  * **A safety check is independent of the rule engine.** A `PermissionRequest` hook
  * may approve a WebFetch whose approved arguments the tool cannot verify; the fetch
  * is then refused, and the refusal is **not** reported as a user denial — it is a
@@ -165,6 +172,37 @@ export interface PermissionRequestHookApproval {
   classifierApprovable?: boolean;
 }
 
+/**
+ * The behaviors a hook's approval can carry.
+ *
+ * The `PermissionRequest` seam only ever sees `allow` and `deny` — the audit names
+ * those two for a permission-request decision. The `PreToolUse` seam also
+ * understands `ask` and `defer`.
+ */
+export type HookApprovalBehavior = 'allow' | 'deny' | 'ask' | 'defer';
+
+/**
+ * A hook's approval, in the shape the permission layer maps into a decision.
+ *
+ * The hooks module's approval (`PermissionRequestHookApproval`) is a **narrower**
+ * shape of this one, so it is assignable to it: the seam is reused rather than
+ * duplicated.
+ */
+export interface HookApproval {
+  /** The hook event name. */
+  hookEventName?: string;
+  /** The hook's decision. */
+  decision?: { behavior: HookApprovalBehavior; reason?: string };
+  /** The rewritten tool input. */
+  updatedInput?: unknown;
+  /**
+   * Whether a classifier may turn this approval into an allow.
+   *
+   * `false` marks an approval that must not be laundered by the auto-mode review.
+   */
+  classifierApprovable?: boolean;
+}
+
 /** A tool's own input validation. */
 export type ToolInputValidator = (
   input: unknown,
@@ -177,32 +215,36 @@ export interface HookApprovalOptions {
   safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
   /** The tool's own validator, run against the rewritten input. */
   validate?: ToolInputValidator;
+  /**
+   * The name of the hook event, used in the reason text.
+   *
+   * It defaults to `PermissionRequest`, the seam this module was written for.
+   */
+  hookName?: string;
 }
 
 /**
- * Apply a `PermissionRequest` hook approval to a tool call.
+ * The outcome of checking a hook's rewritten input.
  *
- * Returns `undefined` when the hook did not decide anything, so the caller can
- * continue with the ordinary rule evaluation.
+ * The check runs on the **effective** input — the input the tool would act on —
+ * because that is the input the tool's own validator and the safety check have to
+ * judge.
  */
-export function applyPermissionRequestHook(
-  hook: PermissionRequestHookApproval | undefined,
+type RewriteCheck = { ok: true } | { ok: false; decision: PermissionDecision };
+
+/**
+ * Check the input a hook rewrote.
+ *
+ * The tool's own validator runs first: a rewritten input the tool rejects denies
+ * the call, because the rewritten input is never executed. The safety check runs
+ * next, on the same effective input: a refusal is a `safetyCheck`, never a user
+ * denial.
+ */
+function checkRewrittenInput(
+  hook: HookApproval,
   ctx: ToolContext,
-  opts: HookApprovalOptions = {},
-): PermissionDecision | undefined {
-  if (!hook) return undefined;
-
-  const behavior = hook.decision?.behavior;
-  if (behavior === 'deny') {
-    return {
-      behavior: 'deny',
-      source: 'hook',
-      reasonType: 'other',
-      reason: hook.decision?.reason ?? 'A PermissionRequest hook denied this call.',
-    };
-  }
-  if (behavior !== 'allow') return undefined;
-
+  opts: HookApprovalOptions,
+): RewriteCheck {
   const rewritten = hook.updatedInput !== undefined;
   const effective = rewritten ? hook.updatedInput : ctx.input;
   const effectiveCtx: ToolContext = { ...ctx, input: effective };
@@ -212,13 +254,15 @@ export function applyPermissionRequestHook(
   if (opts.validate) {
     const validation = opts.validate(effective, effectiveCtx);
     if (!validation.ok) {
-      const code =
-        validation.errorCode === undefined ? '' : ` (error ${validation.errorCode})`;
+      const code = validation.errorCode === undefined ? '' : ` (error ${validation.errorCode})`;
       return {
-        behavior: 'deny',
-        source: 'hook',
-        reasonType: 'other',
-        reason: `A hook rewrote the tool input and the tool rejected it${code}: ${validation.message}`,
+        ok: false,
+        decision: {
+          behavior: 'deny',
+          source: 'hook',
+          reasonType: 'other',
+          reason: `A hook rewrote the tool input and the tool rejected it${code}: ${validation.message}`,
+        },
       };
     }
   }
@@ -228,18 +272,124 @@ export function applyPermissionRequestHook(
   const safety = opts.safetyCheck?.(effectiveCtx);
   if (safety) {
     // The refusal is a safety check, never a user denial.
-    return { ...safety, source: 'hook' };
+    return { ok: false, decision: { ...safety, source: 'hook' } };
   }
+
+  return { ok: true };
+}
+
+/**
+ * Apply a `PermissionRequest` hook approval to a tool call.
+ *
+ * Returns `undefined` when the hook did not decide anything, so the caller can
+ * continue with the ordinary rule evaluation.
+ */
+export function applyPermissionRequestHook(
+  hook: HookApproval | undefined,
+  ctx: ToolContext,
+  opts: HookApprovalOptions = {},
+): PermissionDecision | undefined {
+  if (!hook) return undefined;
+
+  const hookName = opts.hookName ?? 'PermissionRequest';
+  const behavior = hook.decision?.behavior;
+  if (behavior === 'deny') {
+    return {
+      behavior: 'deny',
+      source: 'hook',
+      reasonType: 'other',
+      reason: hook.decision?.reason ?? `A ${hookName} hook denied this call.`,
+    };
+  }
+  if (behavior !== 'allow') return undefined;
+
+  const checked = checkRewrittenInput(hook, ctx, opts);
+  if (!checked.ok) return checked.decision;
 
   const decision: PermissionDecision = {
     behavior: 'allow',
     source: 'hook',
     reasonType: 'other',
-    reason: 'A PermissionRequest hook approved this call.',
+    reason: `A ${hookName} hook approved this call.`,
   };
-  if (rewritten) decision.updatedInput = hook.updatedInput;
+  if (hook.updatedInput !== undefined) decision.updatedInput = hook.updatedInput;
   if (hook.classifierApprovable === false) decision.classifierApprovable = false;
   return decision;
+}
+
+/**
+ * The `PreToolUse` seam of `checkPermission`.
+ *
+ * The returned callback is the `preToolUseHook` option of a permission check: it
+ * runs the `PreToolUse` hooks for the tool call and maps their approval into the
+ * permission decision vocabulary.
+ *
+ * **The shape adaptation lives here.** The hooks module's approval carries a
+ * `decision.behavior` and nothing else — no `source`, no `reasonType`, no
+ * `message` — so it is mapped into a `PermissionDecision` inside the permission
+ * layer. The option's own type stays the plan's:
+ * `(ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>`.
+ * A caller written against the plan therefore still works, and the hooks module's
+ * `createPreToolUseApproval` plugs straight in.
+ *
+ * **The rewrite goes through the same path as the `PermissionRequest` seam**: the
+ * tool's own validator and the safety check run against the **effective** input,
+ * so a rewritten input the tool rejects denies the call.
+ *
+ * **An `ask` is the pending question** and **a `defer` is no opinion** — the
+ * implementation's pick, pinned by `tests/contracts/permission-hook.test.ts`:
+ *
+ *   - an `ask` means the hook wants a human decision, and the permission
+ *     vocabulary has an exact word for it, so the call becomes the question the
+ *     prompt asks;
+ *   - a `defer` has **no** word in the permission vocabulary — the decision
+ *     behaviors are exactly `allow`, `deny` and `ask` — so it is an absence of
+ *     opinion, and the normal permission path decides. Inventing a fourth
+ *     behavior would break the closed vocabulary the target defines.
+ */
+export function createPreToolUseHook(opts: {
+  /** The hook's own approval, or `undefined` when the hook did not decide. */
+  approval: (ctx: ToolContext) => HookApproval | undefined | Promise<HookApproval | undefined>;
+  /** The safety check, run against the rewritten input. */
+  safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
+  /** The tool's own validator, run against the rewritten input. */
+  validate?: ToolInputValidator;
+}): (ctx: ToolContext) => Promise<PermissionDecision | undefined> {
+  return async (ctx: ToolContext) => {
+    const approval = await opts.approval(ctx);
+    if (approval === undefined) return undefined;
+
+    const behavior = approval.decision?.behavior;
+    // An approval without a decision expresses no opinion.
+    if (behavior === undefined) return undefined;
+    // A deferral is no opinion: the normal permission path decides.
+    if (behavior === 'defer') return undefined;
+
+    if (behavior === 'ask') {
+      const checked = checkRewrittenInput(approval, ctx, opts);
+      if (!checked.ok) return checked.decision;
+
+      const reason =
+        approval.decision?.reason ?? 'A PreToolUse hook asked for this call to be approved.';
+      const decision: PermissionDecision = {
+        behavior: 'ask',
+        source: 'hook',
+        reasonType: 'other',
+        reason,
+        message: reason,
+      };
+      if (approval.updatedInput !== undefined) decision.updatedInput = approval.updatedInput;
+      if (approval.classifierApprovable === false) decision.classifierApprovable = false;
+      return decision;
+    }
+
+    // `allow` and `deny` go through the same path as the `PermissionRequest` seam.
+    return applyPermissionRequestHook(approval, ctx, {
+      safetyCheck: opts.safetyCheck,
+      validate: opts.validate,
+      hookName: 'PreToolUse',
+    });
+  };
 }
 
 /**
