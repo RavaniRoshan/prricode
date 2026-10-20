@@ -2229,18 +2229,56 @@ refusal that names the capability, and the overlay's filtering.
 
 **Files:** Modify `src/cli/args.ts`; Modify `src/cli/command.ts`; Modify `tests/contracts/cli-surface.test.ts`; Modify `docs/compatibility/command-surface.md`.
 
-- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+- [x] **Step 1: Read the surface from the source** and record it — the names, the shape,
   the behaviour, the file and the offset for every claim.
-- [ ] **Step 2: Write the failing test** for what the reading established.
-- [ ] **Step 3: Implement** it, and the rules that govern it.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+- [x] **Step 2: Write the failing test** for what the reading established.
+- [x] **Step 3: Implement** it, and the rules that govern it.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Update the conformance documents and the report** — the surface is named,
   and the report says what was compared.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
   ```bash
   git add src tests/contracts docs/compatibility
   git commit -m "feat: the cli surface: the complete flag list and the subcommand tree"
   ```
+
+
+**Result:** the target's command-line surface is here. The **complete** flag vocabulary —
+**85** value-taking, **11** repeatable, **14** optional-value, **45** boolean, **10** command
+tokens and **144** argument hints — and the **command tree** of **77** entries in **8**
+groups, with the target's own paths, usages, aliases and hidden flags.
+
+**69 commands** each dispatch and are **refused with the capability they need** — the plugin
+manager, the MCP *configuration* surface, the account sign-in, the auto-mode classifier
+config, the Windows sandbox, the project purge, the gateway, the autoupdater, the native
+build installer, the importers, the remote control and the editor bridge are other
+milestones or other products. **125 flags** the run does not act on are refused rather than
+silently ignored: the run acts on 19.
+
+**Five discrepancies with the sweep's record, and the source won every time** — including
+the one that mattered most:
+
+| # | The record | The source |
+|---|---|---|
+| 1 | "roughly ninety value-taking, forty boolean" | exactly **85** (+3) and **45** |
+| 2 | the **boolean** set consumes the next non-flag token; `-r`/`--resume` is the optional-value flag | booleans consume **nothing**; the optional-value set has **14** members |
+| 3 | "~60 subcommands in eight groups" | **77** entries, 8 groups, 69 commands |
+| 4 | the `plugin` row lists 18 | **19** — the record omits the `marketplace` group node |
+| 5 | the value and boolean sets end in `...[]]` | same — the literal members are the whole of both sets |
+
+**Discrepancy 2 is the one that mattered.** The record and the audit both said the
+boolean set consumes the next token; the source says it consumes **nothing**, and the set
+that takes the next token only when it does not look like a flag is the **optional-value**
+set, which is where `-r`/`--resume` lives. The `CC-025` implementer, told to make the
+clone consume the next token, **refused** and cited the parser — correctly. The audit's
+§2.10 was corrected against the source, and `F-38` is closed as a false divergence.
+
+**Three divergences kept**, each pinned by an existing contract test: `-d2e` is an unknown
+option; `--attach-serve` takes an *optional* value; `--print=<value>` names the prompt.
+
+**Verified.** Thirty-two new tests in five blocks: the vocabulary at the target's counts,
+the flag shapes, the command tree, the dispatch, and the refusal of every flag the run does
+not act on.
 
 ### CC-032 — The browser surface
 
