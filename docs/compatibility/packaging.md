@@ -29,7 +29,7 @@ bun run scripts/build.ts --name other      # → ./dist/other
 bun run scripts/build.ts --target bun-linux-arm64
 ```
 
-`scripts/build.ts` runs `bun build --compile` over `scripts/entry.ts` — the packaged executable's **entry point**, which the plan's file list does not name — and then **verifies** the result: the artifact exists, it is a regular file, and the build **emitted nothing else**. A build that left a second file beside the executable would not be the self-contained artifact this project ships.
+`scripts/build.ts` runs `bun build --compile` over `scripts/entry.ts` — the packaged executable's **entry point**, which the plan's file list does not name — and then **verifies** the result: the artifact exists, it is a regular file, and the build **emitted nothing new**. A build that left a second file beside the executable would not be the self-contained artifact this project ships.
 
 **The output directory is not cleared.** A file that was already there is not this build's doing, and a second build under another `--name` must not fail on the first build's artifact. The documented usage therefore works:
 
@@ -68,7 +68,7 @@ The installed binary **creates its configuration directory** and **reports the d
 | The mode it carries | `0o700` — the owner may read, write and enter it, **nobody else** | project requirement |
 | An existing directory | **narrowed** to `0o700`, not left as it is | project requirement |
 | The first run | it **reports** the directory it will use, on the **standard error** | project requirement |
-| The settings file inside it | `0o600` | `REA observed` (audit §2.7, "Config file security") |
+| The settings file inside it | `0o600` | `REA observed` (audit §2.7, "Config file security") — the mode is a property of the **library** (`src/config/schema.ts`), not of the install path: no CLI surface writes `settings.json`, so the binary does not exercise it |
 
 The directory is created **before** the command runs, and not by the command: a `--version` that never touches the disk still leaves the installation in a state the next run can use. The mode is set **explicitly** after the creation, because `mkdir`'s mode is filtered through the process's umask and a directory that already existed may carry a wider one — and the configuration directory must not be world-readable either way. A directory that already existed is therefore **narrowed**: the rule is a property of the configuration directory, not only of the moment it is created.
 
@@ -94,7 +94,7 @@ The report goes to the **standard error** so that it never mixes with the answer
 | **Linux x86-64 (glibc)** | **yes** | **yes** — the full suite | the reference platform; the only platform this repository claims |
 | **Linux x86-64 (musl, Alpine)** | **yes** — `--target bun-linux-x64-musl` | **no** | **built** here, **not run** here. The artifact is genuinely musl-linked: interpreter `/lib/ld-musl-x86_64.so.1`, `NEEDED libc.musl-x86_64.so.1` (against the default artifact's `libc.so.6` and `/lib64/ld-linux-x86-64.so.2`). It was not executed: this host has no musl loader, so the run would fail with "cannot execute: required file not found". |
 | **Linux arm64 (musl)** | **yes** — `--target bun-linux-arm64-musl` | **no** | built here as well: `ELF 64-bit LSB executable, ARM aarch64, … interpreter /lib/ld-musl-aarch64.so.1`. Not run. |
-| Linux arm64 (glibc) | no | no | `bun build --compile --target bun-linux-arm64` is the documented cross-build; it **downloads** the target's Bun build. Nothing was cross-built or run here. |
+| Linux arm64 (glibc) | no | no | `bun build --compile --target bun-linux-arm64` is the documented cross-build; it **downloads** the target's Bun build. The **musl** arm64 target was built here as well (see the row above); nothing was **run**, because this host has no musl loader. |
 | macOS arm64 | no | no | Bun can target it; nothing was built or run here. |
 | macOS x64 | no | no | Bun can target it. **Node's SEA alternative cannot ship here** — "x64 is not currently supported" — which is one of the two reasons this project packages with Bun. |
 | Windows x64 | no | no | Bun can target it; the build was never run on or for Windows. |
@@ -184,17 +184,17 @@ This implementation therefore imports **no** SQLite API at all, and the packaged
 | The **fake-provider seam** (`--fake-provider <url>`) | points a packaged run at a **loopback** fake provider | a packaging convenience, not a product feature. It is **loopback-only** — a value naming any other host is **refused** with exit code `2` — and it **resolves no credential**, so a request that leaves through it carries no `x-api-key` and no `authorization` header. The test asserts both. It is an **option** and not an environment variable: an ambient variable is something a caller may set without meaning to, and this one rewrites where the provider request goes. It is a **packaging** option: the packaging entry takes it out of the command line **before** this implementation's argument parser sees it, so this implementation's own `--help` does not list it. |
 | The **packaging path** (`bun build --compile`) | one self-contained executable | the target ships as an npm package |
 
-**One wording, two surfaces.** The two surfaces that label the extension carry **the same sentence**: the `--help` says *"The multi-provider manager is a project extension, not part of the reference agent. It is reached through the /provider command."* and the manager's own output says *"The multi-provider manager is a project extension, not part of the reference agent."* The shared sentence is `PROVIDER_EXTENSION_NOTICE` in `src/cli/commands/shared.ts`, so the two cannot drift. The single wording every surface should carry is `PROVIDER_EXTENSION_NOTICE` in `src/cli/commands/shared.ts`; the `--help` text in `src/cli/command.ts` does not use it yet, and that file is not this task's.
+**One wording, two surfaces.** The two surfaces that label the extension carry **the same sentence**. The `--help` says *"The multi-provider manager is a project extension, not part of the reference agent. It is reached through the /provider command."* and the manager's own output says *"The multi-provider manager is a project extension, not part of the reference agent."* The first sentence comes from the shared `PROVIDER_EXTENSION_NOTICE` in `src/cli/commands/shared.ts` on **both** surfaces, so the claim itself cannot drift; the trailing sentence — *"It is reached through the /provider command."* — is a literal in the help, so that part still can. The single wording every surface should carry is `PROVIDER_EXTENSION_NOTICE` in `src/cli/commands/shared.ts`; the `--help` text in `src/cli/command.ts` does not use it yet, and that file is not this task's.
 
 **No secret is in the artifact, in a log line, or in a fixture.** This implementation's credential rule holds through packaging: the CLI never resolves a secret by itself, the entry resolves none, and the packaged binary's requests carry no credential unless a caller supplies one.
 
 ## What was **not** tested
 
-- **Every platform outside Linux x86-64.** See the matrix above: the cross-builds were not run and the artifacts were not exercised. The **musl** artifacts were **built** and not **run**: this host has no musl loader.
+- **Every platform outside Linux x86-64.** See the matrix above: the cross-builds were not run and the artifacts were not exercised. The **musl** artifacts were **built** and not **run**: this host has no musl loader. A musl artifact also needs `libstdc++.so.6`, so an Alpine image needs the `libstdc++` package for it to run.
 - **The update path.** The milestone is titled "Packaging, installation, and update", and the **update** half is **not implemented**: there is no self-update mechanism, no version check and no channel. The target's own update behaviour is not in the audit. This implementation installs by replacing the executable.
 - **The `0o600` mode of `<configDir>/settings.json` through the packaged binary.** The CLI **reads** that file as the user-settings tier and **no CLI surface writes it**, so the mode is a property of the library (`src/config/schema.ts`), and it is covered there — not by this suite.
 - **The interactive terminal UI inside the packaged binary.** The UI module (`src/ui/app.ts`) exists, but `runCommand` does not call it, so a packaged run without `--print` reports that the interactive terminal UI is not implemented. This is a `src/` matter, not a packaging one.
-- **The sandbox inside the packaged binary.** The sandbox code is bundled (the artifact carries the launcher, the Landlock status and the bubblewrap backend), but the sandbox was **not** exercised through the packaged binary in this milestone — it is covered by `tests/security/sandbox.test.ts` against the library.
+- **The sandbox inside the packaged binary.** The sandbox code is bundled (the artifact carries the launcher, the Landlock status and the bubblewrap backend), but the sandbox was **not exercised by an automated test** through the packaged binary in this milestone — it *is* exercisable, and a manual run drives a real `tool_use` → `Bash` → bubblewrap → stdout round trip — it is covered by `tests/security/sandbox.test.ts` against the library.
 - **The MCP transport inside the packaged binary.** It is bundled; it was not exercised through the packaged binary.
 
 ## How to reproduce

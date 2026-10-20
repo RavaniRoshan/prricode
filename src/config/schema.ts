@@ -109,6 +109,12 @@ export type SettingsParseResult =
  * Validate a parsed settings document. Unknown keys are preserved; a document that
  * violates a known key's shape fails with a list of issues.
  */
+/** Whether an error is a permission failure. */
+function isPermissionError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  return code === 'EACCES' || code === 'EPERM';
+}
+
 export function parseSettingsDocument(input: unknown): SettingsParseResult {
   const result = settingsDocumentSchema.safeParse(input);
   if (result.success) return { ok: true, value: result.data };
@@ -259,7 +265,15 @@ export function writeSandboxSettings(opts: {
   // mode `mkdir` sets is filtered through the process's umask and a directory
   // that already existed may carry a wider one.
   mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  chmodSync(configDir, 0o700);
+  try {
+    chmodSync(configDir, 0o700);
+  } catch (error) {
+    // A configuration directory owned by **another** user cannot be narrowed,
+    // and the mode is not ours to change. That is not a reason to refuse the
+    // write: the settings file itself is written `0600`, and a directory we
+    // did not create is not ours to fix.
+    if (!isPermissionError(error)) throw error;
+  }
 
   writeFileSync(settingsPath, `${JSON.stringify(document, null, 2)}\n`, {
     encoding: 'utf8',

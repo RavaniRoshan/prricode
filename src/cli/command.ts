@@ -90,6 +90,7 @@ import { createAgentRuntime } from '../agent/loop.js';
 import type { ProviderTurnSource } from '../agent/context.js';
 import { streamingSourceOf } from '../agent/context.js';
 import { loadManagerState, providerManagerCommand } from './commands/manager.js';
+import { PROVIDER_EXTENSION_NOTICE } from './commands/shared.js';
 import { loadSettings } from '../config/loader.js';
 import { parseSettingsDocument } from '../config/schema.js';
 import type { SettingsSource, SettingsTier } from '../config/tiers.js';
@@ -199,8 +200,7 @@ Options:
 Commands:
   attach, logs, stop, kill, respawn, rm
 
-The multi-provider manager is a project extension, not part of the reference agent. It
-is reached through the /provider command.
+${PROVIDER_EXTENSION_NOTICE} It is reached through the /provider command.
 `;
 
 /* -------------------------------------------------------------------------- */
