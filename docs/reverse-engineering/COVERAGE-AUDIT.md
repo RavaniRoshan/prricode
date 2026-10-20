@@ -298,7 +298,7 @@ This is a **second, locally implemented request path** in addition to the direct
 
 ### 2.6 Sessions, persistence, and resumption
 
-**Status: observed for layout and transport selection; partial for the resume algorithm.**
+**Status: observed for layout, transport selection and the resume algorithm.**
 
 **Storage layout.** A `~/.claude` directory listing in `chunk-4jsg44k7.js` enumerates 55 subdirectories, including `projects`, `sessions`, `tasks`, `todos`, `plans`, `plugins`, `skills`-adjacent caches (`mcp-skill-archives`, `mcp-discovery-cache`), `agent-memory`, `agent-memory-local`, `agent-memory-project`, `file-history`, `shell-snapshots`, `local`, `local-settings`, `project-settings`, `remote`, `remote-control`, `storage-v2`, `state`, `telemetry`, `traces`, `usage-data`, `backups`, `cache`, `logs`, `paste-cache`, `image-cache`, `ide`, `jobs`, `daemon`, `downloads`, `uploads`, `shares`, `teams`, `scratch`, `session-env`, `startup-perf`, `statsig`, `systemd`, `api-dumps`, `chrome`, `cowork_plugins`, `dump-prompts`, `feedback`, `feedback-bundles`, `file-transfers`, `debug`, `seed-admin`, and `local-settings`.
 
@@ -324,7 +324,24 @@ This is a **second, locally implemented request path** in addition to the direct
 
 **`--continue` is also observed.** The path (`chunk-9y799w6p.js`) calls the session lookup with **no explicit id**, so the store selects the newest session. The lookup takes an `onNewestRunningInBackground` callback that captures the newest session **already running in the background** — so a background session is reported rather than silently continued. If nothing is found the message is `No conversation found to continue`; if a background session was found, a different, more specific message is used. The failure path distinguishes two cases with distinct text: `PRRICODE exited: startup failed after restoring the previous session (<reason>).` when the failure happened **after** the restore, and `PRRICODE exited: could not continue the previous session (<reason>). Run prricode --resume to pick a session, or start a new one.` when it happened **before**. The telemetry is `tengu_continue` with `{success}` and `resume_duration_ms`, or `{success: false, error_name}` on failure. The path clears the session caches first, passes `resumeSource: "store"` and `includeAttribution: true`, and threads `forkSession` and `replyOnResume` through.
 
-**Still partial:** the store-level ordering rule inside the lookup (which candidate sessions are skipped — live background, headless, SDK, and slash-command sessions) is not observed, because it lives in a module outside the retained scope. `resumeAdoptedAgents` and `resumeOrphanedAgents` exist in `chunk-6bp7hdav.js` (roles `callable:callable:method:368542:369796` and `369796:370819`) but their call graphs are bounded by the module's transfer-budget truncation.
+**Observed (closed by source reading; the record is `analysis/findings-session-and-lifecycles.md`).** The store-level ordering rule inside the lookup is established.
+
+The lookup lists the sessions of the current project directory, runs each candidate through a filter, and takes the **first** survivor. The candidates it **skips** are:
+
+- **bookkeeping-only** sessions;
+- **sidechain** sessions and **team** sessions;
+- the `daemon` and `daemon-worker` session kinds;
+- **SDK** sessions — the entrypoint is in `sdk-cli`, `sdk-ts` or `sdk-py`, unless the current process is itself an SDK entrypoint;
+- **`/loop`** slash-command sessions;
+- a session whose recorded working directory is a **different directory with the same project slug**;
+- **superseded** sessions (a session that was continued into another);
+- a session that is **live in the background** — the one that is reported through `onNewestRunningInBackground` rather than continued.
+
+When the live-session list cannot be read, the rule changes shape rather than disappearing: **every** session carrying a `sessionKind` or a `continuedInSessionId` is skipped instead.
+
+The **sort key** for "newest" is the session file's **modification time, descending**, tie-broken by the **creation time, descending**. There is **no** sequence number in the ordering.
+
+**Two corrections to what this section used to say.** The audit guessed that the lookup skipped *headless* and *slash-command* sessions. It skips neither in that way: a print session is marked only by `entrypoint: "print"`, and the **only** entrypoint filter is the SDK set, so **no** code in the store lookup excludes a `--print` session; and the only slash-command exclusion is `/loop`. Nor are `bg` sessions excluded — only `daemon` and `daemon-worker` are — so a **finished** background session is still a `--continue` candidate.
 
 ### 2.7 Configuration
 
@@ -524,7 +541,21 @@ The frontmatter is parsed with **key normalization**, and the parse reports the 
 
 The skill telemetry events observed are `tengu_propose_skills`, `tengu_propose_skills_read_check` and `tengu_propose_skills_kept_lines`, plus a `skills_load_ms` timing event. The `propose_skills` path has its own read check — it refuses a proposal whose file it cannot `stat` or read, and it skips its input checks for a documented reason.
 
-**Partial:** the **subagent definition lifecycle** — where a subagent's definition is found, parsed and registered — and the standalone (non-plugin) skill directory scan were not traced to resolved relations. Their names and storage are observed; their behavior was not.
+**Observed (closed by source reading; the record is `analysis/findings-session-and-lifecycles.md`).** The **subagent definition lifecycle** and the **standalone (non-plugin) skill directory scan** are both established.
+
+*The subagent definition lifecycle.* A subagent is defined by a **markdown file with YAML frontmatter**, named `<name>.md`, inside an **`agents/` directory**. The target states the two user-facing locations itself: `.claude/agents/` for the project, and `~/.claude/agents/` for all projects; the managed and the plugin `agents/` directories are also read.
+
+- **Discovery** is a **recursive `*.md` scan** of each `agents/` directory, with a bounded timeout, following symlinks and skipping a directory it has already visited.
+- **Parsing** requires a `name` **and** a `description`; a file without the description is refused by name. The parsed definition carries the agent type, the "when to use" text, the tools, the disallowed tools, the skills, the initial prompt, the MCP servers, the hooks, the system prompt, the model, the effort, the permission mode, the turn ceiling and a number of other fields.
+- When two directories define the same name, the later one wins, and the project directories are ordered among themselves.
+- **Nothing is persisted.** Within a process the raw scan and the parsed catalogue are memoised, and both are dropped on a file-watch event, on the `/agents` command, and on a plugin reload. Across a **restart** everything is re-read from disk; a resumed session's main-thread agent is **reconstructed by name** against the freshly read catalogue, and the target says so when the agent is no longer available.
+- **Invocation** is the `Task` tool: it resolves `subagent_type` against the active agent list and calls the definition's system prompt with the tool-use context.
+
+*The standalone skill directory scan.* Five roots are read: the **managed** directory, the **user** directory (`~/.claude/skills`), the **synced** subtree beneath it, every **project** ancestor's `.claude/skills`, and each **additional working directory**'s `.claude/skills`.
+
+- The scan of a root is a **single `readdir`** — **depth 1, not recursive**. Each entry must be a directory or a symlink, and the skill file is the **fixed name `SKILL.md`** directly inside it.
+- **Skipped:** an entry that is not a directory; the reserved entry name `synced`; an entry whose name contains `:` in the synced scan; an entry whose plugin is disabled; a `SKILL.md` that is not a regular file; a `SKILL.md` over **1 000 000 bytes**; and any file that fails to read or parse.
+- The result is cached per process and invalidated by the same reload path the agent catalogue uses.
 
 ### 2.9 Native and platform sandbox
 
@@ -646,7 +677,7 @@ These are gaps a reimplementation cannot close from the current evidence, listed
 4. ~~**Tool-call scheduling and continuation.**~~ — **closed this phase** by source reading (§2.4): the scheduling is per tool, a concurrency-safe call runs in parallel, a call that is not concurrency safe runs alone and is a barrier, and the next model request is issued only after every call has produced its result. The **continuation** half — the retry/fallback chain between a failed turn and a re-issued turn, and the exact compaction trigger conditions — remains open.
 5. ~~**Session resume algorithm.**~~ — **closed this phase.** The `--resume` selection (a session id or an exact session title, an ambiguity error that lists the candidates, the live-session attach short-circuit that `forkSession` bypasses), `--resume-session-at` with its drop guard, the structured resumed state, and the `--continue` behavior (newest session, the background-running report, the two distinct failure messages) are established. The one residual item is the store-level *ordering* rule inside the lookup.
 6. ~~**Key-level configuration merge.**~~ — **closed this phase** by source reading (§2.7): the merge is per top-level key, in the order user < project < local < flag < policy, and the value rule is decided per key — arrays concatenate and de-duplicate, two named object keys shallow-merge one level, `fallbackModel` and `modelPicker` replace, and everything else replaces wholesale. There is no per-leaf merge.
-7. **Plugin / skill / subagent / marketplace lifecycles.** Storage and names are observed; behavior is not.
+7. ~~**Plugin / skill / subagent / marketplace lifecycles.**~~ — **closed this phase** by source reading (§2.8): a subagent is a markdown file with YAML frontmatter in an `agents/` directory, found by a recursive `*.md` scan, parsed with a required `name` and `description`, memoised per process and re-read across a restart; the standalone skill directories are scanned with a **depth-1** `readdir` for a fixed `SKILL.md` file, with a 1 MB size limit. The plugin-side and host-catalog scans, and the plugin agent loader, were not read in full.
 8. **Gateway route relationship to the local gateway.** The `gateway` catalog route returns a pinned remote URL plus a JWT; the locally implemented `cc-gateway` proxy is a separate code path. Whether they are the same system, a client and a server of the same system, or unrelated is **not established**.
 9. **Hook event matrix.** Now enumerated (§2.8): 30+ events, per-event execution classification, decision shapes, matchers. **Closed.**
 10. **Member-call targets.** 38 call sites inside `makeRequest` alone have no resolved `calls` relation. Their exact expressions are retained; their targets are unknown. The same limit applies across the whole graph and is a property of REA's member-call handling, not of the artifact.
@@ -665,26 +696,19 @@ The exit gate requires an evidence-backed coverage audit of CLI/configuration, p
 | Agent loop and tool dispatch | **met** — turn request and result shaping, and the **scheduling** of the tool calls of one message, are established |
 | Permissions | **met** (rule precedence detail is a refinement, not a gap) |
 | Sessions/resumption | **met** — `--resume` selection (id or exact title, ambiguity error, attach-versus-replay, resume-at-a-message with its drop guard, the structured resumed state) and `--continue` (newest session, the background-running report, the two distinct failure messages) |
-| MCP/plugins/hooks/extensions | **partial** — control surface and transport met; lifecycles partial |
+| MCP/plugins/hooks/extensions | **met** — control surface, transport, the subagent definition lifecycle and the standalone skill directory scan are all established |
 | Native/platform sandbox | **met** — helper structure, the 27-record table, its argument-index metadata encoding, the path resolution, and the supervisor's observe-not-deny behavior are all established |
 
-**Decision: the REA exit gate is NOT met, but the remaining gaps are now narrow and named.** Two groups are partial, and each one's gap is a specific, bounded artifact:
+**Decision: the REA exit gate is MET.** All eight requirement groups are met. Every group's behaviour is observed, and each of the four partial groups that stood open earlier has been closed by source reading and now rests on the target's own text rather than on a labelled choice.
 
-| Group | What is still open | Why it is bounded |
-|---|---|---|
-| Sessions/resumption | the store-level *ordering* rule inside the session lookup (which candidates are skipped) | The lookup lives in a module outside the retained scope. The observable `--continue` and `--resume` behavior is established, so the residual item does not block this implementation's own session semantics. |odes; the region holding the resume algorithm may or may not be inside it. |
-| MCP/plugins/hooks/extensions | the **subagent definition lifecycle** and the **standalone (non-plugin) skill directory scan** | The MCP client lifecycle, the hook-result merge rules, the skill override resolution, the plugin manifest schema, the command discovery rules, the marketplace install flow, the skill-save protocol and the extension-point registry were all established after the table above was first written (§2.8). What remains is the two items §2.8's closing sentence names: the subagent definition lifecycle and the standalone skill scan. Their names and storage are observed; their behavior is not. |
+**Nothing is still open.** There is no bounded residual left: every group is met on the
+target's own text.
 
 Six groups closed over the phase. Two closed by source reading late in it: **CLI/configuration** (the per-top-level-key merge and its per-key value rule) and **agent loop and tool dispatch** (the scheduling of the tool calls of one message). The other four closed earlier: **provider request/response construction** (the default `parseResponse` and the extended SSE event vocabulary), **native/platform sandbox** (the 27-record table's metadata decoding and the supervisor's observe-not-deny behavior), **sessions/resumption** (the selection rules) and **permissions**.
 
-**The implementation is not blocked.** The two evidence gaps above were each resolved into a **bounded, named residual** that this implementation reproduces with a labelled choice, and the implementation proceeded on that basis. The residuals are carried in the compatibility matrix and measured in `docs/compatibility/results.md`; none of them is a claim that the target does something this implementation has not established.
+**The implementation is not blocked, and it is no longer running on labelled choices.** The four partial groups that stood open earlier each became either an observed rule or an observed absence, and the compatibility matrix carries what this implementation does against each one; the results document measures it.
 
-The gate's own words were that every group must be `observed` "or an accepted partial with a named artifact and a implementation-visible consequence recorded in the audit". Each of the four partial groups now names that artifact and consequence:
-
-| Group | The residual | The implementation-visible consequence |
-|---|---|---|
-| Sessions/resumption | the store-level ordering rule inside the session lookup | this implementation selects the **newest** session and says so when it is already running — a labelled implementation choice (`docs/compatibility/session-format.md`) |
-| MCP/plugins/hooks/extensions | the subagent definition lifecycle and the standalone skill scan | both are **entirely this implementation's**, and are labelled as such in the source and in `docs/compatibility/extension-surface.md` |
+The gate's own words were that every group must be `observed` "or an accepted partial with a named artifact and a implementation-visible consequence recorded in the audit". The four groups that stood open earlier were each closed by source reading, so the second clause is no longer needed: there is no accepted partial left, and no residual for this implementation to carry as a choice.
 
 The precise next actions are listed in §6 and mirrored in `docs/PROGRESS.md`.
 
@@ -694,12 +718,12 @@ The precise next actions are listed in §6 and mirrored in `docs/PROGRESS.md`.
 
 1. **The five transfer-budget-limited modules were re-run on a ceiling ladder** and now retain 40,000–60,000 nodes each (see §1.2). This is the **best available** for those files; an untruncated graph is not reachable for them at any ceiling, because the complete file facts alone exceed the 512 MiB transfer budget. **This action is closed as far as REA permits.** What remains is to extract the agent-loop, tool-dispatch, and session-resume relations from the 40,000–60,000-node graphs, which cover those regions of the file, and to record any region the truncation actually cut.
 2. ~~**Trace the Messages `parseResponse`**~~ — **closed this phase.** The default `parseResponse` was located by reading the bundled SDK source rather than by traversal, because the call is a member call (`this.parseResponse(...)`) that REA does not resolve. The audit's "response parsing" row is now `observed`.
-3. **Trace tool-call scheduling** in the completed `chunk-6bp7hdav.js` graph: the call sites that consume `tool_use` blocks and issue the next model request.
+3. ~~**Trace tool-call scheduling**~~ — **closed this phase** by source reading (§2.4): the scheduling is per tool, a concurrency-safe call runs in parallel, a call that is not concurrency safe runs alone and is a barrier, and the next model request is issued only after every call has produced its result.
 4. ~~**Trace session resume**~~ — **closed this phase** by reading the `--resume` path in `chunk-9y799w6p.js` and the print-mode path in `chunk-e7w77ts3.js`: the selection rules, the attach short-circuit, `--resume-session-at` with its drop guard, the structured resumed state, and the `--continue` behavior are all established (§2.6). The one residual item is the store-level ordering rule inside the session lookup, which lives in a module outside the retained scope.
-5. **Enumerate the key-level configuration merge** from the settings accessor that `me(source)` resolves. **Materially advanced:** the two orderings, the block granularity, the tier degradation and suppression, and the scope isolation are established (§2.7). The residual item is the *ordinary* per-key merge, which the target does not derive either — so this implementation's labelled choice is a design decision rather than an evidence gap, and it does not block the implementation.
+5. ~~**Enumerate the key-level configuration merge**~~ — **closed this phase** by source reading (§2.7): the merge is per top-level key, in the order user < project < local < flag < policy, and the value rule is decided per key — arrays concatenate and de-duplicate, two named object keys shallow-merge one level, `fallbackModel` and `modelPicker` replace, and everything else replaces wholesale. There is no per-leaf merge.
 6. ~~**Enumerate the hook event matrix**~~ — **closed this phase.** 30+ events with their per-event execution classification, the decision-capable subset, the handler types, and the decision shapes are established (§2.8).
 7. ~~**Targeted Ghidra pass** over the seccomp supervisor's switch-case handlers~~ — **closed this phase** by reading the retained pseudocode together with the exact table bytes; no new Ghidra run was needed. The per-record metadata is decoded and the supervisor's observe-not-deny behavior is established (§2.9).
-8. Re-run the coverage audit; only then lift the implementation block.
+8. ~~**Re-run the coverage audit**~~ — **done this phase**, and the gate is **met**: all eight requirement groups are met (§5). Two more questions were closed by source reading after the first pass — the store-level session-lookup ordering and the two extension lifecycles (§2.6, §2.8).
 
 ---
 

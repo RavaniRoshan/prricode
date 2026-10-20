@@ -1121,6 +1121,130 @@ orchestrator owns those and will update the totals when the harness reports.
   git commit -m "feat(mcp): server manager and control-request surface"
   ```
 
+### CC-009d — The session lookup's ordering and skip rules
+
+**Why this task exists.** The REA's session-lookup residual was closed by source
+reading, and the target's rule is richer than the one this implementation has. The
+compatibility report called the clone's behaviour a *labelled implementation choice*; it
+is a **divergence from an observed rule**.
+
+**The target's rule.**
+
+- The lookup lists the sessions of the current project directory, runs each candidate
+  through a filter, and takes the **first** survivor.
+- The candidates it **skips** are: **bookkeeping-only** sessions; **sidechain** sessions;
+  **team** sessions; the `daemon` and `daemon-worker` session kinds; **SDK** sessions
+  (the entrypoint is `sdk-cli`, `sdk-ts` or `sdk-py`, unless the current process is
+  itself an SDK entrypoint); **`/loop`** slash-command sessions; a session whose recorded
+  working directory is a **different directory with the same project slug**;
+  **superseded** sessions; and a session that is **live in the background** — that one is
+  *reported* through the background callback rather than continued.
+- When the live-session list cannot be read, the rule changes shape: **every** session
+  carrying a session kind or a continued-in id is skipped instead.
+- The **sort key** is the session file's **modification time, descending**, tie-broken by
+  the **creation time, descending**. There is no sequence number.
+
+**This implementation's divergence.** It sorts by the **last record's** timestamp and skips
+none of the candidates.
+
+**Note.** The audit used to guess that the lookup skipped *headless* and *slash-command*
+sessions. It skips neither in that way: a print session is marked only by its entrypoint,
+and the only entrypoint filter is the SDK set, so **no** code excludes a `--print`
+session; and the only slash-command exclusion is `/loop`. A **finished** background
+session is still a candidate.
+
+**Files:** Modify `src/session/store.ts`; Modify `src/session/resume.ts`; Modify
+`tests/contracts/session-store.test.ts`; Modify `tests/contracts/session-resume.test.ts`;
+Modify `docs/compatibility/session-format.md`.
+
+**Interfaces:**
+- Consumes: `src/session/store.ts` (the session listing and the summary), the session
+  record's fields.
+- Produces: `isResumableCandidate(summary, options): boolean` — the target's skip rules —
+  and the **file mtime, then creation time** ordering.
+
+- [ ] **Step 1: Write the failing test** — a bookkeeping-only, a sidechain, a team, a
+  `daemon`, an SDK-entrypoint and a `/loop` session are **not** candidates; a live
+  background session is **reported** rather than continued; and two sessions are ordered
+  by the file's modification time, then its creation time.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [ ] **Step 3: Implement the skip rules** and the ordering.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the conformance document** — the row's outcome and the text.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src/session tests/contracts/session-store.test.ts tests/contracts/session-resume.test.ts docs/compatibility/session-format.md
+  git commit -m "fix(session): the session lookup skips what the target skips"
+  ```
+
+### CC-011b — The subagent definition lifecycle and the standalone skill scan
+
+**Why this task exists.** The REA's extension-lifecycle residual was closed by source
+reading, and the target's rules are now known. The compatibility report called both of
+this implementation's surfaces *entirely its own*; they are now **observed**, and they
+diverge.
+
+**The target's rules.**
+
+*The subagent definition lifecycle.*
+
+- A subagent is a **markdown file with YAML frontmatter**, named `<name>.md`, inside an
+  **`agents/` directory**. The target states the two user-facing locations itself:
+  `.claude/agents/` for the project, and `~/.claude/agents/` for all projects; the
+  managed and the plugin `agents/` directories are read too.
+- Discovery is a **recursive `*.md` scan** of each `agents/` directory, with a bounded
+  timeout, following symlinks and skipping a directory it has already visited.
+- Parsing requires a `name` **and** a `description`; a file without the description is
+  refused by name.
+- **Nothing is persisted.** The raw scan and the parsed catalogue are memoised per
+  process and dropped on a file-watch event, on the `/agents` command and on a plugin
+  reload. Across a **restart** everything is re-read from disk, and a resumed session's
+  main-thread agent is **reconstructed by name** against the freshly read catalogue — the
+  target says so when the agent is no longer available.
+- Invocation is the `Task` tool: it resolves the requested type against the active agent
+  list and calls the definition's system prompt.
+
+*The standalone skill directory scan.*
+
+- Five roots are read: the **managed** directory, the **user** directory
+  (`~/.claude/skills`), the **synced** subtree beneath it, every **project** ancestor's
+  `.claude/skills`, and each **additional working directory**'s `.claude/skills`.
+- The scan of a root is a **single `readdir`** — **depth 1, not recursive**. Each entry
+  must be a directory or a symlink, and the skill file is the **fixed name `SKILL.md`**
+  directly inside it.
+- **Skipped:** an entry that is not a directory; the reserved entry name `synced`; an
+  entry whose name contains `:` in the synced scan; an entry whose plugin is disabled; a
+  `SKILL.md` that is not a regular file; a `SKILL.md` over **1 000 000 bytes**; and any
+  file that fails to read or parse.
+- The result is cached per process and invalidated by the same reload path the agent
+  catalogue uses.
+
+**Files:** Modify `src/extensions/skills/registry.ts`; Modify
+`src/extensions/agents/` (or wherever the subagent definitions are read); Modify
+`tests/contracts/extensions.test.ts`; Modify `docs/compatibility/extension-surface.md`.
+
+**Interfaces:**
+- Consumes: `src/extensions/skills/registry.ts` (`SkillRoot`, the registry), the
+  subagent-definition reader.
+- Produces: the target's **skip rules** for the skill scan, and a subagent catalogue that
+  is **re-read across a restart** and **reconstructed by name** on resume.
+
+- [ ] **Step 1: Write the failing test** — a `SKILL.md` over 1 MB, one that is not a
+  regular file, an entry named `synced` and a disabled plugin's entry are **skipped**; a
+  subagent definition without a `description` is **refused by name**; a definition
+  changed on disk is **re-read**.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [ ] **Step 3: Implement the skill scan's skip rules.**
+- [ ] **Step 4: Implement the subagent catalogue's lifecycle** — the recursive scan, the
+  `name`+`description` requirement, the reload, and the by-name reconstruction on resume.
+- [ ] **Step 5: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 6: Update the conformance document.**
+- [ ] **Step 7: Commit.**
+  ```bash
+  git add src/extensions tests/contracts/extensions.test.ts docs/compatibility/extension-surface.md
+  git commit -m "fix(extensions): the skill scan and the subagent catalogue match the target"
+  ```
+
 ### CC-012 — Hooks
 
 **Files:** Create `src/extensions/hooks/registry.ts`, `src/extensions/hooks/runner.ts`, `src/extensions/hooks/schema.ts`; Create `tests/contracts/hooks.test.ts`.

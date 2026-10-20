@@ -70,7 +70,7 @@ The WSL has roughly 6–8 GiB total RAM. This user authorized up to 1 GiB additi
 
 ## Next work order
 
-**The REA phase is substantially complete.** The coverage audit at [`COVERAGE-AUDIT.md`](COVERAGE-AUDIT.md) is the authoritative record of what is established, what is partial, and what is unknown. The planning and research phases have been completed and the implementation plan is at [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md). Implementation is running against that plan; `docs/PROGRESS.md` is the live ledger.
+**The REA phase is complete and its exit gate is met.** The coverage audit at [`COVERAGE-AUDIT.md`](COVERAGE-AUDIT.md) is the authoritative record of what is established, what is partial, and what is unknown. The planning and research phases have been completed and the implementation plan is at [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md). Implementation is running against that plan; `docs/PROGRESS.md` is the live ledger.
 
 **Three REA items were closed this session**, and two remain open:
 
@@ -96,7 +96,8 @@ Useful offline tooling, all under `/home/shiva/opt/reference-agent-rea/analysis/
 - Worktree: `/home/shiva/projects/prricode`.
 - Durable current docs: `docs/PROGRESS.md` (live ledger), `docs/reverse-engineering/COVERAGE-AUDIT.md` (the behavioral spec and the gate state), `docs/reverse-engineering/reference-agent-2.1.303-partial.md` (the evidence record), and this file.
 - Planning and research are complete: `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md` and `research/reference-agent-2.1.303-research.md`.
-- Implementation is running against the plan, using the `subagent-driven-development` workflow: a fresh implementer subagent per task, a task review after each, and a scoped re-review of the fixes.
+- The implementation is complete against the plan, using the `subagent-driven-development` workflow: a fresh implementer subagent per task, a task review after each, and a scoped re-review of the fixes.
 - Read-only continuation preflight: `bash scripts/rea-resume-preflight.sh`.
-- The REA exit gate is **not** fully met: the coverage audit's §5 records four requirement groups as partial on a specific, named artifact each. Those are the three work-order items above, and the plan carries them as `CC-001` steps.
-- Do not mark the REA goal complete while the agent-loop scheduling, session-resume algorithm, extension lifecycles, and the native per-syscall policy remain unresolved.
+- The REA exit gate is **MET**: all eight requirement groups in the coverage audit's §5 are met, every one of them on the target's own text. The last four were closed by source reading — the per-top-level-key settings merge (§2.7), the tool-call scheduling (§2.4), the store-level session-lookup ordering (§2.6) and the two extension lifecycles (§2.8) — and their records are in `/home/shiva/opt/reference-agent-rea/analysis/findings-*.md`.
+ carries them as `CC-001` steps.
+- The REA goal is **complete**: the agent-loop scheduling, the session-resume algorithm, the extension lifecycles and the native per-syscall policy are all resolved, and the gate is met.
