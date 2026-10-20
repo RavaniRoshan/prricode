@@ -546,6 +546,13 @@ type SandboxOutcome =
 async function partialOutputOf(
   launched: LaunchedSandbox,
 ): Promise<{ stdout: string; stderr: string }> {
+  // The launcher keeps the output it has collected so far, so a command that
+  // is stopped before it ends still yields what it had already printed. The
+  // grace period is the fallback for a backend that does not collect.
+  const collected = launched.output;
+  if (collected !== undefined) {
+    return { stdout: collected.stdout, stderr: collected.stderr };
+  }
   const outcome = await Promise.race([
     (async () => {
       await launched.cleanup();

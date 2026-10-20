@@ -747,6 +747,16 @@ function statOrUndefined(candidate: string): ReturnType<typeof statSync> | undef
   }
 }
 
+/**
+ * The number of output characters the launcher keeps.
+ *
+ * The cap is enforced **at the collection point**, not after it: a command
+ * that prints a gigabyte must not make the process hold a gigabyte before the
+ * caller truncates it. Past the cap the launcher keeps counting, so the caller
+ * can report that the output was truncated.
+ */
+export const MAX_COLLECTED_OUTPUT_CHARS = 200_000;
+
 /** The result of the sandboxed command. */
 export interface SandboxRunResult {
   /** The exit code, or `null` when the command was killed by a signal. */
@@ -757,6 +767,18 @@ export interface SandboxRunResult {
   stdout: string;
   /** The standard error. */
   stderr: string;
+  /**
+   * Whether the output was cut short by the collection cap.
+   *
+   * The launcher keeps at most {@link MAX_COLLECTED_OUTPUT_CHARS} characters
+   * of each stream, so a command that prints more is **truncated** rather
+   * than held whole in memory.
+   *
+   * It is **optional**: a caller that builds a result by hand — a test
+   * double, or a backend that does not collect — reports nothing, and the
+   * absence means "not truncated".
+   */
+  truncated?: boolean;
 }
 
 /** The layers a sandbox establishes. */
@@ -804,6 +826,16 @@ export interface SandboxProcess {
    * tell resolves `true`, because it is the backend that establishes the sandbox.
    */
   readonly establishment?: Promise<SandboxEstablishment>;
+  /**
+   * The output collected **so far**.
+   *
+   * A caller that stops the command before it ends reads the partial output
+   * from here, rather than losing it with the process.
+   *
+   * It is **optional**: a backend that does not collect — a test double, or
+   * one that streams the output elsewhere — reports nothing.
+   */
+  readonly output?: { readonly stdout: string; readonly stderr: string };
   /** Wait for the command to finish. */
   wait(): Promise<SandboxRunResult>;
   /** Kill the command. */
@@ -905,6 +937,8 @@ export interface LaunchedSandbox {
   cleanup(): Promise<void>;
   /** Wait for the command to finish. */
   wait(): Promise<SandboxRunResult>;
+  /** The output collected **so far**, for a caller that stops the command early. */
+  readonly output?: { readonly stdout: string; readonly stderr: string };
   /** What the sandbox established. */
   status: SandboxStatus;
 }
@@ -1036,6 +1070,9 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
   return {
     pid: sandboxProcess.pid,
     status,
+    get output(): { readonly stdout: string; readonly stderr: string } | undefined {
+      return sandboxProcess.output;
+    },
     wait: async () => {
       const result = await sandboxProcess.wait();
       if (timer !== undefined) clearTimeout(timer);
@@ -1195,6 +1232,9 @@ async function runUnconfined(
   return {
     pid: sandboxProcess.pid,
     status,
+    get output(): { readonly stdout: string; readonly stderr: string } | undefined {
+      return sandboxProcess.output;
+    },
     wait: async () => {
       const result = await sandboxProcess.wait();
       if (timer !== undefined) clearTimeout(timer);
@@ -1248,8 +1288,17 @@ function collect(child: ChildProcess, options: CollectOptions = {}): SandboxProc
 
   child.stdout?.setEncoding('utf8');
   child.stderr?.setEncoding('utf8');
+  let truncated = false;
   child.stdout?.on('data', (chunk: string) => {
+    if (stdout.length >= MAX_COLLECTED_OUTPUT_CHARS) {
+      truncated = true;
+      return;
+    }
     stdout += chunk;
+    if (stdout.length > MAX_COLLECTED_OUTPUT_CHARS) {
+      stdout = stdout.slice(0, MAX_COLLECTED_OUTPUT_CHARS);
+      truncated = true;
+    }
     const token = options.readinessToken;
     if (token === undefined || tokenSeen) return;
     if (stdout.length < token.length) return;
@@ -1258,7 +1307,15 @@ function collect(child: ChildProcess, options: CollectOptions = {}): SandboxProc
     resolveEstablishment?.({ established: true, layers });
   });
   child.stderr?.on('data', (chunk: string) => {
+    if (stderr.length >= MAX_COLLECTED_OUTPUT_CHARS) {
+      truncated = true;
+      return;
+    }
     stderr += chunk;
+    if (stderr.length > MAX_COLLECTED_OUTPUT_CHARS) {
+      stderr = stderr.slice(0, MAX_COLLECTED_OUTPUT_CHARS);
+      truncated = true;
+    }
   });
 
   const exited = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
@@ -1291,11 +1348,14 @@ function collect(child: ChildProcess, options: CollectOptions = {}): SandboxProc
   return {
     pid: child.pid ?? -1,
     establishment,
+    get output(): { readonly stdout: string; readonly stderr: string } {
+      return { stdout, stderr };
+    },
     wait: async () => {
       const { exitCode, signal } = await exited;
       const token = options.readinessToken;
       const output = token !== undefined && stdout.startsWith(token) ? stdout.slice(token.length) : stdout;
-      return { exitCode, signal, stdout: output, stderr };
+      return { exitCode, signal, stdout: output, stderr, truncated };
     },
     kill: () => {
       try {
