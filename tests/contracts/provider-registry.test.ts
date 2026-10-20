@@ -10,6 +10,11 @@
  *   - the eight route names, exactly;
  *   - the dispatch order (`gateway` first, then `bedrock`, `foundry`, `anthropicAws`,
  *     `anthropicGoogleCloud`, `mantle`, `vertex`, else `firstParty`);
+ *   - the **enabled-flag set** (`enabledRoutes`): the routes the user's
+ *     configuration turns on, and its agreement with the selector;
+ *   - the target's **Bedrock+Mantle `anthropic.*` override**: with both flags
+ *     on, an `anthropic.*` model resolves to `mantle`, and with only one of
+ *     them on it resolves the ordinary way;
  *   - the per-provider base-URL environment variables and the `ownHost` shapes;
  *   - the Foundry base-URL/resource conflict: the resolved value reports the
  *     variables that are in conflict, because the target's own adapter throws on
@@ -38,11 +43,18 @@ import {
   ROUTE_FLAG_ORDER,
   ROUTE_NAMES,
   ROUTE_ORDER,
+  enabledRoutes,
   isProviderRoute,
   resolveBaseUrl,
   selectRoute,
   type ProviderRoute,
 } from '../../src/provider/routes.js';
+import {
+  builtinCatalog,
+  providerIdFor,
+  resolveRouteForModel,
+  type CatalogModel,
+} from '../../src/provider/catalog.js';
 import {
   assertCredentialDelivery,
   checkCredentialDelivery,
@@ -251,6 +263,196 @@ describe('selectRoute', () => {
     const tiers: SettingsTierMap = new Map();
     tiers.set('userSettings', new SettingsTierEntry('userSettings', { useGateway: true }));
     expect(selectRoute({}, tiers)).toBe('gateway');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The enabled-flag set                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The environment the target's Bedrock+Mantle rule is about: both provider
+ * flags on, so the selector picks `bedrock` while `mantle` is on too.
+ */
+const BEDROCK_AND_MANTLE: NodeJS.ProcessEnv = {
+  CLAUDE_CODE_USE_BEDROCK: '1',
+  CLAUDE_CODE_USE_MANTLE: '1',
+};
+
+describe('enabledRoutes', () => {
+  it('collects every route the user turned on, not only the one the selector picks', () => {
+    // The target's selector returns **exactly one** route, but the target's
+    // per-model override needs to know that *two* of them are on.
+    expect(selectRoute(BEDROCK_AND_MANTLE)).toBe('bedrock');
+    expect([...enabledRoutes(BEDROCK_AND_MANTLE)].sort()).toEqual(['bedrock', 'mantle']);
+  });
+
+  it('agrees with the selector: the route the selector picks is in the set', () => {
+    const environments: NodeJS.ProcessEnv[] = [
+      {},
+      { CLAUDE_CODE_USE_BEDROCK: '1' },
+      { CLAUDE_CODE_USE_MANTLE: '1' },
+      { CLAUDE_CODE_USE_FOUNDRY: '1' },
+      { CLAUDE_CODE_USE_ANTHROPIC_AWS: '1' },
+      { CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: '1' },
+      { CLAUDE_CODE_USE_VERTEX: '1' },
+      BEDROCK_AND_MANTLE,
+      {
+        CLAUDE_CODE_USE_BEDROCK: '1',
+        CLAUDE_CODE_USE_FOUNDRY: '1',
+        CLAUDE_CODE_USE_MANTLE: '1',
+        CLAUDE_CODE_USE_VERTEX: '1',
+      },
+    ];
+    for (const env of environments) {
+      expect(enabledRoutes(env).has(selectRoute(env))).toBe(true);
+    }
+  });
+
+  it('falls back to firstParty when nothing is turned on', () => {
+    expect([...enabledRoutes({})]).toEqual(['firstParty']);
+    expect(selectRoute({})).toBe('firstParty');
+  });
+
+  it('reads the gateway flag the way the selector does', () => {
+    const tiers = tiersWith({ useGateway: true });
+    const enabled = enabledRoutes(BEDROCK_AND_MANTLE, tiers);
+    expect(enabled.has('gateway')).toBe(true);
+    expect(enabled.has('bedrock')).toBe(true);
+    expect(selectRoute(BEDROCK_AND_MANTLE, tiers)).toBe('gateway');
+    expect(enabledRoutes({}, tiers).has('gateway')).toBe(true);
+    expect(enabledRoutes({}, () => true).has('gateway')).toBe(true);
+  });
+
+  it('does not treat an explicitly disabled flag as set', () => {
+    expect(enabledRoutes({ CLAUDE_CODE_USE_BEDROCK: '0' }).has('bedrock')).toBe(false);
+    expect(enabledRoutes({ CLAUDE_CODE_USE_BEDROCK: 'false' }).has('bedrock')).toBe(false);
+    expect(enabledRoutes({ CLAUDE_CODE_USE_BEDROCK: '' }).has('bedrock')).toBe(false);
+    expect([...enabledRoutes({ CLAUDE_CODE_USE_BEDROCK: '0' })]).toEqual(['firstParty']);
+  });
+
+  it('reads each environment variable once, so the set and the selector cannot read it twice', () => {
+    // The set is the selector's own source of truth: the environment is read
+    // once to build it, and the selector walks the set rather than the
+    // environment a second time.
+    const reads = new Map<string, number>();
+    const source: Record<string, string> = {
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_MANTLE: '1',
+    };
+    const env = new Proxy<Record<string, string>>(source, {
+      get(target, property, receiver) {
+        if (typeof property === 'string') {
+          reads.set(property, (reads.get(property) ?? 0) + 1);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    const enabled = enabledRoutes(env);
+
+    expect(enabled.has('bedrock')).toBe(true);
+    expect(enabled.has('mantle')).toBe(true);
+    expect(reads.get('CLAUDE_CODE_USE_BEDROCK')).toBe(1);
+    expect(reads.get('CLAUDE_CODE_USE_MANTLE')).toBe(1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The Bedrock+Mantle per-model override                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A row of the built-in catalog, by its logical model id.
+ */
+function catalogRow(modelId: string): CatalogModel {
+  const row = builtinCatalog.models.find((model) => model.id === modelId);
+  if (row === undefined) throw new Error(`the built-in catalog has no row "${modelId}"`);
+  return row;
+}
+
+describe("the Bedrock+Mantle anthropic.* override", () => {
+  it('sends an anthropic.* model to mantle when bedrock and mantle are both enabled', () => {
+    // The target's rule (audit §2.1): with Bedrock and Mantle both enabled,
+    // an `anthropic.*` model resolves to `mantle`.
+    const row = catalogRow('claude-haiku-5-5');
+    expect(providerIdFor(row, 'mantle')).toBe('anthropic.claude-haiku-5-5');
+
+    const enabled = enabledRoutes(BEDROCK_AND_MANTLE);
+
+    expect(resolveRouteForModel(row, 'bedrock', enabled)).toBe('mantle');
+  });
+
+  it('fires on a model the selected route does serve, so it is not the mantle fallback', () => {
+    // The bedrock route *does* serve the row, so the answer is not the
+    // fallback's: the override redirects a model the route serves.
+    const row = catalogRow('claude-haiku-5-5');
+    expect(providerIdFor(row, 'bedrock')).toBe('us.anthropic.claude-haiku-5-5');
+
+    const enabled = enabledRoutes(BEDROCK_AND_MANTLE);
+
+    expect(resolveRouteForModel(row, 'bedrock', enabled)).toBe('mantle');
+    expect(resolveRouteForModel(row, 'bedrock')).toBe('bedrock');
+  });
+
+  it('resolves the ordinary way when only one of the two is enabled', () => {
+    const row = catalogRow('claude-haiku-5-5');
+
+    const bedrockOnly = enabledRoutes({ CLAUDE_CODE_USE_BEDROCK: '1' });
+    expect(bedrockOnly.has('bedrock')).toBe(true);
+    expect(bedrockOnly.has('mantle')).toBe(false);
+    expect(resolveRouteForModel(row, 'bedrock', bedrockOnly)).toBe('bedrock');
+
+    const mantleOnly = enabledRoutes({ CLAUDE_CODE_USE_MANTLE: '1' });
+    expect(mantleOnly.has('mantle')).toBe(true);
+    expect(mantleOnly.has('bedrock')).toBe(false);
+    expect(resolveRouteForModel(row, 'mantle', mantleOnly)).toBe('mantle');
+  });
+
+  it('is off when the enabled-flag set is not supplied', () => {
+    // The argument is optional, so every caller that does not pass the set
+    // keeps the behaviour it had.
+    const row = catalogRow('claude-haiku-5-5');
+    expect(resolveRouteForModel(row, 'bedrock')).toBe('bedrock');
+    expect(resolveRouteForModel(row, 'bedrock', undefined)).toBe('bedrock');
+    expect(resolveRouteForModel(row, 'bedrock', new Set<ProviderRoute>())).toBe('bedrock');
+  });
+
+  it('sends every one of the target\'s ten anthropic.* rows to mantle', () => {
+    const enabled = enabledRoutes(BEDROCK_AND_MANTLE);
+    const anthropic = builtinCatalog.models.filter((model) =>
+      (providerIdFor(model, 'mantle') ?? '').startsWith('anthropic.'),
+    );
+    expect(anthropic).toHaveLength(10);
+    for (const model of anthropic) {
+      expect(resolveRouteForModel(model, 'bedrock', enabled)).toBe('mantle');
+    }
+  });
+
+  it('leaves a model mantle does not serve on the selected route', () => {
+    // A row the mantle route does not serve is not an `anthropic.*` model, so
+    // the override does not apply to it.
+    const row = catalogRow('claude-sonnet-4-5');
+    expect(providerIdFor(row, 'mantle')).toBeUndefined();
+    expect(providerIdFor(row, 'bedrock')).toBe('us.anthropic.claude-sonnet-4-5-20250929-v1:0');
+
+    const enabled = enabledRoutes(BEDROCK_AND_MANTLE);
+
+    expect(resolveRouteForModel(row, 'bedrock', enabled)).toBe('bedrock');
+  });
+
+  it('does not redirect a model whose mantle id is not an anthropic.* one', () => {
+    // The prefix is what makes a model an `anthropic.*` one: a mantle id that
+    // does not carry it is not redirected.
+    const row: CatalogModel = {
+      ...catalogRow('claude-haiku-5-5'),
+      providerIds: {
+        bedrock: 'us.anthropic.claude-haiku-5-5',
+        mantle: 'claude-haiku-5-5',
+      },
+    };
+    const enabled = enabledRoutes(BEDROCK_AND_MANTLE);
+    expect(resolveRouteForModel(row, 'bedrock', enabled)).toBe('bedrock');
   });
 });
 

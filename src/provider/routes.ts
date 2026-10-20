@@ -12,6 +12,14 @@
  *   - the dispatch order: `gateway` first (when the gateway condition holds), then
  *     `bedrock`, `foundry`, `anthropicAws`, `anthropicGoogleCloud`, `mantle`,
  *     `vertex`, and `firstParty` otherwise;
+ *   - the **enabled-flag set** (`enabledRoutes`): every route the user's
+ *     configuration turns on, derived from the same environment variables, the
+ *     same settings and the same truthiness rule the selector uses, so the two
+ *     cannot disagree. The target's selector returns exactly **one** route, but
+ *     the target's per-model override (audit §2.1) needs to know that **two**
+ *     of them are on: "with Bedrock and Mantle both enabled, an `anthropic.*`
+ *     model resolves to `mantle`". The override itself lives in
+ *     `src/provider/catalog.ts`, which is where a model resolves its route;
  *   - the per-provider base-URL environment variables;
  *   - the `ownHost` host shapes, which are what distinguishes a *vendor* endpoint
  *     from a **user-supplied** one;
@@ -122,9 +130,10 @@ export const ROUTE_FLAG_ORDER: readonly ProviderRoute[] = [
  * provider flags in the order `bedrock`, `foundry`, `anthropicAws`,
  * `anthropicGoogleCloud`, `mantle`, `vertex`, and `firstParty` as the fallback.
  *
- * **Derived**, not written out a second time: `selectRoute` walks
- * `ROUTE_FLAG_ORDER`, so the published dispatch order is computed from it and
- * the two cannot drift apart.
+ * **Derived**, not written out a second time: the order is `ROUTE_FLAG_ORDER`
+ * with the gateway in front of it and `firstParty` behind it, and
+ * `selectRoute` walks **this** list, so the published dispatch order is the
+ * one the selector uses and the two cannot drift apart.
  */
 export const ROUTE_ORDER: readonly ProviderRoute[] = Object.freeze([
   'gateway',
@@ -238,18 +247,54 @@ function gatewayEnabled(settings: RouteSettings | undefined): boolean {
 }
 
 /**
+ * The routes the user's configuration turns on.
+ *
+ * The target's selector returns **exactly one** route, but the target's
+ * per-model override needs to know that **two** of them are on: "with Bedrock
+ * and Mantle both enabled, an `anthropic.*` model resolves to `mantle`"
+ * (audit §2.1). This set is that knowledge.
+ *
+ * It is derived from **the same rules `selectRoute` uses** — the same
+ * environment variables, the same `RouteSettings`, the same truthiness rule —
+ * and `selectRoute` is implemented **on top of** it: the selector walks the
+ * dispatch order and returns the first route the set holds. The two therefore
+ * cannot disagree: a route `selectRoute` would have picked is always in the
+ * set, and the environment is read **once** to build it.
+ *
+ * The set holds every route the configuration turns on, and — when the
+ * configuration turns on nothing at all — the default route `firstParty`, so
+ * that the route the selector picks is in the set in every case.
+ */
+export function enabledRoutes(
+  env: NodeJS.ProcessEnv,
+  settings?: RouteSettings,
+): ReadonlySet<ProviderRoute> {
+  const enabled = new Set<ProviderRoute>();
+  if (gatewayEnabled(settings)) enabled.add('gateway');
+  for (const route of ROUTE_FLAG_ORDER) {
+    const variable = ROUTE_ENV_VARS.get(route);
+    if (variable === undefined) continue;
+    if (flagEnabled(readEnvValue(env, variable))) enabled.add(route);
+  }
+  // Nothing was turned on: the default route is the one in play.
+  if (enabled.size === 0) enabled.add('firstParty');
+  return enabled;
+}
+
+/**
  * Select the active route.
  *
  * The gateway wins over every provider flag; otherwise the first provider flag
  * in `ROUTE_FLAG_ORDER` wins; otherwise the route is `firstParty`. This mirrors
  * the target's dispatch order exactly (audit §2.1).
+ *
+ * The route is the **first route of the dispatch order** the enabled-flag set
+ * holds, so the selector and the set are one derivation and not two.
  */
 export function selectRoute(env: NodeJS.ProcessEnv, settings?: RouteSettings): ProviderRoute {
-  if (gatewayEnabled(settings)) return 'gateway';
-  for (const route of ROUTE_FLAG_ORDER) {
-    const variable = ROUTE_ENV_VARS.get(route);
-    if (variable === undefined) continue;
-    if (flagEnabled(readEnvValue(env, variable))) return route;
+  const enabled = enabledRoutes(env, settings);
+  for (const route of ROUTE_ORDER) {
+    if (enabled.has(route)) return route;
   }
   return 'firstParty';
 }

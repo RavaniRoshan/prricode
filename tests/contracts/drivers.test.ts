@@ -19,6 +19,9 @@
  *     Foundry's mutual exclusions and its deployment-name body, the
  *     Mantle/Google/AWS shapes, and the gateway's workspace-id rejection,
  *     `count_tokens` handling, SSE re-framing and upstream hop;
+ *   - the target's **Bedrock+Mantle `anthropic.*` override**, which chooses the
+ *     route — and therefore the driver, the model id and the path — an
+ *     `anthropic.*` model is sent to;
  *   - the per-driver **beta dialect** translation and the trimming of a
  *     per-dialect beta list;
  *   - the **non-streaming timeout** and the `600000` ms cap;
@@ -87,7 +90,12 @@ import {
   translateBetaFlags,
   type ProviderEvent,
 } from '../../src/provider/drivers/types.js';
-import { ROUTE_NAMES, resolveBaseUrl, type ProviderRoute } from '../../src/provider/routes.js';
+import { ROUTE_NAMES, enabledRoutes, resolveBaseUrl, type ProviderRoute } from '../../src/provider/routes.js';
+import {
+  builtinCatalog,
+  providerIdFor,
+  resolveRouteForModel,
+} from '../../src/provider/catalog.js';
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                      */
@@ -1297,6 +1305,46 @@ describe('the mantle driver', () => {
     );
     expect(headers['authorization']).toBe('Bearer mantle-bearer');
     expect(headers['x-api-key']).toBeUndefined();
+  });
+});
+
+describe('the Bedrock+Mantle anthropic.* override', () => {
+  it('sends the model to the mantle driver, with the mantle model id and the mantle path', () => {
+    // The target's per-model override (audit §2.1) changes **which route a
+    // model resolves to**, and the route is what picks the driver: with
+    // Bedrock and Mantle both enabled an `anthropic.*` model goes to the
+    // mantle driver, not to the bedrock one.
+    const enabled = enabledRoutes({
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_MANTLE: '1',
+    });
+    const row = builtinCatalog.models.find((model) => model.id === 'claude-haiku-5-5');
+    if (row === undefined) throw new Error('the built-in catalog has no "claude-haiku-5-5" row');
+
+    const route = resolveRouteForModel(row, 'bedrock', enabled);
+    expect(route).toBe('mantle');
+    if (route === undefined) throw new Error('the model did not resolve to a route');
+
+    const driver = driverFor(route);
+    expect(driver.route).toBe('mantle');
+    expect(driver).not.toBe(bedrockDriver);
+
+    const providerId = providerIdFor(row, route);
+    expect(providerId).toBe('anthropic.claude-haiku-5-5');
+    const req = request({ model: providerId ?? '', aws: { region: 'us-east-1' } });
+    expect(driver.buildUrl(req)).toBe('https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages');
+    expect(bodyOf(driver, req)['model']).toBe('anthropic.claude-haiku-5-5');
+  });
+
+  it('keeps the bedrock driver when only bedrock is enabled', () => {
+    const enabled = enabledRoutes({ CLAUDE_CODE_USE_BEDROCK: '1' });
+    const row = builtinCatalog.models.find((model) => model.id === 'claude-haiku-5-5');
+    if (row === undefined) throw new Error('the built-in catalog has no "claude-haiku-5-5" row');
+
+    const route = resolveRouteForModel(row, 'bedrock', enabled);
+    expect(route).toBe('bedrock');
+    if (route === undefined) throw new Error('the model did not resolve to a route');
+    expect(driverFor(route).route).toBe('bedrock');
   });
 });
 

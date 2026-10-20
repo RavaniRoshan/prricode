@@ -47,13 +47,13 @@
  * translates the target's keys, and it **rejects** an unknown key rather than
  * dropping it.
  *
- * ## The mantle fallback: one half of the target's rule
+ * ## The per-model override: both halves of the target's rule
  *
  * `wd(model)` in the target layers a per-model override on top of the route
  * selector, and the rule has **two** halves (audit §2.1):
  *
  *   (a) *"with Bedrock and Mantle both enabled, an `anthropic.*` model
- *       resolves to `mantle`"* — **target-observed, not implemented here**;
+ *       resolves to `mantle`"* — **target-observed, and implemented**;
  *   (b) *"otherwise, if the catalog has no id for the selected route but has
  *       one for `mantle`, the model resolves to `mantle`"* — implemented.
  *
@@ -62,20 +62,43 @@
  * strict per-route lookup, and an absent key means "this route does not serve
  * the model" — which is what the usable-model list is built from.
  *
- * ### Half (a) is not implemented, and why
+ * ### Half (a): the enabled-flag set
  *
- * The Bedrock+Mantle `anthropic.*` override needs the **enabled-flag set** —
- * which of the provider flags the user turned on — and this module's API does
- * **not** take one: a model is resolved against a *route*, and nothing else.
- * The override therefore cannot be evaluated here without widening the API,
- * so it is left out and labelled rather than silently approximated.
+ * Half (a) needs the **enabled-flag set** — which of the provider flags the
+ * user turned on — so this module now takes one: `resolveRouteForModel` has
+ * an optional third argument, the set of routes the user's configuration
+ * turned on (`enabledRoutes` in `src/provider/routes.ts`). When that set
+ * holds `bedrock` **and** `mantle`, an `anthropic.*` model resolves to
+ * `mantle`, and the redirect is applied **before** the half-(b) fallback,
+ * because the target's rule reads "with Bedrock and Mantle both enabled ...
+ * otherwise, if the catalog has no id for the selected route ...".
  *
- * **Where a later task must wire it in.** The override changes *which route a
- * model resolves to*, so the wiring point is `resolveRouteForModel` in this
- * file — the single function that `resolveModel`, `resolveModelRoute` and
- * `normalizeModel` all go through for the route decision. A task that owns the
- * enabled-flag set (the driver layer, CC-006) must pass it in there and apply
- * the `anthropic.*` → `mantle` redirect **before** the half-(b) fallback.
+ * The rule was **not implemented** while this module resolved a model against
+ * a route and nothing else: nothing here knew which flags the user had
+ * turned on, so the override was left out and labelled rather than silently
+ * approximated. The argument that carries the **enabled-flag set** is what
+ * made it implementable, and it is the wiring point for it —
+ * `resolveRouteForModel` is the single function that `resolveModel`,
+ * `resolveModelRoute` and `normalizeModel` all go through for the route
+ * decision.
+ *
+ * The argument is **optional** and the override is **off** when it is absent,
+ * so every caller that does not pass the set keeps exactly the behaviour it
+ * had. A caller that owns the set (the driver layer, CC-006) passes it in.
+ *
+ * **What an `anthropic.*` model is.** The target's Mantle model ids are the
+ * `anthropic.`-prefixed ones (`anthropic.claude-haiku-4-5`,
+ * `anthropic.claude-sonnet-5`, …) and no other route's id carries the prefix,
+ * so the model is one when the **mantle** route serves it under such an id.
+ * Ten of the target's 22 rows are such models.
+ *
+ * **The override is decided by the enabled-flag set alone**, exactly as the
+ * audit states the rule; the route the selector picked does not enter into it.
+ * In the target the two always agree — Bedrock is enabled, so the selector
+ * picks it — so the difference cannot be observed there. This implementation's own
+ * `gateway` setting is the one case where they can differ, because the
+ * gateway wins the dispatch order while the rule is about the Bedrock and
+ * Mantle pair.
  *
  * ## "Not served" is a superset of the audited predicate
  *
@@ -358,22 +381,64 @@ export function findModel(catalog: ModelCatalog, modelId: string): CatalogModel 
 }
 
 /**
+ * The prefix the target's `anthropic.*` model ids carry.
+ *
+ * The target's Mantle model ids are the `anthropic.`-prefixed ones
+ * (`anthropic.claude-haiku-4-5`, `anthropic.claude-sonnet-5`, …), and the
+ * target's per-model override names a model by that prefix (audit §2.1). It is
+ * the **mantle** id that carries it: no other route's id does.
+ */
+const ANTHROPIC_MODEL_PREFIX = 'anthropic.';
+
+/**
+ * Whether the model is one of the target's `anthropic.*` models.
+ *
+ * A model is one when the **mantle** route serves it under an
+ * `anthropic.`-prefixed id. An absent mantle id means the mantle route does
+ * not serve the model at all, and such a model is not an `anthropic.*` one.
+ */
+function isAnthropicModel(model: CatalogModel): boolean {
+  const mantleId = providerIdFor(model, 'mantle');
+  return mantleId !== undefined && mantleId.startsWith(ANTHROPIC_MODEL_PREFIX);
+}
+
+/**
  * The route a model resolves to for a selected route.
  *
- * This is **half (b)** of the target's `wd(model)` override (audit §2.1): if
- * the selected route has no id for the model but `mantle` does, the model
- * resolves to `mantle`. `undefined` means the model is not served by the
- * selected route and has no `mantle` id either.
+ * This is the target's `wd(model)` override (audit §2.1), which has **two**
+ * halves:
  *
- * **Half (a) is not implemented here.** The target's rule also sends an
- * `anthropic.*` model to `mantle` when Bedrock **and** Mantle are both
- * enabled; that needs the enabled-flag set, which this module does not take.
- * This function is the wiring point for it — see the module header.
+ *   (a) *"with Bedrock and Mantle both enabled, an `anthropic.*` model
+ *       resolves to `mantle`"* — applied when `enabled` holds both `bedrock`
+ *       and `mantle`, and **before** the fallback below;
+ *   (b) *"otherwise, if the catalog has no id for the selected route but has
+ *       one for `mantle`, the model resolves to `mantle`"* — the fallback.
+ *
+ * `enabled` is the **enabled-flag set** — the routes the user's configuration
+ * turned on (`enabledRoutes` in `src/provider/routes.ts`). It is **optional**,
+ * and the override is **off** when it is absent, so a caller that does not
+ * pass the set keeps exactly the behaviour it had.
+ *
+ * `undefined` means the model is not served by the selected route and has no
+ * `mantle` id either.
  */
 export function resolveRouteForModel(
   model: CatalogModel,
   route: ProviderRoute,
+  enabled?: ReadonlySet<ProviderRoute>,
 ): ProviderRoute | undefined {
+  // Half (a) — the target's Bedrock+Mantle override. It is evaluated first,
+  // because the target's rule reads "with Bedrock+Mantle enabled ...
+  // otherwise, if the catalog has no id for the selected route ...".
+  if (
+    enabled !== undefined &&
+    enabled.has('bedrock') &&
+    enabled.has('mantle') &&
+    isAnthropicModel(model)
+  ) {
+    return 'mantle';
+  }
+  // Half (b) — the mantle fallback.
   if (providerIdFor(model, route) !== undefined) return route;
   if (route !== 'mantle' && providerIdFor(model, 'mantle') !== undefined) return 'mantle';
   return undefined;
@@ -383,15 +448,19 @@ export function resolveRouteForModel(
  * The route a model resolves to for a selected route, looked up in a catalog.
  *
  * `undefined` means the catalog has no such model.
+ *
+ * `enabled` is the **enabled-flag set**; it is optional and the Bedrock+Mantle
+ * override is off when it is absent.
  */
 export function resolveModelRoute(
   catalog: ModelCatalog,
   modelId: string,
   route: ProviderRoute,
+  enabled?: ReadonlySet<ProviderRoute>,
 ): ProviderRoute | undefined {
   const model = findModel(catalog, modelId);
   if (model === undefined) return undefined;
-  return resolveRouteForModel(model, route);
+  return resolveRouteForModel(model, route, enabled);
 }
 
 /**
@@ -407,18 +476,21 @@ export function resolveModelRoute(
  * The "no id for the route" test is an **absent key**, which is a superset of
  * the audited `provider_ids[route] === null` predicate — see the module
  * header.
+ *
+ * `enabled` is the **enabled-flag set**; it is optional, and the
+ * Bedrock+Mantle `anthropic.*` override is off when it is absent.
  */
 export function resolveModel(
   catalog: ModelCatalog,
   modelId: string,
   route: ProviderRoute,
+  enabled?: ReadonlySet<ProviderRoute>,
 ): string | undefined {
   const model = findModel(catalog, modelId);
   if (model === undefined) return undefined;
-  const direct = providerIdFor(model, route);
-  if (direct !== undefined) return direct;
-  if (route === 'mantle') return undefined;
-  return providerIdFor(model, 'mantle');
+  const effectiveRoute = resolveRouteForModel(model, route, enabled);
+  if (effectiveRoute === undefined) return undefined;
+  return providerIdFor(model, effectiveRoute);
 }
 
 /**
