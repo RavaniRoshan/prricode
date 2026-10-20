@@ -637,20 +637,22 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Why this task exists.** `CC-008` built the `Bash` tool and `CC-017` built the sandbox, but nothing connects them: the `Bash` tool still runs `/bin/sh -c` directly and its header says "this implementation's sandbox itself is not implemented yet". The sandbox's `launchSandbox` has no caller, so the sandbox currently protects nothing. This task wires the two together.
 
-**Files:** Modify `src/tools/builtins/bash.ts`; Modify `src/tools/builtins/shared.ts`; Create `tests/security/bash-sandbox.test.ts`.
+**Files:** Modify `src/tools/builtins/bash.ts`; Modify `src/tools/builtins/shared.ts`; Modify `src/config/loader.ts`; Create `tests/security/bash-sandbox.test.ts`.
+
+**Config wiring (added by the `CC-017` review).** `src/config/schema.ts` already parses and preserves `sandbox.filesystem`, so no schema change is needed; the gap is that nothing turns a settings document into a sandbox policy. `src/config/loader.ts` must add a `readonly sandboxPolicy: SandboxPolicy` member to `SettingsLoadResult`, built with `readSandboxPolicy(mergedDocument)`, and the `Bash` tool must pass it to `launchSandbox({ policy, … })`.
 
 **Interfaces:**
-- Consumes: `src/platform/sandbox/launcher.ts` (`launchSandbox`, the sandbox status), `src/platform/sandbox/policy.ts` (`sandboxPolicy`, `evaluateSandbox`).
+- Consumes: `src/platform/sandbox/launcher.ts` (`launchSandbox`, the sandbox status), `src/platform/sandbox/policy.ts` (`SandboxPolicy`, `DEFAULT_SANDBOX_POLICY`, `readSandboxPolicy`, `evaluateSandbox`).
 - Produces: the `Bash` tool routes its command through `launchSandbox` when the policy says the command is sandboxed, and runs it unconfined — with the reason recorded — when the policy says so.
 
-- [x] **Step 1: Write the failing test** — a `Bash` call with the sandbox enabled runs through the launcher; a call the policy exempts runs unconfined and says so; a call whose sandbox cannot be started is refused when `failIfUnavailable` is set and runs unconfined when it is not; and `dangerouslyDisableSandbox` **never** skips a permission rule.
-- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the tool does not call the launcher.
-- [x] **Step 3: Implement the wiring** in `src/tools/builtins/bash.ts` — resolve the policy, call `evaluateSandbox`, and route the command through `launchSandbox` or run it directly, recording the reason in the result. The tool's existing timeout, output cap, and environment handling stay as they are.
-- [x] **Step 4: Run it to verify it passes** — expected: PASS.
-- [x] **Step 5: Write the failing safety test** — the sandboxed command cannot see the host's environment (the agent's credentials are not in it), and a denied sandbox leaves the tool's result reporting the refusal rather than a bare non-zero exit.
-- [x] **Step 6: Implement the safety behavior** and correct the tool's header, which currently says the sandbox is not implemented.
-- [x] **Step 7: Run it to verify it passes** — expected: PASS.
-- [x] **Step 8: Commit.**
+- [ ] **Step 1: Write the failing test** — a `Bash` call with the sandbox enabled runs through the launcher; a call the policy exempts runs unconfined and says so; a call whose sandbox cannot be started is refused when `failIfUnavailable` is set and runs unconfined when it is not; and `dangerouslyDisableSandbox` **never** skips a permission rule.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the tool does not call the launcher.
+- [ ] **Step 3: Implement the wiring** in `src/tools/builtins/bash.ts` and `src/config/loader.ts` — add `SettingsLoadResult.sandboxPolicy` (built with `readSandboxPolicy`), resolve the policy, call `evaluateSandbox` **with the backend's real availability** as its fourth argument, and route the command through `launchSandbox` or run it directly, recording the reason, the exemptions and the `sandboxed` flag in the result. The tool's existing timeout, output cap, and environment handling stay as they are.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Write the failing safety test** — the sandboxed command cannot see the host's environment (the agent's credentials are not in it), and a denied sandbox leaves the tool's result reporting the refusal rather than a bare non-zero exit.
+- [ ] **Step 6: Implement the safety behavior** and correct the tool's header, which currently says the sandbox is not implemented.
+- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 8: Commit.**
   ```bash
   git add src/tools tests/security/bash-sandbox.test.ts
   git commit -m "feat(tools): route the Bash tool through the sandbox"
@@ -877,7 +879,7 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Files:** Create `src/platform/sandbox/policy.ts`, `src/platform/sandbox/launcher.ts`, `src/platform/sandbox/landlock.ts`, `src/platform/sandbox/seccomp.ts`, `src/platform/sandbox/proxy.ts`; Create `tests/security/sandbox.test.ts`.
 
-**Interfaces:** Consumes: `src/tools/builtins/bash.ts` (the `Bash` tool). Produces: `sandboxPolicy` with `enabled`, `enabledPlatforms`, `failIfUnavailable`, `allowUnsandboxedCommands`, `excludedCommands`; `evaluateSandbox(policy, platform, command): { decision: 'allow' | 'deny' | 'unconfined'; reason?: string }`; `launchSandbox(spec): { pid: number; cleanup(): Promise<void> }`.
+**Interfaces:** Consumes: `src/tools/builtins/bash.ts` (the `Bash` tool). Produces: the `SandboxPolicy` type and the `DEFAULT_SANDBOX_POLICY` constant, with `enabled`, `enabledPlatforms`, `failIfUnavailable`, `allowUnsandboxedCommands`, `excludedCommands` and `filesystem`; `evaluateSandbox(policy, platform, command, availability): { decision: 'allow' | 'deny' | 'unconfined'; reason?: string; exemptions: readonly string[] }` — the fourth argument is **required** and carries the backend's real availability, so a host with no backend can never be reported as available by default; `launchSandbox(spec): { pid: number; cleanup(): Promise<void> }` with a `SandboxStatus` that reports `sandboxed` from the backend's **establishment report** (not a constant), the `exemptions` that were applied, the `enforcement` probe (the binary's version and setuid bit), and the `layers` actually in force. `readSandboxPolicy(document)` reads the `sandbox` block out of a merged settings document. (Amended after the first review round: the policy was originally exported three ways under the name `sandboxPolicy`; it now has one type name and one constant name, and the availability argument is explicit.)
 
 **Design note — the enforcement boundary.** The target's own helper is a seccomp user-notification supervisor that reads the target's path arguments with `process_vm_readv` and resolves them with `readlinkat`. The kernel's own documentation says that this pattern **cannot be a security policy**: the target can rewrite pointer arguments while blocked waiting for the supervisor's response, and the UAPI header states outright that the seccomp notifier "cannot be used to implement a security policy."
 
