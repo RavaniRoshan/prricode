@@ -77,12 +77,16 @@
  *
  * The audit observes that "headless mode is forced by a non-TTY stdout"
  * (§2.10), and it observes the permission vocabulary, the session format and
- * the turn cycle. It observes **nothing** about how the target's interactive
- * terminal draws a conversation, what its prompt says, which keys it binds, how
- * it lays a session out, or how it ends one. Every one of those is therefore a
- * **implementation choice**, and each is marked at the place it is made:
+ * the turn cycle. The target's **terminal UI** was read out of the extracted
+ * bundle by the `CC-022` milestone, and the surfaces it establishes — the
+ * composer's glyph, the transcript's rows, the approval dialog, the
+ * keybindings, the markdown rules and the two gestures — are the target's
+ * (see `src/ui/` and `docs/compatibility/tool-surface.md`). What the audit
+ * itself observes **nothing** about is still a **implementation choice**, and
+ * each is marked at the place it is made:
  *
- *   - the **status line** and its wording;
+ *   - the **status line's wording**, apart from the verb a turn runs under,
+ *     which is the target's own (`Working`);
  *   - the **wording** of the approval answers' reasons;
  *   - the **"don't ask again"** affordance's persistence (the target's
  *     *behaviour* — one rule per sub-command that needs approval, capped at
@@ -94,8 +98,8 @@
  *   - the **trimming** of the line the user submits, and the **refusal** of a
  *     line submitted while a turn is running;
  *   - the **end of the session**: the host ends when the abort signal fires
- *     or when the app is torn down (the terminal's own `Ctrl+C`, which Ink
- *     handles);
+ *     or when the app is torn down (the terminal's own `Ctrl+C`, which the
+ *     app's own two-press gesture — `Press ctrl+c again to exit` — ends);
  *   - the **terminal UI being loaded on demand** — the two modules are behind
  *     literal dynamic specifiers, so the bundler follows them and the packaged
  *     artifact **does** carry the UI, but the modules are only *evaluated* when
@@ -227,9 +231,9 @@ export const UI_UNAVAILABLE_MESSAGE =
 /**
  * The status line a turn runs under.
  *
- * **Implementation choice** (the wording).
+ * The target's default spinner verb (`chunk-tysd0s74.js:21854`): `Working`.
  */
-export const WORKING_STATUS = 'Working…';
+export const WORKING_STATUS = 'Working';
 
 /**
  * The name of the manager's state file, under the configuration directory.
@@ -322,7 +326,11 @@ export async function runInteractiveSession(
     events: state.events,
     input: state.input,
     approval: state.approval,
-    status: statusLine(state),
+    status: state.status,
+    // The app draws the target's spinner while a turn runs (§5.2), and it
+    // needs to know that a turn **is** running.
+    busy: turning,
+    notice: state.notice,
     onInputChange: (text: string) => {
       state.input = text;
       render();
@@ -777,15 +785,6 @@ function canMount(context: InteractiveContext): boolean {
 /* -------------------------------------------------------------------------- */
 /* The helpers                                                                 */
 /* -------------------------------------------------------------------------- */
-
-/** The status line, with the last notice beside it. */
-function statusLine(state: HostState): string | undefined {
-  const parts: string[] = [];
-  if (state.status !== undefined && state.status !== '') parts.push(state.status);
-  if (state.notice !== undefined && state.notice !== '') parts.push(state.notice);
-  if (parts.length === 0) return undefined;
-  return parts.join(' ');
-}
 
 /**
  * The status a finished turn leaves behind.

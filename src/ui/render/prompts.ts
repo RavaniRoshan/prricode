@@ -1,9 +1,11 @@
 /**
  * The approval-prompt renderer.
  *
- * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.5 (Permissions) and
- * the `CC-015` milestone of
- * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
+ * Evidence: the `CC-022` milestone of
+ * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`,
+ * and the specification it names —
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-terminal-ui.md` §4
+ * ("The approval prompt").
  *
  * ## What this module is
  *
@@ -13,17 +15,21 @@
  * that decision out for the terminal. It is **pure**: it reads no clock, touches
  * no terminal and touches no filesystem.
  *
- * ## What the prompt shows
+ * ## The dialog is the target's dialog
  *
- * The prompt names the **tool**, gives the **reason** the decision carries, and
- * offers the **choices**. The reason is the decision's own: `describeReason`
- * is the one place that turns a rule, a safety check or a sub-command
- * escalation into words, and the prompt does not paraphrase it.
+ * The target's dialog (§4.1 – §4.5):
  *
- * A decision that is **not** an ask has no prompt to answer: a denial is
- * reported as a denial and an approval as an approval. The function renders
- * whichever of the three it is given, so a caller cannot accidentally show a
- * prompt for a call that was already settled.
+ *   - a **title**, bold, in the `permission` colour — `Read file` or
+ *     `Edit file` for a file tool, `Bash command` for a command;
+ *   - the **question**: `Do you want to proceed?`;
+ *   - the **options**, with no numbers at all: a focused row shows `❯` in the
+ *     `suggestion` colour and a selected row shows `✔` in the `success`
+ *     colour, and every other row is dimmed;
+ *   - the **input guide**, dim and italic: `enter to confirm · esc to cancel`.
+ *
+ * The frame itself — a rule in the `permission` colour above a column with
+ * two columns of padding — is drawn by the app, because it is chrome and not
+ * text.
  *
  * ## The choices
  *
@@ -36,25 +42,23 @@
  * call and not "every command of this tool". It is not Bash-specific either:
  * a `Write` is not a command.
  *
- * ## The numbering
+ * **Implementation choice.** The target's own labels for the persistent option
+ * are per-tool templates (`Yes, and don't ask again for <tool> commands in
+ * <scope>`, `Yes, and allow reading from <paths> from this project`, …) and
+ * the specification did not establish which template applies to which case —
+ * so the clone keeps its own wording for that one option, and reproduces the
+ * target's wording for the other two.
  *
- * The prompt numbers its choices the way a terminal menu does, so the number a
- * user types is the number the prompt shows. The list of the choices is the
- * **only** place the numbering comes from: `choiceNumber` is the number of a
- * choice and `choiceForNumber` is its inverse, and the app binds the keys
- * through the latter.
+ * ## The focus
  *
- * ## What is observed and what is a implementation choice
- *
- * The audit pins the permission **vocabulary** and says nothing about how the
- * prompt is drawn. The wording of the choices, the `❯` marker, the numbering
- * and the layout are therefore **implementation choices**, and they are marked as such
- * below. This implementation deliberately does **not** name a product in the third
- * choice: it is an independent implementation, and a prompt that told the user
- * to "tell the agent what to do" would be a false claim.
+ * The target's confirmation context moves the focus with the arrow keys and
+ * confirms with `enter` (`chunk-26sqdasq.js:2660`). The prompt therefore
+ * carries a **focused** option, and the option the pointer is on is the one
+ * `enter` confirms.
  */
 
 import { describeReason, type PermissionDecision } from '../../permissions/decision.js';
+import type { Segment } from '../theme.js';
 
 import { stripControlSequences } from './markdown.js';
 
@@ -69,7 +73,7 @@ export type ApprovalChoice = 'yes' | 'yes-always' | 'no';
  * The choices, in the order the prompt lists them.
  *
  * The order is the prompt's own, and the **keys** the app binds are the
- * numbers next to them.
+ * **focus** the prompt moves.
  */
 export const APPROVAL_CHOICES: readonly ApprovalChoice[] = Object.freeze([
   'yes',
@@ -78,17 +82,40 @@ export const APPROVAL_CHOICES: readonly ApprovalChoice[] = Object.freeze([
 ]);
 
 /**
- * The marker in front of the selected choice.
+ * The marker in front of the focused choice.
  *
- * **Implementation choice.**
+ * The target's `te.pointer` (`❯`, or `>` on the plain Linux terminal).
  */
 export const CHOICE_MARKER = '❯';
 
 /**
+ * The marker in front of the selected choice.
+ *
+ * The target's `te.tick` (`✔`, or `√` on the plain Linux terminal).
+ */
+export const CHOICE_TICK = '✔';
+
+/**
+ * The question the target asks.
+ *
+ * The target's `chunk-7h94ekrj.js:25258`: `Do you want to proceed?`.
+ */
+export const APPROVAL_QUESTION = 'Do you want to proceed?';
+
+/**
+ * The input guide under the dialog.
+ *
+ * The target's default guide (`chunk-bmrbft56.js:6418`): `enter to confirm ·
+ * esc to cancel`.
+ */
+export const APPROVAL_GUIDE = 'enter to confirm · esc to cancel';
+
+/**
  * The number of a choice, counted from one.
  *
- * The prompt numbers its choices the way a terminal menu does, so the number a
- * user types is the number the prompt shows.
+ * The target's options list carries **no numbers** (§4.3), so the number is
+ * this implementation's own: it is the position of the choice in the closed
+ * list, and `choiceForNumber` is its inverse.
  */
 export function choiceNumber(choice: ApprovalChoice): number {
   const index = APPROVAL_CHOICES.indexOf(choice);
@@ -115,24 +142,63 @@ export function choiceForNumber(number: number): ApprovalChoice | undefined {
  * One choice of the prompt, as the prompt shows it.
  */
 export interface ApprovalChoiceView {
-  /** The number the user types to pick it. */
-  readonly number: number;
+  /** The choice this option answers with. */
+  readonly value: ApprovalChoice;
   /** The choice's label. */
   readonly label: string;
-  /** The marker in front of the selected choice. */
-  readonly marker: string;
+  /**
+   * The label's tail, which the target draws in **bold**.
+   *
+   * The target's third option ends with a bold `(esc)`
+   * (`chunk-6bp7hdav.js:1151238`).
+   */
+  readonly suffix?: string | undefined;
+  /** Whether the focus is on this option. */
+  readonly focused: boolean;
+  /** Whether this option is the selected one. */
+  readonly selected: boolean;
 }
 
 /**
  * The pieces of an approval prompt.
  */
 export interface ApprovalPromptParts {
-  /** The question, above the reason. */
+  /** The title, above the question. */
+  readonly title: string;
+  /** The question. */
   readonly question: string;
   /** The reason the decision carries. */
   readonly reason: string;
   /** The choices, in the order the prompt lists them; empty for a settled decision. */
   readonly choices: readonly ApprovalChoiceView[];
+  /** The input guide under the dialog. */
+  readonly guide: string;
+}
+
+/**
+ * The title of the dialog.
+ *
+ * The target's titles (§4.2): `Read file` for a read, `Edit file` for an
+ * edit, and `Bash command` for a command.
+ *
+ * **Implementation choice.** The target's title for a tool that is neither a
+ * file tool nor a command was not established, so the clone shows the tool's
+ * own name.
+ */
+export function approvalTitle(toolName: string): string {
+  const name = stripControlSequences(toolName);
+  switch (name) {
+    case 'Read':
+      return 'Read file';
+    case 'Write':
+    case 'Edit':
+    case 'NotebookEdit':
+      return 'Edit file';
+    case 'Bash':
+      return 'Bash command';
+    default:
+      return name === '' ? 'Tool' : name;
+  }
 }
 
 /**
@@ -150,23 +216,24 @@ function reasonOf(decision: PermissionDecision, toolName: string): string {
 /**
  * The choice labels.
  *
- * **Implementation choice.** The wording is this implementation's own; the audit records no
- * prompt text.
+ * `Yes` and `No, and tell Claude what to do differently (esc)` are the
+ * target's own (§4.3).
+ *
+ * **Implementation choice.** The label of the persistent option is this
+ * implementation's own: the target's own label is a per-tool template and the
+ * specification did not establish which template applies to which case.
  */
-function choiceLabels(toolName: string): readonly string[] {
+function choiceLabels(toolName: string): readonly { label: string; suffix?: string }[] {
   const name = toolName === '' ? 'tool' : toolName;
   return [
-    'Yes',
-    `Yes, and don't ask again for this ${name} call`,
-    'No, and tell the assistant what to do differently',
+    { label: 'Yes' },
+    { label: `Yes, and don't ask again for this ${name} call` },
+    { label: 'No, and tell Claude what to do differently', suffix: '(esc)' },
   ];
 }
 
 /**
  * The choices, as the prompt shows them.
- *
- * **Implementation choice.** The wording is this implementation's own; the audit records no
- * prompt text.
  *
  * The tool's name is **stripped** here as well: the prompt strips the name
  * before it hands it over, so the choices have to strip it **themselves** to
@@ -174,15 +241,52 @@ function choiceLabels(toolName: string): readonly string[] {
  * **OSC** form and not only the CSI one, because a scanner that knows only
  * the CSI form handles a CSI-only input exactly as well as the shared
  * scanner does.
+ *
+ * @param focused the index of the focused option; the first one by default.
  */
-export function approvalChoices(toolName: string): readonly ApprovalChoiceView[] {
+export function approvalChoices(
+  toolName: string,
+  focused = 0,
+  selected = focused,
+): readonly ApprovalChoiceView[] {
   const name = stripControlSequences(toolName);
   const labels = choiceLabels(name);
-  return APPROVAL_CHOICES.map((choice, index) => ({
-    number: choiceNumber(choice),
-    label: labels[index] ?? '',
-    marker: index === 0 ? CHOICE_MARKER : ' ',
-  }));
+  return APPROVAL_CHOICES.map((choice, index) => {
+    const text = labels[index];
+    return {
+      value: choice,
+      label: text?.label ?? '',
+      suffix: text?.suffix,
+      focused: index === focused,
+      selected: index === selected,
+    };
+  });
+}
+
+/**
+ * The option's segments, as the target draws them.
+ *
+ * The target's option row (§4.3): the **pointer** in the `suggestion` colour
+ * in front of the focused row — dimmed in front of the others — the label,
+ * and the **tick** in the `success` colour behind the selected row.
+ */
+export function optionSegments(choice: ApprovalChoiceView): Segment[] {
+  const label = choice.suffix === undefined ? choice.label : `${choice.label} ${choice.suffix}`;
+  const segments: Segment[] = [
+    {
+      text: choice.focused ? CHOICE_MARKER : ' ',
+      role: choice.focused ? 'suggestion' : undefined,
+      // The target dims the pointer of a row that does not have the focus.
+      dim: !choice.focused,
+    },
+    { text: ' ' },
+    { text: label },
+  ];
+  if (choice.selected) {
+    segments.push({ text: ' ' });
+    segments.push({ text: CHOICE_TICK, role: 'success', ariaLabel: '(selected)' });
+  }
+  return segments;
 }
 
 /**
@@ -198,23 +302,27 @@ export function approvalChoices(toolName: string): readonly ApprovalChoiceView[]
 export function approvalPromptParts(
   decision: PermissionDecision,
   toolName: string,
+  focused = 0,
 ): ApprovalPromptParts {
   const name = stripControlSequences(toolName);
   const shown = name === '' ? 'The tool' : name;
   const reason = stripControlSequences(reasonOf(decision, shown));
+  const title = approvalTitle(name);
 
   if (decision.behavior === 'deny') {
-    return { question: `${shown} was denied.`, reason, choices: [] };
+    return { title, question: `${shown} was denied.`, reason, choices: [], guide: APPROVAL_GUIDE };
   }
 
   if (decision.behavior === 'allow') {
-    return { question: `${shown} was allowed.`, reason, choices: [] };
+    return { title, question: `${shown} was allowed.`, reason, choices: [], guide: APPROVAL_GUIDE };
   }
 
   return {
-    question: `${shown} needs your approval.`,
+    title,
+    question: APPROVAL_QUESTION,
     reason,
-    choices: approvalChoices(name),
+    choices: approvalChoices(name, focused),
+    guide: APPROVAL_GUIDE,
   };
 }
 
@@ -229,16 +337,25 @@ export function approvalPromptParts(
  * question to answer, and showing one would ask the user about a call that is
  * already settled.
  */
-export function renderApprovalPrompt(decision: PermissionDecision, toolName: string): string {
-  const parts = approvalPromptParts(decision, toolName);
+export function renderApprovalPrompt(
+  decision: PermissionDecision,
+  toolName: string,
+  focused = 0,
+): string {
+  const parts = approvalPromptParts(decision, toolName, focused);
 
   if (parts.choices.length === 0) {
-    return [parts.question, '', parts.reason].join('\n');
+    return [parts.title, parts.question, '', parts.reason].join('\n');
   }
 
-  const lines = [parts.question, '', parts.reason, ''];
+  const lines = [parts.title, parts.question, '', parts.reason, ''];
   for (const choice of parts.choices) {
-    lines.push(`${choice.marker} ${choice.number}. ${choice.label}`);
+    const marker = choice.focused ? CHOICE_MARKER : ' ';
+    const tick = choice.selected ? CHOICE_TICK : '';
+    const label = choice.suffix === undefined ? choice.label : `${choice.label} ${choice.suffix}`;
+    lines.push(`${marker} ${label}${tick === '' ? '' : ` ${tick}`}`);
   }
+  lines.push('');
+  lines.push(parts.guide);
   return lines.join('\n');
 }

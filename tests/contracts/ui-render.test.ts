@@ -1,88 +1,46 @@
 /**
  * Contract test for the **interactive terminal UI**'s renderers.
  *
- * Evidence: the `CC-015` milestone of
- * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
- * The audit records **no** TUI drawing at all — §2.10 is the argument parser —
- * so every string this test pins is a **implementation choice**, except the permission
- * vocabulary of §2.5 (the behavior, the source and the reason type).
+ * Evidence: the `CC-022` milestone of
+ * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`,
+ * and the specification it names —
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-terminal-ui.md`.
  *
  * ## What this test pins
  *
- * The UI is a **renderer over the runtime**, not a second implementation: it
- * reads the same session records the headless path reads and renders them. The
- * three functions the plan fixes are therefore **pure** — they touch no
- * terminal, no clock and no filesystem — and that is what makes them testable
- * at all.
+ * The surfaces the specification establishes, and the strings, the order, the
+ * colours and the keys it gives for them:
  *
- * The contracts pinned here are:
+ *   1. the **theme**: the target's dark theme, value for value, and the rule
+ *      that maps a role to one colour;
+ *   2. the **glyphs**, with the target's platform deltas (`●` and `⏺`, `❯` and
+ *      `>`, `✔` and `√`, `✘` and `×`);
+ *   3. the **transcript**: the user's own prompt, the assistant's reply, a
+ *      thinking block, a tool call and a tool's result — the same markers, the
+ *      same order and the same colours;
+ *   4. the **composer**: the prompt glyph, the top rule, and the placeholder;
+ *   5. the **hint line**: its parts, and the separator between them;
+ *   6. the **approval dialog**: the title, the question, the options, the
+ *      input guide;
+ *   7. the **keybindings**: the target's table and its platform deltas;
+ *   8. the **markdown**: the target's rendering rules;
+ *   9. the **two gestures**: `Esc again to clear` and
+ *      `Press ctrl+c again to exit`;
+ *   10. and the contracts the plan fixed: the message list's shape, the
+ *       denial marker, the sandbox report, the purity of the renderers, the
+ *       control-sequence stripping on every path, and the screen-reader tree.
  *
- *   1. `renderMessages` produces **one block per assistant message** and **one
- *      block per tool call**, and the tool block carries the tool's result.
- *   2. A **denied** tool call is marked with the decision's **source** and its
- *      **reason type**, so a reader can tell *who* refused the call and *what
- *      kind* of refusal it was — and the **strictest** of two decisions wins.
- *   3. A **sandboxed** run's status is shown: whether the command ran inside
- *      the sandbox, why the sandbox never came up, how far the exemption list
- *      reaches, and whether the command was stopped for running too long.
- *   4. The renderers are **pure** and **deterministic**.
- *   5. A **caller-supplied** tool name (or input) never reaches a plain-object
- *      lookup: `constructor` and `__proto__` are ordinary names here, and the
- *      renderer must not resolve them to `Object.prototype` members.
- *   6. A **partially-streamed** markdown fragment renders as text: it is never
- *      thrown away and it never throws.
- *   7. A **fenced code block** keeps its language, and the block cannot break
- *      out of its fence.
- *   8. The renderers are **safe against hostile input**: they evaluate
- *      nothing, they never call a caller-supplied `toJSON`, and they strip the
- *      control sequences a model could use to rewrite the terminal — from the
- *      **code blocks**, the **tool results**, the **tool summaries** and the
- *      **approval prompt** alike.
- *   9. The **screen-reader tree** names the message list, the input and the
- *      approval prompt: each of the three has an ARIA role and a label, the
- *      messages are **items**, and the three choices are **options**.
- *  10. The app does **not** enter the alternate screen, so the content that
- *      was on the terminal before the session started stays in the scrollback.
- *  11. The **implementation's own strings** are pinned by their **content**, not by
- *      their presence: a reworded marker, a missing exemption line or a
- *      changed choice label is a change the suite must catch.
- *  12. The **strip is per path**: every path that carries a caller-supplied
- *      string strips it **itself**, and each path's stripped text is pinned
- *      **exactly** — so a path that stopped stripping, or a second and weaker
- *      scanner, is caught on its own and not by the path next to it.
- *  13. The **ARIA label** of the approval prompt and the **status line** are
- *      stripped too, and the **mounted** app puts **no** escape sequence on
- *      the terminal — the label reaches the terminal through Ink's own
- *      sanitiser, so only the mount can show that it does not.
- *  14. The **sandbox availability report** is shown: an unconfined run says
- *      why the backend was not used.
- *  15. The renderer's **strictness** rule **fails closed**: a behavior outside
- *      the closed vocabulary is the strictest, exactly as the permission
- *      layer's own rule is.
- *  16. The **shipped view** is built on the plan's `renderMessages`: the
- *      relationship is asserted **by the code** — the conversation is built
- *      from `renderMessages`' own blocks — and by a **behavioural** test (the
- *      conversation's model blocks *are* the model's blocks). It is **not**
- *      observed by spying on the call: an ESM namespace spy cannot see an
- *      intra-module call.
- *  17. **Every** strip site carries a hostile input of **its own**, and the
- *      hostile input is the **OSC** form and not only the CSI one: a scanner
- *      that knows only the CSI form handles a CSI-only input exactly as well
- *      as the shared scanner does, so the OSC form is what tells the two
- *      apart. The sites that were **masked** — the error message, the denial
- *      reason, the compact JSON, the unmatched result's id and the approval's
- *      choices — each have a **named** test of their own.
- *  18. The **shared** scanner is the **only** escape-handling code in the
- *      renderers: a second, weaker scanner anywhere in them fails the suite.
- *  19. The **exported** result reader **fails closed** on a behaviour outside
- *      the closed vocabulary, so a caller that hands it a decision straight
- *      from outside the fold still gets a denial marker.
+ * ## The environment the tests pin
+ *
+ * The glyphs are platform-dependent, so the tests that pin them pass an
+ * **explicit** environment: the suite must not depend on the terminal the test
+ * happens to run in.
  */
 
 import { readFileSync } from 'node:fs';
 import { PassThrough, Writable } from 'node:stream';
 
-import type { RenderOptions } from 'ink';
+import type { Instance, RenderOptions } from 'ink';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../../src/session/event.js';
@@ -91,25 +49,64 @@ import type { ToolResultEnvelope } from '../../src/tools/runner.js';
 import {
   appRenderOptions,
   approvalLabel,
+  composerGlyph,
+  composerPlaceholder,
+  cycleModeChord,
+  ESCAPE_AGAIN_MESSAGE,
+  hintLineItems,
   inputEcho,
+  INTERRUPT_AGAIN_MESSAGE,
+  keybindings,
+  optionText,
+  pasteChord,
+  PLACEHOLDER_SUGGESTIONS,
+  placeholderText,
   renderApp,
+  shortcutOverlayLines,
   STREAMING_MAX_FPS,
   type AppProps,
 } from '../../src/ui/app.js';
-import { renderMarkdown } from '../../src/ui/render/markdown.js';
+import { renderMarkdown, renderMarkdownSegments } from '../../src/ui/render/markdown.js';
 import {
   KNOWN_INPUT_FIELDS,
   renderConversation,
   renderMessages,
   renderToolBlock,
+  renderTranscript,
   summarizeToolInput,
   toolResultLines,
 } from '../../src/ui/render/messages.js';
-import { approvalChoices, renderApprovalPrompt } from '../../src/ui/render/prompts.js';
+import {
+  APPROVAL_GUIDE,
+  APPROVAL_QUESTION,
+  approvalChoices,
+  approvalPromptParts,
+  approvalTitle,
+  choiceForNumber,
+  choiceNumber,
+  renderApprovalPrompt,
+} from '../../src/ui/render/prompts.js';
+import {
+  DARK_THEME,
+  glyphs,
+  isThemeRole,
+  roleColor,
+  spinnerFrame,
+  SPINNER_FRAMES,
+  themeFor,
+} from '../../src/ui/theme.js';
 
 /* -------------------------------------------------------------------------- */
 /* The fixtures                                                                */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The environment the glyphs are read from.
+ *
+ * The tests pass it **explicitly**, so a suite that runs on a plain Linux
+ * terminal and a suite that runs on a macOS terminal pin the same strings.
+ */
+const ENV: NodeJS.ProcessEnv = { TERM: 'xterm-256color' };
 
 let sequence = 0;
 
@@ -122,6 +119,11 @@ function base(id: string): { v: typeof SESSION_SCHEMA_VERSION; ts: number; id: s
 /** An assistant message record. */
 function assistant(id: string, text: string): SessionEvent {
   return { ...base(id), t: 'assistant_message', text };
+}
+
+/** A user's own prompt record. */
+function user(id: string, text: string): SessionEvent {
+  return { ...base(id), t: 'user_message', text };
 }
 
 /** A tool call record. */
@@ -196,10 +198,10 @@ function bashOutput(overrides: Partial<{
 
 describe('renderMessages — the message list', () => {
   it('produces one block per assistant message', () => {
-    const blocks = renderMessages([
-      assistant('a1', 'The first answer.'),
-      assistant('a2', 'The second answer.'),
-    ]);
+    const blocks = renderMessages(
+      [assistant('a1', 'The first answer.'), assistant('a2', 'The second answer.')],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(2);
     expect(blocks[0]).toContain('The first answer.');
@@ -207,14 +209,17 @@ describe('renderMessages — the message list', () => {
   });
 
   it('produces one block per tool call, and the block carries the tool result', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls -la' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: bashOutput(),
-        isError: false,
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls -la' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: bashOutput(),
+          isError: false,
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toContain('Bash');
@@ -224,16 +229,19 @@ describe('renderMessages — the message list', () => {
   });
 
   it('produces one block per assistant message and one per tool call together', () => {
-    const blocks = renderMessages([
-      assistant('a1', 'Let me look.'),
-      toolCall('c1', 'Read', { file_path: '/work/a.txt' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: { type: 'text', text: 'the file body' },
-        isError: false,
-      }),
-      assistant('a2', 'Here is what I found.'),
-    ]);
+    const blocks = renderMessages(
+      [
+        assistant('a1', 'Let me look.'),
+        toolCall('c1', 'Read', { file_path: '/work/a.txt' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: { type: 'text', text: 'the file body' },
+          isError: false,
+        }),
+        assistant('a2', 'Here is what I found.'),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(3);
     expect(blocks[0]).toContain('Let me look.');
@@ -244,15 +252,18 @@ describe('renderMessages — the message list', () => {
   });
 
   it('marks a denied tool call with the decision source and the reason type', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'rm -rf /' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
-        isError: true,
-        permissionDecision: { decision: 'deny', source: 'user_reject', reasonType: 'rule' },
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'rm -rf /' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
+          isError: true,
+          permissionDecision: { decision: 'deny', source: 'user_reject', reasonType: 'rule' },
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toContain('user_reject');
@@ -261,20 +272,23 @@ describe('renderMessages — the message list', () => {
   });
 
   it('marks a denied tool call with the source and reason type the permission request recorded', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'rm -rf /' }),
-      permissionRequest('p1', 'Bash', {
-        behavior: 'deny',
-        source: 'hook',
-        reasonType: 'safetyCheck',
-        reason: 'A safety check refused this Bash call.',
-      }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
-        isError: true,
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'rm -rf /' }),
+        permissionRequest('p1', 'Bash', {
+          behavior: 'deny',
+          source: 'hook',
+          reasonType: 'safetyCheck',
+          reason: 'A safety check refused this Bash call.',
+        }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
+          isError: true,
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toContain('hook');
@@ -286,26 +300,29 @@ describe('renderMessages — the message list', () => {
     // The runtime checks a call twice when a hook rewrites the input: the
     // first check asks, the re-check denies. The stricter decision is the one
     // that decided the call, so it is the one the marker carries.
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'rm -rf /' }),
-      permissionRequest('p1', 'Bash', {
-        behavior: 'ask',
-        source: 'unknown',
-        reasonType: 'other',
-        reason: 'No permission rule matched.',
-      }),
-      permissionRequest('p2', 'Bash', {
-        behavior: 'deny',
-        source: 'hook',
-        reasonType: 'safetyCheck',
-        reason: 'A safety check refused this Bash call.',
-      }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
-        isError: true,
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'rm -rf /' }),
+        permissionRequest('p1', 'Bash', {
+          behavior: 'ask',
+          source: 'unknown',
+          reasonType: 'other',
+          reason: 'No permission rule matched.',
+        }),
+        permissionRequest('p2', 'Bash', {
+          behavior: 'deny',
+          source: 'hook',
+          reasonType: 'safetyCheck',
+          reason: 'A safety check refused this Bash call.',
+        }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
+          isError: true,
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toContain('denied (source: hook, reason type: safetyCheck)');
@@ -318,16 +335,19 @@ describe('renderMessages — the message list', () => {
     // The request belongs to the **most recent** call of the same tool —
     // whether or not that call already carries a decision, because a call that
     // is checked twice folds both requests into it.
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls' }),
-      toolCall('c2', 'Bash', { command: 'rm -rf /' }),
-      permissionRequest('p1', 'Bash', {
-        behavior: 'deny',
-        source: 'hook',
-        reasonType: 'safetyCheck',
-        reason: 'A safety check refused this Bash call.',
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls' }),
+        toolCall('c2', 'Bash', { command: 'rm -rf /' }),
+        permissionRequest('p1', 'Bash', {
+          behavior: 'deny',
+          source: 'hook',
+          reasonType: 'safetyCheck',
+          reason: 'A safety check refused this Bash call.',
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(2);
     expect(blocks[1]).toContain('denied (source: hook, reason type: safetyCheck)');
@@ -347,16 +367,19 @@ describe('renderMessages — the message list', () => {
       reason: 'An unknown behaviour decided this Bash call.',
     } as unknown as PermissionDecision;
 
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'rm -rf /' }),
-      permissionRequest('p1', 'Bash', {
-        behavior: 'ask',
-        source: 'unknown',
-        reasonType: 'other',
-        reason: 'No permission rule matched.',
-      }),
-      permissionRequest('p2', 'Bash', outside),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'rm -rf /' }),
+        permissionRequest('p1', 'Bash', {
+          behavior: 'ask',
+          source: 'unknown',
+          reasonType: 'other',
+          reason: 'No permission rule matched.',
+        }),
+        permissionRequest('p2', 'Bash', outside),
+      ],
+      ENV,
+    );
 
     expect(blocks[0]).toContain('denied (source: unknown, reason type: other)');
     // The unknown behaviour **won the fold**: the `ask` decision's reason is
@@ -368,21 +391,24 @@ describe('renderMessages — the message list', () => {
   it('prefers the decision that decided the call over the first request', () => {
     // The envelope carries the decision the call was settled with; a
     // `permission_request` record is the log of the checks that led to it.
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'rm -rf /' }),
-      permissionRequest('p1', 'Bash', {
-        behavior: 'ask',
-        source: 'unknown',
-        reasonType: 'other',
-        reason: 'No permission rule matched.',
-      }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
-        isError: true,
-        permissionDecision: { decision: 'deny', source: 'hook', reasonType: 'safetyCheck' },
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'rm -rf /' }),
+        permissionRequest('p1', 'Bash', {
+          behavior: 'ask',
+          source: 'unknown',
+          reasonType: 'other',
+          reason: 'No permission rule matched.',
+        }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
+          isError: true,
+          permissionDecision: { decision: 'deny', source: 'hook', reasonType: 'safetyCheck' },
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toContain('denied (source: hook, reason type: safetyCheck)');
@@ -390,122 +416,143 @@ describe('renderMessages — the message list', () => {
   });
 
   it('shows a sandboxed run as sandboxed', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls -la' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: bashOutput({ sandboxed: true }),
-        isError: false,
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls -la' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: bashOutput({ sandboxed: true }),
+          isError: false,
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks[0]).toContain('sandboxed');
   });
 
   it('shows the reason a run was not sandboxed, and the exemptions that applied', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls -la' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: bashOutput({
-          sandboxed: false,
-          sandboxReason: 'sandbox.allowUnsandboxedCommands is true',
-          sandboxExemptions: ['git'],
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls -la' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: bashOutput({
+            sandboxed: false,
+            sandboxReason: 'sandbox.allowUnsandboxedCommands is true',
+            sandboxExemptions: ['git'],
+          }),
+          isError: false,
         }),
-        isError: false,
-      }),
-    ]);
+      ],
+      ENV,
+    );
 
     expect(blocks[0]).toContain('sandbox.allowUnsandboxedCommands is true');
     // The exemption line is pinned by its **content**: the command is `ls`,
     // so the word `git` can only come from the exemption list.
-    expect(blocks[0]).toContain('  ⎿ sandbox exemptions: git');
+    expect(blocks[0]).toContain('     sandbox exemptions: git');
   });
 
   it('shows why the sandbox never came up, how far the exemptions reach, and a timeout', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls -la' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: bashOutput({
-          sandboxed: false,
-          sandboxEstablishmentReason: 'the bubblewrap backend is not available',
-          sandboxExemptionScope: 'all',
-          timedOut: true,
-          exitCode: 0,
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls -la' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: bashOutput({
+            sandboxed: false,
+            sandboxEstablishmentReason: 'the bubblewrap backend is not available',
+            sandboxExemptionScope: 'all',
+            timedOut: true,
+            exitCode: 0,
+          }),
+          isError: false,
         }),
-        isError: false,
-      }),
-    ]);
+      ],
+      ENV,
+    );
 
-    expect(blocks[0]).toContain('  ⎿ sandbox not established: the bubblewrap backend is not available');
-    expect(blocks[0]).toContain('  ⎿ sandbox exemption scope: all');
-    expect(blocks[0]).toContain('  ⎿ timed out');
+    expect(blocks[0]).toContain('     sandbox not established: the bubblewrap backend is not available');
+    expect(blocks[0]).toContain('     sandbox exemption scope: all');
+    expect(blocks[0]).toContain('     timed out');
   });
 
   it('shows the backend\'s availability report, so an unconfined run says why', () => {
     // On the unconfined path the availability report is the **only** carrier
     // of *why the backend was not used*, so it is shown and not merely read.
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls -la' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: bashOutput({
-          sandboxed: false,
-          sandboxAvailability: {
-            available: false,
-            reason: 'the bubblewrap backend is not available',
-          },
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls -la' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: bashOutput({
+            sandboxed: false,
+            sandboxAvailability: {
+              available: false,
+              reason: 'the bubblewrap backend is not available',
+            },
+          }),
+          isError: false,
         }),
-        isError: false,
-      }),
-    ]);
+      ],
+      ENV,
+    );
 
     expect(blocks[0]).toContain(
-      '  ⎿ sandbox backend unavailable: the bubblewrap backend is not available',
+      '     sandbox backend unavailable: the bubblewrap backend is not available',
     );
   });
 
   it('shows what the availability probe could not establish', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls -la' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: bashOutput({
-          sandboxed: true,
-          sandboxAvailability: { available: true, warning: 'the probe could not check the mount' },
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls -la' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: bashOutput({
+            sandboxed: true,
+            sandboxAvailability: { available: true, warning: 'the probe could not check the mount' },
+          }),
+          isError: false,
         }),
-        isError: false,
-      }),
-    ]);
+      ],
+      ENV,
+    );
 
-    expect(blocks[0]).toContain('  ⎿ sandbox backend available');
-    expect(blocks[0]).toContain('  ⎿ sandbox availability warning: the probe could not check the mount');
+    expect(blocks[0]).toContain('     sandbox backend available');
+    expect(blocks[0]).toContain('     sandbox availability warning: the probe could not check the mount');
   });
 
-  it('renders a tool block in this implementation\'s own shape', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls' }),
-      toolResult('r1', { toolUseId: 'c1', content: bashOutput(), isError: false }),
-    ]);
+  it('renders a tool block in the target\'s shape', () => {
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls' }),
+        toolResult('r1', { toolUseId: 'c1', content: bashOutput(), isError: false }),
+      ],
+      ENV,
+    );
 
-    // The block's format is a implementation choice, so it is pinned whole: the marker,
-    // the header, the indent, the result marker, the sandbox line, the exit
-    // code and the output.
+    // The target's shape: the bullet in the gutter, the tool's name and the
+    // summary in parentheses, and the result under the dim marker `  ⎿  ` —
+    // every line of the body aligned under the marker.
     expect(blocks[0]).toBe(
-      '⏺ Bash(ls)\n  ⎿ sandboxed\n  ⎿ exit code 0\n  ⎿ file1\n  ⎿ file2',
+      '● Bash(ls)\n  ⎿  sandboxed\n     exit code 0\n     file1\n     file2',
     );
   });
 
   it('strips the control sequences a tool result could carry', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'ls' }),
-      toolResult('r1', {
-        toolUseId: 'c1',
-        content: { type: 'text', text: 'out\n\u001b[?1049h\n\u001b]0;pwned\u0007' },
-        isError: false,
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'Bash', { command: 'ls' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: { type: 'text', text: 'out\n\u001b[?1049h\n\u001b]0;pwned\u0007' },
+          isError: false,
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks[0]).not.toContain('\u001b');
     expect(blocks[0]).not.toContain('1049');
@@ -514,7 +561,7 @@ describe('renderMessages — the message list', () => {
   });
 
   it('strips the control sequences a tool input could carry', () => {
-    const blocks = renderMessages([toolCall('c1', 'Bash', { command: 'ls\u001b[?1049h' })]);
+    const blocks = renderMessages([toolCall('c1', 'Bash', { command: 'ls\u001b[?1049h' })], ENV);
 
     expect(blocks[0]).not.toContain('\u001b');
     expect(blocks[0]).not.toContain('1049');
@@ -522,7 +569,7 @@ describe('renderMessages — the message list', () => {
 
   it('never calls a caller-supplied toJSON', () => {
     const toJSON = vi.fn(() => 'leaked');
-    const blocks = renderMessages([toolCall('c1', 'Mystery', { command: 'ls', toJSON })]);
+    const blocks = renderMessages([toolCall('c1', 'Mystery', { command: 'ls', toJSON })], ENV);
 
     expect(toJSON).not.toHaveBeenCalled();
     expect(blocks.join('\n')).not.toContain('leaked');
@@ -536,16 +583,19 @@ describe('renderMessages — the message list', () => {
   });
 
   it('reports a tool result that has no tool call, rather than dropping it', () => {
-    const blocks = renderMessages([
-      toolResult('r1', {
-        toolUseId: 'nobody',
-        content: { type: 'text', text: 'the orphan body' },
-        isError: false,
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolResult('r1', {
+          toolUseId: 'nobody',
+          content: { type: 'text', text: 'the orphan body' },
+          isError: false,
+        }),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(1);
-    expect(blocks[0]).toBe('⏺ unmatched tool result\n  ⎿ toolUseId: nobody');
+    expect(blocks[0]).toBe('● unmatched tool result\n  ⎿  toolUseId: nobody');
   });
 
   it('is pure: it writes to no terminal and mutates no record', () => {
@@ -560,7 +610,7 @@ describe('renderMessages — the message list', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     let blocks: string[];
     try {
-      blocks = renderMessages(events);
+      blocks = renderMessages(events, ENV);
     } finally {
       stdout.mockRestore();
       log.mockRestore();
@@ -569,15 +619,18 @@ describe('renderMessages — the message list', () => {
     expect(stdout).not.toHaveBeenCalled();
     expect(log).not.toHaveBeenCalled();
     expect(events).toEqual(before);
-    expect(renderMessages(events)).toEqual(blocks);
+    expect(renderMessages(events, ENV)).toEqual(blocks);
   });
 
   it('treats a caller-supplied tool name as data, never as a lookup key', () => {
-    const blocks = renderMessages([
-      toolCall('c1', 'constructor', { command: 'ls' }),
-      toolCall('c2', '__proto__', { command: 'ls' }),
-      toolCall('c3', 'toString', { command: 'ls' }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolCall('c1', 'constructor', { command: 'ls' }),
+        toolCall('c2', '__proto__', { command: 'ls' }),
+        toolCall('c3', 'toString', { command: 'ls' }),
+      ],
+      ENV,
+    );
 
     expect(blocks).toHaveLength(3);
     for (const block of blocks) {
@@ -590,17 +643,14 @@ describe('renderMessages — the message list', () => {
   });
 
   it('keeps the user prompt out of the model list and inside the conversation view', () => {
-    const events: SessionEvent[] = [
-      { ...base('u1'), t: 'user_message', text: 'Please list the files.' },
-      assistant('a1', 'Listing them now.'),
-    ];
+    const events: SessionEvent[] = [user('u1', 'Please list the files.'), assistant('a1', 'Listing them now.')];
 
-    const blocks = renderMessages(events);
+    const blocks = renderMessages(events, ENV);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toContain('Listing them now.');
     expect(blocks.join('\n')).not.toContain('Please list the files.');
 
-    const conversation = renderConversation(events);
+    const conversation = renderConversation(events, ENV);
     expect(conversation).toHaveLength(2);
     expect(conversation[0]).toContain('Please list the files.');
     expect(conversation[1]).toContain('Listing them now.');
@@ -610,7 +660,7 @@ describe('renderMessages — the message list', () => {
     // The app ships the conversation; the conversation is built **on** the
     // plan's `renderMessages`, so the two cannot drift apart.
     const events: SessionEvent[] = [
-      { ...base('u1'), t: 'user_message', text: 'Please list the files.' },
+      user('u1', 'Please list the files.'),
       assistant('a1', 'Listing them now.'),
       toolCall('c1', 'Read', { file_path: '/work/a.txt' }),
       toolResult('r1', {
@@ -620,24 +670,540 @@ describe('renderMessages — the message list', () => {
       }),
     ];
 
-    const model = renderMessages(events);
-    const conversation = renderConversation(events);
+    const model = renderMessages(events, ENV);
+    const conversation = renderConversation(events, ENV);
 
     expect(model).toHaveLength(2);
     expect(conversation).toHaveLength(3);
     expect(conversation.filter((block) => model.includes(block))).toEqual(model);
     // The conversation's model blocks **are** the model's blocks, in order.
-    expect(conversation).toEqual(['> Please list the files.', ...model]);
+    expect(conversation).toEqual(['❯ Please list the files.', ...model]);
   });
 });
 
-describe('renderMarkdown — the markdown renderer', () => {
+/* -------------------------------------------------------------------------- */
+/* The theme                                                                   */
+/* -------------------------------------------------------------------------- */
+
+describe('the theme — the target\'s colours and the role rule', () => {
+  it('carries the target\'s dark theme, value for value', () => {
+    // The target's own literals (`chunk-x6tyc5tp.js:16451`), spaces and all.
+    expect(roleColor('promptBorder')).toBe('rgb(136,136,136)');
+    expect(roleColor('permission')).toBe('rgb(177,185,249)');
+    expect(roleColor('text')).toBe('rgb(255,255,255)');
+    expect(roleColor('inactive')).toBe('rgb(153,153,153)');
+    expect(roleColor('userMessageBackground')).toBe('rgb(55, 55, 55)');
+    expect(roleColor('claude')).toBe('rgb(215,119,87)');
+    expect(roleColor('error')).toBe('rgb(255,107,128)');
+    expect(roleColor('success')).toBe('rgb(78,186,101)');
+    expect(roleColor('warning')).toBe('rgb(255,193,7)');
+    expect(roleColor('bashBorder')).toBe('rgb(253,93,177)');
+    expect(roleColor('suggestion')).toBe('rgb(177,185,249)');
+    expect(roleColor('subtle')).toBe('rgb(80,80,80)');
+    expect(roleColor('diffAdded')).toBe('rgb(34,92,43)');
+    expect(roleColor('diffRemoved')).toBe('rgb(122,41,54)');
+  });
+
+  it('has no colour for a role the theme does not have', () => {
+    // The target's `dMt` is `Object.hasOwn(theme, role)`, so a role that is
+    // not in the theme has **no** colour — and an inherited member is not a
+    // role.
+    expect(roleColor('constructor')).toBeUndefined();
+    expect(roleColor('__proto__')).toBeUndefined();
+    expect(roleColor('toString')).toBeUndefined();
+    expect(isThemeRole('constructor')).toBe(false);
+    expect(isThemeRole('promptBorder')).toBe(true);
+  });
+
+  it('carries every role of the target\'s dark theme', () => {
+    // The target's theme has 72 roles; a theme that lost one would draw one
+    // surface in the wrong colour.
+    expect(Object.keys(DARK_THEME)).toHaveLength(72);
+  });
+
+  it('falls back to the dark theme for a name it does not know', () => {
+    expect(themeFor('nonsense').promptBorder).toBe('rgb(136,136,136)');
+    expect(themeFor('constructor').promptBorder).toBe('rgb(136,136,136)');
+  });
+
+  it('carries the values the specification established for the other themes', () => {
+    expect(themeFor('light').permission).toBe('rgb(87,105,247)');
+    expect(themeFor('light').text).toBe('rgb(0,0,0)');
+    expect(themeFor('light').userMessageBackground).toBe('rgb(240, 240, 240)');
+    expect(themeFor('light-ansi').text).toBe('ansi:black');
+    expect(themeFor('light-ansi').permission).toBe('ansi:blue');
+    expect(themeFor('dark-ansi').permission).toBe('ansi:blueBright');
+    expect(themeFor('dark-ansi').text).toBe('ansi:white');
+    expect(themeFor('dark-daltonized').diffAdded).toBe('rgb(0,68,102)');
+    expect(themeFor('dark-daltonized').claude).toBe('rgb(255,153,51)');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The glyphs                                                                  */
+/* -------------------------------------------------------------------------- */
+
+describe('the glyphs — the target\'s platform deltas', () => {
+  it('uses the default set off the plain Linux terminal', () => {
+    const set = glyphs(ENV);
+    expect(set.pointer).toBe('❯');
+    expect(set.tick).toBe('✔');
+    expect(set.cross).toBe('✘');
+  });
+
+  it('uses the plain Linux set on TERM=linux', () => {
+    // The target's icon set is chosen by a test that is `false` only on
+    // `TERM=linux`, and not on Windows.
+    const set = glyphs({ TERM: 'linux' });
+    expect(set.pointer).toBe('>');
+    expect(set.tick).toBe('√');
+    expect(set.cross).toBe('×');
+  });
+
+  it('uses the macOS bullet on macOS and the other bullet everywhere else', () => {
+    expect(glyphs(ENV, 'macos').bullet).toBe('⏺');
+    expect(glyphs(ENV, 'linux').bullet).toBe('●');
+    expect(glyphs(ENV, 'wsl').bullet).toBe('●');
+  });
+
+  it('carries the target\'s own glyph constants', () => {
+    const set = glyphs(ENV);
+    expect(set.thinking).toBe('∴');
+    expect(set.toolResult).toBe('⎿');
+    expect(set.lozenge).toBe('◆');
+    expect(set.arrowUp).toBe('↑');
+    expect(set.arrowDown).toBe('↓');
+    expect(set.fastMode).toBe('↯');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The transcript                                                              */
+/* -------------------------------------------------------------------------- */
+
+describe('the transcript — the target\'s rows', () => {
+  it('draws the user\'s own prompt as the pointer and the text, on a band', () => {
+    const rows = renderTranscript([user('u1', 'hello there')], ENV);
+
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row?.kind).toBe('user');
+    // The target's §3.1: the pointer in `inactive`, the text in `text`, and
+    // the whole row on a `userMessageBackground` band.
+    expect(row?.background).toBe('userMessageBackground');
+    expect(row?.segments[0]).toMatchObject({ text: '❯', role: 'inactive', ariaLabel: 'you:' });
+    expect(row?.segments[2]).toMatchObject({ text: 'hello there', role: 'text' });
+  });
+
+  it('draws the assistant\'s reply as the bullet and the markdown body', () => {
+    const rows = renderTranscript([assistant('a1', 'The **answer**.')], ENV);
+
+    const row = rows[0];
+    expect(row?.kind).toBe('assistant');
+    // The target's §3.3: the bullet in `text`, the body beside it.
+    expect(row?.segments[0]).toMatchObject({ text: '●', role: 'text', ariaLabel: 'claude:' });
+    expect(row?.segments[1]).toEqual({ text: ' ' });
+    expect(row?.segments[2]).toMatchObject({ text: 'The ' });
+    expect(row?.segments[3]).toMatchObject({ text: 'answer', bold: true });
+  });
+
+  it('draws a tool call as the bullet, the bold name and the summary', () => {
+    const rows = renderTranscript([toolCall('c1', 'Bash', { command: 'ls -la' })], ENV);
+
+    const row = rows[0];
+    expect(row?.kind).toBe('tool');
+    // The target's §3.5: the gutter holds the bullet, the tool's name is
+    // bold, and the summary is in parentheses.
+    expect(row?.segments[0]).toMatchObject({ text: '●', role: 'text', ariaLabel: 'tool:' });
+    expect(row?.segments[2]).toMatchObject({ text: 'Bash', bold: true });
+    expect(row?.segments[3]).toEqual({ text: '(ls -la)' });
+  });
+
+  it('draws the tool\'s result under the dim marker, aligned under it', () => {
+    const rows = renderTranscript(
+      [
+        toolCall('c1', 'Bash', { command: 'ls' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: { type: 'text', text: 'one\ntwo' },
+          isError: false,
+        }),
+      ],
+      ENV,
+    );
+
+    const row = rows[0];
+    // The target's §3.6: the marker is `  ⎿  ` — two spaces, the marker, two
+    // spaces — and it is dim.
+    const marker = row?.segments.find((segment) => segment.text === '  ⎿  ');
+    expect(marker).toMatchObject({ dim: true });
+    // The body is aligned under the marker.
+    const body = row?.segments[row.segments.length - 1];
+    expect(body?.text).toBe('one\n     two');
+  });
+
+  it('draws an errored result in the error colour', () => {
+    const rows = renderTranscript(
+      [
+        toolCall('c1', 'Bash', { command: 'ls' }),
+        toolResult('r1', {
+          toolUseId: 'c1',
+          content: { type: 'text', text: 'it broke' },
+          isError: true,
+        }),
+      ],
+      ENV,
+    );
+
+    const body = rows[0]?.segments[rows[0].segments.length - 1];
+    expect(body?.role).toBe('error');
+  });
+
+  it('keeps the rows in the order the records happened', () => {
+    const rows = renderTranscript(
+      [
+        user('u1', 'the question'),
+        assistant('a1', 'the answer'),
+        toolCall('c1', 'Bash', { command: 'ls' }),
+        toolResult('r1', { toolUseId: 'c1', content: { type: 'text', text: 'out' }, isError: false }),
+      ],
+      ENV,
+    );
+
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'assistant', 'tool']);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The composer                                                                */
+/* -------------------------------------------------------------------------- */
+
+describe('the composer', () => {
+  it('shows the target\'s prompt glyph, in the prompt border colour', () => {
+    // The target's §2.1: `te.pointer` and a non-breaking space.
+    expect(composerGlyph('prompt', ENV)).toEqual({ text: '❯\u00A0', role: 'promptBorder' });
+  });
+
+  it('shows the shell glyph in the bash border colour', () => {
+    // The target's §2.1: `!` and a non-breaking space, in `bashBorder`.
+    expect(composerGlyph('bash', ENV)).toEqual({ text: '!\u00A0', role: 'bashBorder' });
+  });
+
+  it('dims the glyph while a turn is loading', () => {
+    // The target's §2.1: the glyph is dimmed while the turn is loading.
+    expect(composerGlyph('prompt', ENV, true)).toEqual({
+      text: '❯\u00A0',
+      role: 'promptBorder',
+      dim: true,
+    });
+  });
+
+  it('offers the target\'s placeholder', () => {
+    // The target's §2.3: `Try "<a suggestion>"`.
+    expect(placeholderText(0)).toBe('Try "fix lint errors"');
+    expect(PLACEHOLDER_SUGGESTIONS).toHaveLength(8);
+    expect(PLACEHOLDER_SUGGESTIONS[1]).toBe('fix typecheck errors');
+    expect(PLACEHOLDER_SUGGESTIONS[7]).toBe('create a util logging.py that...');
+  });
+
+  it('dims the placeholder and inverts its first character — the cursor', () => {
+    const segments = composerPlaceholder(placeholderText(0));
+
+    expect(segments[0]).toMatchObject({ text: 'T', inverse: true });
+    expect(segments[1]).toMatchObject({ text: 'ry "fix lint errors"', dim: true });
+  });
+
+  it('echoes the typed line with the target\'s prompt glyph', () => {
+    expect(inputEcho('hello', ENV)).toBe('❯\u00A0hello');
+    expect(inputEcho('', ENV)).toBe('');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The hint line                                                               */
+/* -------------------------------------------------------------------------- */
+
+describe('the hint line', () => {
+  it('waits for the permission while a call is pending', () => {
+    // The target's §2.4: `Waiting for permission…`.
+    expect(hintLineItems({ approvalPending: true, mode: 'prompt' })).toEqual([
+      'Waiting for permission…',
+      '? for shortcuts',
+    ]);
+  });
+
+  it('shows the shell hint in shell mode', () => {
+    // The target's §2.4: `! for shell mode`.
+    expect(hintLineItems({ approvalPending: false, mode: 'bash' })).toEqual([
+      '! for shell mode',
+      '? for shortcuts',
+    ]);
+  });
+
+  it('shows the shortcuts hint', () => {
+    expect(hintLineItems({ approvalPending: false, mode: 'prompt' })).toEqual(['? for shortcuts']);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The shortcuts overlay                                                       */
+/* -------------------------------------------------------------------------- */
+
+describe('the shortcuts overlay', () => {
+  it('carries the target\'s lines, in the target\'s order', () => {
+    const lines = shortcutOverlayLines(ENV);
+
+    expect(lines[0]).toBe('! for shell mode');
+    expect(lines[1]).toBe('/ for commands');
+    expect(lines[2]).toBe('@ for file paths');
+    expect(lines[3]).toBe('/btw for side question');
+    expect(lines[4]).toBe('double tap esc to clear input');
+    expect(lines[lines.length - 1]).toBe('/keybindings to customize');
+  });
+
+  it('renders each key hint as the target does — the chord, then the action', () => {
+    const lines = shortcutOverlayLines(ENV);
+
+    expect(lines).toContain('ctrl + o to verbose output');
+    expect(lines).toContain('ctrl + t to toggle tasks');
+    expect(lines).toContain('ctrl + _ to undo');
+    expect(lines).toContain('ctrl + z to suspend');
+    expect(lines).toContain('alt + p to switch model');
+    expect(lines).toContain('alt + o to toggle fast mode');
+    expect(lines).toContain('ctrl + g to edit in $EDITOR');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The approval dialog                                                         */
+/* -------------------------------------------------------------------------- */
+
+describe('the approval prompt — the target\'s dialog', () => {
+  it('titles the dialog by the tool', () => {
+    // The target's §4.2.
+    expect(approvalTitle('Read')).toBe('Read file');
+    expect(approvalTitle('Write')).toBe('Edit file');
+    expect(approvalTitle('Edit')).toBe('Edit file');
+    expect(approvalTitle('NotebookEdit')).toBe('Edit file');
+    expect(approvalTitle('Bash')).toBe('Bash command');
+  });
+
+  it('asks the target\'s question', () => {
+    // The target's §4.2.
+    expect(APPROVAL_QUESTION).toBe('Do you want to proceed?');
+    const parts = approvalPromptParts(
+      { behavior: 'ask', source: 'unknown', reasonType: 'other', reason: 'No rule matched.' },
+      'Bash',
+    );
+    expect(parts.question).toBe('Do you want to proceed?');
+    expect(parts.title).toBe('Bash command');
+  });
+
+  it('offers the target\'s options, with no numbers', () => {
+    // The target's §4.3: the options carry **no** numbers.
+    const choices = approvalChoices('Bash');
+
+    expect(choices.map((choice) => choice.value)).toEqual(['yes', 'yes-always', 'no']);
+    expect(choices[0]?.label).toBe('Yes');
+    expect(choices[2]?.label).toBe('No, and tell Claude what to do differently');
+    expect(choices[2]?.suffix).toBe('(esc)');
+    // The target's options carry **no** numbers at all.
+    expect(Object.hasOwn(choices[0] as object, 'number')).toBe(false);
+  });
+
+  it('numbers the choices from one, for a caller that wants the index', () => {
+    expect(choiceNumber('yes')).toBe(1);
+    expect(choiceNumber('yes-always')).toBe(2);
+    expect(choiceNumber('no')).toBe(3);
+    expect(choiceForNumber(2)).toBe('yes-always');
+    expect(choiceForNumber(9)).toBeUndefined();
+  });
+
+  it('shows the focused option with the pointer and the selected one with the tick', () => {
+    // The target's §4.3: `❯ ` in the `suggestion` colour for the focused
+    // row, `✔` in the `success` colour for the selected one.
+    const choices = approvalChoices('Bash', 1);
+
+    expect(optionText(choices[1] as never)).toBe(
+      '❯ Yes, and don\'t ask again for this Bash call ✔',
+    );
+    expect(optionText(choices[0] as never)).toBe('  Yes');
+    expect(optionText(choices[2] as never)).toBe(
+      '  No, and tell Claude what to do differently (esc)',
+    );
+  });
+
+  it('shows the target\'s input guide', () => {
+    // The target's §4.1: `enter to confirm · esc to cancel`.
+    expect(APPROVAL_GUIDE).toBe('enter to confirm · esc to cancel');
+  });
+
+  it('renders the whole dialog, in the target\'s order', () => {
+    const prompt = renderApprovalPrompt(
+      { behavior: 'ask', source: 'unknown', reasonType: 'other', reason: 'No rule matched.' },
+      'Bash',
+    );
+
+    expect(prompt).toBe(
+      [
+        'Bash command',
+        'Do you want to proceed?',
+        '',
+        'No rule matched.',
+        '',
+        '❯ Yes ✔',
+        '  Yes, and don\'t ask again for this Bash call',
+        '  No, and tell Claude what to do differently (esc)',
+        '',
+        'enter to confirm · esc to cancel',
+      ].join('\n'),
+    );
+  });
+
+  it('renders a denial as a denial, with no question to answer', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'deny',
+        source: 'user_reject',
+        reasonType: 'rule',
+        reason: 'Permission rule denies this Bash call.',
+      },
+      'Bash',
+    );
+
+    expect(prompt).toContain('denied');
+    expect(prompt).toContain('Permission rule denies this Bash call.');
+    expect(prompt).not.toContain('1. Yes');
+    expect(prompt).not.toContain('Do you want to proceed?');
+  });
+
+  it('renders an approval as an approval, with no question to answer', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'allow',
+        source: 'user_temporary',
+        reasonType: 'rule',
+        reason: 'Permission rule allows this Bash call.',
+      },
+      'Bash',
+    );
+
+    expect(prompt).toContain('allowed');
+    expect(prompt).not.toContain('Do you want to proceed?');
+  });
+
+  it('strips the control sequences a tool name or a reason could carry', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No permission rule matched.\u001b[?1049h\u001b]0;pwned\u0007',
+      },
+      'Bash\u001b[?1049h\u001b]0;pwned\u0007',
+    );
+
+    expect(prompt).not.toContain('\u001b');
+    expect(prompt).not.toContain('1049');
+    expect(prompt).toContain('Bash');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The keybindings                                                             */
+/* -------------------------------------------------------------------------- */
+
+describe('the keybindings — the target\'s table', () => {
+  it('carries the Global context', () => {
+    const table = keybindings(ENV);
+
+    expect(table.get('Global')?.get('ctrl+c')).toBe('app:interrupt');
+    expect(table.get('Global')?.get('ctrl+d')).toBe('app:exit');
+    expect(table.get('Global')?.get('ctrl+t')).toBe('app:toggleTodos');
+    expect(table.get('Global')?.get('ctrl+o')).toBe('app:toggleTranscript');
+  });
+
+  it('carries the Chat context', () => {
+    const table = keybindings(ENV);
+
+    expect(table.get('Chat')?.get('enter')).toBe('chat:submit');
+    expect(table.get('Chat')?.get('escape')).toBe('chat:cancel');
+    expect(table.get('Chat')?.get('ctrl+j')).toBe('chat:newline');
+    expect(table.get('Chat')?.get('ctrl+l')).toBe('chat:clearInput');
+    expect(table.get('Chat')?.get('ctrl+g')).toBe('chat:externalEditor');
+    expect(table.get('Chat')?.get('up')).toBe('history:previous');
+    expect(table.get('Chat')?.get('down')).toBe('history:next');
+  });
+
+  it('carries the Confirmation context', () => {
+    const table = keybindings(ENV);
+
+    expect(table.get('Confirmation')?.get('enter')).toBe('confirm:yes');
+    expect(table.get('Confirmation')?.get('escape')).toBe('confirm:no');
+    expect(table.get('Confirmation')?.get('up')).toBe('confirm:previous');
+    expect(table.get('Confirmation')?.get('down')).toBe('confirm:next');
+  });
+
+  it('carries the Select and Transcript contexts', () => {
+    const table = keybindings(ENV);
+
+    expect(table.get('Select')?.get('enter')).toBe('select:accept');
+    expect(table.get('Select')?.get('escape')).toBe('select:cancel');
+    expect(table.get('Transcript')?.get('ctrl+e')).toBe('transcript:toggleShowAll');
+    expect(table.get('Transcript')?.get('q')).toBe('transcript:exit');
+  });
+
+  it('pastes with the target\'s platform chord', () => {
+    // The target's §9.2: `alt+v` on Windows and WSL, `ctrl+v` elsewhere.
+    expect(pasteChord({ PRRICODE_PLATFORM: 'linux' })).toBe('ctrl+v');
+    expect(pasteChord({ PRRICODE_PLATFORM: 'macos' })).toBe('ctrl+v');
+    expect(pasteChord({ PRRICODE_PLATFORM: 'windows' })).toBe('alt+v');
+    expect(pasteChord({ PRRICODE_PLATFORM: 'wsl' })).toBe('alt+v');
+  });
+
+  it('cycles the mode with the target\'s platform chord', () => {
+    // The target's §9.2: `shift+tab` on a recent install, `meta+m` on an old
+    // one.
+    expect(cycleModeChord({ PRRICODE_PLATFORM: 'linux' })).toBe('shift+tab');
+    expect(cycleModeChord({ PRRICODE_PLATFORM: 'macos' })).toBe('shift+tab');
+    expect(cycleModeChord({ PRRICODE_PLATFORM: 'windows' })).toBe('meta+m');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The spinner                                                                 */
+/* -------------------------------------------------------------------------- */
+
+describe('the spinner', () => {
+  it('carries the target\'s six frames', () => {
+    expect(SPINNER_FRAMES).toEqual(['·', '✢', '*', '✶', '✻', '✽']);
+  });
+
+  it('oscillates on a two-second period', () => {
+    // The target's index is a cosine over two seconds: the frame walks the
+    // set and walks it back.
+    const first = spinnerFrame(0);
+    const half = spinnerFrame(1000);
+    const again = spinnerFrame(2000);
+
+    expect(SPINNER_FRAMES).toContain(first);
+    expect(SPINNER_FRAMES).toContain(half);
+    expect(again).toBe(first);
+    expect(half).not.toBe(first);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The markdown renderer                                                       */
+/* -------------------------------------------------------------------------- */
+
+describe('renderMarkdown — the target\'s rules', () => {
   it('renders a partially-streamed fragment as text instead of throwing', () => {
     const fragment = 'Here is a **partially streamed fra';
 
     let rendered: string | undefined;
     expect(() => {
-      rendered = renderMarkdown(fragment);
+      rendered = renderMarkdown(fragment, ENV);
     }).not.toThrow();
     expect(rendered).toBeDefined();
     expect(rendered ?? '').toContain('partially streamed fra');
@@ -646,31 +1212,110 @@ describe('renderMarkdown — the markdown renderer', () => {
   it('renders a fragment whose fenced code block has not been closed yet', () => {
     const fragment = '```rust\nfn main() {';
 
-    const rendered = renderMarkdown(fragment);
+    const rendered = renderMarkdown(fragment, ENV);
     expect(rendered).toContain('rust');
     expect(rendered).toContain('fn main() {');
   });
 
   it('renders a fenced code block with its language preserved', () => {
-    const rendered = renderMarkdown('```rust\nfn main() {}\n```');
+    const rendered = renderMarkdown('```rust\nfn main() {}\n```', ENV);
 
     expect(rendered).toContain('rust');
     expect(rendered).toContain('fn main() {}');
   });
 
-  it('labels a fenced code block with its language, and shows it verbatim', () => {
-    // A block of one line is the case a formatter that only labels a boxed
-    // block loses: the language must survive it too. The label is pinned
-    // whole, because the label's **shape** is a implementation choice.
-    const rendered = renderMarkdown('```rust\nfn main() {}\n```');
+  it('dims the language of a labelled fence above the body', () => {
+    // The target's §10.1: the language name is dimmed and prepended when the
+    // highlighter does not support it — and the clone has no highlighter, so
+    // it always is.
+    const segments = renderMarkdownSegments('```rust\nfn main() {}\n```', ENV);
 
-    expect(rendered).toBe('[rust]\nfn main() {}');
+    expect(segments[0]).toMatchObject({ text: 'rust', dim: true });
+    expect(segments[segments.length - 1]).toMatchObject({ text: 'fn main() {}' });
+  });
+
+  it('renders an unlabelled fence entirely in the permission colour', () => {
+    // The target's §10.1: an unlabelled, non-indented fence is rendered
+    // **entirely** in the `permission` colour, with no header.
+    const segments = renderMarkdownSegments('```\nplain\n```', ENV);
+
+    expect(segments).toEqual([{ text: 'plain', role: 'permission' }]);
+  });
+
+  it('renders inline code in the permission colour', () => {
+    // The target's §10.1.
+    const segments = renderMarkdownSegments('Run `code` now', ENV);
+    const code = segments.find((segment) => segment.role === 'permission');
+
+    expect(code?.text).toBe('code');
+  });
+
+  it('bolds a heading, and underlines an H1 as well', () => {
+    // The target's §10.1: an H1 is bold, italic **and** underlined; every
+    // other heading is bold. The `#` markers are not shown.
+    const h1 = renderMarkdownSegments('# Title', ENV);
+    expect(h1[0]).toMatchObject({ text: 'Title', bold: true, italic: true, underline: true });
+
+    const h2 = renderMarkdownSegments('## Sub', ENV);
+    expect(h2[0]).toMatchObject({ text: 'Sub', bold: true });
+    expect(h2[0]?.italic).toBeUndefined();
+  });
+
+  it('renders a thematic break as three dashes', () => {
+    expect(renderMarkdown('---', ENV)).toBe('---');
+  });
+
+  it('marks a list item with a dash and an ordered one with its number', () => {
+    expect(renderMarkdown('- one', ENV)).toBe('- one');
+    expect(renderMarkdown('1. one', ENV)).toBe('1. one');
+  });
+
+  it('prefixes a task item with its checkbox', () => {
+    expect(renderMarkdown('- [x] done', ENV)).toBe('- [x] done');
+    expect(renderMarkdown('- [ ] todo', ENV)).toBe('- [ ] todo');
+  });
+
+  it('renders a table as a markdown table', () => {
+    // The target's §10.1: the header row, a separator of dashes per column,
+    // and the body rows.
+    expect(renderMarkdown('| a | b |\n| --- | --- |\n| 1 | 2 |', ENV)).toBe(
+      '| a   | b   |\n|-----|-----|\n| 1   | 2   |',
+    );
+  });
+
+  it('renders a blockquote behind a quote rule, in italics', () => {
+    const segments = renderMarkdownSegments('> quoted', ENV);
+
+    expect(segments[0]).toMatchObject({ text: '│ quoted', italic: true });
+  });
+
+  it('keeps struck-through text literal on a terminal that cannot strike it', () => {
+    // The target's §10.1: struck-through is off on `TERM=linux` and on
+    // Apple Terminal, and the literal `~~text~~` is shown instead.
+    expect(renderMarkdown('~~gone~~', { TERM: 'linux' })).toBe('~~gone~~');
+    expect(renderMarkdown('~~gone~~', ENV)).toBe('gone');
+  });
+
+  it('renders an image as its alt text and its URL', () => {
+    // The target's §10.1.
+    expect(renderMarkdown('![alt](https://example.com/i.png)', ENV)).toBe(
+      'alt (https://example.com/i.png)',
+    );
+    expect(renderMarkdown('![](https://example.com/i.png)', ENV)).toBe(
+      'https://example.com/i.png',
+    );
+  });
+
+  it('appends a link\'s title in parentheses', () => {
+    expect(renderMarkdown('[label](https://example.com "the title")', ENV)).toBe(
+      'label ("the title")',
+    );
   });
 
   it('does not let a fenced code block break out of its fence', () => {
     const source = ['```ts', '**not bold**', 'const fence = "```";', '```'].join('\n');
 
-    const rendered = renderMarkdown(source);
+    const rendered = renderMarkdown(source, ENV);
     // The markdown syntax inside the block stays literal: it was never parsed.
     expect(rendered).toContain('**not bold**');
     // The closing fence inside the block did not close the block.
@@ -678,7 +1323,7 @@ describe('renderMarkdown — the markdown renderer', () => {
   });
 
   it('evaluates nothing', () => {
-    const rendered = renderMarkdown('Run `process.exit(1)` to stop.');
+    const rendered = renderMarkdown('Run `process.exit(1)` to stop.', ENV);
 
     expect(rendered).toContain('process.exit(1)');
   });
@@ -696,7 +1341,7 @@ describe('renderMarkdown — the markdown renderer', () => {
       '```',
     ].join('\n');
 
-    const rendered = renderMarkdown(hostile);
+    const rendered = renderMarkdown(hostile, ENV);
 
     expect(rendered).not.toContain('\u001b');
     expect(rendered).not.toContain('\u0007');
@@ -708,7 +1353,7 @@ describe('renderMarkdown — the markdown renderer', () => {
   it('drops the payload of a C1 control sequence, not only its introducer', () => {
     // 0x9b is the 8-bit CSI: a terminal that accepts it acts on `2J` exactly
     // as it acts on the 7-bit form, so the parameters go with the introducer.
-    const rendered = renderMarkdown('a\u009b2Jb');
+    const rendered = renderMarkdown('a\u009b2Jb', ENV);
 
     expect(rendered).not.toContain('\u009b');
     expect(rendered).not.toContain('2J');
@@ -719,7 +1364,7 @@ describe('renderMarkdown — the markdown renderer', () => {
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     let rendered: string | undefined;
     try {
-      rendered = renderMarkdown('# A heading\n\nSome **text**.');
+      rendered = renderMarkdown('# A heading\n\nSome **text**.', ENV);
     } finally {
       stdout.mockRestore();
     }
@@ -727,122 +1372,6 @@ describe('renderMarkdown — the markdown renderer', () => {
     expect(stdout).not.toHaveBeenCalled();
     expect(rendered).toContain('A heading');
     expect(rendered).toContain('Some text.');
-  });
-});
-
-describe('renderApprovalPrompt — the approval prompt', () => {
-  it('names the tool, gives the reason and offers the choices', () => {
-    const prompt = renderApprovalPrompt(
-      {
-        behavior: 'ask',
-        source: 'unknown',
-        reasonType: 'other',
-        reason: 'No permission rule matched, so this Bash call requires approval.',
-      },
-      'Bash',
-    );
-
-    expect(prompt).toContain('Bash');
-    expect(prompt).toContain('No permission rule matched');
-    expect(prompt).toContain('1. Yes');
-    expect(prompt).toContain("don't ask again");
-    expect(prompt).toContain('3. No');
-  });
-
-  it('renders a denial as a denial, with no question to answer', () => {
-    const prompt = renderApprovalPrompt(
-      {
-        behavior: 'deny',
-        source: 'user_reject',
-        reasonType: 'rule',
-        reason: 'Permission rule denies this Bash call.',
-      },
-      'Bash',
-    );
-
-    expect(prompt).toContain('denied');
-    expect(prompt).toContain('Permission rule denies this Bash call.');
-    expect(prompt).not.toContain('1. Yes');
-  });
-
-  it('renders an approval as an approval, with no question to answer', () => {
-    const prompt = renderApprovalPrompt(
-      {
-        behavior: 'allow',
-        source: 'user_temporary',
-        reasonType: 'rule',
-        reason: 'Permission rule allows this Bash call.',
-      },
-      'Bash',
-    );
-
-    expect(prompt).toContain('allowed');
-    expect(prompt).not.toContain('1. Yes');
-  });
-
-  it('offers exactly the three choices, in this implementation\'s own wording', () => {
-    const prompt = renderApprovalPrompt(
-      {
-        behavior: 'ask',
-        source: 'unknown',
-        reasonType: 'other',
-        reason: 'No permission rule matched.',
-      },
-      'Bash',
-    );
-
-    expect(prompt).toContain('❯ 1. Yes');
-    expect(prompt).toContain("2. Yes, and don't ask again for this Bash call");
-    expect(prompt).toContain('3. No, and tell the assistant what to do differently');
-    // This implementation is an independent implementation: it never names a product.
-    expect(prompt.toLowerCase()).not.toContain('claude');
-  });
-
-  it('numbers the choices from one', () => {
-    const choices = approvalChoices('Bash');
-
-    expect(choices.map((choice) => choice.number)).toEqual([1, 2, 3]);
-    expect(choices.map((choice) => choice.label)).toEqual([
-      'Yes',
-      "Yes, and don't ask again for this Bash call",
-      'No, and tell the assistant what to do differently',
-    ]);
-    expect(choices[0]?.marker).toBe('❯');
-    expect(choices[1]?.marker).toBe(' ');
-  });
-
-  it('does not call a Write a command, and does not oversell the grant', () => {
-    const prompt = renderApprovalPrompt(
-      {
-        behavior: 'ask',
-        source: 'unknown',
-        reasonType: 'other',
-        reason: 'No permission rule matched.',
-      },
-      'Write',
-    );
-
-    expect(prompt).toContain('Write needs your approval.');
-    expect(prompt).not.toContain('command');
-    // The permission layer persists one rule per sub-command that needs
-    // approval, capped at five: the label must not promise a wider grant.
-    expect(prompt).toContain("don't ask again for this Write call");
-  });
-
-  it('strips the control sequences a tool name or a reason could carry', () => {
-    const prompt = renderApprovalPrompt(
-      {
-        behavior: 'ask',
-        source: 'unknown',
-        reasonType: 'other',
-        reason: 'No permission rule matched.\u001b[?1049h',
-      },
-      'Bash\u001b[?1049h',
-    );
-
-    expect(prompt).not.toContain('\u001b');
-    expect(prompt).not.toContain('1049');
-    expect(prompt).toContain('Bash');
   });
 });
 
@@ -958,37 +1487,49 @@ describe('the control-sequence strip — one path at a time', () => {
     // The name is the **caller's** name — a model chose it — and nothing
     // else strips it: the summary and the result lines are stripped on
     // their own paths, and the name is on neither of them.
-    const block = renderToolBlock('Bash\u001b[?1049h\u001b]0;pwned\u0007', 'ls', []);
+    const block = renderToolBlock('Bash\u001b[?1049h\u001b]0;pwned\u0007', 'ls', [], ENV);
 
-    expect(block).toBe('⏺ Bash(ls)');
+    expect(block).toBe('● Bash(ls)');
   });
 
   it('strips the summary in the block header itself', () => {
-    const block = renderToolBlock('Bash', 'ls\u001b[?1049h\u001b]0;pwned\u0007', []);
+    const block = renderToolBlock('Bash', 'ls\u001b[?1049h\u001b]0;pwned\u0007', [], ENV);
 
-    expect(block).toBe('⏺ Bash(ls)');
+    expect(block).toBe('● Bash(ls)');
   });
 
   it('strips the result lines in the block itself', () => {
     // The lines arrive already stripped by the reader that produced them, so
     // the block has to strip them **itself** to be safe on its own.
-    const block = renderToolBlock('Bash', 'ls', ['out\u001b[?1049h\u001b]0;pwned\u0007']);
+    const block = renderToolBlock('Bash', 'ls', ['out\u001b[?1049h\u001b]0;pwned\u0007'], ENV);
 
-    expect(block).toBe('⏺ Bash(ls)\n  ⎿ out');
+    expect(block).toBe('● Bash(ls)\n  ⎿  out');
+  });
+
+  it('strips the user\'s own prompt itself', () => {
+    // The user's prompt is the only text in a row that is **not** markdown,
+    // so nothing else strips it.
+    const rows = renderTranscript([user('u1', 'hello\u001b[?1049h\u001b]0;pwned\u0007')], ENV);
+    const body = rows[0]?.segments[2];
+
+    expect(body?.text).toBe('hello');
   });
 
   it('strips the tool result id of an unmatched result itself', () => {
     // An unmatched result is a block of its own: it never reaches the block
     // renderer, so the id is stripped **here** or not at all.
-    const blocks = renderMessages([
-      toolResult('r1', {
-        toolUseId: 'nobody\u001b[?1049h\u001b]0;pwned\u0007',
-        content: { type: 'text', text: 'the orphan body' },
-        isError: false,
-      }),
-    ]);
+    const blocks = renderMessages(
+      [
+        toolResult('r1', {
+          toolUseId: 'nobody\u001b[?1049h\u001b]0;pwned\u0007',
+          content: { type: 'text', text: 'the orphan body' },
+          isError: false,
+        }),
+      ],
+      ENV,
+    );
 
-    expect(blocks).toEqual(['⏺ unmatched tool result\n  ⎿ toolUseId: nobody']);
+    expect(blocks).toEqual(['● unmatched tool result\n  ⎿  toolUseId: nobody']);
   });
 
   it('strips the tool block itself', () => {
@@ -996,17 +1537,18 @@ describe('the control-sequence strip — one path at a time', () => {
       'Bash\u001b[?1049h\u001b]0;pwned\u0007',
       'ls\u001b]0;pwned\u0007',
       ['out\u001b[2J\u001b]0;pwned\u0007'],
+      ENV,
     );
 
-    expect(block).toBe('⏺ Bash(ls)\n  ⎿ out');
+    expect(block).toBe('● Bash(ls)\n  ⎿  out');
   });
 
   it('does not render an empty parenthesis for a summary that is only an escape', () => {
     // The summary is tested **after** it is stripped: a summary that is only
     // an escape is an empty summary, and an empty summary has no parentheses.
-    const block = renderToolBlock('Bash', '\u001b[2J\u001b]0;pwned\u0007', []);
+    const block = renderToolBlock('Bash', '\u001b[2J\u001b]0;pwned\u0007', [], ENV);
 
-    expect(block).toBe('⏺ Bash');
+    expect(block).toBe('● Bash');
   });
 
   it('strips the tool name in the approval prompt itself', () => {
@@ -1020,7 +1562,7 @@ describe('the control-sequence strip — one path at a time', () => {
       'Bash\u001b[?1049h\u001b]0;pwned\u0007',
     );
 
-    expect(prompt).toContain('Bash needs your approval.');
+    expect(prompt).toContain('Bash command');
     expect(prompt).not.toContain('\u001b');
     expect(prompt).not.toContain('pwned');
   });
@@ -1038,13 +1580,16 @@ describe('the control-sequence strip — one path at a time', () => {
 
     expect(prompt).toBe(
       [
-        'Bash needs your approval.',
+        'Bash command',
+        'Do you want to proceed?',
         '',
         'No rule matched.',
         '',
-        '❯ 1. Yes',
-        "  2. Yes, and don't ask again for this Bash call",
-        '  3. No, and tell the assistant what to do differently',
+        '❯ Yes ✔',
+        "  Yes, and don't ask again for this Bash call",
+        '  No, and tell Claude what to do differently (esc)',
+        '',
+        'enter to confirm · esc to cancel',
       ].join('\n'),
     );
   });
@@ -1070,24 +1615,27 @@ describe('the control-sequence strip — one path at a time', () => {
 
     expect(prompt).toBe(
       [
-        'Bash needs your approval.',
+        'Bash command',
+        'Do you want to proceed?',
         '',
         'No rule matched.',
         '',
-        '❯ 1. Yes',
-        "  2. Yes, and don't ask again for this Bash call",
-        '  3. No, and tell the assistant what to do differently',
+        '❯ Yes ✔',
+        "  Yes, and don't ask again for this Bash call",
+        '  No, and tell Claude what to do differently (esc)',
+        '',
+        'enter to confirm · esc to cancel',
       ].join('\n'),
     );
   });
 
   it('strips the typed line itself', () => {
-    expect(inputEcho('x\u001b[?1049h')).toBe('> x');
-    expect(inputEcho('x\u001b]0;pwned\u0007')).toBe('> x');
+    expect(inputEcho('x\u001b[?1049h', ENV)).not.toContain('\u001b');
+    expect(inputEcho('x\u001b]0;pwned\u0007', ENV)).not.toContain('\u001b');
   });
 
   it('strips the markdown itself', () => {
-    expect(renderMarkdown('a\u001b[2Jb\u001b]0;pwned\u0007')).toBe('ab');
+    expect(renderMarkdown('a\u001b[2Jb\u001b]0;pwned\u0007', ENV)).toBe('ab');
   });
 
   it('strips the approval label itself', () => {
@@ -1123,8 +1671,8 @@ describe('the shared scanner — the only escape-handling code', () => {
 
   /** The number of strip sites in the renderers this task owns. */
   const STRIP_SITES: ReadonlyMap<string, number> = new Map([
-    ['src/ui/render/messages.ts', 9],
-    ['src/ui/render/prompts.ts', 3],
+    ['src/ui/render/messages.ts', 11],
+    ['src/ui/render/prompts.ts', 4],
   ]);
 
   it('never writes the escape character down outside the shared scanner', () => {
@@ -1236,6 +1784,25 @@ function captureStream(options: { isTTY?: boolean } = {}): {
   return { stream, text: () => chunks.join('') };
 }
 
+/**
+ * A standard input that looks like a terminal.
+ *
+ * Ink only reads the input of a stream that is a terminal and can be put into
+ * raw mode, so the fake carries both.
+ */
+function terminalStdin(): PassThrough & {
+  isTTY: boolean;
+  setRawMode: (mode: boolean) => unknown;
+} {
+  const stdin = new PassThrough() as PassThrough & {
+    isTTY: boolean;
+    setRawMode: (mode: boolean) => unknown;
+  };
+  stdin.isTTY = true;
+  stdin.setRawMode = () => stdin;
+  return stdin;
+}
+
 /** The streams a mount needs, with the terminal replaced by a collector. */
 function mountStreams(): {
   stdout: CapturedStream;
@@ -1283,6 +1850,42 @@ async function mountApp(props: AppProps, options: RenderOptions = {}): Promise<s
   return frame;
 }
 
+/**
+ * Mount the app with a **terminal** input, so a key can be pressed.
+ *
+ * The keystrokes go through Ink's own input pipeline, so what the test presses
+ * is what a terminal would send.
+ */
+async function mountWithKeys(
+  props: AppProps,
+): Promise<{ text: () => string; press: (key: string) => Promise<void>; instance: Instance }> {
+  const { stream, text } = captureStream({ isTTY: true });
+  const stdin = terminalStdin();
+  const stderr = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  const instance = renderApp(props, {
+    stdout: stream,
+    stdin,
+    stderr,
+    debug: true,
+    patchConsole: false,
+  });
+  await instance.waitUntilRenderFlush();
+
+  const press = async (key: string): Promise<void> => {
+    stdin.write(key);
+    // Ink holds a lone escape back for 20 ms, waiting to see whether it is
+    // the start of a sequence, so the wait has to be longer than that.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await instance.waitUntilRenderFlush();
+  };
+
+  return { text, press, instance };
+}
+
 /** The events the app-level tests show. */
 const APP_EVENTS: SessionEvent[] = [
   { v: SESSION_SCHEMA_VERSION, ts: 1, id: 'a1', t: 'assistant_message', text: 'Hello there.' },
@@ -1311,7 +1914,9 @@ const APP_APPROVAL = {
   toolName: 'Bash',
 };
 
-/** Run a body with the screen-reader switch on, and restore it afterwards. */
+/**
+ * Run a body with the screen-reader switch on, and restore it afterwards.
+ */
 async function withScreenReader(body: () => Promise<string>): Promise<string> {
   const previous = process.env['INK_SCREEN_READER'];
   process.env['INK_SCREEN_READER'] = 'true';
@@ -1339,8 +1944,10 @@ describe('the app — the screen-reader tree', () => {
       mountApp({ events: APP_EVENTS, input: 'what next?', approval: APP_APPROVAL }),
     );
 
-    expect(output).toContain('listitem: ⏺ Hello there.');
-    expect(output).toContain('listitem: ⏺ Bash(ls -la)');
+    // The target labels its **gutters**: the assistant's bullet is announced
+    // as `claude:` and the tool call's as `tool:` (§3.3, §3.5).
+    expect(output).toContain('listitem: claude:   Hello there.');
+    expect(output).toContain('listitem: tool:   Bash (ls -la)');
   });
 
   it('announces the three approval choices as options', async () => {
@@ -1348,9 +1955,9 @@ describe('the app — the screen-reader tree', () => {
       mountApp({ events: APP_EVENTS, input: 'what next?', approval: APP_APPROVAL }),
     );
 
-    expect(output).toContain('option: 1. Yes');
-    expect(output).toContain("option: 2. Yes, and don't ask again for this Bash call");
-    expect(output).toContain('option: 3. No, and tell the assistant what to do differently');
+    expect(output).toContain('option: Yes');
+    expect(output).toContain("option: Yes, and don't ask again for this Bash call");
+    expect(output).toContain('option: No, and tell Claude what to do differently (esc)');
   });
 
   it('still announces the content of the regions it labels', async () => {
@@ -1405,10 +2012,10 @@ describe('the app — the screen-reader tree', () => {
 
 describe('the app — the input echo', () => {
   it('strips the control sequences the typed text could carry', () => {
-    expect(inputEcho('\u001b[?1049h')).not.toContain('\u001b');
-    expect(inputEcho('\u001b[?1049h')).not.toContain('1049');
-    expect(inputEcho('hello')).toBe('> hello');
-    expect(inputEcho('')).toBe('');
+    expect(inputEcho('\u001b[?1049h', ENV)).not.toContain('\u001b');
+    expect(inputEcho('\u001b[?1049h', ENV)).not.toContain('1049');
+    expect(inputEcho('hello', ENV)).toBe('❯\u00A0hello');
+    expect(inputEcho('', ENV)).toBe('');
   });
 
   it('does not write a control sequence the typed text carried', async () => {
@@ -1430,6 +2037,12 @@ describe('the app — the scrollback', () => {
     // the lines that changed, so 60 frames a second is affordable.
     expect(STREAMING_MAX_FPS).toBe(60);
     expect(options.maxFps).toBe(60);
+  });
+
+  it('does not let Ink exit on ctrl+c, because the target\'s chord is a gesture', () => {
+    // The target's `ctrl+c` is `app:interrupt`, and the exit is a **two-press**
+    // gesture: `Press ctrl+c again to exit` (§12.3).
+    expect(appRenderOptions().exitOnCtrlC).toBe(false);
   });
 
   it('never writes the alternate-screen sequences to the terminal', async () => {
@@ -1461,9 +2074,32 @@ describe('the app — the mounted view', () => {
   it('shows the conversation the plan\'s renderers produce', async () => {
     const output = await mountApp({ events: APP_EVENTS, input: 'what next?' });
 
-    expect(output).toContain('⏺ Hello there.');
-    expect(output).toContain('⏺ Bash(ls -la)');
-    expect(output).toContain('> what next?');
+    expect(output).toContain('● Hello there.');
+    expect(output).toContain('● Bash(ls -la)');
+    expect(output).toContain('❯\u00A0what next?');
+  });
+
+  it('shows the target\'s placeholder when the line is empty', async () => {
+    const output = await mountApp({ events: APP_EVENTS, input: '' });
+
+    expect(output).toContain('Try "fix lint errors"');
+  });
+
+  it('shows the approval dialog, with the target\'s title, question and options', async () => {
+    const output = await mountApp({ events: APP_EVENTS, input: '', approval: APP_APPROVAL });
+
+    expect(output).toContain('Bash command');
+    expect(output).toContain('Do you want to proceed?');
+    expect(output).toContain('❯ Yes');
+    expect(output).toContain('No, and tell Claude what to do differently (esc)');
+    expect(output).toContain('enter to confirm · esc to cancel');
+  });
+
+  it('shows the hint line', async () => {
+    const output = await mountApp({ events: APP_EVENTS, input: '', approval: APP_APPROVAL });
+
+    expect(output).toContain('Waiting for permission…');
+    expect(output).toContain('? for shortcuts');
   });
 
   it('strips the control sequences the status line could carry', async () => {
@@ -1482,5 +2118,90 @@ describe('the app — the mounted view', () => {
     expect(output).toContain('thinking');
     expect(output).not.toContain('\u001b');
     expect(output).not.toContain('pwned');
+  });
+});
+
+describe('the app — the shortcuts overlay', () => {
+  it('opens on `?` and closes on escape', async () => {
+    const mounted = await mountWithKeys({
+      events: APP_EVENTS,
+      input: '',
+      onInputChange: () => undefined,
+    });
+
+    // The overlay is closed at first.
+    expect(mounted.text()).not.toContain('double tap esc to clear input');
+
+    // The terminal collects every frame, so what a press *wrote* is the text
+    // that came after it.
+    const before = mounted.text().length;
+    await mounted.press('?');
+    expect(mounted.text().slice(before)).toContain('double tap esc to clear input');
+    expect(mounted.text()).toContain('/keybindings to customize');
+
+    const afterOpen = mounted.text().length;
+    await mounted.press('\u001b');
+    expect(mounted.text().slice(afterOpen)).not.toContain('double tap esc to clear input');
+    mounted.instance.unmount();
+  });
+
+  it('lets a question mark be typed into a line that has content', async () => {
+    const typed: string[] = [];
+    const mounted = await mountWithKeys({
+      events: APP_EVENTS,
+      input: 'what',
+      onInputChange: (text: string) => {
+        typed.push(text);
+      },
+    });
+
+    await mounted.press('?');
+    expect(typed).toEqual(['what?']);
+    expect(mounted.text()).not.toContain('double tap esc to clear input');
+    mounted.instance.unmount();
+  });
+});
+
+describe('the app — the two gestures', () => {
+  it('arms the escape gesture and clears the line on the second press', async () => {
+    let current = 'half a line';
+    const changes: string[] = [];
+    const mounted = await mountWithKeys({
+      events: APP_EVENTS,
+      input: current,
+      onInputChange: (text: string) => {
+        current = text;
+        changes.push(text);
+      },
+    });
+
+    // The first escape shows the toast and clears **nothing**.
+    await mounted.press('\u001b');
+    expect(mounted.text()).toContain(ESCAPE_AGAIN_MESSAGE);
+    expect(changes).toEqual([]);
+
+    // The second escape clears the line.
+    await mounted.press('\u001b');
+    expect(changes).toEqual(['']);
+    mounted.instance.unmount();
+  });
+
+  it('arms the interrupt gesture and exits on the second press', async () => {
+    const mounted = await mountWithKeys({
+      events: APP_EVENTS,
+      input: 'hello',
+      // The app takes the terminal over when it is given something to report
+      // back, so the chord has to have a listener.
+      onInputChange: () => undefined,
+    });
+
+    // The first `ctrl+c` shows the toast and exits **nothing**.
+    await mounted.press('\u0003');
+    expect(mounted.text()).toContain(INTERRUPT_AGAIN_MESSAGE);
+
+    // The second one ends the session.
+    await mounted.press('\u0003');
+    await mounted.instance.waitUntilExit();
+    expect(mounted.text()).toContain(INTERRUPT_AGAIN_MESSAGE);
   });
 });

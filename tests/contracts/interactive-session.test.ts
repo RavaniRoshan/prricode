@@ -581,6 +581,36 @@ describe('the interactive session host', () => {
     await host;
   });
 
+  it('tells the app that a turn is running, under the target\'s status verb', async () => {
+    // The target's status line carries a spinner while a turn runs (§5.2), so
+    // the app has to be told that a turn **is** running, and the verb it runs
+    // under is the target's own: `Working`.
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const test = harness({ rounds: [[...finalTurn('Hello there.')]], wait: gate });
+    const controller = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
+    await test.app.mounted();
+
+    expect(test.app.latest.busy).toBe(false);
+
+    test.app.latest.onSubmit?.('the first line');
+    await test.app.waitFor((props) => props.status === WORKING_STATUS);
+
+    expect(test.app.latest.busy).toBe(true);
+    expect(test.app.latest.status).toBe('Working');
+
+    release?.();
+    await test.app.waitFor((props) => props.events.some((event) => event.t === 'assistant_message'));
+    expect(test.app.latest.busy).toBe(false);
+
+    controller.abort();
+    await host;
+  });
+
   it("mounts this implementation's own app when the caller supplies no seam", async () => {
     // The **real** app, through the real mount: the terminal UI is loaded on
     // demand, the line the user types reaches the app, and the answer reaches

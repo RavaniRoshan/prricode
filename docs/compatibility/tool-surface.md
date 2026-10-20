@@ -2,8 +2,8 @@
 
 **Target:** the pinned reference build `2.1.303`, Linux x86-64, SHA-256 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`.
 **Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.4 ("Agent loop and tool dispatch") and §2.5 ("Permissions").
-**Owning task:** `CC-008` in [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
-**Matrix rows:** F-17, F-18 in [`feature-matrix.md`](feature-matrix.md).
+**Owning task:** `CC-008` in [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md); the terminal-UI surfaces below were closed by `CC-022`.
+**Matrix rows:** F-17, F-18 in [`feature-matrix.md`](feature-matrix.md), and F-39 (the interactive terminal UI) below.
 
 Every row names its **evidence class**: `REA observed`, `Documented only`, or `implementation choice`.
 
@@ -83,6 +83,63 @@ Delegates through a `deps.delegate` seam and reports a typed `taskUnavailable` f
 - **Implementation choice (`CC-008b`).** The `Bash` output gained the sandbox members — `sandboxed`, `sandboxReason`, `sandboxEstablishmentReason`, `sandboxExemptions`, `sandboxExemptionScope`, `sandboxAvailability` — and `timedOut`. The audit records no such members; they are this implementation's, and the shape is additive.
 - `Grep`'s bounds (a 512-character pattern, a 1 MiB file, 2 000 examined files), `Glob`'s result cap, and `WebFetch`'s timeout and byte cap.
 
+## The terminal UI (F-39)
+
+**Specification:** `/home/shiva/opt/reference-agent-rea/analysis/findings-terminal-ui.md` — the surface inventory, every string, the layout of every surface, the theme's colours, the rule that maps a role to one, the keybindings, the markdown rules and the observable behaviours. Every claim in that document carries the target's own file and byte offset.
+
+**Owning task:** `CC-022`. **Evidence class:** `REA observed` — the target's terminal UI was read out of the extracted bundle, so the surfaces below are compared against the target's own strings, order, colours and keys.
+
+### What is compared
+
+| Surface | What the specification established | What the clone does | Match |
+| --- | --- | --- | --- |
+| The **theme** | The dark theme, value for value, and the role→colour rule (`qn`/`dMt`) — §1.1, §1.2 | `src/ui/theme.ts` carries the target's 72 roles verbatim and resolves a role to its literal with an own-property lookup | yes |
+| The **glyph set** | `●`/`⏺`, `❯`/`>`, `✔`/`√`, `✘`/`×` and the platform deltas — §1.4 | `glyphs()` reproduces the rule, not one platform's answer | yes |
+| The **transcript** | The user's prompt, the assistant's reply, a thinking block, a tool call and a tool's result: the markers, the order and the colours — §3.1–§3.6 | `renderTranscript` produces the target's rows, with the roles the colours come from. The thinking block's renderer is the target's, but this implementation's records carry no thinking block, so the row has no producer yet | yes, for the rows that have a producer |
+| The **composer** | The prompt glyph (with its non-breaking space), the top rule in `promptBorder`, and the dimmed, inverted-cursor placeholder — §2.1–§2.3 | The app draws the glyph, the `promptBorder` top rule and the `Try "…"` placeholder | yes |
+| The **hint line** | The dim hint line, its parts and the `" · "` separator — §2.4 | `hintLineItems` produces the parts; the app joins them with `" · "` | yes |
+| The **`?` shortcuts overlay** | The overlay's lines, in the target's order, and the `<chord> to <action>` form — §2.5 | `shortcutOverlayLines` produces the target's lines; `?` on an empty line opens the overlay | yes, for the lines; the overlay's *chrome* is not established |
+| The **approval dialog** | The title, the question, the options (no numbers), the pointer, the tick and the input guide — §4.1–§4.3 | `approvalPromptParts` and `optionSegments` produce the target's dialog | yes |
+| The **keybindings** | The contexts, the chords, the actions and the platform deltas — §9.1, §9.2 | `keybindings()` is the target's table, with the paste and cycle-mode chords resolved per platform | yes |
+| The **spinner and the status line** | The six frames, the two-second oscillation, the gutter arrow and the verb `Working` — §5.1, §5.2 | `SPINNER_FRAMES` and `spinnerFrame` are the target's; the app draws `↓ <frame> Working` | yes |
+| The **markdown** | The heading, code-block, inline-code, list, table, blockquote, rule, image, link and strike-through rules — §10.1 | `renderMarkdownSegments` implements the target's rules and produces the roles | yes |
+| The **two gestures** | `Esc again to clear` and `Press ctrl+c again to exit` — §12.3 | The app arms the first press and acts on the second; `ctrl+c` is not Ink's own exit key | yes |
+
+### What the specification did **not** settle — left alone, and named
+
+Nothing below was invented. Each is a surface the specification explicitly could not establish, or a surface this implementation does not have.
+
+| Surface | Why it is left alone |
+| --- | --- |
+| The **`/permissions` panel's chrome** | The specification did not locate the component (§8, §13.1). This implementation has no permissions panel. |
+| The **composer's bottom rule** | The specification's §2.2 quotes a border whose `borderBottom` is set, while its prose and its closing section (§13.2) say the bottom rule was **not** established. The specification contradicts itself here, so the clone follows the closing section and draws the **top rule only** — and says so rather than picking a side silently. |
+| The **session-title banner** in the composer's rule | The target puts the session's title in the rule's `borderText` (§2.2, §12.7). This implementation has no session title, so the rule is plain. |
+| The **shell mode's switch** | Typing `!` into an empty prompt enters the shell mode (§12.8), whose glyph and hint are reproduced — but this implementation has no shell mode to enter, so the switch is not made. |
+| The **permission-mode pill** and the mode cycling | The mode *labels* are established (§4.4) and the `shift+tab` binding is (§9.1), but the pill's own rendering is not, and this implementation's permission mode is fixed for the session. |
+| The **token counter** (`↓ N tokens`) | The target's format is established (§5.2); this implementation's runtime does not surface a token count, so the counter has no producer. |
+| The **transcript's empty state** | No empty-state string was found (§13.3). The clone has no empty state. |
+| The **thinking block's producer** | The block's *shape* is established (§3.4) and the renderer is the target's, but this implementation's session records carry a thinking block only as a raw provider event, and the plan fixes the message list as one block per assistant message and one per tool call. The renderer exists; nothing feeds it yet. |
+| The **per-tool summary text** inside `( … )` | The *shape* is established; the seven `renderToolUseMessage` texts were not read (§13.4). The clone's own summary fields are used, and the shape is the target's. |
+| The **`/help` and `/diff` layouts** | Neither body was read (§13.5, §13.7). |
+| The **welcome screen** | The version line is established, but the banner art is not, and this implementation has no welcome screen. |
+| The **model picker** | The target's picker is a different surface from this implementation's multi-provider picker, which is a **project extension** (`CC-016`). |
+| The **slash-command registry** | §11's 92 commands are `CC-030`'s work; this task changed no command. |
+| The **diff panel's chrome** | The colour roles are established, the panel's layout is not (§13.7). |
+| The **input field's readline-style key map** | §9.3 establishes the target's field: the word motions, `home`/`end`, the `ctrl+a`…`ctrl+y` family and the `meta` motions. This implementation's composer is a single line of text with no cursor, so those chords have nothing to move. The chords it *can* act on are implemented: `enter`, `escape`, `ctrl+j`, `ctrl+l`, `ctrl+c`, `ctrl+d`, the backspace and delete keys, and the approval dialog's arrows. |
+
+### The clone's own choices on the compared surfaces
+
+These are the places where the clone differs from the target *by choice*, each one labelled in the code:
+
+- the **ARIA region labels and roles** (`Conversation`, `Message input`, the approval listbox) — the target's regions were not established; the target labels its **gutters** (`you:`, `claude:`, `tool:`, `thinking:`), and the clone does that too;
+- the **denial marker** (`denied (source: …, reason type: …)`) and the **sandbox status lines** — the target reports a denial as the tool's own error result;
+- the **persistent option's label** — the target's own labels are per-tool templates, and the specification did not establish which template applies to which case;
+- the **reason line** under the question — the target's own line is the "always allow is not available" note, which this implementation has no equivalent for;
+- the **syntax highlighter** and the **terminal hyperlink** — the clone has neither, so a code block's body is verbatim and a link carries its URL without an OSC 8 sequence;
+- the **nested list's indent** (two columns per level), the **spinner's cosine**, the **placeholder's rotation** and the **frame rate** — implementation choices, each labelled where it is made;
+- the **toast's placement** — the target renders its notifications in a right-hand column (§5.4, §12.4); the clone renders them on a line under the hint line, joined with the target's `" · "` separator;
+- the **`?` overlay's opening rule** — the target's footer advertises `? for shortcuts` (§2.4) but the specification does not say how the overlay is opened; the clone opens it on `?` **on an empty line**, so a question mark can still be typed into a prompt.
+
 ## Conformance table
 
 | Claim | Evidence class | Matrix row | Pinned by |
@@ -103,3 +160,13 @@ Delegates through a `deps.delegate` seam and reports a typed `taskUnavailable` f
 | A Bash rule matches command text, not program identity | Documented only | F-20 | same file |
 | The malformed-call path reaches the audit's `errorCode: 7` / `3` end-to-end | REA observed | F-20 | `tests/contracts/tool-registry.test.ts` — the end-to-end malformed cases |
 | The rule engine's tool tables name only shipped tools | implementation choice | F-20 | `tests/security/permission-rules.test.ts` — "the rule engine's tool tables" |
+| The terminal UI's **theme** is the target's, value for value, and the role→colour rule is the target's | REA observed | F-39 | `tests/contracts/ui-render.test.ts` — "the theme — the target's colours and the role rule" |
+| The terminal UI's **glyphs** carry the target's platform deltas | REA observed | F-39 | same file — "the glyphs — the target's platform deltas" |
+| The terminal UI's **transcript** rows carry the target's markers, order and colours | REA observed | F-39 | same file — "the transcript — the target's rows" |
+| The terminal UI's **composer** shows the target's glyph, top rule and placeholder | REA observed | F-39 | same file — "the composer" |
+| The terminal UI's **hint line** joins its parts with the target's separator | REA observed | F-39 | same file — "the hint line" |
+| The terminal UI's **approval dialog** shows the target's title, question, options and guide | REA observed | F-39 | same file — "the approval prompt — the target's dialog" |
+| The terminal UI's **keybindings** are the target's table, with the target's platform deltas | REA observed | F-39 | same file — "the keybindings — the target's table" |
+| The terminal UI's **spinner** and **status line** carry the target's frames and verb | REA observed | F-39 | same file — "the spinner" |
+| The terminal UI's **markdown** follows the target's rendering rules | REA observed | F-39 | same file — "renderMarkdown — the target's rules" |
+| The terminal UI's two **gestures** are the target's (`Esc again to clear`, `Press ctrl+c again to exit`) | REA observed | F-39 | same file — "the app — the two gestures" |

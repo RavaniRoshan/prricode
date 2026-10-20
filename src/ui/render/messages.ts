@@ -1,19 +1,37 @@
 /**
- * The message-list renderer.
+ * The transcript renderer.
  *
- * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.5 (Permissions) and
- * the `CC-015` milestone of
- * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
- * The audit records **no** TUI drawing at all — §2.10 is the argument parser,
- * not a terminal — so everything this module draws is a **implementation choice**.
+ * Evidence: the `CC-022` milestone of
+ * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`,
+ * and the specification it names —
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-terminal-ui.md` §3
+ * ("The transcript").
  *
  * ## What this module is
  *
  * The UI is a **renderer over the runtime**, not a second implementation: it
  * reads the same `SessionEvent` records the headless path reads and turns them
- * into the blocks the terminal shows. The renderer is **pure** — it reads no
+ * into the rows the terminal shows. The renderer is **pure** — it reads no
  * clock, touches no terminal and touches no filesystem — and that is what makes
  * it testable at all.
+ *
+ * ## The rows are the target's rows
+ *
+ * The target draws four kinds of row (§3.1 – §3.6), and the clone draws the
+ * same four, with the same markers, in the same colours, in the same order:
+ *
+ * | row | the target's shape | the target's colours |
+ * |---|---|---|
+ * | the user's own prompt | `❯ ` and the text, on a band | the pointer is `inactive`, the text is `text`, the band is `userMessageBackground` |
+ * | the assistant's reply | a two-column gutter with `●`, then the body | the bullet is `text` |
+ * | a thinking block | a two-column gutter with `∴`, then the text | dim and italic |
+ * | a tool call | a two-column gutter with `●`, then `Tool(summary)` | the tool's name is bold |
+ * | a tool's result | the marker `  ⎿  `, then the body | the marker is dim; an errored result is `error` |
+ *
+ * The gutter is **two columns** wide in the target (`minWidth: 2`), so the body
+ * of a row starts at the second column and every line under it is aligned
+ * there. The result's marker is `  ⎿  ` — two spaces, the marker, two spaces —
+ * and the body is aligned under it.
  *
  * ## The blocks
  *
@@ -22,10 +40,10 @@
  *   - **one block per assistant message**, and
  *   - **one block per tool call**, carrying the tool's **result**.
  *
- * A block is a **string**: the renderer produces the text the terminal shows,
- * and the UI decides how to colour it. The blocks are separated in the returned
- * array, so a consumer can lay them out one per line-group without parsing
- * the text.
+ * A block is a **string**: `renderMessages` produces the text the terminal
+ * shows, and `renderTranscript` produces the same rows with the **roles** the
+ * colours come from. The two cannot disagree: the string is the projection of
+ * the segments.
  *
  * The other record kinds are **not** blocks:
  *
@@ -53,24 +71,21 @@
  * The marker names both:
  *
  * ```
- * ⏺ Bash(rm -rf /)
- *   ⎿ denied (source: user_reject, reason type: rule)
- *   ⎿ Permission rule 'rm -rf *' from localSettings denies this Bash call.
+ * ● Bash(rm -rf /)
+ *   ⎿  denied (source: user_reject, reason type: rule)
+ *   ⎿  Permission rule 'rm -rf *' from localSettings denies this Bash call.
  * ```
  *
- * The source and the reason type come from the decision that **decided** the
- * call: the tool result's own envelope carries it as the summary the model
- * observes, and a `permission_request` record is the log of the checks that
- * led to it. When the runtime checks a call **twice** — which it does when a
- * hook rewrites the input — the **strictest** of the two decisions is the one
- * that decided the call, and the marker carries that one.
+ * **Implementation choice.** The target reports a denial as the tool's own
+ * error result; the marker is this implementation's own, and the plan asks for
+ * it.
  *
  * ## A sandboxed run shows its status
  *
- * The `Bash` tool reports whether the command ran **inside** the sandbox, the
+ * The `Bash` tool reports whether the command ran **inside the sandbox**, the
  * reason it did not, the reason the sandbox **never came up**, the exemptions
- * that applied, how far they reach, and what the backend's **availability
- * probe** reported. The block shows all of them, because "the command ran"
+ * that applied, how far they reach, and the backend's **availability
+ * probe**'s report. The row shows all of them, because "the command ran"
  * and "the command ran *confined*" are different facts and a reader must not
  * have to guess which one happened. The availability report is not redundant
  * either: on the unconfined path it is the **only** carrier of *why the
@@ -79,8 +94,8 @@
  * ## The strictness rule is shared, and it fails closed
  *
  * A call can be checked twice — the runtime checks the input, and checks it
- * again when a hook rewrote it — and the **strictest** of the two decisions
- * is the one that decided the call. The rule that says which one is stricter
+ * again when a hook rewrites it — and the **strictest** of the two decisions is
+ * the one that decided the call. The rule that says which one is stricter
  * belongs to the **permission layer** (`permissionStrictness`, in
  * `src/permissions/decision.ts`), and the renderer **shares** it rather than
  * copying it: the renderer already depends on the permission vocabulary, and
@@ -117,60 +132,72 @@
  *
  * ## What is observed and what is a implementation choice
  *
- * The audit pins the permission **vocabulary** — the behaviors, the sources and
- * the reason types — and the tool-result **metadata**. It says nothing about
- * how the terminal draws a message, so the following are **implementation choices**, and
- * they are marked as such below:
+ * The transcript's **shapes**, **markers**, **order** and **colours** are the
+ * target's (§3.1 – §3.6, every row carrying the target's own file and byte
+ * offset). The following are **implementation choices**, and they are marked
+ * as such below:
  *
- *   - the **block format**: the block markers (`⏺` and `⎿`), the indentation
- *     and the truncation limits;
  *   - the **denial marker's wording**: `denied (source: …, reason type: …)`;
  *   - the **sandbox status lines**: `sandboxed`, `not sandboxed: …`,
  *     `sandbox not established: …`, `sandbox backend available`,
  *     `sandbox backend unavailable: …`, `sandbox availability warning: …`,
  *     `sandbox exemptions: …` and `sandbox exemption scope: …`;
- *   - the **tool-summary fields** the summary names;
- *   - the **unmatched-result report**: `unmatched tool result`.
+ *   - the **tool-summary fields** the summary names — the target's per-tool
+ *     summaries were not established (§13.4), so the clone's own fields are
+ *     used and the shape (`Tool(summary)`) is the target's;
+ *   - the **unmatched-result report**: `unmatched tool result`;
+ *   - the **thinking block** has no producer: the clone's session records
+ *     carry a thinking block only as a raw provider event, and the plan fixes
+ *     the message list as one block per assistant message and one per tool
+ *     call. The renderer exists; nothing feeds it yet.
  */
 
 import { permissionStrictness, type PermissionDecision } from '../../permissions/decision.js';
 import { isRecord, ownBoolean, ownNumber, ownString } from '../../session/event.js';
 import type { SessionEvent } from '../../session/event.js';
 import type { ToolResultEnvelope } from '../../tools/runner.js';
+import { glyphs, type Segment } from '../theme.js';
 
-import { renderMarkdown, stripControlSequences } from './markdown.js';
+import { renderMarkdownSegments, stripControlSequences } from './markdown.js';
 
 /* -------------------------------------------------------------------------- */
 /* The constants                                                               */
 /* -------------------------------------------------------------------------- */
 
 /**
- * The marker in front of a message.
+ * The marker in front of an assistant's reply and of a tool call.
  *
- * **Implementation choice.** The audit records no marker; the shape is this implementation's own.
+ * The target's `wo` (`chunk-c9s0jh80.js:216418`): `⏺` on macOS and `●`
+ * everywhere else. The clone runs on Linux, so the marker is `●`.
  */
-export const MESSAGE_MARKER = '⏺';
+export const MESSAGE_MARKER = glyphs().bullet;
 
 /**
  * The marker in front of a tool result line.
  *
- * **Implementation choice**, like the message marker.
+ * The target's `$Ks` (`chunk-c9s0jh80.js:216418`): `⎿`.
  */
-export const RESULT_MARKER = '⎿';
+export const RESULT_MARKER = glyphs().toolResult;
 
 /**
  * The marker in front of a user's own prompt.
  *
- * **Implementation choice**, like the message marker.
+ * The target's `te.pointer`: `❯`, or `>` on the plain Linux terminal.
  */
-export const USER_MARKER = '>';
+export const USER_MARKER = glyphs().pointer;
 
 /**
- * The indentation of a result line.
+ * The spaces before the result's marker.
  *
- * **Implementation choice**, like the markers.
+ * The target's `Dp` (`chunk-mgm68b0e.js:106687`): `"  ⎿  "` — two spaces
+ * before the marker and two after it.
  */
 export const RESULT_INDENT = '  ';
+
+/**
+ * The spaces after the result's marker.
+ */
+export const RESULT_MARKER_SUFFIX = '  ';
 
 /**
  * The largest number of result lines a tool block shows.
@@ -227,6 +254,65 @@ export const KNOWN_INPUT_FIELDS: ReadonlyMap<string, string> = new Map<string, s
   ['WebFetch', 'url'],
   ['Write', 'file_path'],
 ]);
+
+/* -------------------------------------------------------------------------- */
+/* The rows                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One row of the transcript.
+ *
+ * A row is a **list of segments**: a text and the **role** it is drawn in.
+ * The role is resolved to a colour by the theme, at the moment the row is
+ * drawn — the target's own arrangement.
+ */
+export interface TranscriptRow {
+  /** What the row is. */
+  readonly kind: 'user' | 'assistant' | 'thinking' | 'tool';
+  /** The row's text, in order. */
+  readonly segments: readonly Segment[];
+  /**
+   * The theme role the row is drawn on, when the row has a background.
+   *
+   * The target draws the user's own prompt on a `userMessageBackground` band
+   * (§3.1).
+   */
+  readonly background?: string | undefined;
+}
+
+/**
+ * The text of a list of segments.
+ */
+function segmentText(segments: readonly Segment[]): string {
+  let out = '';
+  for (const segment of segments) out += segment.text;
+  return out;
+}
+
+/**
+ * Indent every line of a list of segments after the first.
+ *
+ * The target's rows are two-column: the gutter holds the marker and the body
+ * starts at the second column, so a body that runs to several lines is
+ * aligned under itself.
+ */
+function indentSegments(segments: readonly Segment[], indent: string): Segment[] {
+  const out: Segment[] = [];
+  for (const segment of segments) {
+    if (!segment.text.includes('\n')) {
+      out.push(segment);
+      continue;
+    }
+    const parts = segment.text.split('\n').map((part, position) => {
+      if (position === 0) return part;
+      // An empty line stays empty: a line of trailing spaces is a line the
+      // terminal shows.
+      return part === '' ? '' : `${indent}${part}`;
+    });
+    out.push({ ...segment, text: parts.join('\n') });
+  }
+  return out;
+}
 
 /* -------------------------------------------------------------------------- */
 /* The small readers                                                           */
@@ -341,6 +427,9 @@ function oneLine(text: string): string {
  * command of a `Bash` call, the path of a `Read` call — and any other tool is
  * summarised by its input as compact JSON. The lookup is guarded and the table
  * is a `Map`, so a caller-supplied tool name cannot reach an inherited member.
+ *
+ * **Implementation choice.** The target's per-tool summary texts were not
+ * established (§13.4); the *shape* — `Tool(summary)` — is the target's.
  */
 export function summarizeToolInput(toolName: string, input: unknown): string {
   const field = KNOWN_INPUT_FIELDS.get(toolName);
@@ -541,84 +630,201 @@ export function toolResultLines(
 }
 
 /* -------------------------------------------------------------------------- */
-/* The blocks                                                                  */
+/* The rows                                                                    */
 /* -------------------------------------------------------------------------- */
 
 /**
- * A block of text: the marker in front of the first line, and the rest of the
- * text under it.
+ * The rows of the transcript.
+ *
+ * The renderer is **pure**: it reads no clock, touches no terminal and touches
+ * no filesystem.
+ *
+ * The rows are the target's (§3.1 – §3.6):
+ *
+ *   - the **user's own prompt** is the pointer in `inactive`, the text in
+ *     `text`, on a `userMessageBackground` band;
+ *   - the **assistant's reply** is the bullet in `text` and the body beside
+ *     it, rendered as markdown;
+ *   - a **tool call** is the bullet, the tool's name in bold and the summary
+ *     in parentheses;
+ *   - a **tool's result** is the dim marker `  ⎿  ` and the body, rendered as
+ *     markdown, in the `error` colour when the result is an error.
  */
-function blockWithMarker(marker: string, text: string): string {
-  const rendered = renderMarkdown(text);
-  if (rendered === '') return marker;
-  const lines = rendered.split('\n');
-  const first = lines[0];
-  const head = first === undefined ? marker : `${marker} ${first}`;
-  const rest = lines.slice(1);
-  return rest.length === 0 ? head : `${head}\n${rest.join('\n')}`;
+export function renderTranscript(
+  events: SessionEvent[],
+  env: NodeJS.ProcessEnv = process.env,
+): TranscriptRow[] {
+  if (!Array.isArray(events)) return [];
+  const entries = fold(events, true);
+  return entries.map((entry) => renderEntry(entry, env));
 }
 
 /**
- * The block of an assistant message.
+ * The rows of the **model's** list: the assistant's replies and the tool
+ * calls, and nothing else.
  *
- * The text is rendered as markdown, because that is what a model emits.
+ * The plan fixes this list — one block per assistant message and one per tool
+ * call — and the app's view adds the user's own prompts to it.
  */
-export function renderAssistantBlock(text: string): string {
-  return blockWithMarker(MESSAGE_MARKER, text);
+function modelRows(events: SessionEvent[], env: NodeJS.ProcessEnv): TranscriptRow[] {
+  if (!Array.isArray(events)) return [];
+  const entries = fold(events, false);
+  return entries.map((entry) => renderEntry(entry, env));
 }
 
 /**
- * The block of a user's own prompt.
- *
- * **Implementation choice.** The prompt is shown with a `>` marker, which is how a
- * terminal shows what was typed at it.
+ * Render one entry into a row.
  */
-export function renderUserBlock(text: string): string {
-  return blockWithMarker(USER_MARKER, text);
+function renderEntry(entry: Entry, env: NodeJS.ProcessEnv): TranscriptRow {
+  if (entry.kind === 'assistant') return assistantRow(entry.text, env);
+  if (entry.kind === 'user') return userRow(entry.text, env);
+  if (entry.kind === 'unmatched') return unmatchedRow(entry.toolUseId, env);
+  const summary = summarizeToolInput(entry.name, entry.input);
+  const lines = toolResultLines(entry.envelope, entry.decision);
+  return toolRow(entry.name, summary, lines, entry.envelope?.isError === true, env);
 }
 
 /**
- * The block of a tool call.
+ * The row of the user's own prompt.
  *
- * The header names the tool and the call; the result lines are indented under
- * it. The lines are capped, and the cap is **announced** rather than silent.
- *
- * Both the summary and the lines are **stripped**: they are caller-supplied,
- * and the block is what the terminal shows. The summary is tested **after** it
- * is stripped, so a summary that is *only* an escape sequence is an empty
- * summary — and an empty summary has no parentheses at all.
- *
- * **Implementation choice.** The block's shape — the marker, the indent and the result
- * marker — is this implementation's own.
+ * The target's §3.1: the pointer in `inactive`, a space, the text in `text`,
+ * on a `userMessageBackground` band. The text is **not** markdown: the target
+ * draws it as the user typed it.
  */
-export function renderToolBlock(
+function userRow(text: string, env: NodeJS.ProcessEnv): TranscriptRow {
+  const pointer = glyphs(env).pointer;
+  const body = stripControlSequences(text);
+  return {
+    kind: 'user',
+    background: 'userMessageBackground',
+    segments: [
+      { text: pointer, role: 'inactive', ariaLabel: 'you:' },
+      { text: ' ' },
+      { text: body, role: 'text' },
+    ],
+  };
+}
+
+/**
+ * The row of the assistant's reply.
+ *
+ * The target's §3.3: a two-column gutter with the bullet in `text`, and the
+ * body beside it, rendered as markdown.
+ */
+function assistantRow(text: string, env: NodeJS.ProcessEnv): TranscriptRow {
+  const bullet = glyphs(env).bullet;
+  // The target's §3.3: the body is drawn in the `text` role, and the roles
+  // the markdown itself sets (inline code in `permission`) win over it.
+  const body = renderMarkdownSegments(text, env).map((segment) => ({
+    ...segment,
+    role: segment.role ?? 'text',
+  }));
+  return {
+    kind: 'assistant',
+    segments: [
+      { text: bullet, role: 'text', ariaLabel: 'claude:' },
+      { text: ' ' },
+      ...indentSegments(body, '  '),
+    ],
+  };
+}
+
+/**
+ * The row of a thinking block.
+ *
+ * The target's §3.4: a two-column gutter with `∴`, and the text beside it,
+ * dim and italic.
+ *
+ * The clone's session records carry no thinking block — a thinking block is
+ * only a raw provider event — so this renderer has no producer yet. It is
+ * here because the target's shape is established and the clone will need it
+ * the moment its records carry one.
+ */
+export function thinkingRow(text: string, env: NodeJS.ProcessEnv = process.env): TranscriptRow {
+  const thinking = glyphs(env).thinking;
+  const body = stripControlSequences(text);
+  return {
+    kind: 'thinking',
+    segments: [
+      { text: thinking, role: 'text', dim: true, italic: true, ariaLabel: 'thinking:' },
+      { text: ' ' },
+      { text: body, dim: true, italic: true },
+    ],
+  };
+}
+
+/**
+ * The row of a tool call, and of its result.
+ *
+ * The target's §3.5 and §3.6: the gutter holds the bullet, the label is the
+ * tool's name in bold with the summary in parentheses, and the result is the
+ * dim marker `  ⎿  ` with the body under it.
+ */
+function toolRow(
   toolName: string,
   summary: string,
-  lines: string[],
-): string {
+  lines: readonly string[],
+  isError: boolean,
+  env: NodeJS.ProcessEnv,
+): TranscriptRow {
+  const bullet = glyphs(env).bullet;
   const name = stripControlSequences(toolName);
   const summaryText = stripControlSequences(summary);
-  const call = summaryText === '' ? name : `${name}(${summaryText})`;
-  const header = `${MESSAGE_MARKER} ${call}`;
-  if (lines.length === 0) return header;
 
-  let shown = lines.map((line) => stripControlSequences(line));
-  let truncated = false;
-  if (shown.length > MAX_RESULT_LINES) {
-    shown = shown.slice(0, MAX_RESULT_LINES);
-    truncated = true;
-  }
-  let body = shown.join('\n');
-  if (body.length > MAX_BLOCK_CHARS) {
-    body = `${body.slice(0, MAX_BLOCK_CHARS - 1)}…`;
-    truncated = true;
-  }
-  if (truncated) body = `${body}\n… (truncated)`;
+  const segments: Segment[] = [
+    { text: bullet, role: 'text', ariaLabel: 'tool:' },
+    { text: ' ' },
+    { text: name, bold: true },
+  ];
+  if (summaryText !== '') segments.push({ text: `(${summaryText})` });
 
-  const indented = body
-    .split('\n')
-    .map((line) => `${RESULT_INDENT}${RESULT_MARKER} ${line}`);
-  return [header, ...indented].join('\n');
+  if (lines.length > 0) {
+    let shown = lines.map((line) => stripControlSequences(line));
+    let truncated = false;
+    if (shown.length > MAX_RESULT_LINES) {
+      shown = shown.slice(0, MAX_RESULT_LINES);
+      truncated = true;
+    }
+    let body = shown.join('\n');
+    if (body.length > MAX_BLOCK_CHARS) {
+      body = `${body.slice(0, MAX_BLOCK_CHARS - 1)}…`;
+      truncated = true;
+    }
+    if (truncated) body = `${body}\n… (truncated)`;
+
+    const marker = `${RESULT_INDENT}${RESULT_MARKER}${RESULT_MARKER_SUFFIX}`;
+    const rendered = renderMarkdownSegments(body, env).map((segment) =>
+      isError ? { ...segment, role: segment.role ?? 'error' } : segment,
+    );
+    segments.push({ text: '\n' });
+    segments.push({ text: marker, dim: true });
+    segments.push(...indentSegments(rendered, ' '.repeat(marker.length)));
+  }
+
+  return { kind: 'tool', segments };
+}
+
+/**
+ * The row of a tool result that has no tool call.
+ *
+ * **Implementation choice.** The report's wording is this implementation's own; the audit
+ * records only that the target reports the mismatch.
+ */
+function unmatchedRow(toolUseId: string, env: NodeJS.ProcessEnv): TranscriptRow {
+  const bullet = glyphs(env).bullet;
+  const id = stripControlSequences(toolUseId);
+  const marker = `${RESULT_INDENT}${RESULT_MARKER}${RESULT_MARKER_SUFFIX}`;
+  return {
+    kind: 'tool',
+    segments: [
+      { text: bullet, role: 'text' },
+      { text: ' ' },
+      { text: UNMATCHED_RESULT_LABEL },
+      { text: '\n' },
+      { text: marker, dim: true },
+      { text: `toolUseId: ${id}` },
+    ],
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -650,8 +856,8 @@ type Entry =
  * renderer already depends on the permission vocabulary — the decision type
  * and the reason the prompt shows — so a second copy of the rule could only
  * drift. The shared rule **fails closed**: a behavior outside the closed
- * vocabulary, which the types forbid but a caller can still build at runtime,
- * is the **strictest** one, and the renderer treats it as such.
+ * vocabulary, which the types forbid but a caller can still build at runtime, is
+ * the **strictest** one, and the renderer treats it as such.
  */
 function stricterDecision(
   first: PermissionDecision | undefined,
@@ -789,13 +995,14 @@ function fold(events: SessionEvent[], includeUserMessages: boolean): Entry[] {
  *
  * The user's own prompts are **not** blocks of this list: they are what the
  * input line shows. `renderConversation` is the app's fuller view, which shows
- * them too — and it is built on **this** function's blocks, so the shipped
- * view and the plan's contract cannot drift apart.
+ * them too — and it is built on **this** function's rows, so the shipped view
+ * and the plan's contract cannot drift apart.
  */
-export function renderMessages(events: SessionEvent[]): string[] {
-  if (!Array.isArray(events)) return [];
-  const entries = fold(events, false);
-  return entries.map((entry) => renderEntry(entry));
+export function renderMessages(
+  events: SessionEvent[],
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return modelRows(events, env).map((row) => segmentText(row.segments));
 }
 
 /**
@@ -832,63 +1039,72 @@ function userPrompts(folded: Entry[]): UserPrompt[] {
 /**
  * Render the whole conversation: the user's prompts and the model's blocks.
  *
- * **Implementation choice.** The plan fixes `renderMessages` as the list of what the
- * model produced; the app also shows what the user said, in the order it was
- * said, so this is the view the app mounts.
- *
  * The conversation is built **on** the plan's contract, and it is built on it
- * **structurally**: the model's blocks are `renderMessages`' own blocks, taken
- * from `renderMessages` and from nothing else. The prompts are placed by the
+ * **structurally**: the model's blocks are the model's own rows, taken from
+ * the same renderer and from nothing else. The prompts are placed by the
  * count of the model's entries that came before them, so a prompt sits where
  * it was said. The shipped view and the plan's contract therefore cannot
  * drift apart — there is no second copy of the model's blocks to drift.
  */
-export function renderConversation(events: SessionEvent[]): string[] {
+export function renderConversation(
+  events: SessionEvent[],
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
   if (!Array.isArray(events)) return [];
   const folded = fold(events, true);
   const entries = userPrompts(folded);
-  const model = renderMessages(events);
+  const model = modelRows(events, env);
 
   const blocks: string[] = [];
   let index = 0;
   for (const entry of entries) {
     while (index < entry.modelIndex) {
-      const block = model[index];
+      const row = model[index];
       index += 1;
-      if (block !== undefined) blocks.push(block);
+      if (row !== undefined) blocks.push(segmentText(row.segments));
     }
-    blocks.push(renderUserBlock(entry.text));
+    blocks.push(segmentText(userRow(entry.text, env).segments));
   }
   while (index < model.length) {
-    const block = model[index];
+    const row = model[index];
     index += 1;
-    if (block !== undefined) blocks.push(block);
+    if (row !== undefined) blocks.push(segmentText(row.segments));
   }
   return blocks;
 }
 
 /**
- * Render one entry into a block.
+ * The block of an assistant message.
+ *
+ * The text is rendered as markdown, because that is what a model emits.
  */
-function renderEntry(entry: Entry): string {
-  if (entry.kind === 'assistant') return renderAssistantBlock(entry.text);
-  if (entry.kind === 'user') return renderUserBlock(entry.text);
-  if (entry.kind === 'unmatched') return renderUnmatchedResult(entry.toolUseId);
-  const summary = summarizeToolInput(entry.name, entry.input);
-  const lines = toolResultLines(entry.envelope, entry.decision);
-  return renderToolBlock(entry.name, summary, lines);
+export function renderAssistantBlock(text: string, env: NodeJS.ProcessEnv = process.env): string {
+  return segmentText(assistantRow(text, env).segments);
 }
 
 /**
- * The block of a tool result that has no tool call.
- *
- * **Implementation choice.** The report's wording is this implementation's own; the audit
- * records only that the target reports the mismatch.
+ * The block of a user's own prompt.
  */
-function renderUnmatchedResult(toolUseId: string): string {
-  const id = stripControlSequences(toolUseId);
-  return [
-    `${MESSAGE_MARKER} ${UNMATCHED_RESULT_LABEL}`,
-    `${RESULT_INDENT}${RESULT_MARKER} toolUseId: ${id}`,
-  ].join('\n');
+export function renderUserBlock(text: string, env: NodeJS.ProcessEnv = process.env): string {
+  return segmentText(userRow(text, env).segments);
+}
+
+/**
+ * The block of a tool call.
+ *
+ * The header names the tool and the call; the result lines are indented under
+ * it. The lines are capped, and the cap is **announced** rather than silent.
+ *
+ * Both the summary and the lines are **stripped**: they are caller-supplied,
+ * and the block is what the terminal shows. The summary is tested **after** it
+ * is stripped, so a summary that is *only* an escape sequence is an empty
+ * summary — and an empty summary has no parentheses at all.
+ */
+export function renderToolBlock(
+  toolName: string,
+  summary: string,
+  lines: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return segmentText(toolRow(toolName, summary, lines, false, env).segments);
 }
