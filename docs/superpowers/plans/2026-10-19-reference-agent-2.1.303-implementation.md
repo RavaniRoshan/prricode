@@ -2018,6 +2018,28 @@ classification, the in-flight de-duplication and the trust and folder validation
 thresholds), and the three project-requirement rows, which have no target behaviour to
 compare at all.
 
+
+**Progress (the rows are closing).**
+
+| Row | What it now compares | Outcome |
+|---|---|---|
+| `F-10`, `F-11`, `F-40` | the project's own rules, which the target has no counterpart for | **`not-tested`** — there is nothing to compare them against, and calling them a `match` would be false |
+| `F-01` | the **whole** flag surface, set by set, against the inventory the verifier generates from the target's own source, with the target's own relationships between the sets | `match` |
+| `F-13` | the `x-should-retry` header in **both** directions and the `401` cached-token marker | `match` |
+| `F-14` | the SDK's default `parseResponse` in full — the `204`, the binary path, the empty JSON body, the text fallback, the non-enumerable identifiers and the content-type test | `match` |
+| `F-20` | the **precedence** — deny, then ask, then allow; a whole-tool rule before its `Tool(key:value)` form; a command in two lists decided by the **earlier** list; the mode never changing the order; an ask rule holding where the mode would allow; and in `auto` an ask rule being a **denial** | reading done, implementation done, probe in flight |
+| `F-02` | what a run **writes** — the target's **result document** with its member order and nested shapes, the three formats' stdout, and the fact that a `--print` run **is** a session | reading done, implementation done, probe in flight — with **four named divergences** that make the row a `mismatch` |
+| `F-16` | the turn request and the continuation | probe in flight |
+| `F-31` | the MCP client lifecycle | probe in flight |
+| `F-32` | the `mcp_tool` hook type and the per-model severity thresholds | the row was claiming a thing the clone does not have; the site-configuration bundle is now recorded as a gap and the row says what is true |
+
+**Two of the rows found work rather than closing cleanly.** `F-32`'s prose claimed the
+per-model severity thresholds were "implemented here"; the target ships them in a
+**site-configuration bundle** this implementation does not have at all, so the row became a
+`mismatch` and the gap was recorded in the audit's list of uncovered surfaces. And `F-20`'s
+precedence was wrong in exactly one place — the clone's `decideAuto` consulted the **allow**
+list before the **ask** list, and it asked where the target denies.
+
 **Files:** `tests/compatibility/scenarios.ts`; the conformance documents the rows name.
 
 - [ ] **Step 1: Extend each probe** so it compares the whole contract its row names.

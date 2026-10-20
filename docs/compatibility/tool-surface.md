@@ -29,9 +29,15 @@ interface ToolDefinition<I, O> {
 The target's registry names **88** tools. The verifier re-derives the list from the
 target's own source and writes it to
 [`SURFACE-INVENTORY.md`](../reverse-engineering/SURFACE-INVENTORY.md) under
-**"The tool registry"**; this implementation now holds **44** of those names —
-**43** canonical tools plus the `Task` alias — and **one** tool of its own
+**"The tool registry"**; this implementation now holds **45** of those names —
+**44** canonical tools plus the `Task` alias — and **one** tool of its own
 (`TodoRead`).
+
+**The browser surface is a second registry, and it is not in that count.** The
+target's twenty-two browser tools are **MCP tools** — the model calls them
+`mcp__<server>__<tool>` — so they are not in the target's own eighty-eight-tool
+registry and they are not counted above. `CC-032` added them; see
+[the browser surface](#the-browser-surface-cc-032) below.
 
 **The names and the aliases are the target's.** The target keeps one alias table
 and maps a legacy name to the canonical one (`chunk-y3kmvs94.js:663`, read out of
@@ -95,6 +101,7 @@ the inventory's own order.
 | `Monitor` | watch, monitor, or keep an eye on a process/log/command or WebSocket — stream each stdout line as a live notification | Starts a monitored task through the session's monitor and reports its task id. | 2 |
 | `NotebookEdit` | edit Jupyter notebook cells (.ipynb) | Edits the cell. Unchanged. | 2 |
 | `NotebookRead` | — (the target's inventory names it; the target's own search hint was not read) | Reads the notebook's cells and reports them in the target's own cell shape. | 1 |
+| `OfferChromeSetup` | offer the user the one-time setup of the browser, so this task can use their own signed-in browser | **Refuses**: it needs the browser extension setup card, which this session does not have. Its name, its description, its long prompt, its input schema and its four result strings are the target's own. | 2 |
 | `PowerShell` | execute Windows PowerShell commands | Runs `powershell.exe` with the filtered environment; **refuses** on any other platform. | 2 |
 | `ProposeGoal` | propose a session goal condition for the user to approve with one keypress | Puts the condition to the session's dialog and reports whether the user was asked. | 2 |
 | `Read` | read files, images, PDFs, notebooks | Reads the file. Unchanged. | 2 |
@@ -120,6 +127,28 @@ the inventory's own order.
 | `memory_list` | list the memory stores and the documents in them | Lists the stores, or the documents of one store, through the session's memory surface. | 2 |
 | `memory_read` | read a document from a memory store | Reads the document through the session's memory surface. | 2 |
 | `memory_write` | save a document to a memory store | Writes the document through the session's memory surface. | 2 |
+| `javascript_tool` | execute JavaScript code in the context of the current page | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `read_page` | get an accessibility tree representation of elements on the page | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `find` | find elements on the page using natural language | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `form_input` | set values in form elements using element reference ID from the read_page tool | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `computer` | use a mouse and keyboard to interact with a web browser, and take screenshots | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `browser_batch` | execute a sequence of browser tool calls in ONE round trip | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `navigate` | navigate to a URL, or go forward/back in browser history | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `resize_window` | resize the current browser window to specified dimensions | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `gif_creator` | manage GIF recording and export for browser automation sessions | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `upload_image` | upload a screenshot you took with the computer tool's screenshot action to a file input or drag & drop target | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `get_page_text` | extract raw text content from the page, prioritizing article content | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `tabs_context_mcp` | get context information about the current MCP tab group | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `tabs_create_mcp` | create a new empty tab in the MCP tab group | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `tabs_close_mcp` | close a tab in the MCP tab group by its ID | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `read_console_messages` | read browser console messages from a specific tab | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `read_network_requests` | read HTTP network requests from a specific tab | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `shortcuts_list` | list all available shortcuts and workflows | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `shortcuts_execute` | execute a shortcut or workflow in a new sidepanel window using the current tab | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `file_upload` | upload one or multiple files to a file input element on the page | **Refuses**: it needs a connected browser extension, which this session does not have. | 2 |
+| `switch_browser` | send a connection request to every Chrome browser with the extension installed and wait for the user to pick one | **Refuses**: it needs the browser extension account connection, which this session does not have. | 2 |
+| `list_connected_browsers` | list all Chrome browsers currently connected to this account | **Refuses**: it needs the browser extension account connection, which this session does not have. | 2 |
+| `select_browser` | select a specific Chrome browser by deviceId for browser automation | **Refuses**: it needs the browser extension account connection, which this session does not have. | 2 |
 
 ### The tools this implementation does **not** ship
 
@@ -142,7 +171,6 @@ implemented honestly is omitted and named — never faked.
 | `ListPlugins` | the account's plugin catalogue | The catalogue is the account's own. |
 | `ListSkills` | the account's skill catalogue | The catalogue is the account's own. |
 | `ObserverReport` | the harness's observation channel | The harness that produced it is not part of this implementation. |
-| `OfferChromeSetup` | a browser | The browser is the product's own extension; there is none here to set up. |
 | `Poll` | the harness event queue | The queue is the harness's own. |
 | `Projects` | the account's project surface | The project lives in the account. |
 | `PublishPlugin` | the account's plugin library | The library is the account's own. |
@@ -258,6 +286,139 @@ permission mode and working directory.
 is a typed failure (`capabilityUnavailable`) whose message names the tool and
 the capability. The seams are this implementation's own design — the target holds
 the subsystems directly — and they are labelled as such in the code.
+
+## The browser surface (CC-032)
+
+**Specification:** `/home/shiva/opt/reference-agent-rea/analysis/findings-browser.md`
+— the surface inventory, every tool with its schema and its description, the
+two group sets, the timeout table, the result caps, the setup tool and the
+transport, each claim carrying the target's own file and byte offset.
+
+**Owning task:** `CC-032`. **Evidence class:** `REA observed` — the target's
+browser surface was read out of the extracted bundle, by **evaluating** the
+target's own tool module and walking the consuming modules' ASTs, so the twenty
+-two names, their order, their descriptions, their schemas and the two group
+sets are the target's own and not a pattern's guess.
+
+**The target has a browser surface and the audit never mentioned one.** The
+target ships **twenty-two** browser tools and a **setup** tool, and it reaches
+them through a Chrome extension over a local socket to the browser's
+native-messaging host. It also ships a **second, independent implementation**
+of the browser tooling as data assets inside the bundle (`playwright-mcp.mjs`,
+`ct.mjs`, `ctbrowser.mjs`, `signin.mjs`, `live-page.mjs`, `fence-proxy.mjs`,
+`guard.mjs`, `run-tools.mjs`, `tools.mjs`, `psl-data.json` and the rest — the
+extraction manifest's list).
+
+### The twenty-two tools
+
+The names are the target's **bare** names: the target reaches them through a
+browser MCP server, so the model calls them `mcp__<server>__<tool>`, and the
+tool array itself holds the bare names. This implementation registers the bare
+names.
+
+| tool | the target's own statement of what it is for | group | what this implementation's version does |
+|---|---|---|---|
+| `javascript_tool` | execute JavaScript code in the context of the current page | — | **Refuses**: it needs a connected browser extension. |
+| `read_page` | get an accessibility tree representation of elements on the page | — | **Refuses**: it needs a connected browser extension. |
+| `find` | find elements on the page using natural language | — | **Refuses**: it needs a connected browser extension. |
+| `form_input` | set values in form elements using an element reference ID | — | **Refuses**: it needs a connected browser extension. |
+| `computer` | use a mouse and keyboard to interact with a web browser, and take screenshots | — | **Refuses**: it needs a connected browser extension. |
+| `browser_batch` | execute a sequence of browser tool calls in ONE round trip | — | **Refuses**: it needs a connected browser extension. |
+| `navigate` | navigate to a URL, or go forward/back in browser history | — | **Refuses**: it needs a connected browser extension. |
+| `resize_window` | resize the current browser window to specified dimensions | session | **Refuses**: it needs a connected browser extension. |
+| `gif_creator` | manage GIF recording and export for browser automation sessions | session | **Refuses**: it needs a connected browser extension. |
+| `upload_image` | upload a screenshot to a file input or drag & drop target | — | **Refuses**: it needs a connected browser extension. |
+| `get_page_text` | extract raw text content from the page, prioritizing article content | — | **Refuses**: it needs a connected browser extension. |
+| `tabs_context_mcp` | get context information about the current MCP tab group | session | **Refuses**: it needs a connected browser extension. |
+| `tabs_create_mcp` | create a new empty tab in the MCP tab group | session | **Refuses**: it needs a connected browser extension. |
+| `tabs_close_mcp` | close a tab in the MCP tab group by its ID | session | **Refuses**: it needs a connected browser extension. |
+| `read_console_messages` | read browser console messages from a specific tab | — | **Refuses**: it needs a connected browser extension. |
+| `read_network_requests` | read HTTP network requests from a specific tab | — | **Refuses**: it needs a connected browser extension. |
+| `shortcuts_list` | list all available shortcuts and workflows | session | **Refuses**: it needs a connected browser extension. |
+| `shortcuts_execute` | execute a shortcut or workflow in a new sidepanel window | session | **Refuses**: it needs a connected browser extension. |
+| `file_upload` | upload one or multiple files to a file input element on the page | — | **Refuses**: it needs a connected browser extension. |
+| `switch_browser` | send a connection request to every Chrome browser with the extension installed | session, selection | **Refuses**: it needs the browser extension account connection. |
+| `list_connected_browsers` | list all Chrome browsers currently connected to this account | session, selection | **Refuses**: it needs the browser extension account connection. |
+| `select_browser` | select a specific Chrome browser by deviceId | selection | **Refuses**: it needs the browser extension account connection. |
+
+**The group column is the target's own two sets.** The **session** group is the
+target's nine-tool set of the tools that manage the browser session rather than
+the content of a page (`tabs_context_mcp`, `tabs_create_mcp`, `tabs_close_mcp`,
+`shortcuts_list`, `shortcuts_execute`, `resize_window`, `switch_browser`,
+`list_connected_browsers`, `gif_creator`). The **selection** group is the
+target's three-tool set of the tools that need the account-wide browser roster
+(`switch_browser`, `list_connected_browsers`, `select_browser`); the target
+withholds those three from the tool list unless the session has a bridge
+connection.
+
+### The timeouts and the result caps
+
+Every number below is the target's own.
+
+| what | the target's value | where it is used |
+|---|---|---|
+| the default tool-call timeout | `60000` ms | every browser tool |
+| the `browser_batch` timeout | `90000` ms | the target's **one** per-tool override |
+| the wait for the extension peer to connect | `10000` ms | the client, before a call |
+| the extension-discovery deadline | `5000` ms | the client's extension roster |
+| the local-device-ids lookup | `3000` ms | the roster's "on this computer" hint |
+| the external-message timeout | `150000` ms, capped at `270000` ms | the pairing broadcast |
+| the `switch_browser` wait | `120000` ms | the two minutes the description names |
+| the hidden tab-context lookup | `8000` ms | the lookup `navigate` performs for itself |
+| the result-size cap | `{"anthropic/maxResultSizeChars": 60000}` | on `read_page`, `browser_batch` and `get_page_text` — and on **no other** tool |
+| the `OfferChromeSetup` result cap | `2000` characters | the setup tool |
+
+`read_page`'s own schema says its default output limit is **50 000** characters
+and the `_meta` cap is **60 000**; the target keeps both numbers, and so does
+this implementation.
+
+### The permission rules
+
+| rule | the target's behaviour | this implementation |
+|---|---|---|
+| the rule engine | every browser tool consults it | the same |
+| the **safe** subset | a tool of the session group that the target's own predicate calls *safe* is **allowed** without a prompt | the same — and only the *generic* prompt becomes an allow, so a **deny rule** and an **ask rule** both still win |
+| a non-web URL | **denied**: *"Can't interact with browser-internal or unparseable URLs."* | not implemented — there is no URL to judge |
+| an unresolvable tab | **denied**: *"Couldn't determine which page this action targets."* | not implemented — there is no tab to resolve |
+| a domain rule | the target's own pseudo-tool, matched on the host | not implemented — there is no site to allow or deny |
+| a blanket allow | the target **excludes** the browser tools from every whole-tool allow rule | not implemented — this implementation's rule engine has no whole-tool-allow concept to exclude, so a user's `allow: ["navigate"]` allows the call (and the call then refuses) |
+
+The **safe** predicate is the target's own: five tools are always safe
+(`list_connected_browsers`, `resize_window`, `shortcuts_list`, `switch_browser`,
+`tabs_close_mcp`), and three more are safe unless they change something
+(`tabs_context_mcp` unless it creates a group, `read_console_messages` and
+`read_network_requests` unless they clear).
+
+### The setup tool
+
+`OfferChromeSetup` is in the target's own eighty-eight-tool registry, and
+`CC-032` added it here. Its name, its search hint, its one-line description,
+its long prompt, its input schema (one optional `reason`, at most 200
+characters), its output vocabulary (`connected`, `not_now`, `no_attempt_yet`)
+and its four result strings are the target's own. **It refuses**: it needs the
+setup card, and there is none here. The target's own permission check is an
+**ask** — *"Set up the browser?"* — and so is this one's.
+
+### How the browser is reached — recorded, not reproduced
+
+| the target's layer | what it is | here |
+|---|---|---|
+| the browser MCP server | a server named for the browser, version `1.0.0`, capabilities `{tools:{listChanged:true},logging:{}}`, reachable in-process or as a stdio subprocess behind a CLI flag | not reproduced |
+| the transport | a local Unix socket to the browser's native-messaging host (a named pipe on Windows), or a WebSocket bridge, or a pool of sockets | not reproduced |
+| the wire protocol | a four-byte little-endian length prefix and a JSON frame, after a local pairing handshake | not reproduced |
+| the extension | the browser extension instance, addressed by a `deviceId`, discovered over the socket | not reproduced |
+| the session tab | the **tab group**: `tabs_context_mcp` returns the group's tabs and a `tabGroupId`, and every tab tool's schema names the group | not reproduced |
+| the connector | a user-invocable bundled command that adds the browser server, gated by a browser permission setting | not reproduced |
+
+### The honest boundary
+
+**This implementation has no browser.** There is no extension, no
+native-messaging host, no socket, no tab group and no setup card here, so
+every one of the twenty-three tools **refuses** with a typed
+`capabilityUnavailable` whose message names the tool and the capability it
+needed. **No tool pretends to drive a browser**: none of them returns a page,
+a screenshot, a tab list or a text extraction, and none of them opens a
+socket.
 
 ## Unpinned surfaces (implementation choices, labelled in the code)
 
@@ -375,6 +536,14 @@ These are the places where the clone differs from the target *by choice*, each o
 | The envelope's members carry the **target's** names — `id`, `non_execution_kind`, `user_feedback`, `remedy` and `permission_decision { decision, source, reason_type }` | REA observed (audit §2.4) | F-18 | `tests/contracts/tool-registry.test.ts` — "names the envelope's members the way the target names them" |
 | The previous spellings (`toolUseId`, `permissionDecision`, `nonExecutionKind`, `userFeedback`) are the **migration path**: the reader accepts them and returns the target's names | implementation choice (the migration) | F-18 | `tests/contracts/session-store.test.ts` — "reads a record whose envelope carries the previous member names" |
 | The `Skill` tool invokes a skill the extension layer's registry discovered | REA observed (the registry is the target's; the seam is this implementation's) | F-17 | `tests/contracts/extensions.test.ts` — "the Skill tool and the skill registry" |
+| The browser surface is **twenty-two** tools, and the first of them is **`javascript_tool`** — `javascript_exec` is the value of its `action` argument, not a tool name | REA observed | F-17 | `tests/contracts/tool-registry.test.ts` — "the browser surface" — "carries the target's twenty-two browser tools, in the target's order" and "carries the target's own input schemas" |
+| The browser tools' **descriptions and input schemas** are the target's own, with the product's name replaced | REA observed | F-17 | same file — "carries the target's own descriptions" and "names no target product name in any browser description" |
+| The browser tools' **two group sets** — the nine-tool session group and the three-tool selection group — are the target's | REA observed | F-17 | same file — "carries the target's two tool groups" |
+| The browser **timeout table**, the `browser_batch` override, the two-minute `switch_browser` wait and the three result caps are the target's | REA observed | F-17 | same file — "carries the target's timeouts and result caps" |
+| The browser tools' **safe subset** and its predicate are the target's | REA observed | F-17 | same file — "reproduces the target's safe subset" |
+| A browser tool of the **safe subset** is allowed without a prompt, and a deny rule and an ask rule both still win | REA observed (the rule is the target's; the *generic prompt* is this implementation's marker) | F-20 | same file — "allows the target's safe subset and asks for everything else", "lets a deny rule block a safe browser tool" and "lets an ask rule ask for a safe browser tool" |
+| Every browser tool **refuses** and names the capability it needs; none of them pretends to drive a browser | implementation choice (deliberate) | F-17 | same file — "refuses every browser tool and names the capability it needs", "names the browser capability in the refusal" and "does not let a browser tool pretend to drive a browser" |
+| The `OfferChromeSetup` tool carries the target's name, description, prompt, schema and result strings, and **refuses** | REA observed (the data) / implementation choice (the refusal) | F-17 | same file — "carries the setup tool and refuses it" and "asks before offering the setup, the way the target does" |
 | The terminal UI's **theme** is the target's, value for value, and the role→colour rule is the target's | REA observed | F-39 | `tests/contracts/ui-render.test.ts` — "the theme — the target's colours and the role rule" |
 | The terminal UI's **glyphs** carry the target's platform deltas | REA observed | F-39 | same file — "the glyphs — the target's platform deltas" |
 | The terminal UI's **transcript** rows carry the target's markers, order and colours | REA observed | F-39 | same file — "the transcript — the target's rows" |
