@@ -145,6 +145,13 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | `plan` never auto-approves an edit, by effect not by tool name | implementation choice | same file — "modes" |
 | `acceptEdits` auto-approves inside the working directory or an added directory, and still prompts for `rm` on a critical path | REA observed + implementation choice (the critical-path list) | same file |
 | Start-mode precedence, the settings-file rule, and the three availability overrides | REA observed | same file — "start mode" |
+| The start mode's flag beats `permissions.defaultMode`, which beats the built-in default | REA observed | `tests/contracts/permission-decision.test.ts` — "prefers the flag over the settings default", "prefers the settings default over the built-in default" |
+| `auto` and `bypassPermissions` written into a settings file are ignored | REA observed | same file — "ignores auto and bypassPermissions written into a settings file" |
+| The built-in default is `auto` for an interactive terminal session and `default` for a headless run | REA observed | same file — "starts in auto for an interactive session when auto mode is available", "starts in default for a headless run" |
+| The override: a settings file with `disableAutoMode: "disable"` falls back to `default` | REA observed | same file — "falls back to default when auto mode is disabled by policy" |
+| The override: a HIPAA-configured session falls back to `default` | REA observed | same file — "falls back to default for a HIPAA-configured session" |
+| The override: a session where auto mode is unavailable falls back to `default` | REA observed | same file — "falls back to default when auto mode is unavailable" |
+| An **explicit** `auto` flag is honoured even when auto mode is unavailable | REA observed | same file — "honours an auto flag even when auto mode is unavailable" |
 | The CLI threads all three start-mode overrides, and the HIPAA key and the unavailable signal are this implementation's | **implementation choice** | `tests/contracts/cli-surface.test.ts` — the start-mode tests |
 | The `defaultMode` tier order follows the observed `TOP_LEVEL_KEY_ORDER` | implementation choice | same file |
 | The rule-list combination is concatenation, not "first source wins" | implementation choice | same file |
@@ -160,3 +167,20 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | The transport dispatcher's shape, including the dropped non-string `request_id` | REA observed | same file — "dispatcher" |
 | The computer-folder and repository-trust names are configuration, and an unrecognised one is refused | implementation choice (unpinned) | same file — "dispatcher" |
 | The "don't ask again" rule computation and its 5-rule cap | Documented only (the write is not implemented) | `tests/contracts/permission-decision.test.ts` |
+
+## The `PreToolUse` seam — conformance
+
+The `PreToolUse` seam's own table above lists this implementation's **pick** rule by rule. This table is the same list, condensed, with the test that pins each rule. The measured outcome of the row is in [`results.md`](results.md).
+
+| Claim | Evidence class | Pinned by |
+|---|---|---|
+| A `PreToolUse` `allow` never overrides a deny or an ask rule, and a `PreToolUse` `deny` holds in every mode | REA observed (the mechanism) + **implementation choice** (the pick) | `tests/contracts/permission-hook.test.ts` — "does not let a PreToolUse approval override a deny rule", "does not let a PreToolUse approval override an ask rule", "holds a PreToolUse denial in every mode, bypassPermissions included" |
+| A `PreToolUse` hook that expresses no opinion changes nothing, and a `defer` is no opinion | **implementation choice** | same file — "changes nothing when the PreToolUse hook expresses no opinion", "treats a deferral as no opinion, so the normal permission path decides" |
+| A `PreToolUse` `ask` is the pending question, and it carries the hook's own reason and source | **implementation choice** | same file — "makes a PreToolUse question the pending question", "carries the hook's reason and source into the pending question" |
+| The two hook seams merge by **strictness**, so neither can cancel the other | **implementation choice** | same file — the "the merge of the two hook seams" block |
+| A `PreToolUse` rewrite is re-checked with the **whole** permission check against the **effective** input, and the rewritten input is what the tool receives | **implementation choice** (the re-check) + REA observed (the rewrite) | same file — the "the PreToolUse rewrite" block |
+| A rewritten input the tool's own validator rejects **denies** the call | REA observed | same file — "denies the call when the rewritten input is rejected by the tool validator" |
+| A hook that throws denies the call | **implementation choice** | same file — "denies the call when the PreToolUse hook throws" |
+| The `PreToolUse` seam is wired into the **tool runner** and into the runtime's permission service | **implementation choice** | `tests/contracts/pre-tool-use-wiring.test.ts` — "wires the registry’s hooks into the tool layer" |
+| The seam is consulted **three** times for a rewritten call and **once** for a call that is not rewritten, and the safety check runs twice for a rewritten call | **implementation choice** | same file — "consults the PreToolUse seam three times for a rewritten call", "consults the seam once for a call that is not rewritten", "runs the safety check twice for a rewritten call" |
+| The tool layer's re-check keeps only a **denial**, so an approving-and-rewriting hook cannot approve a call no rule covers | **implementation choice** | same file — "refuses the call the permission layer allowed and the hook approved", "keeps the approval of neither seam" |

@@ -928,14 +928,14 @@ export interface PreToolUseHookApproval {
 
 **Interfaces:** Consumes: the same registries as `CC-013`. Produces: a `collidesWith` that names the **other** providers, or is empty when the collision is one plugin's own duplication; a collision report on the `apply()` path.
 
-- [ ] **Step 1: Write the failing test** — one plugin that provides the same skill name twice reports the duplication with its **two paths**, and `collidesWith` names no provider; two plugins that provide the same name report the conflict with both providers.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement the semantics** — the field must distinguish the two situations, and the **same-source filter** and the **dedupe** must each be pinned.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing `apply()` test** — `PluginManager.apply(plugin)` on a plugin with two `skills` directories reports the duplication and yields **one** entry.
-- [ ] **Step 6: Implement the report** on the `apply()` path.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Commit.**
+- [x] **Step 1: Write the failing test** — one plugin that provides the same skill name twice reports the duplication with its **two paths**, and `collidesWith` names no provider; two plugins that provide the same name report the conflict with both providers.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement the semantics** — the field must distinguish the two situations, and the **same-source filter** and the **dedupe** must each be pinned.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing `apply()` test** — `PluginManager.apply(plugin)` on a plugin with two `skills` directories reports the duplication and yields **one** entry.
+- [x] **Step 6: Implement the report** on the `apply()` path.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Commit.**
   ```bash
   git add src/extensions tests/contracts/extensions.test.ts
   git commit -m "fix(extensions): a contributed name's collision says what collided"

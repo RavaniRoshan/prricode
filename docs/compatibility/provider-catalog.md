@@ -92,6 +92,76 @@ Read from the target's own bundled adapters — `chunk-1njnz05e.js` (Bedrock and
 
 `chunk-z6a1zj5w.js` contains a first-party local gateway that proxies Anthropic-shaped traffic: `POST /v1/messages` and `POST /v1/messages/count_tokens`; a `cc-gateway/<version>` user agent; a body containing `workspace_id` rejected with `400 invalid_request_error: "workspace_id: not supported through the gateway"`; Bedrock `count_tokens` computed locally or answered `501 not_supported` with `x-should-retry: false`; the upstream stream re-framed as SSE with keep-alive comments and a rewritten `message_start.message.model`; and, for Bedrock upstreams, the `anthropic-beta` header moved into the request body.
 
+## The manager surfaces (project extension)
+
+**The whole surface is a project extension.** The target has **no** user-managed registry of provider connections and no catalog browser: its route selector yields exactly one active route from environment flags, and the model catalog is built in and provider-owned (audit §2.1, "Important negative finding"). Everything below is this implementation's own product surface, and every one of its outputs **says so** — in the text output, in the `--help`, and in the machine-readable document.
+
+### The credential status vocabulary
+
+The listing reports a **status**, never a value. The vocabulary is exactly four names:
+
+| Status | Meaning |
+|---|---|
+| `resolved` | the reference names something that is present. For a keychain reference this reports the **reference's** completeness, because a listing never reads the OS credential store. |
+| `unresolved` | nothing is there. |
+| `unreadable` | something is there, but it cannot be read. |
+| `refused` | the reference is fine, but this implementation refuses to deliver the credential to the connection's endpoint (the untrusted-endpoint guard). The refusal names the **host**, which is a fact about the endpoint and not about the secret. |
+
+### The two credential columns
+
+The `list` output carries **two** credential columns and no third:
+
+| Column | What it holds |
+|---|---|
+| `CREDENTIAL` | the **reference** — `env:<name>`, `file:<path>` or `keychain:<service>/<account>` — never a value |
+| `STATUS` | the status from the vocabulary above |
+
+The line under the table says so in words: *CREDENTIAL is a reference, never a value.*
+
+### The verbs
+
+The manager's verbs are **five**: `list`, `add`, `remove`, `use` and `test`. The catalog browser has **five** of its own: `list`, `search`, `show`, `refresh` and `override`.
+
+| Verb | What it does |
+|---|---|
+| `list` | prints one row per connection: its id, name, route, base URL, credential reference and credential status |
+| `add` | registers a connection; the credential is a **reference**, and a raw value is refused before anything else happens |
+| `remove` | removes a connection and reports an unknown id |
+| `use` | makes a connection the active one |
+| `test` | resolves the credential through the guarded resolver and probes the endpoint, with the value **redacted** out of every message it reports |
+
+### The `use` refusal
+
+`use` **refuses an unusable connection and names it**. A connection whose credential cannot be resolved is unusable **for that connection only**: the listing reports it and keeps going, the other connections are untouched, and the active-connection resolution refuses to select it rather than routing to a route that cannot work.
+
+An `add --use` runs the same usability check **before** the connection is added, so a refused `--use` leaves the registry exactly as it was.
+
+### The two argv forms
+
+Every manager surface is reachable in **two** forms, and the decision between them lives in **one** place (`src/cli/commands/manager.ts`), so the two surfaces cannot drift:
+
+| Form | Example |
+|---|---|
+| the **word** form | `provider list`, `catalog list` — the word is read only when it is the **first** token, the placement a subcommand may take |
+| the **flag** form | `--provider list`, `--catalog list` — the flag form wins over the word form, because `--catalog list` is unambiguous while a prompt that merely mentions "catalog" is not |
+
+The flag form writes a **machine-readable** document, and every such document carries the extension label.
+
+### The catalog source location
+
+A connection says **where its catalog is read from**, in its `catalogSource` member: `builtin`, `file` or `url`. The connection is the routing identity; the catalog is the model metadata; the source is the join between them. A connection whose source is a file and that names no catalog file is refused with a named reason, and the same holds for a URL.
+
+### The catalog and the connection table are two records
+
+This is the load-bearing rule of the catalog surface, and it is what keeps a refresh from rewriting routing identity:
+
+| Record | Holds | A refresh rewrites it |
+|---|---|---|
+| the **connection** | the id, the name, the route, the base URL, the credential **reference**, the catalog source | **never** |
+| the **catalog** | the rows, their families, their per-route provider ids | **yes** |
+
+A **user override** of a catalog-owned field lives in its **own** record and survives a refresh, because the refresh rewrites the catalog and not the overrides.
+
 ## Conformance table
 
 | Audit claim | Pinned by |
@@ -112,6 +182,22 @@ Read from the target's own bundled adapters — `chunk-1njnz05e.js` (Bedrock and
 | `useConnection` fails loudly rather than silently not switching | same file — "the connection registry" |
 | A registered flag that is explicitly disabled is not treated as set | same file — "selectRoute" |
 | Two connections may share the same route | same file — "the connection registry" |
+
+## The manager surfaces — conformance
+
+Every row of this table is a **project extension**: the target has no such surface, so there is no target behaviour to match. The measured outcome of the row is in [`results.md`](results.md).
+
+| Claim | Evidence class | Pinned by |
+|---|---|---|
+| The credential status vocabulary is exactly `resolved`, `unresolved`, `unreadable` and `refused` | implementation choice | `tests/contracts/provider-command.test.ts` — "reports a connection whose credential cannot be resolved as unusable, for that connection only", "reports a credential path that exists but cannot be read as unreadable", "reports a refused endpoint as refused, names the host, and never resolves the credential" |
+| The listing carries **two** credential columns — `CREDENTIAL` (the reference) and `STATUS` — and never a value | implementation choice | same file — "provider list prints one row per connection with its id, name, route, base URL, and credential status", "provider list shows no credential value even when the underlying environment variable is set" |
+| The manager's verbs are `list`, `add`, `remove`, `use` and `test` | implementation choice | same file — "provider add registers a connection whose credential is a reference, never a value", "provider remove removes a connection and reports an unknown id", "provider test resolves the credential through the guarded resolver and never prints the value" |
+| `use` refuses an unusable connection and names it, and an `add --use` leaves the registry untouched | implementation choice | same file — "provider use refuses an unusable connection and names it in the error", "provider add --use leaves the registry untouched when the connection is unusable" |
+| The surfaces are reachable in **two** argv forms — the word form and the `--provider` / `--catalog` flag form — and both are machine-readable | implementation choice | same file — "exposes the same operations as --provider style flags with machine-readable output", "dispatches the --provider and the --catalog forms through one entry point" |
+| A connection's `catalogSource` says where its catalog is read from — `builtin`, `file` or `url` | implementation choice | same file — "rewrites the catalog without changing a connection id, name, route, or credential reference" |
+| The catalog and the connection table are **two records**: a refresh rewrites the catalog and never the connection, and a user override survives the refresh | implementation choice | same file — "rewrites the catalog without changing a connection id, name, route, or credential reference", "keeps a user override of a catalog-owned field across a refresh" |
+| A keychain credential is shown as configured without ever reading the OS credential store | implementation choice | same file — "shows a keychain credential as configured without ever reading the OS credential store" |
+| Every surface labels itself as a project extension | project requirement | same file — "labels the provider manager as a project extension wherever it surfaces" |
 
 ## Catalog conformance
 

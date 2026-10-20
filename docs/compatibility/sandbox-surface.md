@@ -71,6 +71,23 @@ The reason strings are reproduced **verbatim**:
 | `sandbox.allowUnsandboxedCommands is true` | the global opt-out is set |
 | the `excludedCommands` exemption | a matching entry applies |
 
+### The decision mapping
+
+**Only one of the four reasons refuses the command.** The decision vocabulary is `allow` | `unconfined` | `deny`, and the mapping is exact:
+
+| Reason | Decision | What the command does |
+|---|---|---|
+| `sandbox.enabledPlatforms excludes <platform>` | **unconfined** | it runs on the host, and the status says why |
+| `sandbox.enabled is false` | **unconfined** | it runs on the host, and the status says why |
+| `sandbox.failIfUnavailable is false (a missing backend would run the shell unconfined)` | **unconfined** | it runs on the host, and the status says why |
+| the `excludedCommands` exemption | **unconfined** | it runs on the host, and the status says why |
+| the backend is missing and `failIfUnavailable` is **true** | **deny** | it is **refused**: the user asked for a sandbox and none can be provided |
+| — | **allow** | it runs inside the sandbox |
+
+So: a **switched-off** sandbox and an **excluded** platform run the command **unconfined**; only a **missing backend** with `failIfUnavailable` **refuses** it. The reason for that refusal is the one the audit does **not** name — *"sandbox backend is unavailable and sandbox.failIfUnavailable is true"* — and it is a reimplementation string, labelled as such in the source.
+
+The mapping is also **order-sensitive**, and the order is this implementation's: the platform is decided first, then the switch, then the exemption, then the backend. A command that is exempt from the sandbox runs unconfined whatever the backend's state is — and a compound command must not become unconfined because one of its parts is exempt, so the exemption is decided **per sub-command**.
+
 ### The `excludedCommands` exemption
 
 An entry must cover the **whole** sub-command, after the shell wrappers and the redirections are stripped. A part carrying a command substitution — `$( … )`, backticks, or a process substitution — is **rejected** from the comparison, and the check runs on the **raw** part, before the redirections are stripped. So `git status > "$(rm -rf /tmp/x)"` is **not** exempt, and the substitution runs inside the sandbox.
@@ -128,6 +145,9 @@ These are this implementation's decisions, not the target's observed behavior:
 | A command substitution in any part — including a redirection target — defeats the `excludedCommands` exemption | REA observed (the exemption) + implementation choice (the rule) | same file — the substitution tests, including the end-to-end host-file proof |
 | An entry must cover the whole sub-command; `git` does not cover `git status` | REA observed | same file |
 | The four target reason strings are verbatim | REA observed | same file — the reason-string tests |
+| The decision mapping: an excluded platform, a switched-off sandbox and a missing backend with `failIfUnavailable` off all run the command **unconfined** | REA observed (the reasons) + **implementation choice** (the mapping) | `tests/security/sandbox.test.ts` — "runs unconfined with the reason naming the platform when enabledPlatforms excludes it", "runs unconfined when the sandbox is disabled", "runs the shell unconfined, and says so, when failIfUnavailable is false" |
+| Only a missing backend with `failIfUnavailable` **true** refuses the command | REA observed (the mechanism) + **implementation choice** (the reason string) | `tests/security/sandbox.test.ts` — "denies when the backend is missing and failIfUnavailable is true", "refuses only when the backend is missing and failIfUnavailable is true" |
+| An exempt command runs unconfined whatever the backend's state is | REA observed (the exemption) | `tests/security/sandbox.test.ts` — "runs an excluded command unconfined when allowUnsandboxedCommands is true" |
 | The status reports only the layers actually in force | implementation choice | same file — the layer tests |
 | The Landlock status says "the seam is not implemented in this build", never "the kernel does not implement Landlock" | REA observed (the ABI ladder) + implementation choice (the seam) | same file — the Landlock tests |
 | The ABI 3 ladder is derived, not assumed: no network rights, no `FS_IOCTL_DEV`, no scopes | REA observed | same file |
