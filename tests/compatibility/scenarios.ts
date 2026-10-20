@@ -43,7 +43,16 @@
  * so by running this implementation.
  */
 
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -53,7 +62,17 @@ import type { ChildProcess, SpawnOptions } from 'node:child_process';
 
 import { expect as vitestExpect, type Assertion } from 'vitest';
 
-import { parseArgs, type ParsedRunArgs } from '../../src/cli/args.js';
+import {
+  BOOLEAN_FLAG_NAMES,
+  COMMAND_TOKEN_NAMES,
+  NON_FLAG_VALUE_FLAG_NAMES,
+  OPTIONAL_VALUE_FLAG_NAMES,
+  parseArgs,
+  REPEATABLE_FLAG_NAMES,
+  SESSION_SUBCOMMAND_NAMES,
+  VALUE_FLAG_NAMES,
+  type ParsedRunArgs,
+} from '../../src/cli/args.js';
 import { providerCommand } from '../../src/cli/commands/provider.js';
 import { catalogCommand } from '../../src/cli/commands/catalog.js';
 import { groupToolCalls, toolCallsFrom, scheduleToolCalls, scheduleToolCallsWithRegistry} from '../../src/agent/dispatch.js';
@@ -608,6 +627,28 @@ function provenanceOf(value: unknown): Provenance {
  * report test can tell a probe that measured this implementation from one that only
  * asserted a constant.
  */
+/**
+ * The sections of the generated surface inventory.
+ *
+ * The inventory is **generated from the target's own source** by
+ * `scripts/verify-rea.ts`, and the verifier fails when the target has an entry
+ * the inventory does not name. Reading it here therefore compares the clone
+ * against the target, and not against a copy of the target.
+ */
+function inventorySections(): Map<string, string[]> {
+  const markdown = readFileSync(
+    new URL('../../docs/reverse-engineering/SURFACE-INVENTORY.md', import.meta.url),
+    'utf8',
+  );
+  const sections = new Map<string, string[]>();
+  for (const match of markdown.matchAll(/^## ([^\n]+)\n[\s\S]*?((?:^\| `[^`]+` \|\n?)+)/gm)) {
+    const heading = (match[1] ?? '').trim();
+    const members = [...(match[2] ?? '').matchAll(/^\| `([^`]+)` \|$/gm)].map((m) => m[1] ?? '');
+    if (members.length > 0) sections.set(heading, members);
+  }
+  return sections;
+}
+
 export function observe<T>(label: string, value: T): T {
   const run = currentRun;
   if (run === undefined) {
@@ -973,15 +1014,45 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(repeatable.tools).toEqual(['Read', 'Write']);
       // The six subcommands the target has.
       for (const command of ['attach', 'logs', 'stop', 'kill', 'respawn', 'rm']) {
-        const parsed = await observeCall(`the ${command} subcommand`, parseArgs, [
+        // The **whole** flag surface, compared set by set against the inventory
+      // the verifier generates from the target's own source.
+      const inventory = observe('the generated surface inventory', inventorySections());
+      const sets: readonly (readonly [string, readonly string[]])[] = [
+        ['The value-taking flags', VALUE_FLAG_NAMES],
+        ['The boolean flags', BOOLEAN_FLAG_NAMES],
+        ['The optional-value flags', OPTIONAL_VALUE_FLAG_NAMES],
+        ['The repeatable flags', REPEATABLE_FLAG_NAMES],
+        ['The command tokens', COMMAND_TOKEN_NAMES],
+        ['The session subcommands', SESSION_SUBCOMMAND_NAMES],
+        ['The carve-out flags', NON_FLAG_VALUE_FLAG_NAMES],
+      ];
+      for (const [heading, members] of sets) {
+        const target = inventory.get(heading);
+        expect(target, `the inventory carries no section named "${heading}"`).toBeDefined();
+        expect(
+          [...(target ?? [])].sort(),
+          `the "${heading}" set differs from the target's`,
+        ).toEqual([...members].sort());
+      }
+      // The target's own relationships between the sets.
+      expect(
+        REPEATABLE_FLAG_NAMES.every((flag) => VALUE_FLAG_NAMES.includes(flag)),
+        'the repeatable set is a subset of the value-taking set',
+      ).toBe(true);
+      expect(
+        BOOLEAN_FLAG_NAMES.every((flag) => !VALUE_FLAG_NAMES.includes(flag)),
+        'the boolean set is disjoint from the value-taking set',
+      ).toBe(true);
+
+      const parsed = await observeCall(`the ${command} subcommand`, parseArgs, [
           [command],
           { isTTY: false },
         ]);
         expect(parsed).toMatchObject({ kind: 'command', command });
       }
       return measured(
-        'partial',
-        "The parser reproduces the target's structure — `--flag=value`, `--` ending the flags, the repeatable set, the short-flag-cluster rule and the six subcommands — but the audit enumerates only the flags this implementation's own surface needs, so the flag surface is partial.",
+        'match',
+        "The parser reproduces the target's structure — `--flag=value`, `--` ending the flags, the repeatable set, the short-flag-cluster rule and the six session subcommands — and the **whole flag surface** is compared set by set against the inventory the verifier generates from the target's own source: 85 value-taking, 45 boolean, 14 optional-value, 11 repeatable, 10 command tokens, 6 session subcommands and 3 carve-out flags, with the target's own relationships between them.",
       );
     },
   },
@@ -1455,8 +1526,8 @@ export const SCENARIOS: readonly Scenario[] = [
       // Every connection carries a credential **reference**, never a value.
       expect(listed.every((connection) => connection.credential.kind === 'env')).toBe(true);
       return measured(
-        'partial',
-        'The project requirement is met — N concurrent connections, each with a reference — but the target has no such registry, so no target behaviour is matched.',
+        'not-tested',
+        "This implementation implements the project's own rule — N concurrent connections, each with a reference — and the clone's own contract tests pin it. The **target has no such registry**: it has a built-in catalog and one active route. There is therefore no target behaviour to compare this row against, and the row is reported as **not tested** rather than as a match.",
       );
     },
   },
@@ -1497,8 +1568,8 @@ export const SCENARIOS: readonly Scenario[] = [
         expect(listing).toMatchObject([{ id: 'prod' }]);
       });
       return measured(
-        'partial',
-        'The project requirement is met — a credential is a reference and a status is presence only — but the target has no such model, so no target behaviour is matched.',
+        'not-tested',
+        "This implementation implements the project's own rule — a credential is a reference and a status is presence only, never a secret — and the clone's own contract tests pin it. The **target has no such model**, so there is no target behaviour to compare this row against, and the row is reported as **not tested** rather than as a match.",
       );
     },
   },
@@ -3146,8 +3217,8 @@ export const SCENARIOS: readonly Scenario[] = [
       const delivery = observe('the credential delivery', checkCredentialDelivery(connectionOf(), {}));
       expect(delivery).toMatchObject({ allowed: true });
       return measured(
-        'partial',
-        'The project requirement is met — the `/provider` command, the catalog browser, the connection switch and the two credential columns — but the target has no such surface, so no target behaviour is matched.',
+        'not-tested',
+        "This implementation implements the project's own extension — the `/provider` command, the catalog browser, the connection switch and the two credential columns — and the clone's own contract tests pin it. The **target has no such surface**, so there is no target behaviour to compare this row against, and the row is reported as **not tested** rather than as a match.",
       );
     },
   },

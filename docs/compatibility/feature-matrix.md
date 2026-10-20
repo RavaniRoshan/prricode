@@ -22,7 +22,7 @@
 
 | ID | Group | Requirement | Status | Evidence class | Evidence / source | Implementation status | Owning task | Test ref |
 |---|---|---|---|---|---|---|---|---|
-| F-01 | CLI | CLI entry, flags, subcommands | partial | REA observed | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`, `ev_55449a84611a36ea464f40e34521dc3eda4ed244d6ff37baa2fc163d64070fe5` |  implemented | CC-014 | `tests/contracts/cli-surface.test.ts` |
+| F-01 | CLI | CLI entry, flags, subcommands | observed | REA observed | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`, `ev_55449a84611a36ea464f40e34521dc3eda4ed244d6ff37baa2fc163d64070fe5` |  implemented | CC-014 | `tests/contracts/cli-surface.test.ts` |
 | F-02 | CLI | Headless (`--print`) and output formats | partial | REA observed | same as F-01 |  implemented | CC-014 | `tests/contracts/cli-surface.test.ts` |
 | F-03 | Configuration | Configuration file tiers | observed | REA observed | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`; tier constants `C7s`, `Ble`, `D_`, `VD` | implemented | CC-003 | `tests/contracts/settings-precedence.test.ts` |
 | F-04 | Configuration | Configuration precedence algorithm | observed | REA observed | same as F-03; the per-top-level-key merge and its per-key value rule, closed by source reading: the order `Ps` (user, project, local, flag, policy) and the value table — arrays concatenate and de-duplicate, `extraKnownMarketplaces` and `managedMcpServers` shallow-merge one level, `fallbackModel` and `modelPicker` replace, everything else replaces wholesale | implemented | CC-003 | `tests/contracts/settings-precedence.test.ts` |
@@ -69,8 +69,8 @@
 
 | Status | Count |
 |---|---|
-| observed | 34 |
-| partial | 3 |
+| observed | 35 |
+| partial | 2 |
 | unknown | 2 |
 | project requirement | 1 |
 

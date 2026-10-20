@@ -80,8 +80,8 @@ them and fails when they disagree.
 
 | Outcome | Rows |
 |---|---|
-| `match` | 27 |
-| `partial` | 8 |
+| `match` | 28 |
+| `partial` | 7 |
 | `mismatch` | 2 |
 | `not-tested` | 3 |
 | `unknown` | 2 |
@@ -91,7 +91,7 @@ them and fails when they disagree.
 
 | Row | Area | Feature | Evidence class | Outcome | What was measured | Linked test | Pinning test | Reproduce |
 |---|---|---|---|---|---|---|---|---|
-| F-01 | CLI | CLI entry, flags, subcommands | REA observed | partial | The parser reproduces the target's structure — `--flag=value`, `--` ending the flags, the repeatable set, the short-flag-cluster rule and the six subcommands — but the audit enumerates only the flags this implementation's own surface needs, so the flag surface is partial. | `tests/compatibility/scenarios.test.ts` — "F-01 cli entry and flags" | `tests/contracts/cli-surface.test.ts` — "ends the flag parsing at --" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-01 cli entry and flags" |
+| F-01 | CLI | CLI entry, flags, subcommands | REA observed | match | The parser reproduces the target's structure — `--flag=value`, `--` ending the flags, the repeatable set, the short-flag-cluster rule and the six session subcommands — and the **whole flag surface** is compared set by set against the inventory the verifier generates from the target's own source: 85 value-taking, 45 boolean, 14 optional-value, 11 repeatable, 10 command tokens, 6 session subcommands and 3 carve-out flags, with the target's own relationships between them. | `tests/compatibility/scenarios.test.ts` — "F-01 cli entry and flags" | `tests/contracts/cli-surface.test.ts` — "ends the flag parsing at --" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-01 cli entry and flags" |
 | F-02 | CLI | Headless (`--print`) and output formats | REA observed | partial | The headless rule and the three output formats are reproduced; the audit pins the formats and not the documents a run writes. | `tests/compatibility/scenarios.test.ts` — "F-02 headless print and the output formats" | `tests/contracts/cli-surface.test.ts` — "writes exactly one JSON document and exits 0 on success" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-02 headless print and the output formats" |
 | F-03 | Configuration | Configuration file tiers | REA observed | match | The five tiers and the four observed orderings — the top-level, the merged, the source enumeration and the project-side set — are reproduced exactly. | `tests/compatibility/scenarios.test.ts` — "F-03 the five settings tiers" | `tests/contracts/settings-precedence.test.ts` — "declares the two distinct orderings and the project-side set" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-03 the five settings tiers" |
 | F-04 | Configuration | Configuration precedence algorithm | REA observed | match | Both observed precedence orderings, the whole-block override and the per-top-level-key merge are reproduced; an object a higher tier defines replaces the lower tier's whole, and an array two tiers define is the concatenation of both. | `tests/compatibility/scenarios.test.ts` — "F-04 the two precedence orderings" | `tests/contracts/settings-precedence.test.ts` — "keeps the two orderings genuinely different" | npx vitest run tests/compatibility/scenarios.test.ts -t "F-04 the two precedence orderings" |
@@ -179,7 +179,6 @@ No row is `not-tested`: every scenario in this report ran.
 
 ### `partial` — measured, and matched on part of the contract
 
-| `F-01` | The parser reproduces the target's structure — `--flag=value`, `--` ending the flags, the repeatable set, the short-flag-cluster rule and the six subcommands — but the audit enumerates only the flags this implementation's own surface needs, so the flag surface is partial. |
 | `F-02` | The headless rule and the three output formats are reproduced; the audit pins the formats and not the documents a run writes. |
 | `F-13` | The retry set, the 600000 ms fallback and the error classification are the target's observed rules. Measured: the retry set, the fallback and the classification. The 401 cache invalidation and the x-should-retry header are established by the audit and implemented here, but this probe does not compare them. |
 | `F-14` | The non-streaming body and the SSE stream parse into the same events, and the SDK's extended agent.* vocabulary is tolerated. Measured: the non-streaming body, one SSE frame, and the extended vocabulary. The audit also records the 204 and binary paths, the content-length branch, the text() helper and the non-enumerable request and workspace members, which are implemented but not compared here. |
