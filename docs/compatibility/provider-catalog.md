@@ -143,7 +143,7 @@ Every manager surface is reachable in **two** forms, and the decision between th
 | Form | Example |
 |---|---|
 | the **word** form | `provider list`, `catalog list` — the word is read only when it is the **first** token, the placement a subcommand may take |
-| the **flag** form | `--provider list`, `--catalog list` — the flag form wins over the word form, because `--catalog list` is unambiguous while a prompt that merely mentions "catalog" is not |
+| the **flag** form | `--provider list`, `--catalog list` — the flag form names the surface unambiguously, because `--catalog list` cannot be a prompt; the **word** form names it only when it comes first |
 
 The flag form writes a **machine-readable** document, and every such document carries the extension label.
 
@@ -193,7 +193,7 @@ Every row of this table is a **project extension**: the target has no such surfa
 | The listing carries **two** credential columns — `CREDENTIAL` (the reference) and `STATUS` — and never a value | implementation choice | F-40 | same file — "provider list prints one row per connection with its id, name, route, base URL, and credential status", "provider list shows no credential value even when the underlying environment variable is set" |
 | The manager's verbs are `list`, `add`, `remove`, `use` and `test` | implementation choice | F-40 | same file — "provider add registers a connection whose credential is a reference, never a value", "provider remove removes a connection and reports an unknown id", "provider test resolves the credential through the guarded resolver and never prints the value" |
 | `use` refuses an unusable connection and names it, and an `add --use` leaves the registry untouched | implementation choice | F-40 | same file — "provider use refuses an unusable connection and names it in the error", "provider add --use leaves the registry untouched when the connection is unusable" |
-| The surfaces are reachable in **two** argv forms — the word form and the `--provider` / `--catalog` flag form — and both are machine-readable | implementation choice | F-40 | same file — "exposes the same operations as --provider style flags with machine-readable output", "dispatches the --provider and the --catalog forms through one entry point" |
+| The surfaces are reachable in **two** argv forms — the word form and the `--provider` / `--catalog` flag form — and the **flag** form is the machine-readable one | implementation choice | F-40 | same file — "exposes the same operations as --provider style flags with machine-readable output", "dispatches the --provider and the --catalog forms through one entry point" |
 | A connection's `catalogSource` says where its catalog is read from — `builtin`, `file` or `url` | implementation choice | F-40 | same file — "rewrites the catalog without changing a connection id, name, route, or credential reference" |
 | The catalog and the connection table are **two records**: a refresh rewrites the catalog and never the connection, and a user override survives the refresh | implementation choice | F-40 | same file — "rewrites the catalog without changing a connection id, name, route, or credential reference", "keeps a user override of a catalog-owned field across a refresh" |
 | A keychain credential is shown as configured without ever reading the OS credential store | implementation choice | F-40 | same file — "shows a keychain credential as configured without ever reading the OS credential store" |

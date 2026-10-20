@@ -492,10 +492,6 @@ const UNIMPLEMENTED_OPTIONS: ReadonlyMap<string, string> = new Map([
     '--no-session-persistence',
     'it keeps the session off the disk, and this implementation always writes the transcript',
   ],
-  [
-    '--forward-home-settings',
-    "it says whether this machine's settings go into a cloud session, and this implementation has no cloud session",
-  ],
 ]);
 
 /**

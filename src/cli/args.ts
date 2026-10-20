@@ -642,10 +642,11 @@ export function parseArgs(argv: string[], options: ParseOptions = {}): ParsedArg
     cursor += 1;
     if (token === undefined) continue;
 
-    // **The multi-provider manager** (a project extension). The flag form wins
-    // over the word form, because `--catalog list` is unambiguous while a
-    // prompt that merely mentions "catalog" is not. Everything from the token
-    // on is the manager's own.
+    // **The multi-provider manager** (a project extension). The **flag** form
+    // (`--catalog list`) is unambiguous, while a prompt that merely mentions
+    // "catalog" is not — so the flag form names the surface, and the word
+    // form only names it when it comes first. Everything from the token on is
+    // the manager's own.
     if (token === '--provider' || token === '--catalog') {
       // The manager is a **command**, so it cannot be combined with a prompt:
       // silently discarding the prompt would be a surprise. A prompt or a mode

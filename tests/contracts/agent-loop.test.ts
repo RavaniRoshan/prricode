@@ -1368,6 +1368,108 @@ describe('the runtime\'s permission options', () => {
     expect(seen[0]?.preToolUseHook).toBe(seam);
   });
 
+  it('prefers a seam the caller supplied in the options over the dependency\'s', async () => {
+    const seen: CheckPermissionOptions[] = [];
+    const fromOptions = (): undefined => undefined;
+    const fromDependency = (): undefined => undefined;
+
+    const { runtime } = harness({
+      rounds: [
+        { events: toolTurn('toolu_01', 'Echo', { text: 'hi' }) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+      permission: async (_ctx, options) => {
+        seen.push(options);
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+      permissionOptions: {
+        rules: { allow: [], deny: [], ask: [] },
+        mode: 'default',
+        preToolUseHook: fromOptions,
+      },
+      preToolUseHook: fromDependency,
+    });
+
+    await runtime.runTurn(input);
+
+    // The options are the **more specific** statement, so the seam the caller
+    // put in them wins over the one the dependency carries.
+    expect(seen[0]?.preToolUseHook).toBe(fromOptions);
+  });
+
+  it('does not mutate the options object the caller handed over', async () => {
+    const supplied: CheckPermissionOptions = {
+      rules: { allow: [], deny: [], ask: [] },
+      mode: 'default',
+    };
+    const before = Object.keys(supplied).sort();
+
+    const { runtime } = harness({
+      rounds: [
+        { events: toolTurn('toolu_01', 'Echo', { text: 'hi' }) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+      permission: async () => ({ behavior: 'allow', source: 'unknown', reasonType: 'other' }),
+      permissionOptions: supplied,
+      preToolUseHook: (): undefined => undefined,
+      hook: (): undefined => undefined,
+    });
+
+    await runtime.runTurn(input);
+
+    // The runtime **copies** the options, so a seam it filled in is not
+    // visible to the caller — and the caller's object is untouched.
+    expect(Object.keys(supplied).sort()).toEqual(before);
+    expect(supplied.preToolUseHook).toBeUndefined();
+    expect(supplied.hook).toBeUndefined();
+  });
+
+  it('does not leak one runtime\'s seam into another that shares the options', async () => {
+    const shared: CheckPermissionOptions = {
+      rules: { allow: [], deny: [], ask: [] },
+      mode: 'default',
+    };
+    const first = (): undefined => undefined;
+    const second = (): undefined => undefined;
+    const seen: Array<string | undefined> = [];
+
+    const a = harness({
+      rounds: [
+        { events: toolTurn('toolu_01', 'Echo', { text: 'hi' }) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+      permission: async (_ctx, options) => {
+        seen.push(options.preToolUseHook === first ? 'first' : 'other');
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+      permissionOptions: shared,
+      preToolUseHook: first,
+    });
+    const b = harness({
+      rounds: [
+        { events: toolTurn('toolu_02', 'Echo', { text: 'hi' }) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+      permission: async (_ctx, options) => {
+        seen.push(options.preToolUseHook === second ? 'second' : 'other');
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+      permissionOptions: shared,
+      preToolUseHook: second,
+    });
+
+    await a.runtime.runTurn(input);
+    await b.runtime.runTurn(input);
+
+    // Each runtime sees **its own** seam, and the shared object is unchanged.
+    expect(seen).toEqual(['first', 'second']);
+    expect(shared.preToolUseHook).toBeUndefined();
+  });
+
   it('leaves the default options untouched when no seam is supplied', async () => {
     const seen: CheckPermissionOptions[] = [];
 
