@@ -479,7 +479,7 @@ The exit gate requires an evidence-backed coverage audit of CLI/configuration, p
 | Provider request/response construction | **met** — request construction and response parsing both established |
 | Agent loop and tool dispatch | **partial** — turn request and result shaping met; scheduling partial |
 | Permissions | **met** (rule precedence detail is a refinement, not a gap) |
-| Sessions/resumption | **partial** — storage and carry-over met; resume algorithm partial |
+| Sessions/resumption | **met** for `--resume` (selection, attach-versus-replay, resume-at-a-message with its drop guard, and the structured resumed state); `--continue`'s selection rule is still open |
 | MCP/plugins/hooks/extensions | **partial** — control surface and transport met; lifecycles partial |
 | Native/platform sandbox | **met** — helper structure, the 27-record table, its argument-index metadata encoding, the path resolution, and the supervisor's observe-not-deny behavior are all established |
 
@@ -489,7 +489,7 @@ The exit gate requires an evidence-backed coverage audit of CLI/configuration, p
 |---|---|---|
 | CLI/configuration | the **ordinary** per-key merge across tiers | The target's own per-key merge is not derived; this implementation makes a labelled choice. This is a *implementation design* gap, not an evidence gap. |
 | Agent loop and tool dispatch | the **scheduling order** of concurrent tool calls and the point at which the next model request is issued | Every call in these functions is a **member call** (`this.x(...)`), which REA does not resolve into a `calls` relation. Closing it needs source reading in the 5 MB bundle, not a better tool. |
-| Sessions/resumption | the `--resume` / `--continue` selection and the transcript replay algorithm | The session controller's semantic graph is bounded by the REA transfer byte budget at 40,000 nodes; the region holding the resume algorithm may or may not be inside it. |
+| Sessions/resumption | the **`--continue`** selection rule (the `--resume` selection and the replay semantics are now established) | The session controller's semantic graph is bounded by the REA transfer byte budget at 40,000 nodes; the region holding the resume algorithm may or may not be inside it. |
 | MCP/plugins/hooks/extensions | the server lifecycle and the plugin/skill/subagent/marketplace lifecycles | The subsystems are named and their storage is observed; their behavior was not traced. |
 
 Two groups closed this phase that were previously open: **provider request/response construction** (the default `parseResponse` and the extended SSE event vocabulary) and **native/platform sandbox** (the 27-record table's metadata decoding and the supervisor's observe-not-deny behavior).
