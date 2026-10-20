@@ -14,10 +14,15 @@
  * rule — "Headless mode is forced by a non-TTY stdout."
  *
  * **Implementation choice**: the **shape of the documents**. The audit pins the three
- * formats and the fact that the `json` format writes **one** document and the
- * `stream-json` format writes **one object per event**; it does not record what a
- * document contains. The documents below are therefore this implementation's own, and they
- * are labelled as such here so that nothing reads them as a compatibility claim.
+ * formats and **nothing** about what a document contains — it does not record
+ * the one-document / one-object-per-event contract either. That contract is the
+ * **plan's**: `CC-014` Step 5 of
+ * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`
+ * — "`--print` with `--output-format json` writes **exactly one** JSON document
+ * to stdout and exits 0 on success, non-zero on a provider error;
+ * `--output-format stream-json` writes one JSON object per event". The
+ * documents below are therefore this implementation's own, and they are labelled as such
+ * here so that nothing reads them as a compatibility claim.
  *
  * ## The exit codes
  *
@@ -44,6 +49,13 @@
  * The `json` document is written **after** the run, and the `stream-json`
  * objects are written **as the events arrive**: that is the difference between
  * the two formats, and it is the whole reason the target has both.
+ *
+ * **A limitation, stated rather than hidden**: the runtime returns the turn's
+ * records **when the turn is over**, so the events are produced in **one
+ * batch** rather than one at a time. The `stream-json` format therefore writes
+ * one object per event, but it writes them when the turn ends — the same
+ * limitation `src/cli/headless.ts` records. The runtime's own contract is the
+ * reason, and the runtime is not this milestone's to change.
  */
 
 /* -------------------------------------------------------------------------- */
@@ -236,12 +248,17 @@ export async function writeHeadlessOutput(options: HeadlessOutputOptions): Promi
     }
   }
 
-  const failed = result?.is_error === true || (result === undefined && failure !== undefined);
+  // The exit code is the run's own, and it agrees with the document the `json`
+  // format writes: a run that produced **no** result event failed — the
+  // document says so, and so does the exit code.
+  const failed = result === undefined || result.is_error === true || failure !== undefined;
 
   if (format === 'text') {
-    // The text of a failed run goes to stderr, so stdout stays the answer.
+    // The text of a failed run goes to stderr, so stdout stays the answer. The
+    // provider's own message is preferred over the generic one: the two formats
+    // must not disagree about the same failure.
     if (failed) {
-      stderr.write(`${failure ?? 'The run failed.'}\n`);
+      stderr.write(`${failure ?? result?.error ?? 'The run failed.'}\n`);
     } else if (wroteText) {
       stdout.write('\n');
     }
@@ -291,22 +308,4 @@ function resultDocument(
   const message = failure ?? result.error;
   if (result.is_error && message !== undefined) document.error = message;
   return document;
-}
-
-/**
- * Read the JSON documents a stream of output carries.
- *
- * The documents are written **one per line**, so the reader splits on the line
- * breaks and parses each line. It is the reader a machine uses to check the
- * `json` format's contract — **exactly one** document — and to count the
- * `stream-json` format's objects.
- */
-export function readJsonDocuments(text: string): unknown[] {
-  const documents: unknown[] = [];
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed === '') continue;
-    documents.push(JSON.parse(trimmed));
-  }
-  return documents;
 }

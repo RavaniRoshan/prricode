@@ -37,6 +37,12 @@
  * hook registry — so the default path needs the change that is reported to the
  * orchestrator.
  *
+ * The runtime's `AgentRuntimeDeps` also carries the two seams as its **own**
+ * members, and this module supplies them there as well: the seam reaches the
+ * runtime's service whichever of the two the runtime consults, and the
+ * runtime's **default** path — the one a caller that supplies no
+ * `permissionOptions` takes — is gated by them too.
+ *
  * ## The session's own errors
  *
  * The messages the target prints for a failed session lookup and a failed
@@ -55,17 +61,37 @@
  *   - the fact that the **subcommands** are recognised but not implemented: the
  *     audit records their names and not their behaviour, and this implementation has no
  *     live-session model to attach to;
- *   - the **background mode**, which this implementation does not run.
+ *   - the **background mode**, which this implementation does not run;
+ *   - the **options this implementation recognises and does not implement**
+ *     (`--sdk-url`, `--teleport`, `--max-turns`, `--system-prompt`,
+ *     `--append-system-prompt`, `--verbose`, `--debug`, `--cloud`, `--remote`,
+ *     `--environment`, `--betas`, `--file`, `--channels`, `--mcp-config` and
+ *     `--dangerously-load-development-channels`). A flag this implementation accepts and
+ *     then ignores is worse than one it refuses, so each of them is **refused
+ *     by the run** with a message that names it — the same shape as the
+ *     `--routine` command and the background mode;
+ *   - the **settings file** `--settings` names: it is loaded as the
+ *     **highest-precedence overlay** of the tiered settings;
+ *   - the **stream-json input**: the standard input carries **JSON documents**,
+ *     one per line, and their text is the prompt of this implementation's **one** turn.
+ *     See `src/cli/headless.ts`;
+ *   - the **start mode's three availability overrides**, which the CLI — the
+ *     only production caller of `resolveStartMode` — now threads. See
+ *     {@link startModeOf}.
  */
 
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import type { AgentRuntime, TurnResult } from '../agent/loop.js';
+import type { AgentRuntime } from '../agent/loop.js';
 import { createAgentRuntime } from '../agent/loop.js';
 import type { ProviderTurnSource } from '../agent/context.js';
 import { streamingSourceOf } from '../agent/context.js';
 import { loadSettings } from '../config/loader.js';
+import { parseSettingsDocument } from '../config/schema.js';
+import type { SettingsSource, SettingsTier } from '../config/tiers.js';
+import { TIER_PRECEDENCE, documentOf } from '../config/tiers.js';
 import type { HookRegistry } from '../extensions/hooks/registry.js';
 import { createHookRegistry } from '../extensions/hooks/registry.js';
 import { createHookApproval, createPreToolUseApproval } from '../extensions/hooks/runner.js';
@@ -99,7 +125,9 @@ import type { BuiltinToolDeps } from '../tools/builtins/shared.js';
 import { createToolRegistry } from '../tools/registry.js';
 
 import type { ParsedArgs, ParsedCommandArgs, ParsedRunArgs } from './args.js';
-import { runHeadless } from './headless.js';
+import type { CloudTarget } from './args.js';
+import { findSessionIdInPath, isSessionId } from './args.js';
+import { readStreamJsonInput, runHeadless } from './headless.js';
 import {
   EXIT_FAILURE,
   EXIT_SUCCESS,
@@ -115,9 +143,10 @@ import {
 /**
  * This implementation's version.
  *
- * **Implementation choice.** It tracks the `version` of `package.json`. It is the
- * implementation's own version and never the target's: this implementation does not claim to be
- * the reference agent.
+ * **Implementation choice.** It is the `version` of `package.json`, and the contract
+ * test keeps the two in step: the version the `--version` command prints is the
+ * package's version. It is this implementation's own version and never the target's: the
+ * implementation does not claim to be the reference agent.
  */
 export const CLI_VERSION = '0.1.0';
 
@@ -155,17 +184,13 @@ Options:
                               the tools that are refused
       --tools <tool…>         the tools the session offers
       --add-dir <dir…>        the directories the session may write in
-      --mcp-config <file…>    the MCP configuration files
-      --betas <beta…>         the beta flags the request carries
-      --file <file…>          the files the session starts with
-      --channels <channel…>   the channels the session uses
+      --settings <file>       a settings file to load over the tiered ones
       --init-only             set the session up and stop
       --no-session-persistence
                               do not persist the session
       --fork-session          load a copy of the session that is resumed
       --dangerously-skip-permissions
                               start in bypassPermissions mode
-      --verbose               write more about what the run does
   -h, --help                  write this help and stop
   -v, --version               write the version and stop
 
@@ -219,6 +244,14 @@ export interface SessionContext {
   driver?: ProviderDriver;
   /** The options the hook runner runs with. */
   hookOptions?: RunHooksOptions;
+  /**
+   * The settings document the `--settings` flag named.
+   *
+   * It is loaded by the run and handed to the settings loader as the
+   * highest-precedence overlay, so the rules and the default mode it carries are
+   * in force.
+   */
+  settingsDocument?: Record<string, unknown>;
 }
 
 /** The session a run uses. */
@@ -227,6 +260,13 @@ export interface CommandSession {
   sessionId: string;
   /** The runtime that runs the turn. */
   runtime: AgentRuntime;
+  /**
+   * The permission mode the session starts in.
+   *
+   * The member makes the start mode **observable**: a caller — and a test — can
+   * see which mode the rules and the settings resolved to.
+   */
+  mode: PermissionMode;
 }
 
 /** The factory that builds the session a run uses. */
@@ -365,11 +405,93 @@ export async function runCommand(parsed: ParsedArgs, options: CommandOptions = {
       stderr.write("The '--routine' command is not implemented here yet.\n");
       return EXIT_FAILURE;
     case 'command':
-      return runSubcommand(parsed, { stdout, stderr, ...options });
+      // The resolved sinks come **last**: an own `stdout: undefined` in the
+      // options must not clobber the default.
+      return runSubcommand(parsed, { ...options, stdout, stderr });
     case 'run':
-      return runRun(parsed, { stdout, stderr, ...options });
+      return runRun(parsed, { ...options, stdout, stderr });
     default:
       return EXIT_USAGE;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* The options this implementation does not implement                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The options this implementation recognises and does not implement.
+ *
+ * **Implementation choice.** The audit records the flag names and not what they do, and
+ * this implementation does not implement them. A flag this implementation accepts and then ignores
+ * is worse than one it refuses, so every one of them is **refused by the run**
+ * with a message that names it — the same shape as the `--routine` command and
+ * the background mode.
+ *
+ * The **parser** still knows every one of them: the repeatable set is the
+ * audit's own eleven, and the parser consumes every following non-flag token
+ * for it whether or not the run can honour it.
+ *
+ * The table is a `Map`, so a flag name is **data**: a lookup can never resolve
+ * an inherited member of `Object.prototype`.
+ */
+const UNIMPLEMENTED_OPTIONS: ReadonlyMap<string, string> = new Map([
+  ['--sdk-url', 'it names an SDK server, and this implementation has no SDK server'],
+  ['--teleport', 'it moves a session to another machine, and this implementation cannot'],
+  ['--max-turns', 'it caps the number of turns, and this implementation makes one turn'],
+  ['--system-prompt', 'it replaces the system prompt, and this implementation has none'],
+  ['--append-system-prompt', 'it appends to the system prompt, and this implementation has none'],
+  ['--verbose', "it writes more about what the run does, and this implementation does not"],
+  ['--debug', "it writes the run's debug trace, and this implementation does not"],
+  ['--cloud', 'it names a cloud session, and this implementation has no cloud client'],
+  ['--remote', 'it names a remote session, and this implementation has no remote client'],
+  ['--environment', 'it names a cloud environment, and this implementation has no cloud client'],
+  ['--betas', 'it names the beta flags of the request, and this implementation sends none'],
+  ['--file', 'it names the files the session starts with, and this implementation starts with none'],
+  ['--channels', 'it names the channels of the session, and this implementation has none'],
+  ['--mcp-config', 'it names the MCP configuration files, and this implementation loads none'],
+  [
+    '--dangerously-load-development-channels',
+    'it loads the development channels, and this implementation loads none',
+  ],
+  ['--name', 'it names the session, and this implementation has no name for one'],
+  [
+    '--no-session-persistence',
+    'it keeps the session off the disk, and this implementation always writes the transcript',
+  ],
+]);
+
+/**
+ * The option the run refuses, when it names one this implementation does not implement.
+ */
+function unimplementedOptionOf(parsed: ParsedRunArgs): string | undefined {
+  for (const [name, reason] of UNIMPLEMENTED_OPTIONS) {
+    if (!parsed.flags.has(name)) continue;
+    if (name === '--cloud' && parsed.cloudTarget !== undefined) {
+      return `The '--cloud' option is not implemented here yet: it names ${describeCloudTarget(parsed.cloudTarget)}, and this implementation has no cloud client.`;
+    }
+    return `The '${name}' option is not implemented here yet: ${reason}.`;
+  }
+  return undefined;
+}
+
+/**
+ * How a cloud target is described.
+ *
+ * The three shapes the audit records — a **session id**, a **cloud session
+ * ref** and a **URI argument** — are named, so that the message says what the
+ * implementation was handed.
+ */
+function describeCloudTarget(target: CloudTarget): string {
+  switch (target.kind) {
+    case 'session-id':
+      return 'a session id';
+    case 'cloud-ref':
+      return 'a cloud session ref';
+    case 'uri':
+      return 'a URI argument';
+    default:
+      return 'a cloud session';
   }
 }
 
@@ -428,6 +550,15 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
     return EXIT_FAILURE;
   }
 
+  // The options this implementation recognises and does not implement. They are refused
+  // **before** anything is set up, so that a flag this implementation cannot honour never
+  // reaches a provider request.
+  const unimplemented = unimplementedOptionOf(parsed);
+  if (unimplemented !== undefined) {
+    context.stderr.write(`${unimplemented}\n`);
+    return EXIT_FAILURE;
+  }
+
   if (!parsed.headless) {
     // The interactive terminal UI is a later milestone's surface. The seam is
     // here so that it plugs in without this module changing.
@@ -440,6 +571,14 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
   const configDir = context.configDir ?? defaultConfigDir();
   const env = context.env ?? process.env;
   const store = createSessionStore({ configDir });
+
+  // The settings file the `--settings` flag named. It is loaded **before** the
+  // session, because the session's rules and its start mode come from it.
+  const settingsFile = loadSettingsFileOf(parsed.settingsFile);
+  if (settingsFile.kind === 'error') {
+    context.stderr.write(`${settingsFile.message}\n`);
+    return EXIT_USAGE;
+  }
 
   // The session: continued, resumed, or new. The resolution runs **before** the
   // prompt is read, so a failed session lookup is reported with the target's own
@@ -461,6 +600,7 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
     ...(context.credential === undefined ? {} : { credential: context.credential }),
     ...(context.driver === undefined ? {} : { driver: context.driver }),
     ...(context.hookOptions === undefined ? {} : { hookOptions: context.hookOptions }),
+    ...(settingsFile.kind === 'ok' ? { settingsDocument: settingsFile.document } : {}),
   });
 
   // `--init-only` sets the session up and stops: no turn is made and no prompt
@@ -471,8 +611,25 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
   }
 
   // The prompt: the positional argument, or the standard input.
+  //
+  // The `stream-json` input format decides where the prompt comes from: the
+  // standard input carries **JSON documents**, and their text is the prompt.
+  // **Implementation choice**: the stream-json input wins over a positional argument, and
+  // this implementation's one turn carries the text of every document.
   let prompt = parsed.prompt;
-  if (prompt === undefined) {
+  if (parsed.inputFormat === 'stream-json') {
+    const read = context.readPrompt ?? readStandardInput;
+    const stream = readStreamJsonInput(await read());
+    if (stream.kind === 'invalid') {
+      context.stderr.write(`${stream.message}\n`);
+      return EXIT_USAGE;
+    }
+    prompt = stream.prompt;
+    if (prompt.trim() === '') {
+      context.stderr.write('Error: no prompt was given.\n');
+      return EXIT_USAGE;
+    }
+  } else if (prompt === undefined) {
     const read = context.readPrompt ?? readStandardInput;
     prompt = await read();
     if (prompt.trim() === '') {
@@ -546,13 +703,18 @@ async function resolveSession(
   }
 
   if (parsed.resume !== undefined) {
+    // **Observed** (audit §2.10): "A **session id** matches
+    // `/^(?:session|cse)_[A-Za-z0-9_]+$/`; a path is scanned for such a
+    // segment." A `--resume` that names a **path** therefore names the session
+    // the path holds.
+    const target = resumeTargetOf(parsed.resume);
     const result = await resumeSession({
       store,
       cwd,
       // The print path is the headless path, and the print path is what emits
       // the target's `tengu_resume_print` event.
       entrypoint: 'print',
-      target: parsed.resume,
+      target,
       ...(parsed.resumeSessionAt === undefined ? {} : { messageUuid: parsed.resumeSessionAt }),
       ...(parsed.forkSession ? { forkSession: true } : {}),
       ...(telemetry === undefined ? {} : { onTelemetry: telemetry, onPrintTelemetry: telemetry }),
@@ -579,6 +741,24 @@ async function resolveSession(
   }
 
   return { sessionId: parsed.sessionId ?? newSessionId(), store };
+}
+
+/**
+ * The session a `--resume` names.
+ *
+ * **Observed** (audit §2.10): a **session id** matches
+ * `/^(?:session|cse)_[A-Za-z0-9_]+$/`, and "a path is scanned for such a
+ * segment". So a `--resume` that names a **path** names the session the path
+ * holds: `agent --resume /x/session_abc123` resumes `session_abc123`.
+ *
+ * A path to a **transcript** (`…/session_abc123.jsonl`) is left alone: the
+ * session module reads that file directly, and it does so whether or not the
+ * session is in the store.
+ */
+function resumeTargetOf(value: string): string {
+  if (isSessionId(value)) return value;
+  if (value.endsWith('.jsonl')) return value;
+  return findSessionIdInPath(value) ?? value;
 }
 
 /**
@@ -669,6 +849,11 @@ function storeWithout(inner: SessionStore, discarded: ReadonlySet<string>): Sess
  * The **mode** is the start mode: the `--permission-mode` flag beats
  * `permissions.defaultMode`, which beats the built-in default, and the built-in
  * default is `auto` for a terminal session and `default` for a headless one.
+ *
+ * The CLI is the **only** production caller of `resolveStartMode`, so the
+ * plan's global constraint — that the built-in default is subject to **three**
+ * availability overrides — binds **here**. They are threaded from the merged
+ * settings document; see {@link startModeAvailabilityOf}.
  */
 export async function createCommandSession(context: SessionContext): Promise<CommandSession> {
   const { cwd, configDir, env, parsed } = context;
@@ -677,10 +862,18 @@ export async function createCommandSession(context: SessionContext): Promise<Com
     cwd,
     configDir,
     restricted: env[RESTRICT_PERSONAL_CONFIG_ENV] !== undefined,
+    // **Implementation choice**: the settings file `--settings` named is the
+    // highest-precedence overlay of the tiered settings.
+    ...(context.settingsDocument === undefined ? {} : { flagSettings: context.settingsDocument }),
   });
   const permissions = permissionsFromSettings(settings, { cwd, configDir, env });
 
-  const mode = startModeOf(parsed, permissions.defaultMode, !parsed.headless);
+  const mode = startModeOf(
+    parsed,
+    permissions.defaultMode,
+    !parsed.headless,
+    startModeAvailabilityOf(settings.tiers),
+  );
   const seams = hookSeamsOf(context.hooks, context.hookOptions ?? {});
 
   // **The command line's own rules.** `--allowedTools` and `--disallowedTools`
@@ -740,10 +933,18 @@ export async function createCommandSession(context: SessionContext): Promise<Com
     store: context.store,
     permission: checkPermission,
     permissionOptions,
+    // **The two seams, as the runtime's own dependencies.** The runtime's
+    // default permission options carry the seam members, and this module hands
+    // it the same two seams here: the seam reaches the runtime's service
+    // whichever of the two the runtime consults, and the runtime's **default**
+    // path — the one a caller that supplies no `permissionOptions` takes — is
+    // gated by them too.
+    preToolUseHook: seams.preToolUse,
+    hook: seams.permissionRequest,
     cwd,
   });
 
-  return { sessionId: context.sessionId, runtime };
+  return { sessionId: context.sessionId, runtime, mode };
 }
 
 /**
@@ -779,27 +980,120 @@ function rulesWithFlags(rules: RuleSet, parsed: ParsedRunArgs): RuleSet {
 }
 
 /**
+ * The availability signals the built-in start mode is subject to.
+ *
+ * **The plan's global constraint** names three of them: `disableAutoMode:
+ * "disable"` in a settings file, a HIPAA-configured session, and a session
+ * where auto mode is unavailable.
+ */
+export interface StartModeAvailability {
+  /** Whether a policy disabled auto mode (`disableAutoMode: "disable"`). */
+  autoDisabledByPolicy: boolean;
+  /** Whether the session is HIPAA-configured. */
+  hipaaConfigured: boolean;
+  /** Whether auto mode is available for this session at all. */
+  autoAvailable: boolean;
+}
+
+/**
+ * Whether auto mode is available.
+ *
+ * **Reported, not hidden.** This implementation has **no** availability probe for the auto
+ * mode: the mode exists in the permission layer — where it fails closed when no
+ * classifier is supplied — and nothing in the CLI can say that the mode is
+ * unavailable. The signal is therefore the constant `true`, and this third
+ * override never fires. The compatibility matrix records it.
+ */
+const AUTO_MODE_AVAILABLE = true;
+
+/**
+ * The availability signals the settings document carries.
+ *
+ * **Implementation choice.** The plan names the three overrides but not the keys two of
+ * them live under, so this implementation reads:
+ *
+ *   - `disableAutoMode` — the **merged** settings document's top-level member.
+ *     The value `"disable"` disables auto mode; any other value does not.
+ *   - `hipaa` — the merged document's top-level member. `true`, or an object
+ *     whose `enabled` member is `true`, marks a HIPAA-configured session. **The
+ *     key is this implementation's own**: the audit names the override and not where it
+ *     lives.
+ *   - the auto mode's **availability** — the constant {@link AUTO_MODE_AVAILABLE}.
+ *
+ * The merge is the settings loader's own: the tiers are folded from the lowest
+ * precedence to the highest, so the **highest** tier that defines the key wins.
+ */
+export function startModeAvailabilityOf(
+  tiers: ReadonlyMap<SettingsSource, SettingsTier>,
+): StartModeAvailability {
+  const disableAutoMode = mergedTopLevelKey(tiers, 'disableAutoMode');
+  const hipaa = mergedTopLevelKey(tiers, 'hipaa');
+  return {
+    autoDisabledByPolicy: disableAutoMode === 'disable',
+    hipaaConfigured: hipaaConfiguredOf(hipaa),
+    autoAvailable: AUTO_MODE_AVAILABLE,
+  };
+}
+
+/**
+ * The value a **top-level** key has in the merged settings document.
+ *
+ * The tiers are read in the loader's own precedence order (`TIER_PRECEDENCE`,
+ * highest first), and the **first** tier that defines the key wins — the rule
+ * the loader's own block-wise merge follows for a key that is not a block.
+ *
+ * The lookup is an **own-property** check, so a key that names an inherited
+ * member of `Object.prototype` is reported as absent rather than resolving to
+ * the inherited member.
+ */
+function mergedTopLevelKey(
+  tiers: ReadonlyMap<SettingsSource, SettingsTier>,
+  key: string,
+): unknown {
+  for (const source of TIER_PRECEDENCE) {
+    const tier = tiers.get(source);
+    if (tier === undefined) continue;
+    const document = documentOf(tier);
+    if (typeof document !== 'object' || document === null) continue;
+    const record = document as Record<string, unknown>;
+    if (!Object.hasOwn(record, key)) continue;
+    return record[key];
+  }
+  return undefined;
+}
+
+/** Whether a `hipaa` settings member marks a HIPAA-configured session. */
+function hipaaConfiguredOf(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (!Object.hasOwn(record, 'enabled')) return false;
+  return record['enabled'] === true;
+}
+
+/**
  * The mode a session starts in.
  *
  * The precedence is the target's: the `--permission-mode` flag beats
  * `permissions.defaultMode`, which beats the built-in default, and `auto` and
  * `bypassPermissions` written into a settings file are ignored — only the flag
  * may select them. The built-in default is `auto` for a terminal session and
- * `default` for a headless one.
+ * `default` for a headless one, subject to the three availability overrides.
  */
-function startModeOf(
+export function startModeOf(
   parsed: ParsedRunArgs,
   settingsDefault: PermissionMode | undefined,
   interactive: boolean,
+  availability: StartModeAvailability,
 ): PermissionMode {
   if (parsed.dangerouslySkipPermissions) return 'bypassPermissions';
   const flag = parsed.permissionMode as PermissionMode | undefined;
   return resolveStartMode({
     ...(flag === undefined ? {} : { flag }),
     ...(settingsDefault === undefined ? {} : { settingsDefault }),
-    autoAvailable: true,
-    autoDisabledByPolicy: false,
-    hipaaConfigured: false,
+    autoAvailable: availability.autoAvailable,
+    autoDisabledByPolicy: availability.autoDisabledByPolicy,
+    hipaaConfigured: availability.hipaaConfigured,
     interactive,
   });
 }
@@ -843,8 +1137,73 @@ function transportSourceOf(
 }
 
 /* -------------------------------------------------------------------------- */
+/* The settings file                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The outcome of loading the settings file `--settings` named.
+ *
+ * The two cases are: the file was read and it is a settings document, or the
+ * file could not be used. The second is an **argument error**: the command line
+ * named a file the run cannot honour, and the run says so rather than quietly
+ * using a different configuration.
+ */
+export type SettingsFileLoad =
+  /** The file was read. */
+  | { kind: 'ok'; document: Record<string, unknown> }
+  /** The file could not be read. */
+  | { kind: 'error'; message: string };
+
+/**
+ * Load the settings file `--settings` named.
+ *
+ * **Implementation choice.** The audit records the flag name and not what it does. The
+ * implementation reads the file, validates it against the settings schema and hands it
+ * to the settings loader as the **highest-precedence overlay** of the tiered
+ * settings — so the rules, the default mode and the start-mode overrides it
+ * carries are in force.
+ */
+export function loadSettingsFileOf(filePath: string | undefined): SettingsFileLoad {
+  if (filePath === undefined) return { kind: 'ok', document: {} };
+
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, 'utf8');
+  } catch (error) {
+    return {
+      kind: 'error',
+      message: `Error: --settings ${filePath} could not be read: ${messageOf(error)}.`,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { kind: 'error', message: `Error: --settings ${filePath} is not valid JSON.` };
+  }
+
+  const result = parseSettingsDocument(parsed);
+  if (!result.ok) {
+    return {
+      kind: 'error',
+      message: `Error: --settings ${filePath} failed validation: ${result.issues.join('; ')}.`,
+    };
+  }
+
+  return { kind: 'ok', document: result.value };
+}
+
+/* -------------------------------------------------------------------------- */
 /* The helpers                                                                 */
 /* -------------------------------------------------------------------------- */
+
+/** The message of a thrown value. */
+function messageOf(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  return 'an unknown error';
+}
 
 /** A fresh session id. */
 function newSessionId(): string {
@@ -859,11 +1218,3 @@ async function readStandardInput(): Promise<string> {
   }
   return Buffer.concat(chunks).toString('utf8');
 }
-
-/**
- * The result of a turn, as the runtime's own.
- *
- * **Implementation choice.** The headless mode does not re-implement the turn, so the
- * type is re-exported for a caller that wants to name it.
- */
-export type { TurnResult };

@@ -37,6 +37,22 @@
  * rather than one at a time. The `stream-json` format therefore writes one
  * object per event, but it writes them when the turn ends. The runtime's own
  * contract is the reason, and the runtime is not this milestone's to change.
+ *
+ * ## The stream-json input
+ *
+ * **Implementation choice.** The audit records that the input format is `text` or
+ * `stream-json`, that `--input-format=stream-json` requires
+ * `--output-format=stream-json` and that it requires `--print` — and **nothing**
+ * about the shape of a document. This implementation reads the shape the target's own SDK
+ * protocol uses: the standard input carries **JSON documents**, one per line,
+ * and each of them is a **user message** whose content is a string or an array
+ * of `{type: 'text', text}` blocks.
+ *
+ * **A limitation, stated rather than hidden**: this implementation's headless run makes
+ * **one** turn, so a stream-json input that carries several user messages
+ * contributes the text of all of them to that one turn. The target's
+ * stream-json input drives a **persistent session**, one turn per message; that
+ * session model is a later milestone's surface.
  */
 
 import type { AgentRuntime } from '../agent/loop.js';
@@ -103,6 +119,115 @@ export async function* runHeadless(options: HeadlessOptions): AsyncIterable<Head
     duration_ms: Math.max(0, now() - startedAt),
     ...(failed && message !== undefined ? { error: message } : {}),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The stream-json input                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The outcome of reading a `stream-json` input.
+ *
+ * The two cases are: the input carried text, or the input carried something the
+ * implementation cannot read. The second is an **error**, not an empty prompt: a
+ * document this implementation cannot read must not become a run with no prompt.
+ */
+export type StreamJsonRead =
+  /** The input carried text. */
+  | { kind: 'ok'; prompt: string }
+  /** The input carried a line that is not JSON, or a document with no text. */
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Read the prompt a `stream-json` input carries.
+ *
+ * The standard input carries **JSON documents**, one per line. Each document is
+ * a **user message**: its `message.content` — or its own `content` — is either
+ * a string or an array of `{type: 'text', text}` blocks. The text of every
+ * document is the prompt of the one turn this implementation makes.
+ *
+ * **Implementation choice.** The audit records the input format and not the shape of a
+ * document; the shape read here is the one the target's SDK protocol uses, and
+ * this implementation says so rather than pretending the audit settled it.
+ */
+export function readStreamJsonInput(text: string): StreamJsonRead {
+  const documents: string[] = [];
+
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return {
+        kind: 'invalid',
+        message: 'Error: the stream-json input carries a line that is not JSON.',
+      };
+    }
+
+    const content = contentOf(parsed);
+    if (content === undefined) {
+      return {
+        kind: 'invalid',
+        message: 'Error: the stream-json input carries a document with no text.',
+      };
+    }
+    documents.push(content);
+  }
+
+  return { kind: 'ok', prompt: documents.join('\n') };
+}
+
+/**
+ * The text a document carries, when it carries any.
+ *
+ * The document is read through **own-property** checks only, so a document that
+ * names an inherited member of `Object.prototype` is a document with no text
+ * rather than a crash.
+ */
+function contentOf(document: unknown): string | undefined {
+  if (typeof document !== 'object' || document === null) return undefined;
+  const record = document as Record<string, unknown>;
+
+  const message = ownValue(record, 'message');
+  if (typeof message === 'object' && message !== null) {
+    const content = ownValue(message as Record<string, unknown>, 'content');
+    const text = textOf(content);
+    if (text !== undefined) return text;
+  }
+
+  return textOf(ownValue(record, 'content'));
+}
+
+/**
+ * The value of an **own** property.
+ *
+ * The lookup is guarded, so a key that names an inherited member of
+ * `Object.prototype` (`constructor`, `toString`, `__proto__`, …) is reported as
+ * absent rather than resolving to the inherited member.
+ */
+function ownValue(record: Record<string, unknown>, key: string): unknown {
+  if (!Object.hasOwn(record, key)) return undefined;
+  return record[key];
+}
+
+/** The text a content value carries: a string, or the text blocks of an array. */
+function textOf(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return undefined;
+
+  const parts: string[] = [];
+  for (const block of value) {
+    if (typeof block !== 'object' || block === null) continue;
+    const record = block as Record<string, unknown>;
+    if (ownValue(record, 'type') !== 'text') continue;
+    const text = ownValue(record, 'text');
+    if (typeof text !== 'string') continue;
+    parts.push(text);
+  }
+  return parts.join('');
 }
 
 /* -------------------------------------------------------------------------- */

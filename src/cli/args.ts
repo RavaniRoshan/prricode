@@ -51,15 +51,55 @@
  *     but a **pure** boolean that swallowed the next token would take the
  *     prompt with it (`agent --continue "the prompt"`), so this implementation keeps the
  *     rest pure and applies the optional value to the flag the audit names.
+ *     **This is a implementation choice, and a deliberate one**: the audit's rule is
+ *     reproduced for the flag it names, and the rest of the boolean set is
+ *     **pure**. `docs/compatibility/command-surface.md` records the divergence.
  *   - a **bare subcommand** is a command when it comes **first**. The audit names
  *     the six subcommands but not where they may appear, and a first token is
  *     the only placement that cannot swallow a prompt.
  *   - the **messages** the audit does not record are this implementation's own. Every
  *     message the audit records is reproduced **verbatim**, and each one is
  *     marked as such at the place it is produced.
+ *
+ * ## The audit's validation table
+ *
+ * The audit's table has **fourteen** rows. This implementation reproduces **all fourteen**
+ * messages, and it says which **mode** each of the three `<mode>` rows applies
+ * to — the audit's placeholder is ambiguous, and a rule that does not say which
+ * mode it decides is not a rule:
+ *
+ *   - the row "a mode that cannot be combined with resume/continue/teleport" is
+ *     applied to the **background** mode. It is **not** applied to `print`:
+ *     the target's own `--resume` message says "when used with `--print`", so
+ *     the target's print mode **does** combine with `--resume`.
+ *   - the row "`--init-only` or `--session-id` combined with a mode" is applied
+ *     to **every** mode this implementation has: `--init-only` and `--session-id` name
+ *     the session, and a mode names how the run talks to the user.
+ *   - the row "a non-interactive mode with `--output-format stream-json`" is
+ *     applied to the **background** mode: the target's print mode uses
+ *     `stream-json` (the audit's own `--input-format=stream-json` rules require
+ *     `--print`), so the row is about another mode.
+ *
+ * ## The rules this implementation does not implement
+ *
+ * The **parser** knows every flag of the target's own vocabulary this implementation's
+ * surface needs — including the ones this implementation does not implement: `--sdk-url`
+ * (this implementation has no SDK server), `--teleport` (this implementation has no teleport) and
+ * the cloud flags (`--cloud`, `--remote`, `--environment` — this implementation has no
+ * cloud client). Those are **refused by the run**, not by the parser, so that
+ * the parser's own validation messages — which the audit records — still fire
+ * first. `src/cli/command.ts` holds the list.
+ *
+ * `--attach-serve` needs an **enabled headless cloud client**, which this implementation
+ * does not have, so the target's message is produced whenever the flag is
+ * given: the rule is implemented, and this implementation never satisfies it.
+ *
+ * `--settings <file>` **is** implemented: the file is read, validated against
+ * the settings schema and loaded as the highest-precedence overlay of the
+ * tiered settings.
  */
 
-import { INPUT_FORMATS, OUTPUT_FORMATS, isInputFormat, isOutputFormat } from './output.js';
+import { isInputFormat, isOutputFormat } from './output.js';
 import type { InputFormat, OutputFormat } from './output.js';
 
 /* -------------------------------------------------------------------------- */
@@ -132,6 +172,48 @@ export function findSessionIdInPath(value: string): string | undefined {
   return found;
 }
 
+/**
+ * The cloud session a `--cloud` value names.
+ *
+ * **Implementation choice.** The audit records the three shapes the target knows — a
+ * **session id**, a **cloud session ref** and a **URI argument** — and the
+ * message `--cloud <session_id|url>`, but it does not say how a value that is
+ * none of the three is read. This implementation classifies the value it is given, so
+ * that the run can say which shape it was handed.
+ */
+export type CloudTarget =
+  /** A **session id**, `session_…` or `cse_…`. */
+  | { kind: 'session-id'; value: string }
+  /** A **cloud session ref**: eight hex digits. */
+  | { kind: 'cloud-ref'; value: string }
+  /** A **URI argument**: `cc://…` or `cc+unix://…`. */
+  | { kind: 'uri'; value: string }
+  /** Anything else — a url, or a value this implementation does not recognise. */
+  | { kind: 'other'; value: string };
+
+/**
+ * The cloud session a `--cloud` value names.
+ *
+ * The three shapes the audit records are recognised; anything else is `other`.
+ */
+export function cloudTargetOf(value: string): CloudTarget {
+  if (isSessionId(value)) return { kind: 'session-id', value };
+  if (isCloudSessionRef(value)) return { kind: 'cloud-ref', value };
+  if (isUriArgument(value)) return { kind: 'uri', value };
+  return { kind: 'other', value };
+}
+
+/**
+ * Whether a **headless cloud client** is enabled.
+ *
+ * **Implementation choice.** The target's `--attach-serve` rule needs "an enabled
+ * headless cloud client", and this implementation has **no** cloud client at all: the
+ * cloud is a later milestone's surface. The flag therefore never satisfies the
+ * rule, and this implementation refuses `--attach-serve` with the target's message rather
+ * than accepting it and doing nothing.
+ */
+export const HEADLESS_CLOUD_CLIENT_ENABLED = false;
+
 /* -------------------------------------------------------------------------- */
 /* The flag tables                                                             */
 /* -------------------------------------------------------------------------- */
@@ -159,6 +241,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--append-system-prompt',
   '--system-prompt',
   '--settings',
+  '--teleport',
 ]);
 
 /**
@@ -188,6 +271,13 @@ const REPEATABLE_FLAGS: ReadonlySet<string> = new Set([
  * **Observed** (audit §2.10): "so `-r`/`--resume` takes an *optional* value". A
  * flag of this set consumes the next token only when that token does **not**
  * look like a flag.
+ *
+ * **A implementation choice, and a deliberate one.** The audit describes the **boolean**
+ * set as consuming the next non-flag token, which would make every boolean in
+ * the set swallow the prompt (`agent --continue "the prompt"`). This implementation
+ * applies the optional value to the flag the audit **names** — `-r`/`--resume` —
+ * and keeps the rest of the boolean set **pure**. The divergence is recorded in
+ * the compatibility matrix.
  */
 const OPTIONAL_VALUE_FLAGS: ReadonlySet<string> = new Set(['-r', '--resume']);
 
@@ -212,7 +302,9 @@ const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
  *
  * `-p` (print), `-h` (help), `-v`/`-V` (version) and `-r` (resume) are named by
  * the audit; `-n` (name) is named by the target's own message ("to name the
- * session, use `-n/--name`").
+ * session, use `-n/--name`"). `-c` (continue) is the target's own short form of
+ * `--continue` — the pair the target's boolean set carries beside `-r`/`--resume`
+ * — and this implementation's help text advertises it, so the parser must know it.
  *
  * The table is a `Map`, so a short flag is **data**: a lookup can never resolve
  * an inherited member of `Object.prototype`.
@@ -224,6 +316,7 @@ const SHORT_FLAGS: ReadonlyMap<string, string> = new Map([
   ['-V', '--version'],
   ['-r', '--resume'],
   ['-n', '--name'],
+  ['-c', '--continue'],
 ]);
 
 /**
@@ -393,6 +486,10 @@ export interface ParsedRunArgs {
   initOnly: boolean;
   /** The SDK url. */
   sdkUrl?: string;
+  /** The settings file the `--settings` flag named. */
+  settingsFile?: string;
+  /** The cloud session the `--cloud` flag named. */
+  cloudTarget?: CloudTarget;
   /** Whether the session is persisted. */
   noSessionPersistence: boolean;
   /** Whether the run loads a copy of the session it resumes. */
@@ -493,6 +590,11 @@ export function parseArgs(argv: string[], options: ParseOptions = {}): ParsedArg
   let command: Subcommand | undefined;
   let printValue: string | undefined;
   let routineValue: string | undefined;
+  // **Implementation choice**: `--help` and `--version` win **wherever** they appear. The
+  // audit records the tokens but not their precedence, and a help request that
+  // loses to an earlier `--print` is a help request the user never sees.
+  let helpRequested = false;
+  let versionRequested = false;
 
   /** The tokens that are left to read. */
   const queue: string[] = [...argv];
@@ -548,7 +650,11 @@ export function parseArgs(argv: string[], options: ParseOptions = {}): ParsedArg
     // `--print=<value>` names the prompt; `--routine=<value>` names a routine.
     if (token.startsWith('--print=')) {
       if (mode === undefined) mode = 'print';
-      printValue = token.slice('--print='.length);
+      const value = token.slice('--print='.length);
+      // **Implementation choice**: an **empty** inline value is no value. `--print=` names
+      // the mode; the prompt still comes from the positional argument or from the
+      // standard input.
+      printValue = value === '' ? undefined : value;
       continue;
     }
     if (token.startsWith('--routine=')) {
@@ -560,7 +666,9 @@ export function parseArgs(argv: string[], options: ParseOptions = {}): ParsedArg
     // A command token is a command, not a flag.
     const commandKind = COMMAND_TOKENS.get(token);
     if (commandKind !== undefined) {
-      if (mode === undefined) mode = commandKind;
+      if (commandKind === 'help') helpRequested = true;
+      else if (commandKind === 'version') versionRequested = true;
+      else if (mode === undefined) mode = commandKind;
       continue;
     }
 
@@ -632,6 +740,10 @@ export function parseArgs(argv: string[], options: ParseOptions = {}): ParsedArg
 
   const flags = flagValuesOf(collected);
 
+  // **Implementation choice**: `--help` and `--version` win regardless of the order they
+  // were given in, and regardless of anything else on the command line.
+  if (helpRequested) return { kind: 'help', positionals: [...positionals] };
+  if (versionRequested) return { kind: 'version', positionals: [...positionals] };
   if (command !== undefined) {
     return { kind: 'command', command, args: [...positionals], flags };
   }
@@ -679,11 +791,31 @@ interface RunInputs {
 function finishRun(inputs: RunInputs): ParsedArgs {
   const { flags, positionals, mode, printValue, isTTY } = inputs;
 
+  // The mode the run is in.
+  //
+  // **Implementation choice.** The audit's `<mode>` placeholder is ambiguous: the audit
+  // records three rows that name a mode and does not say which mode each row is
+  // about. This implementation's modes are `print` and `background`, and it applies the
+  // rows as follows — the reasoning is in the file header:
+  //
+  //   - "a mode that cannot be combined with resume/continue/teleport" applies
+  //     to **`background`**. The target's print mode **does** combine with
+  //     `--resume`: the target's own message says "when used with `--print`".
+  //   - "`--init-only` or `--session-id` combined with a mode" applies to
+  //     **every** mode: `--init-only` and `--session-id` name the session, and a
+  //     mode names how the run talks to the user.
+  //   - "a non-interactive mode with `--output-format stream-json`" applies to
+  //     **`background`**. The target's print mode uses `stream-json` — the
+  //     audit's own `--input-format=stream-json` rules require `--print`.
+  const modeName = mode === 'background' ? 'background' : mode === 'print' ? 'print' : undefined;
+
   // The output format.
   const outputFormatValue = flags.get('--output-format');
   let outputFormat: OutputFormat = 'text';
   if (outputFormatValue !== undefined) {
     if (!isOutputFormat(outputFormatValue)) {
+      // **Implementation choice**: the audit records an **input**-format message and no
+      // output-format one. This message is this implementation's own.
       return errorArgs(`Error: Invalid output format "${outputFormatValue}".`);
     }
     outputFormat = outputFormatValue;
@@ -717,6 +849,12 @@ function finishRun(inputs: RunInputs): ParsedArgs {
     return errorArgs('Error: --input-format=stream-json requires --print.');
   }
 
+  // **Observed**: `<mode> does not support --output-format stream-json` — the
+  // background mode, the one non-interactive mode that does not speak it.
+  if (modeName === 'background' && outputFormat === 'stream-json') {
+    return errorArgs('background does not support --output-format stream-json');
+  }
+
   // **Observed**: `Error: --sdk-url requires both --input-format=stream-json and
   // --output-format=stream-json.`
   if (sdkUrl !== undefined && !(inputFormat === 'stream-json' && outputFormat === 'stream-json')) {
@@ -729,6 +867,40 @@ function finishRun(inputs: RunInputs): ParsedArgs {
   // mode.`
   if (flags.has('--no-session-persistence') && !print) {
     return errorArgs('Error: --no-session-persistence can only be used with --print mode.');
+  }
+
+  // **Observed**: `<mode> cannot be combined with --resume, --continue, or
+  // --teleport` — the background mode.
+  if (
+    modeName === 'background' &&
+    (flags.has('--resume') || flags.has('--continue') || flags.has('--teleport'))
+  ) {
+    return errorArgs('background cannot be combined with --resume, --continue, or --teleport');
+  }
+
+  // **Observed**: `<mode> cannot be combined with --init-only` and `<mode> cannot
+  // be combined with --session-id` — every mode this implementation has.
+  if (modeName !== undefined) {
+    if (initOnly) return errorArgs(`${modeName} cannot be combined with --init-only`);
+    if (flags.has('--session-id')) {
+      return errorArgs(`${modeName} cannot be combined with --session-id`);
+    }
+  }
+
+  // **Observed**: `Error: --attach-serve requires the serve-only headless launch
+  // (non-interactive, --input-format stream-json and --output-format stream-json)
+  // and an enabled headless cloud client; it never falls back to a plain attach`.
+  //
+  // This implementation has **no** headless cloud client, so the rule never holds: the flag
+  // is refused rather than accepted and ignored.
+  if (flags.has('--attach-serve')) {
+    const serveOnly =
+      !isTTY && inputFormat === 'stream-json' && outputFormat === 'stream-json';
+    if (!serveOnly || !HEADLESS_CLOUD_CLIENT_ENABLED) {
+      return errorArgs(
+        'Error: --attach-serve requires the serve-only headless launch (non-interactive, --input-format stream-json and --output-format stream-json) and an enabled headless cloud client; it never falls back to a plain attach',
+      );
+    }
   }
 
   // **Observed**: `Error: --forward-home-settings takes true or false, not
@@ -797,6 +969,8 @@ function finishRun(inputs: RunInputs): ParsedArgs {
   let permissionMode: PermissionModeName | undefined;
   if (permissionModeValue !== undefined) {
     if (!isPermissionModeName(permissionModeValue)) {
+      // **Implementation choice**: the audit records the six permission modes and no
+      // message for an unknown one. This message is this implementation's own.
       return errorArgs(`Error: Invalid permission mode "${permissionModeValue}".`);
     }
     permissionMode = permissionModeValue;
@@ -846,6 +1020,9 @@ function finishRun(inputs: RunInputs): ParsedArgs {
   const name = flags.get('--name');
   if (name !== undefined) run.name = name;
   if (sdkUrl !== undefined) run.sdkUrl = sdkUrl;
+  const settingsFile = flags.get('--settings');
+  if (settingsFile !== undefined) run.settingsFile = settingsFile;
+  if (cloud !== undefined) run.cloudTarget = cloudTargetOf(cloud);
 
   return run;
 }
@@ -896,9 +1073,3 @@ function expandShortCluster(token: string): string[] | undefined {
 function isPermissionModeName(value: string): value is PermissionModeName {
   return (PERMISSION_MODE_NAMES as readonly string[]).includes(value);
 }
-
-/**
- * The formats the CLI knows, re-exported for a caller that only imports the
- * parser.
- */
-export { INPUT_FORMATS, OUTPUT_FORMATS };
