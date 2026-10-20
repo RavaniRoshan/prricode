@@ -177,6 +177,7 @@ The store is append-only, the last row per id wins, and a prompt is not delivere
 | The drop guard refuses a resume that would split a tool turn | REA observed (the mechanism) + implementation choice (the exact rule) | same file — the drop-guard tests |
 | The resume point is the last assistant message with a tool use, else the last message | REA observed | `tests/contracts/session-resume.test.ts` — the two resume-point tests |
 | A leaf tie is won by the record written last | implementation choice | same file — "wins a leaf tie with the one that was written last" |
+| `--continue` selects the newest session, reports a background-running one, and uses the target's two failure messages | REA observed (the messages and the newest-session rule) + **implementation choice** (the store-level ordering rule was not traced) | `tests/contracts/session-store.test.ts` — the continue tests |
 | The interrupted turn is detected by the backward walk | REA observed | same file — the two interrupted-turn tests |
 | A `tool_use` is answered by the `tool_result` with the same id, and the pending id is removed on arrival | REA observed | same file — "pairs a `tool_result` with the `tool_call` it answers", "keeps a tool call whose result never arrived pending" |
 | The compaction boundary skips the prefix and does not delete it, and the boundary is located by the parent link | REA observed (the mechanism) + implementation choice (the model) | same file — the compaction tests |
