@@ -25,6 +25,9 @@ import {
   SESSION_SCHEMA_VERSION,
   SessionFormatError,
   SessionVersionError,
+  ownNumber,
+  ownString,
+  parseSessionEvent,
   type SessionEvent,
 } from '../../src/session/event.js';
 import {
@@ -273,8 +276,8 @@ describe('the session store', () => {
 
     const raw = readFileSync(handle.path, 'utf8');
     // The transcript **keeps** the payload: the replacement is applied when
-    // the session is read, so the data is not lost — it is only kept out of
-    // the context.
+    // the session is **resumed** (by `resumeEvents`), so the data is not lost
+    // — it is only kept out of the context.
     expect(raw).toContain(payload);
 
     const events = await collect(store.read(handle));
@@ -441,6 +444,67 @@ describe('the session store', () => {
     // or a digit — and it is refused as an id, not as an inherited member.
     await expect(store.create({ cwd: CWD, sessionId: '__proto__' })).rejects.toThrow();
   });
+
+  it('reads an own member of a record and never an inherited one', () => {
+    // A member name in a record is caller-supplied data, and `Object.prototype`
+    // carries members called `constructor`, `toString` and `__proto__`. A
+    // record whose **prototype** carries a member of the same name must not
+    // resolve that member as the record's own.
+    const inherited = Object.create({
+      constructor: 'inherited',
+      toString: 'inherited',
+    }) as Record<string, unknown>;
+
+    expect(ownString(inherited, 'constructor')).toBeUndefined();
+    expect(ownString(inherited, 'toString')).toBeUndefined();
+    expect(ownNumber(inherited, 'constructor')).toBeUndefined();
+
+    // The same holds for a member of the type the reader expects: an
+    // inherited **number** is not the record's number either.
+    const numeric = Object.create({ constructor: 42 }) as Record<string, unknown>;
+    expect(ownNumber(numeric, 'constructor')).toBeUndefined();
+
+    // The standard prototype carries members of the same names, and they are
+    // not resolved either.
+    expect(ownString({}, 'constructor')).toBeUndefined();
+    expect(ownString({}, 'toString')).toBeUndefined();
+    expect(ownNumber({}, 'toString')).toBeUndefined();
+
+    // A record that inherits its `text` is **refused**: the member is absent,
+    // and the inherited one does not stand in for it.
+    const value = Object.assign(Object.create({ text: 'inherited' }), {
+      v: SESSION_SCHEMA_VERSION,
+      t: 'user_message',
+      ts: 1000,
+      id: 'm0',
+    });
+    expect(() => parseSessionEvent(value)).toThrow(SessionFormatError);
+
+    // A record that inherits its `ts` is refused as well: the timestamp is
+    // absent, and the inherited number does not stand in for it.
+    const stamped = Object.assign(Object.create({ ts: 1000 }), {
+      v: SESSION_SCHEMA_VERSION,
+      t: 'user_message',
+      id: 'm0',
+      text: 'hello',
+    });
+    expect(() => parseSessionEvent(stamped)).toThrow(SessionFormatError);
+
+    // And an envelope that inherits its `isError` is refused: the flag is
+    // absent, and the inherited boolean does not stand in for it.
+    const envelope = Object.assign(Object.create({ isError: false }), {
+      toolUseId: 'toolu_1',
+      content: 'the output',
+    });
+    const result = Object.assign(Object.create({}), {
+      v: SESSION_SCHEMA_VERSION,
+      t: 'tool_result',
+      ts: 1000,
+      id: 'm0',
+      envelope,
+    });
+    expect(() => parseSessionEvent(result)).toThrow(SessionFormatError);
+  });
 });
 
 describe('resuming a session by id or title', () => {
@@ -490,6 +554,20 @@ describe('resuming a session by id or title', () => {
     expect(resolution.message).toContain('second');
     expect(resolution.message).toContain('(modified ');
     expect(resolution.candidates).toHaveLength(2);
+
+    // The candidates carry the **file's** modification time, as an ISO
+    // timestamp: the clock the target's error reports. A candidate that
+    // carried no time would be reported as "unknown" — and the clock of the
+    // file is not the clock of the last record.
+    for (const candidate of resolution.candidates) {
+      const modifiedAt = candidate.modifiedAt;
+      if (modifiedAt === undefined) throw new Error('expected a modification time');
+      expect(resolution.message).toContain(`(modified ${new Date(modifiedAt).toISOString()})`);
+    }
+    // The file's clock is not the record's clock: the records of these two
+    // sessions carry the timestamps 1000 and 2000.
+    expect(resolution.message).not.toContain(new Date(1000).toISOString());
+    expect(resolution.message).not.toContain(new Date(2000).toISOString());
   });
 
   it('refuses a value that is neither a session id nor a title', () => {

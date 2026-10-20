@@ -21,13 +21,20 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { SESSION_SCHEMA_VERSION, SessionVersionError, type SessionEvent } from '../../src/session/event.js';
 import { createSessionStore } from '../../src/session/store.js';
 import {
+  CONTINUE_BACKGROUND_RUNNING_MESSAGE,
+  CONTINUE_NOT_FOUND_MESSAGE,
+  SESSION_CONTINUE_TELEMETRY_EVENT,
+  SESSION_RESUME_PRINT_TELEMETRY_EVENT,
   SESSION_RESUMED_TELEMETRY_EVENT,
   contextToProviderMessages,
+  continueSession,
   pairToolCalls,
   resumeAtMessage,
   resumeEvents,
   resumeSession,
   type ContextItem,
+  type SessionContinueTelemetry,
+  type SessionResumePrintTelemetry,
   type SessionResumedTelemetry,
 } from '../../src/session/resume.js';
 import { compact } from '../../src/session/compaction.js';
@@ -53,6 +60,19 @@ async function collect(iterable: AsyncIterable<SessionEvent>): Promise<SessionEv
   const events: SessionEvent[] = [];
   for await (const event of iterable) events.push(event);
   return events;
+}
+
+/**
+ * The **module header** of a source file — the leading block comment.
+ *
+ * The header is where a module states what it does *not* do and what it
+ * claims, so a claim like "this reason is this implementation's choice" has to live
+ * there and not only in a function's doc comment.
+ */
+function moduleHeader(file: string): string {
+  const source = readFileSync(new URL(`../../src/session/${file}`, import.meta.url), 'utf8');
+  const end = source.indexOf('*/');
+  return end === -1 ? source : source.slice(0, end);
 }
 
 function userMessage(id: string, text: string, ts: number, parentId?: string): SessionEvent {
@@ -285,6 +305,27 @@ describe('the resume algorithm', () => {
 
     expect(() => resumeEvents([stale])).toThrow(SessionVersionError);
   });
+
+  it('refuses a record that carries no version at all', () => {
+    // A resume can be handed a list that did not come from the store, and such
+    // a list may hold anything. A `null` element is a record that carries no
+    // version, and it is refused like any other unknown version — it is not a
+    // `TypeError`.
+    const absent = null as unknown as SessionEvent;
+
+    const failure = (() => {
+      try {
+        resumeEvents([absent]);
+        return undefined;
+      } catch (error: unknown) {
+        return error;
+      }
+    })();
+
+    expect(failure).toBeInstanceOf(SessionVersionError);
+    expect((failure as SessionVersionError).found).toBeUndefined();
+    expect((failure as SessionVersionError).supported).toBe(SESSION_SCHEMA_VERSION);
+  });
 });
 
 describe('the compaction boundary', () => {
@@ -363,7 +404,7 @@ describe('the compaction boundary', () => {
     expect(raw).toContain('"m0"');
     expect(raw).toContain('"m1"');
 
-    // The prefix is skipped when the session is read.
+    // The prefix is skipped when the session is resumed.
     const result = resumeEvents(await collect(store.read(handle)));
     expect(result.context[0]?.type).toBe('summary');
     expect(result.context[0]?.type === 'summary' ? result.context[0].text : undefined).toBe(
@@ -563,6 +604,41 @@ describe('the structured state of a resumed transcript', () => {
     expect(result.adoptedSessionId).toBeUndefined();
   });
 
+  it('carries the anchor of the resumed transcript', () => {
+    // The anchor is the point the resume continues from: the record the
+    // branch ends at, and where that record sits among the source rows.
+    const events = [
+      userMessage('m0', 'hello', 1000),
+      assistantMessage('m1', 'hi', 1100, 'm0'),
+    ];
+
+    const result = resumeEvents(events);
+
+    expect(result.transcriptAnchor?.recordId).toBe('m1');
+    expect(result.transcriptAnchor?.rowIndex).toBe(1);
+  });
+
+  it('carries the agent setting and the project path the caller passes in', () => {
+    // This implementation's transcript vocabulary has no agent-setting record and no
+    // project-path record, so the caller carries both in.
+    const result = resumeEvents([userMessage('m0', 'hello', 1000)], {
+      agentSetting: { name: 'the agent' },
+      sessionProjectPath: '/home/user/project',
+    });
+
+    expect(result.agentSetting).toEqual({ name: 'the agent' });
+    expect(result.sessionProjectPath).toBe('/home/user/project');
+  });
+
+  it('has no live source rows, because this implementation has no source rows', () => {
+    // The target's `liveSourceRows` are the rows still live in its source, as
+    // opposed to the reconstructed messages. This implementation's source is the
+    // transcript itself and it has no such rows, so the member stays absent.
+    const result = resumeEvents([userMessage('m0', 'hello', 1000)]);
+
+    expect(result.liveSourceRows).toBeUndefined();
+  });
+
   it('reports a superseded tool call and a turn that ended cleanly', () => {
     const events = [
       userMessage('m0', 'one', 1000),
@@ -644,6 +720,35 @@ describe('the structured state of a resumed transcript', () => {
     expect(messages).toHaveLength(3);
     expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user']);
   });
+
+  it('keeps the decision of a permission request in the projected context', () => {
+    // The approval is not only the fact that a request was made: the decision
+    // that answered it is part of the record, and the projection carries it.
+    const events: SessionEvent[] = [
+      userMessage('m0', 'read the file', 1000),
+      {
+        v: SESSION_SCHEMA_VERSION,
+        t: 'permission_request',
+        ts: 1100,
+        id: 'perm_1',
+        toolName: 'Read',
+        parentId: 'm0',
+        decision: { behavior: 'allow', source: 'user_permanent', reasonType: 'other' },
+      },
+      toolCall('toolu_1', 'Read', { path: 'a.txt' }, 1200, 'perm_1'),
+    ];
+
+    const result = resumeEvents(events);
+
+    const request = result.context.find((item) => item.type === 'permission_request');
+    expect(request?.type).toBe('permission_request');
+    if (request?.type !== 'permission_request') throw new Error('expected a permission request');
+    expect(request.decision).toEqual({
+      behavior: 'allow',
+      source: 'user_permanent',
+      reasonType: 'other',
+    });
+  });
 });
 
 describe('resuming at a message', () => {
@@ -656,6 +761,24 @@ describe('resuming at a message', () => {
     if (result.kind !== 'refused') throw new Error('expected a refusal');
     expect(result.reason).toBe('processing_error');
     expect(result.message).toBe('No message found with message.uuid of: nope');
+  });
+
+  it('refuses a uuid that names a record that is not a message', () => {
+    // The uuid is on the branch, but it names a `provider_event` and not a
+    // message: the target looks the uuid up among the **messages**, and says
+    // so with its own wording.
+    const events = [
+      userMessage('m0', 'hello', 1000),
+      providerEvent('p0', 1100, 'm0'),
+      assistantMessage('m1', 'hi', 1200, 'p0'),
+    ];
+
+    const result = resumeAtMessage(events, 'p0');
+
+    expect(result.kind).toBe('refused');
+    if (result.kind !== 'refused') throw new Error('expected a refusal');
+    expect(result.reason).toBe('processing_error');
+    expect(result.message).toBe('No message found with message.uuid of: p0');
   });
 
   it('refuses a resume that would discard part of a turn', () => {
@@ -742,6 +865,47 @@ describe('resuming a session', () => {
     if (telemetry?.success !== false) throw new Error('expected a failure');
     expect(telemetry.failure_reason).toBe('not_found_explicit_id');
     expect(telemetry.error_name).toBe('SessionResumeError');
+  });
+
+  it('refuses an ambiguous title end to end, with the reason this implementation chose', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const first = await store.create({ cwd: CWD, sessionId: 'first' });
+    await store.append(first, userMessage('m1', 'same title', 1000));
+    const second = await store.create({ cwd: CWD, sessionId: 'second' });
+    await store.append(second, userMessage('m1', 'same title', 2000));
+
+    const events: SessionResumedTelemetry[] = [];
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'same title',
+      onTelemetry: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('failed');
+    // The **reason** is this implementation's choice: the audit records the ambiguity
+    // error but never the reason it maps to.
+    expect(result.failure?.reason).toBe('not_found_explicit_id');
+    // The message is the target's ambiguity error, with the candidates and
+    // their modification times.
+    expect(result.failure?.message).toContain('--resume "same title" matches 2 sessions');
+    expect(result.failure?.message).toContain('first');
+    expect(result.failure?.message).toContain('second');
+    expect(result.failure?.message).toContain('(modified ');
+
+    const telemetry = events[0];
+    if (telemetry?.success !== false) throw new Error('expected a failure');
+    expect(telemetry.failure_reason).toBe('not_found_explicit_id');
+
+    // And the reason is labelled as a implementation choice in the module header: the
+    // audit does not pin it.
+    const header = moduleHeader('resume.ts');
+    expect(header).toContain('not_found_explicit_id');
+    expect(header).toContain('implementation choice');
+    expect(header).toContain('ambigu');
   });
 
   it('refuses a resume at a message that is not there', async () => {
@@ -944,5 +1108,254 @@ describe('resuming a session', () => {
     const telemetry = events[0];
     if (telemetry?.success !== true) throw new Error('expected a success');
     expect(telemetry.interruption_kind).toBe('pending_tool_use');
+  });
+
+  it('marks the start of a print-mode resume', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const prints: SessionResumePrintTelemetry[] = [];
+    await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'print',
+      target: 'session-01',
+      onPrintTelemetry: (event) => prints.push(event),
+    });
+
+    // The event marks the **start** of a print-mode resume, and it is a
+    // separate event from the resume's own telemetry.
+    expect(prints).toHaveLength(1);
+    expect(prints[0]?.name).toBe('tengu_resume_print');
+    expect(prints[0]?.name).toBe(SESSION_RESUME_PRINT_TELEMETRY_EVENT);
+  });
+
+  it('does not mark a print-mode resume on the other paths', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const prints: SessionResumePrintTelemetry[] = [];
+    await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'session-01',
+      onPrintTelemetry: (event) => prints.push(event),
+    });
+
+    expect(prints).toHaveLength(0);
+  });
+
+  it('carries the agent setting and the project path into the resumed state', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m0', 'hello', 1000));
+
+    const result = await resumeSession({
+      store,
+      cwd: CWD,
+      entrypoint: 'cli_flag',
+      target: 'session-01',
+      agentSetting: { name: 'the agent' },
+      sessionProjectPath: '/home/user/project',
+    });
+
+    expect(result.status).toBe('resumed');
+    expect(result.resume?.agentSetting).toEqual({ name: 'the agent' });
+    expect(result.resume?.sessionProjectPath).toBe('/home/user/project');
+    // The anchor is derived: the record the branch ends at.
+    expect(result.resume?.transcriptAnchor?.recordId).toBe('m0');
+  });
+});
+
+describe('the --continue selection', () => {
+  it('continues the newest session of the working directory', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const older = await store.create({ cwd: CWD, sessionId: 'older' });
+    await store.append(older, userMessage('m1', 'hello', 1000));
+    const newer = await store.create({ cwd: CWD, sessionId: 'newer' });
+    await store.append(newer, userMessage('m1', 'hello', 2000));
+
+    const result = await continueSession({ store, cwd: CWD });
+
+    expect(result.status).toBe('continued');
+    expect(result.sessionId).toBe('newer');
+    expect(result.resume?.context).toHaveLength(1);
+    expect(result.failure).toBeUndefined();
+  });
+
+  it('reports a session that is already running in the background', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'newer' });
+    await store.append(handle, userMessage('m1', 'hello', 2000));
+
+    const result = await continueSession({
+      store,
+      cwd: CWD,
+      isLiveSession: (sessionId) => sessionId === 'newer',
+    });
+
+    // The background session is **reported**, not silently continued.
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('background_running');
+    expect(result.failure?.detail).toBe(CONTINUE_BACKGROUND_RUNNING_MESSAGE);
+    expect(result.failure?.afterRestore).toBe(false);
+    expect(result.resume).toBeUndefined();
+    // The report names the session that is running.
+    expect(result.backgroundSessionId).toBe('newer');
+  });
+
+  it('reports that there is nothing to continue', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const result = await continueSession({ store, cwd: CWD });
+
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('not_found');
+    expect(result.failure?.detail).toBe('No conversation found to continue');
+    expect(result.failure?.detail).toBe(CONTINUE_NOT_FOUND_MESSAGE);
+  });
+
+  it('reports a failure that happened before the restore', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    // A transcript this build cannot read: the restore never happens.
+    writeFileSync(
+      handle.path,
+      '{"v":2,"t":"user_message","ts":1,"id":"m1","text":"hello"}\n',
+      'utf8',
+    );
+
+    const result = await continueSession({ store, cwd: CWD });
+
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('load_error');
+    expect(result.failure?.afterRestore).toBe(false);
+    // The failure happened **before** the restore, so it is reported with the
+    // target's "could not continue" message.
+    expect(result.failure?.message).toContain(
+      'The agent exited: could not continue the previous session (',
+    );
+    expect(result.failure?.message).toContain(
+      '). Run agent --resume to pick a session, or start a new one.',
+    );
+  });
+
+  it('reports a failure that happened after the restore', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m1', 'hello', 1000));
+
+    const result = await continueSession({
+      store,
+      cwd: CWD,
+      startSession: () => {
+        throw new Error('the model refused');
+      },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('startup_error');
+    expect(result.failure?.afterRestore).toBe(true);
+    // The failure happened **after** the restore, so it is reported with the
+    // target's other message.
+    expect(result.failure?.message).toBe(
+      'The agent exited: startup failed after restoring the previous session (the model refused).',
+    );
+  });
+
+  it('reports a state the worker could not read', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m1', 'hello', 1000));
+
+    const result = await continueSession({
+      store,
+      cwd: CWD,
+      readSessionState: () => {
+        throw new Error('the state is unreadable');
+      },
+    });
+
+    // The state is read **before** the restore, so the failure is reported
+    // with the "could not continue" message.
+    expect(result.status).toBe('failed');
+    expect(result.failure?.reason).toBe('worker_state_unread');
+    expect(result.failure?.afterRestore).toBe(false);
+    expect(result.failure?.message).toContain(
+      'The agent exited: could not continue the previous session (the state is unreadable).',
+    );
+  });
+
+  it('emits the target\'s continue telemetry', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m1', 'hello', 1000));
+
+    const events: SessionContinueTelemetry[] = [];
+    const result = await continueSession({
+      store,
+      cwd: CWD,
+      onTelemetry: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('continued');
+    expect(events).toHaveLength(1);
+    const telemetry = events[0];
+    if (telemetry?.success !== true) throw new Error('expected a success');
+    expect(telemetry.name).toBe(SESSION_CONTINUE_TELEMETRY_EVENT);
+    expect(telemetry.name).toBe('tengu_continue');
+    expect(telemetry.resume_duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it('emits the continue telemetry of a failure', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+
+    const events: SessionContinueTelemetry[] = [];
+    await continueSession({
+      store,
+      cwd: CWD,
+      onTelemetry: (event) => events.push(event),
+    });
+
+    expect(events).toHaveLength(1);
+    const telemetry = events[0];
+    if (telemetry?.success !== false) throw new Error('expected a failure');
+    expect(telemetry.name).toBe('tengu_continue');
+    expect(telemetry.error_name).toBe('SessionContinueError');
+    // A failure carries the error's name and no duration.
+    expect('resume_duration_ms' in telemetry).toBe(false);
+  });
+
+  it('threads the fork flag through the continue', async () => {
+    const configDir = path.join(makeRoot(), 'config');
+    const store = createSessionStore({ configDir });
+    const handle = await store.create({ cwd: CWD, sessionId: 'session-01' });
+    await store.append(handle, userMessage('m1', 'hello', 1000));
+
+    const result = await continueSession({
+      store,
+      cwd: CWD,
+      forkSession: true,
+      idFactory: () => 'forked-01',
+    });
+
+    expect(result.status).toBe('continued');
+    expect(result.adoptedSessionId).toBe('forked-01');
+    expect(result.resume?.resumedAsFork).toBe(true);
   });
 });

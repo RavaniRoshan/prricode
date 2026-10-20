@@ -15,10 +15,10 @@
  *
  * So this implementation writes a **marker record** that carries the summary of the prefix
  * it replaces and the number of records that prefix held. The prefix stays in
- * the file; the reader **skips** it when the session is read, and the summary
- * takes its place in the context. The marker points at the last pre-compact
- * record the way the target's boundary line points at the last pre-compact
- * message.
+ * the file; the **resume** skips it — by `resumeEvents`, not by the store's
+ * reader — and the summary takes its place in the context. The marker points
+ * at the last pre-compact record the way the target's boundary line points at
+ * the last pre-compact message.
  *
  * ## The boundary is located by a link, not by a count
  *

@@ -25,10 +25,11 @@
  * ## The transcript is append-only
  *
  * Nothing in this module ever rewrites a record. A compaction **skips** a
- * prefix when the session is read; it does not delete it, because a transcript
- * that can replay a preserved tail is worth more than a small file. The
- * carried-prompt store follows the same rule: a delivery is recorded by
- * **appending** an updated row, and the last row for an id wins.
+ * prefix when the session is **resumed** — by `resumeEvents`, not by this
+ * store's reader; it does not delete it, because a transcript that can replay
+ * a preserved tail is worth more than a small file. The carried-prompt store
+ * follows the same rule: a delivery is recorded by **appending** an updated
+ * row, and the last row for an id wins.
  *
  * ## A torn final line is discarded
  *
@@ -71,7 +72,8 @@
  *     audit records that the target replaces oversized tool output with a stub
  *     and a content-replacement entry, but not the threshold. The limit bounds
  *     what the **context** carries: the transcript keeps the payload, and the
- *     replacement is applied when the session is read.
+ *     replacement is applied when the session is **resumed** — by
+ *     `resumeEvents`, not by this store's reader.
  *   - The **carried-prompt file** is `<configDir>/carried-prompts.jsonl`. The
  *     audit records that the target "reads a file, parses prompts, filters out
  *     prompts marked `perhapsDelivered`" but not where the file lives.
@@ -80,10 +82,12 @@
  *     vocabulary the audit records. The audit names the seven outcomes and
  *     nothing else, so the mapping is documented rather than claimed.
  *   - A session's **title** is derived from its first user message, because
- *     this implementation's transcript vocabulary has no title record. The target's
- *     titles are the first prompt as well, and the derivation keeps a title
- *     stable: the transcript is append-only, so the first message never
- *     changes.
+ *     this implementation's transcript vocabulary has no title record. That derivation
+ *     is a **implementation choice**: the audit records that a title exists and that it
+ *     is matched exactly, but it never says how the target derives one, so
+ *     the target's derivation is **unobserved** and is not claimed here. What
+ *     this implementation's derivation buys is stability: the transcript is append-only,
+ *     so the first message never changes.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -254,8 +258,9 @@ export interface SessionStoreOptions {
    *
    * A larger content is stored verbatim in the transcript, and a
    * content-replacement record is appended beside it. The replacement is
-   * applied when the session is read, so the payload does not come back into
-   * the context.
+   * applied when the session is **resumed** — by `resumeEvents` in
+   * `src/session/resume.ts`, not by this store's reader — so the payload does
+   * not come back into the context.
    */
   maxToolResultBytes?: number;
   /** The clock. */
@@ -410,8 +415,9 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
    * **verbatim**, and a **content-replacement record** is appended beside it:
    * the record says which record's content is oversized and what stub stands
    * in for it. The payload stays in the transcript — the data is not lost —
-   * and the replacement is applied when the session is **read**, so the
-   * payload does not come back into the context.
+   * and the replacement is applied when the session is **resumed** (by
+   * `resumeEvents`), not by this store's reader, so the payload does not come
+   * back into the context.
    */
   function recordsFor(event: SessionEvent): SessionEvent[] {
     if (event.t !== 'tool_result') return [event];

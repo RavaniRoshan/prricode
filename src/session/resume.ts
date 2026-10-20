@@ -40,10 +40,11 @@
  * ## The projections
  *
  *   - **The compaction boundary** is a marker, not a deletion: the pre-compact
- *     prefix is **skipped** when the session is read, and the summary replaces
- *     it in the context. The prefix is still in the file. The boundary is
- *     located by the marker's **parent link** on the branch's parent chain, so
- *     a record that is not a message moves it with it.
+ *     prefix is **skipped** when the session is resumed (by `resumeEvents`,
+ *     not by the store's reader), and the summary replaces it in the context.
+ *     The prefix is still in the file. The boundary is located by the marker's
+ *     **parent link** on the branch's parent chain, so a record that is not a
+ *     message moves it with it.
  *   - **The content replacement** is applied on resume, so the payload of an
  *     oversized tool result does not come back into the context. The
  *     transcript keeps the payload; only the context is stubbed.
@@ -59,18 +60,43 @@
  *     the candidates with their modification times, and a value that matches
  *     neither is an error that says so. The lookup itself lives in
  *     `src/session/store.ts`; the flags belong to the CLI.
+ *   - **The reason an ambiguity reports.** This implementation reports
+ *     `not_found_explicit_id` for an ambiguous title — the same reason a
+ *     session id that is not in the store gets. The audit records the
+ *     ambiguity *error* but never the reason it maps to, so that mapping is a
+ *     **implementation choice**, and this header says so rather than claiming the
+ *     target verifies it.
  *   - **The drop guard.** A resume at a message uuid that is not present is
  *     refused, and a resume that would discard part of a turn is refused
  *     before anything reaches a context.
  *   - **The structured state.** A resumed transcript carries not only
  *     messages but a state: the interruption of the turn it picked up, the
  *     tool uses that were answered, the ones that were superseded, the tool
- *     use that was deferred, and the identity the session adopted.
+ *     use that was deferred, and the identity the session adopted. The audit
+ *     records four more members of that state — `agentSetting`,
+ *     `sessionProjectPath`, `transcriptAnchor` and `liveSourceRows` — and
+ *     they are here as **optional** members, but only one of them is
+ *     **derived**: the `transcriptAnchor` is the record the branch ends at
+ *     and where it sits among the source rows. This implementation **cannot derive**
+ *     the other three from its own vocabulary: its transcript has no
+ *     **agent-setting record** and no **project-path record**, so the caller
+ *     carries those two in, and `liveSourceRows` — the rows still live in
+ *     the source, as opposed to the reconstructed messages — has **no implementation
+ *     counterpart** at all, so the member stays absent.
  *   - **The attach.** A **live** session is attached to rather than replayed,
  *     and the fork flag bypasses that short-circuit so that a fork always
  *     loads a copy.
  *   - **The telemetry.** Every resume emits `tengu_session_resumed`, with the
- *     entrypoint it came from and, when it fails, the reason it failed.
+ *     entrypoint it came from and, when it fails, the reason it failed. The
+ *     **print** path emits `tengu_resume_print` as well, at the start: that
+ *     event marks the start of a print-mode resume.
+ *   - **The `--continue`.** A continue names **no** session: the store picks
+ *     the newest one. A session that is already running in the background is
+ *     **reported** rather than silently continued, a failure that happened
+ *     before the restore is reported with the target's "could not continue"
+ *     message and a failure that happened after it with the target's
+ *     "startup failed after restoring" message, and the run emits
+ *     `tengu_continue`.
  *
  * ## What is *not* claimed
  *
@@ -78,6 +104,11 @@
  * target's transcript format, not the pinned binary (Global Constraints). The
  * boundary this module implements is the **implementation's own design**, and this header
  * says so rather than claiming the target verifies it.
+ *
+ * The target's `--continue` **ordering** rule — which candidates its lookup
+ * skips — is not observed either: the lookup lives in a module outside the
+ * retained scope. This implementation's rule is its own, and `continueSession` says so
+ * where it is implemented.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -94,7 +125,7 @@ import {
   requestedToolUseId,
   type SessionEvent,
 } from './event.js';
-import { readAllSessionEvents, resolveSessionTarget, type SessionStore } from './store.js';
+import { readAllSessionEvents, resolveSessionTarget, type SessionStore, type SessionSummary } from './store.js';
 
 export type { SessionEvent } from './event.js';
 
@@ -210,6 +241,22 @@ export interface DeferredToolUse {
   input: unknown;
 }
 
+/**
+ * The anchor of a resumed transcript.
+ *
+ * **Implementation choice.** The audit records that a resumed transcript carries a
+ * `transcriptAnchor` (audit §2.6) but never what the anchor holds, so the
+ * implementation's reading is documented here rather than claimed: the anchor is the
+ * point the resume continues from — the record the branch ends at, and how
+ * many source rows precede it.
+ */
+export interface TranscriptAnchor {
+  /** The id of the record the resumed transcript is anchored at. */
+  recordId: string;
+  /** How many rows of the source precede the anchor. */
+  rowIndex: number;
+}
+
 /** What a resume produces. */
 export interface ResumeResult {
   /** The reconstructed context. */
@@ -279,6 +326,39 @@ export interface ResumeResult {
    * that continues under a new identity does.
    */
   adoptedSessionId?: string;
+  /**
+   * The agent setting the resumed session carries.
+   *
+   * **Implementation choice.** The audit records the member but not its shape, and the
+   * implementation's transcript vocabulary has no **agent-setting record**, so the
+   * caller carries the setting in and this implementation does not derive it.
+   */
+  agentSetting?: Record<string, unknown>;
+  /**
+   * The project path the resumed session belongs to.
+   *
+   * **Implementation choice.** This implementation's transcript vocabulary has no
+   * **project-path record**, so the caller carries the path in and this implementation
+   * does not derive it.
+   */
+  sessionProjectPath?: string;
+  /**
+   * The anchor of the resumed transcript.
+   *
+   * **Observed** (audit §2.6): a resumed transcript carries a
+   * `transcriptAnchor`. This implementation derives it: the anchor is the record the
+   * branch ends at and where it sits among the source rows.
+   */
+  transcriptAnchor?: TranscriptAnchor;
+  /**
+   * The rows still live in the source.
+   *
+   * **Not implemented.** The target's rows are rows of *its* source, as
+   * opposed to the reconstructed `messages`; this implementation's source is the
+   * transcript and it has no such rows, so the member stays absent. It is
+   * here so that the shape of the resumed state is the target's.
+   */
+  liveSourceRows?: readonly unknown[];
 }
 
 /** The options a resume runs with. */
@@ -289,6 +369,20 @@ export interface ResumeEventsOptions {
   resumedAsFork?: boolean;
   /** The id the resumed session adopts. */
   adoptedSessionId?: string;
+  /**
+   * The agent setting the resumed session carries.
+   *
+   * This implementation's transcript vocabulary has no agent-setting record, so the
+   * caller carries the setting in.
+   */
+  agentSetting?: Record<string, unknown>;
+  /**
+   * The project path the resumed session belongs to.
+   *
+   * This implementation's transcript vocabulary has no project-path record, so the
+   * caller carries the path in.
+   */
+  sessionProjectPath?: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -801,6 +895,24 @@ export function resumeEvents(
   result.planModeOnResume = options.planModeOnResume === true;
   result.resumedAsFork = options.resumedAsFork === true;
   if (options.adoptedSessionId !== undefined) result.adoptedSessionId = options.adoptedSessionId;
+  if (options.agentSetting !== undefined) result.agentSetting = options.agentSetting;
+  if (options.sessionProjectPath !== undefined) {
+    result.sessionProjectPath = options.sessionProjectPath;
+  }
+
+  // The **anchor**: the point the resume continues from. It is the record the
+  // branch ends at, and where that record sits among the source rows.
+  if (branch.leafId !== undefined) {
+    const rowIndex = events.findIndex((event) => event.id === branch.leafId);
+    result.transcriptAnchor = {
+      recordId: branch.leafId,
+      rowIndex: rowIndex < 0 ? 0 : rowIndex,
+    };
+  }
+
+  // The **live source rows** are not implemented: this implementation's source is the
+  // transcript, and it has no rows that are still live beside the
+  // reconstructed messages. The member stays absent.
 
   return result;
 }
@@ -878,10 +990,21 @@ export type ResumeAtMessageResult =
  * **split a turn**: a discarded tool result whose tool call is kept would drop
  * the answer to a call the session still holds. A turn that is discarded whole
  * is allowed, and a call that was never answered is allowed.
+ *
+ * The uuid is looked up among the **messages** of the branch. A uuid that
+ * names another record of the branch — a `provider_event`, a boundary marker —
+ * is not a message, and it is refused with the same wording as a uuid that is
+ * not there at all.
  */
 export function resumeAtMessage(events: SessionEvent[], messageUuid: string): ResumeAtMessageResult {
   const branch = selectBranch(events);
-  const index = branch.chain.findIndex((event) => event.id === messageUuid);
+  // The uuid is looked up among the **messages**. A uuid that names another
+  // record of the branch — a `provider_event`, a boundary marker — is not a
+  // message, and the target refuses it with the same wording it uses for a
+  // uuid that is not there at all.
+  const index = branch.chain.findIndex(
+    (event) => event.id === messageUuid && isMessageEvent(event),
+  );
   if (index < 0) {
     return {
       kind: 'refused',
@@ -914,6 +1037,13 @@ export function resumeAtMessage(events: SessionEvent[], messageUuid: string): Re
     if (result === undefined) continue;
     if (discarded.some((candidate) => candidate.id === result.id)) continue;
     // The call is discarded and its answer is kept: the turn is split.
+    //
+    // This branch **cannot fire** on the chain this guard walks. The chain is
+    // ancestor-ordered — it is the parent path from the root to the leaf — so a
+    // result always *follows* the call it answers, and a call that is
+    // discarded takes its answer with it. The check is kept as a **defensive**
+    // guard for a chain that is not ordered that way: an answer that precedes
+    // its call would otherwise be split from it without a word.
     return {
       kind: 'refused',
       reason: 'drop_guard_refused',
@@ -962,6 +1092,24 @@ export type SessionResumeFailureReason =
  * and an extra `interruption_kind` on the print path."
  */
 export const SESSION_RESUMED_TELEMETRY_EVENT = 'tengu_session_resumed';
+
+/**
+ * The telemetry event that marks the **start** of a print-mode resume.
+ *
+ * **Observed** (audit §2.6): "A separate `tengu_resume_print` event marks the
+ * start of a print-mode resume." The audit does not record the members of the
+ * event, so this implementation's payload is a **implementation choice**: the entrypoint the
+ * print-mode resume came from.
+ */
+export const SESSION_RESUME_PRINT_TELEMETRY_EVENT = 'tengu_resume_print';
+
+/** The telemetry of a print-mode resume's start. */
+export interface SessionResumePrintTelemetry {
+  /** The event's name. */
+  name: typeof SESSION_RESUME_PRINT_TELEMETRY_EVENT;
+  /** The entrypoint the print-mode resume came from. */
+  entrypoint: 'print';
+}
 
 /** The telemetry of a successful resume. */
 export interface SessionResumedSuccess {
@@ -1040,10 +1188,33 @@ export interface ResumeSessionOptions {
   readSessionState?: () => void;
   /** The telemetry sink. */
   onTelemetry?: (event: SessionResumedTelemetry) => void;
+  /**
+   * The sink of the **print-mode** telemetry.
+   *
+   * The print path emits a second, separate event — `tengu_resume_print` —
+   * that marks the start of the print-mode resume. It has its own sink, so a
+   * caller that only wants the resume's own telemetry does not have to know
+   * about it.
+   */
+  onPrintTelemetry?: (event: SessionResumePrintTelemetry) => void;
   /** The clock. */
   now?: () => number;
   /** The id factory for an adopted session id. */
   idFactory?: () => string;
+  /**
+   * The agent setting the resumed session carries.
+   *
+   * This implementation's transcript vocabulary has no agent-setting record, so the
+   * caller carries the setting in.
+   */
+  agentSetting?: Record<string, unknown>;
+  /**
+   * The project path the resumed session belongs to.
+   *
+   * This implementation's transcript vocabulary has no project-path record, so the
+   * caller carries the path in.
+   */
+  sessionProjectPath?: string;
 }
 
 /** The outcome of a session resume. */
@@ -1089,12 +1260,23 @@ function errorNameOf(error: unknown): string {
  * A resume at a message runs the **drop guard** first: a resume that would
  * discard part of a turn is refused before anything is loaded into a context.
  *
- * Every outcome emits the target's `tengu_session_resumed` telemetry.
+ * Every outcome emits the target's `tengu_session_resumed` telemetry. The
+ * **print** path emits `tengu_resume_print` as well, at the start: the event
+ * marks the start of a print-mode resume, before anything can fail.
  */
 export async function resumeSession(options: ResumeSessionOptions): Promise<ResumeSessionResult> {
   const now = options.now ?? (() => Date.now());
   const startedAt = now();
   const entrypoint = options.entrypoint;
+
+  // The print path marks its start, whether the resume goes on to succeed or
+  // to fail.
+  if (entrypoint === 'print') {
+    options.onPrintTelemetry?.({
+      name: SESSION_RESUME_PRINT_TELEMETRY_EVENT,
+      entrypoint: 'print',
+    });
+  }
 
   const fail = (
     reason: SessionResumeFailureReason,
@@ -1194,6 +1376,10 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
     planModeOnResume: options.planModeOnResume === true,
     resumedAsFork: forked,
     ...(adoptedSessionId === undefined ? {} : { adoptedSessionId }),
+    ...(options.agentSetting === undefined ? {} : { agentSetting: options.agentSetting }),
+    ...(options.sessionProjectPath === undefined
+      ? {}
+      : { sessionProjectPath: options.sessionProjectPath }),
   });
 
   const telemetry = succeed(
@@ -1205,6 +1391,360 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
     status: 'resumed',
     sessionId,
     resumedAsFork: forked,
+    resume,
+    telemetry,
+  };
+  if (adoptedSessionId !== undefined) result.adoptedSessionId = adoptedSessionId;
+  return result;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Continuing the newest session                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The telemetry event the target emits for a `--continue`.
+ *
+ * **Observed** (audit §2.6): "The telemetry is `tengu_continue` with
+ * `{success}` and `resume_duration_ms`, or `{success: false, error_name}` on
+ * failure."
+ */
+export const SESSION_CONTINUE_TELEMETRY_EVENT = 'tengu_continue';
+
+/**
+ * The message the target's lookup reports when there is **nothing** to
+ * continue.
+ *
+ * **Observed** (audit §2.6): "If nothing is found the message is `No
+ * conversation found to continue`."
+ */
+export const CONTINUE_NOT_FOUND_MESSAGE = 'No conversation found to continue';
+
+/**
+ * The report of a session that is **already running in the background**.
+ *
+ * **Implementation choice.** The audit records that "if a background session was found,
+ * a different, more specific message is used", but it does not record the
+ * text. This implementation's message says what the target's says: the session is
+ * running, and the way to pick a session is `--resume`.
+ */
+export const CONTINUE_BACKGROUND_RUNNING_MESSAGE =
+  'The previous session is already running in the background. Run agent --resume to pick a session, or start a new one.';
+
+/**
+ * The message the target prints when the failure happened **after** the
+ * restore.
+ *
+ * **Observed** (audit §2.6): "`The agent exited: startup failed after
+ * restoring the previous session (<reason>).`"
+ */
+export const CONTINUE_FAILED_AFTER_RESTORE_MESSAGE =
+  'The agent exited: startup failed after restoring the previous session ({reason}).';
+
+/**
+ * The message the target prints when the failure happened **before** the
+ * restore.
+ *
+ * **Observed** (audit §2.6): "`The agent exited: could not continue the
+ * previous session (<reason>). Run agent --resume to pick a session, or start
+ * a new one.`"
+ */
+export const CONTINUE_FAILED_BEFORE_RESTORE_MESSAGE =
+  'The agent exited: could not continue the previous session ({reason}). Run agent --resume to pick a session, or start a new one.';
+
+/**
+ * The message a `--continue` failure is reported with.
+ *
+ * The two texts are the target's, and the **reason** is the text the
+ * parentheses hold: the lookup's own report, or the message of the error that
+ * failed the run.
+ */
+export function continueFailureMessage(reason: string, afterRestore: boolean): string {
+  const template = afterRestore
+    ? CONTINUE_FAILED_AFTER_RESTORE_MESSAGE
+    : CONTINUE_FAILED_BEFORE_RESTORE_MESSAGE;
+  return template.replace('{reason}', reason);
+}
+
+/**
+ * The reasons a `--continue` can fail.
+ *
+ * **Implementation choice.** The audit records the two failure *messages* and the
+ * lookup's "not found" message; it does not record a reason vocabulary. The
+ * implementation names the reasons it can tell apart, and each one says whether the
+ * failure happened **before** the restore or **after** it.
+ */
+export type SessionContinueFailureReason =
+  /** There was no session to continue. */
+  | 'not_found'
+  /** The newest session is already running in the background. */
+  | 'background_running'
+  /** The transcript could not be read. */
+  | 'load_error'
+  /** The session's stored state could not be read. */
+  | 'worker_state_unread'
+  /** The previous session could not be restored. */
+  | 'restore_error'
+  /** The startup failed after the previous session was restored. */
+  | 'startup_error';
+
+/** The telemetry of a successful continue. */
+export interface SessionContinueSuccess {
+  /** The event's name. */
+  name: typeof SESSION_CONTINUE_TELEMETRY_EVENT;
+  /** Whether the continue succeeded. */
+  success: true;
+  /** How long the continue took, in milliseconds. */
+  resume_duration_ms: number;
+}
+
+/** The telemetry of a failed continue. */
+export interface SessionContinueFailure {
+  /** The event's name. */
+  name: typeof SESSION_CONTINUE_TELEMETRY_EVENT;
+  /** Whether the continue succeeded. */
+  success: false;
+  /** The name of the error that failed the continue. */
+  error_name: string;
+}
+
+/** The telemetry of a continue. */
+export type SessionContinueTelemetry = SessionContinueSuccess | SessionContinueFailure;
+
+/** The session a `--continue` restored. */
+export interface ContinueRestoredSession {
+  /** The id of the session that was restored. */
+  sessionId: string;
+  /** The path of its transcript. */
+  path: string;
+  /** The reconstructed state. */
+  resume: ResumeResult;
+}
+
+/** The options a `--continue` runs with. */
+export interface ContinueSessionOptions {
+  /** The store the sessions live in. */
+  store: SessionStore;
+  /** The working directory the sessions live under. */
+  cwd: string;
+  /**
+   * Whether a session is **live** — already running in the background.
+   *
+   * This implementation's transcript has no "this session is running" marker, so the
+   * caller says which sessions are live.
+   */
+  isLiveSession?: (sessionId: string) => boolean;
+  /**
+   * The startup that follows the restore.
+   *
+   * This implementation restores the previous session and then **starts** it. A failure
+   * in the startup is the failure that happened **after** the restore, and it
+   * is reported with the target's other message.
+   */
+  startSession?: (session: ContinueRestoredSession) => void;
+  /**
+   * Load a **copy** of the session.
+   *
+   * The fork flag is threaded through the continue, as it is threaded through
+   * the resume.
+   */
+  forkSession?: boolean;
+  /**
+   * The reader of the session's stored state.
+   *
+   * The target's worker refuses to start a turn when it cannot read the state
+   * (`worker_state_unread`); this implementation asks the caller for it, and a failure
+   * is reported with that reason.
+   */
+  readSessionState?: () => void;
+  /** The telemetry sink. */
+  onTelemetry?: (event: SessionContinueTelemetry) => void;
+  /** The clock. */
+  now?: () => number;
+  /** The id factory for an adopted session id. */
+  idFactory?: () => string;
+}
+
+/** The outcome of a `--continue`. */
+export interface SessionContinueResult {
+  /** What happened. */
+  status: 'continued' | 'failed';
+  /** The session that was continued. */
+  sessionId?: string;
+  /** The id the continued session adopted. */
+  adoptedSessionId?: string;
+  /** The reconstructed state, when the session was restored. */
+  resume?: ResumeResult;
+  /**
+   * The session that is **already running in the background**, when one was
+   * reported instead of continued.
+   */
+  backgroundSessionId?: string;
+  /** The failure, when the continue failed. */
+  failure?: {
+    /** Why the continue failed. */
+    reason: SessionContinueFailureReason;
+    /**
+     * Whether the failure happened **after** the restore.
+     *
+     * The two cases have distinct texts: a failure before the restore is
+     * reported as "could not continue the previous session", a failure after
+     * it as "startup failed after restoring the previous session".
+     */
+    afterRestore: boolean;
+    /**
+     * The reason the failure carries.
+     *
+     * It is the text the parentheses of the target's message hold: the
+     * lookup's own report, or the message of the error that failed the run.
+     */
+    detail: string;
+    /** The message the target prints. */
+    message: string;
+  };
+  /** The telemetry event that was emitted. */
+  telemetry: SessionContinueTelemetry;
+}
+
+/**
+ * Continue the newest session of a working directory.
+ *
+ * **Observed** (audit §2.6): "The path (`chunk-9y799w6p.js`) calls the session
+ * lookup with **no explicit id**, so the store selects the newest session. The
+ * lookup takes an `onNewestRunningInBackground` callback that captures the
+ * newest session **already running in the background** — so a background
+ * session is reported rather than silently continued. If nothing is found the
+ * message is `No conversation found to continue`; if a background session was
+ * found, a different, more specific message is used. The failure path
+ * distinguishes two cases with distinct text: `The agent exited: startup
+ * failed after restoring the previous session (<reason>).` when the failure
+ * happened **after** the restore, and `The agent exited: could not continue
+ * the previous session (<reason>). Run agent --resume to pick a session, or
+ * start a new one.` when it happened **before**."
+ *
+ * **Implementation choice.** The audit does not record the *ordering* rule inside the
+ * target's lookup — which candidates it skips — so this implementation's rule is its
+ * own: the **newest** session of the working directory, and the newest
+ * session is *reported* when it is already running in the background.
+ *
+ * **Not implemented.** The target's path also clears the session caches
+ * first, passes `resumeSource: "store"` and `includeAttribution: true`, and
+ * threads `replyOnResume` through. This implementation's store holds **no cache** — a
+ * lookup always reads the transcripts — so the clearing step has no
+ * counterpart, and the continue always resumes from the store.
+ * `includeAttribution` and `replyOnResume` have **no counterpart** in the
+ * implementation's vocabulary and are not implemented. `forkSession` is threaded
+ * through, and does what it does everywhere else.
+ */
+export async function continueSession(
+  options: ContinueSessionOptions,
+): Promise<SessionContinueResult> {
+  const now = options.now ?? (() => Date.now());
+  const startedAt = now();
+
+  const fail = (
+    reason: SessionContinueFailureReason,
+    detail: string,
+    afterRestore: boolean,
+    errorName = 'SessionContinueError',
+  ): SessionContinueResult => {
+    const telemetry: SessionContinueFailure = {
+      name: SESSION_CONTINUE_TELEMETRY_EVENT,
+      success: false,
+      error_name: errorName,
+    };
+    options.onTelemetry?.(telemetry);
+    return {
+      status: 'failed',
+      failure: {
+        reason,
+        afterRestore,
+        detail,
+        message: continueFailureMessage(detail, afterRestore),
+      },
+      telemetry,
+    };
+  };
+
+  // The lookup: the **newest** session of the working directory.
+  let summaries: SessionSummary[];
+  try {
+    summaries = await options.store.list({ cwd: options.cwd });
+  } catch (error) {
+    return fail('load_error', messageOf(error), false, errorNameOf(error));
+  }
+  const newest = summaries[0];
+  if (newest === undefined) {
+    return fail('not_found', CONTINUE_NOT_FOUND_MESSAGE, false);
+  }
+  if (options.isLiveSession?.(newest.sessionId) === true) {
+    // The session is already running in the background: it is **reported**,
+    // not silently continued.
+    const reported = fail('background_running', CONTINUE_BACKGROUND_RUNNING_MESSAGE, false);
+    reported.backgroundSessionId = newest.sessionId;
+    return reported;
+  }
+
+  // The session's stored state: the target's worker refuses to start a turn
+  // without it. This happens **before** the restore.
+  if (options.readSessionState !== undefined) {
+    try {
+      options.readSessionState();
+    } catch (error) {
+      return fail('worker_state_unread', messageOf(error), false, errorNameOf(error));
+    }
+  }
+
+  // The transcript. A transcript that cannot be read is a failure **before**
+  // the restore.
+  let events: SessionEvent[];
+  try {
+    events = await readAllSessionEvents(newest.path);
+  } catch (error) {
+    return fail('load_error', messageOf(error), false, errorNameOf(error));
+  }
+
+  // The restore itself.
+  const forked = options.forkSession === true;
+  const adoptedSessionId = forked
+    ? (options.idFactory ?? (() => randomUUID()))()
+    : undefined;
+  let resume: ResumeResult;
+  try {
+    resume = resumeEvents(events, {
+      planModeOnResume: false,
+      resumedAsFork: forked,
+      ...(adoptedSessionId === undefined ? {} : { adoptedSessionId }),
+    });
+  } catch (error) {
+    return fail('restore_error', messageOf(error), false, errorNameOf(error));
+  }
+
+  // The startup, which follows the restore. A failure here is the failure
+  // that happened **after** the restore.
+  const restored: ContinueRestoredSession = {
+    sessionId: newest.sessionId,
+    path: newest.path,
+    resume,
+  };
+  if (options.startSession !== undefined) {
+    try {
+      options.startSession(restored);
+    } catch (error) {
+      return fail('startup_error', messageOf(error), true, errorNameOf(error));
+    }
+  }
+
+  const telemetry: SessionContinueSuccess = {
+    name: SESSION_CONTINUE_TELEMETRY_EVENT,
+    success: true,
+    resume_duration_ms: Math.max(0, now() - startedAt),
+  };
+  options.onTelemetry?.(telemetry);
+
+  const result: SessionContinueResult = {
+    status: 'continued',
+    sessionId: newest.sessionId,
     resume,
     telemetry,
   };
