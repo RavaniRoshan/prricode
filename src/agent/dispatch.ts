@@ -70,6 +70,7 @@
  */
 
 import type { ProviderEvent } from '../provider/drivers/types.js';
+import { isToolConcurrencySafe, type ToolRegistry } from '../tools/registry.js';
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                              */
@@ -244,4 +245,21 @@ export function scheduleToolCalls(
     groups.push({ ids: [call.id], parallel: safe });
   }
   return groups;
+}
+
+/**
+ * The scheduling a **registry** implies.
+ *
+ * The predicate the runtime uses reads the flag off the tool the registry
+ * holds, and a tool the registry does not hold is **not** concurrency safe.
+ * This is that predicate, wrapped so that a caller — a test, or a caller that
+ * wants the rule without the runtime — can ask the question directly.
+ */
+export function scheduleToolCallsWithRegistry(
+  calls: ToolCall[],
+  registry: ToolRegistry,
+): ScheduledGroup[] {
+  return scheduleToolCalls(calls, (call) =>
+    isToolConcurrencySafe(registry.get(call.name), call.input),
+  );
 }

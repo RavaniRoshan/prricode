@@ -1073,31 +1073,73 @@ the per-tool `isConcurrencySafe` implementations in `chunk-4jsg44k7.js`.
 - Produces: `isConcurrencySafe(tool, input): boolean` on a tool definition, and a
   scheduler that runs the safe calls in parallel and the unsafe ones alone.
 
-- [ ] **Step 1: Write the failing test** — two concurrency-safe calls in one message
+- [x] **Step 1: Write the failing test** — two concurrency-safe calls in one message
   **overlap** in time; a call that is not concurrency safe **never overlaps** with
   another; the next model request is issued only after **every** call has produced its
   result.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the calls are sequential.
-- [ ] **Step 3: Read the target's read-only classifier** — the rule that decides whether
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the calls are sequential.
+- [x] **Step 3: Read the target's read-only classifier** — the rule that decides whether
   a shell command is read-only, and the reason it reports when it is not. It is a
   **source reading**, and it is recorded before any code is written.
-- [ ] **Step 4: Add the flag** to the tool definitions and to the registry's contract —
+- [x] **Step 4: Add the flag** to the tool definitions and to the registry's contract —
   the built-in tools get the flags the target uses, and a tool that does not declare the
   flag is **not** concurrency safe.
-- [ ] **Step 5: Implement the classifier** and the Bash flag — a command the classifier
+- [x] **Step 5: Implement the classifier** and the Bash flag — a command the classifier
   calls read-only is concurrency safe; one it does not is not, and the reason is
   reported.
-- [ ] **Step 6: Implement the scheduler** — a queue that starts the safe calls in
+- [x] **Step 6: Implement the scheduler** — a queue that starts the safe calls in
   parallel, breaks at the first unsafe call, and resumes when it finishes; the turn
   waits for **all** the results before it issues the next request.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Update the module header** — the "sequential, in message order" note
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Update the module header** — the "sequential, in message order" note
   becomes the observed rule, with the per-tool flags.
-- [ ] **Step 9: Commit.**
+- [x] **Step 9: Commit.**
   ```bash
   git add src/agent src/tools tests/contracts/agent-loop.test.ts tests/contracts/tool-registry.test.ts
   git commit -m "fix(agent): the concurrency-safe tool calls of one message run in parallel"
   ```
+
+
+**Result:** the tool calls of one message are scheduled the way the target schedules
+them. `scheduleToolCalls` in `src/agent/dispatch.ts` groups the calls: a call that is
+**concurrency safe** joins the run of safe calls before it, and a call that is **not**
+concurrency safe **stands alone** and stops the run. The runtime runs a parallel group
+**at the same time** and waits for **every** call's result before it issues the next
+model request, and the results are emitted in **completion order**.
+
+The flag is read **per call, off the tool that was called**; a tool that does not
+declare it is **not** concurrency safe, which is the target's own default, and a flag
+that throws is not either. The per-tool flags are the target's: `Glob`, `Grep`,
+`WebFetch` and `Read` are concurrency safe, `Bash` is safe only when the call is
+read-only, and every tool that mutates or delegates is not.
+
+**The read-only classifier** is in `src/tools/readonly.ts`, built on this
+implementation's own shell lexer, and it carries the target's tables: the read-only
+command list, the per-command rules, the known-command table with its flag
+allowlists, the text-pattern fallback, the glob-safe set and the known-safe inline
+environment variables. Twenty-four tests pin them.
+
+**The overlap is asserted, not assumed.** A **meeting gate** releases only when two
+calls have arrived, and an in-flight counter records the peak. Two safe calls that
+both wait at the gate cannot be sequential — the first would time out — so the gate
+not timing out together with a peak of two is the proof. The negative controls are
+the same mechanism inverted: the unsafe call asserts that nothing else is in flight
+when it starts, the gate **times out**, and the peak stays one.
+
+**One place the implementation followed the source over the plan's prose.** The plan
+called the known-command table a *refusal map* that the text fallback refuses. The
+source shows the opposite: the table is consulted **before** the text patterns, and a
+match makes the command read-only. The plan's own list of that table's keys is
+exactly the table's keys, and it calls them the read-only git subcommands, so the
+source's behaviour is what is implemented, and the module header says so.
+
+**What the hand-written lexer cannot reproduce**, and what was done instead, is listed
+in the module's own header: the target's "too-complex" parse, its per-command danger
+callbacks, and the git rules that read the session's git and sandbox state. The
+subshell and compound-statement test is replaced by a **text-level** detection that is
+coarser than the parse, so it can refuse a command the target accepts — and refusal is
+the safe direction, because the target's own default is that a command not established
+as read-only is not read-only.
 
 **Note.** The compatibility harness measures the clone and reports the outcome; this
 task must not edit `docs/compatibility/results.md` or `tests/compatibility/**` — the
@@ -1699,7 +1741,7 @@ that reason.
 ---
 
 
-**Result (fix round 2, after `CC-005b` and `CC-003b`):** The measured totals are **21 `match`**, **12 `partial`**, **6 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. The six `mismatch` rows are `F-18` (this implementation's permission-feedback member names), `F-21` (this implementation's seventh permission reason kind), `F-24` (the target's observed `transcriptSource` marker), `F-34` (no native sandbox helper), `F-35` (no seccomp-notify listener) and `F-38` (the pure boolean-flag set). `F-07` and `F-08` moved to `match` when `CC-005b` implemented the target's observed Bedrock+Mantle routing of the `anthropic.*` models, and `F-04` moved to `match` when `CC-003b` implemented the target's observed per-top-level-key settings merge. The three `unknown` rows are `F-36` (no whole-image native inventory), `F-37` (the target's sandbox routing is unobserved) and `F-39` (the target's terminal UI is unobserved).
+**Result (fix round 2, after `CC-005b`, `CC-003b` and `CC-010b`):** The measured totals are **22 `match`**, **11 `partial`**, **6 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. The six `mismatch` rows are `F-18` (this implementation's permission-feedback member names), `F-21` (this implementation's seventh permission reason kind), `F-24` (the target's observed `transcriptSource` marker), `F-34` (no native sandbox helper), `F-35` (no seccomp-notify listener) and `F-38` (the pure boolean-flag set). `F-07` and `F-08` moved to `match` when `CC-005b` implemented the target's observed Bedrock+Mantle routing of the `anthropic.*` models, and `F-04` moved to `match` when `CC-003b` implemented the target's observed per-top-level-key settings merge, and `F-17` moved to `match` when `CC-010b` implemented the target's observed tool-call scheduling. The three `unknown` rows are `F-36` (no whole-image native inventory), `F-37` (the target's sandbox routing is unobserved) and `F-39` (the target's terminal UI is unobserved).
 
 **One rule, applied to every row:** a **difference of any kind** from the target's *observed* behavior — including a member the target has and this implementation does not — is a `mismatch`. Every "What was measured" cell is the harness's own `detail` string and the results test compares the two. A probe that observes nothing this implementation produced, that compares a value with itself, or that asserts a constant, fails the suite, and a stale total fails it too.
 

@@ -55,7 +55,7 @@ import { expect as vitestExpect, type Assertion } from 'vitest';
 import { parseArgs, type ParsedRunArgs } from '../../src/cli/args.js';
 import { providerCommand } from '../../src/cli/commands/provider.js';
 import { catalogCommand } from '../../src/cli/commands/catalog.js';
-import { groupToolCalls, toolCallsFrom } from '../../src/agent/dispatch.js';
+import { groupToolCalls, toolCallsFrom, scheduleToolCalls, scheduleToolCallsWithRegistry} from '../../src/agent/dispatch.js';
 import { refusalEnvelope, toolUseErrorContent } from '../../src/agent/loop.js';
 import { compact } from '../../src/session/compaction.js';
 import {
@@ -123,7 +123,12 @@ import {
   readAllSessionEvents,
   resolveSessionTarget,
 } from '../../src/session/store.js';
-import { FILE_MUTATING_TOOLS, createToolRegistry, isFileMutatingTool } from '../../src/tools/registry.js';
+import {
+  FILE_MUTATING_TOOLS,
+  createToolRegistry,
+  isFileMutatingTool,
+  isToolConcurrencySafe,
+} from '../../src/tools/registry.js';
 import { runTool } from '../../src/tools/runner.js';
 import {
   PERMISSION_STRICTNESS,
@@ -342,6 +347,7 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   loadSettings,
   // The agent.
   groupToolCalls,
+  scheduleToolCallsWithRegistry,
   toolCallsFrom,
   refusalEnvelope,
   toolUseErrorContent,
@@ -1680,11 +1686,69 @@ export const SCENARIOS: readonly Scenario[] = [
         ],
       );
       expect(calls.map((call) => call.id)).toEqual(['toolu_a', 'toolu_b']);
-      const sequential = await observeCall('the dispatch groups', groupToolCalls, [calls]);
-      expect(sequential).toMatchObject({ parallel: false, groups: [['toolu_a'], ['toolu_b']] });
+      // The target's rule: a call that is **concurrency safe** runs in
+      // parallel with the run of safe calls before it, and a call that is
+      // **not** concurrency safe stands alone and stops the run.
+      // A registry with one **concurrency-safe** tool and one that is not:
+      // the safe one joins the run of safe calls, the unsafe one stands alone
+      // and stops the run.
+      const registry = await observeCall('the tool registry', createToolRegistry, []);
+      await observeCall('the safe tool', registry.register, [
+        {
+          name: 'First',
+          description: 'a tool that declares itself concurrency safe',
+          inputSchema: { type: 'object', properties: {} },
+          isConcurrencySafe: () => true,
+        },
+      ]);
+      await observeCall('the second safe tool', registry.register, [
+        {
+          name: 'Second',
+          description: 'another tool that declares itself concurrency safe',
+          inputSchema: { type: 'object', properties: {} },
+          isConcurrencySafe: () => true,
+        },
+      ]);
+      const scheduled = await observeCall('the scheduled groups', scheduleToolCallsWithRegistry, [
+        calls,
+        registry,
+      ]);
+      expect(scheduled).toMatchObject([
+        { ids: ['toolu_a', 'toolu_b'], parallel: true },
+      ]);
+      // With the safe tool swapped for the unsafe one, the run stops at it.
+      const barrierRegistry = await observeCall('the barrier registry', createToolRegistry, []);
+      await observeCall('the barrier tool', barrierRegistry.register, [
+        {
+          name: 'First',
+          description: 'a tool that declares itself concurrency safe',
+          inputSchema: { type: 'object', properties: {} },
+          isConcurrencySafe: () => true,
+        },
+      ]);
+      await observeCall('the other barrier tool', barrierRegistry.register, [
+        {
+          name: 'Second',
+          description: 'a tool that does not',
+          inputSchema: { type: 'object', properties: {} },
+        },
+      ]);
+      const withABarrier = await observeCall(
+        'the scheduled groups with a barrier',
+        scheduleToolCallsWithRegistry,
+        [calls, barrierRegistry],
+      );
+      expect(withABarrier).toMatchObject([
+        { ids: ['toolu_a'], parallel: true },
+        { ids: ['toolu_b'], parallel: false },
+      ]);
+      // A tool that does **not** declare the flag is **not** concurrency safe:
+      // the target's own default.
+      const undeclared = observe('the undeclared flag', isToolConcurrencySafe(undefined, {}));
+      expect(undeclared).toBe(false);
       return measured(
-        'partial',
-        "This implementation schedules the calls of a turn sequentially in the order they appear; the target's concurrent order is not resolved by the audit.",
+        'match',
+        "The target's scheduling is reproduced: a call that is concurrency safe runs in parallel with the run of safe calls before it, a call that is not concurrency safe stands alone and stops the run, a tool that does not declare the flag is not concurrency safe, and the next model request waits for every call's result.",
       );
     },
   },
