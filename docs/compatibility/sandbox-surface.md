@@ -44,6 +44,21 @@ The layer **feature-detects** the ABI and reports **reduced protection** rather 
 
 > **This build ships no native Landlock helper and no seccomp-notify listener** — both need raw syscalls a Node process cannot make. Layer 3 is therefore enforced by the mount namespace (kernel-enforced, but not inode-bound) and layer 5 observes nothing. **The status says so**: `layers.pathPolicy` and `layers.supervisor` are `false`, and the status never claims a layer that is not in force. The Landlock status distinguishes "the seam is not implemented in this build" from "the kernel does not implement Landlock" — this implementation never asserts a host fact it has not observed.
 
+## The decision mapping
+
+The policy returns one of three decisions: **allow** (run it inside the sandbox), **deny** (do not run it), **unconfined** (run it, but without the sandbox).
+
+| Condition | Decision | Reason |
+|---|---|---|
+| the platform is not in `enabledPlatforms` | **unconfined** | `sandbox.enabledPlatforms excludes <platform>` |
+| the sandbox is switched off | **unconfined** | `sandbox.enabled is false` |
+| an excluded command | **unconfined** | `sandbox.allowUnsandboxedCommands is true` |
+| the backend is missing, `failIfUnavailable` off | **unconfined** | `sandbox.failIfUnavailable is false (a missing backend would run the shell unconfined)` |
+| the backend is missing, `failIfUnavailable` on | **deny** | this implementation's own `unavailableRefused` |
+| otherwise | **allow** | — |
+
+**Implementation choice.** Only the last refusal is a refusal. The target's own documented default is that "a failed sandbox start **falls back to running unsandboxed**", and a setting that switched the sandbox off would be useless if it refused the command instead. Refusing on a platform the sandbox does not support would also make this implementation unusable everywhere its backend does not run.
+
 ## The policy
 
 The reason strings are reproduced **verbatim**:

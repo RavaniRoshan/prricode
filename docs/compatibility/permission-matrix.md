@@ -51,6 +51,10 @@ This implementation adds one reason kind, **`noRuleMatch`**, to distinguish "no 
 - `acceptEdits` auto-approves the edit/write tool set plus `mkdir, touch, rm, rmdir, mv, cp, sed` — but only for paths inside the working directory or an **added** directory, and only after a symlink check. `rm`/`rmdir` on a **critical path** still prompt. The critical-path list is a **implementation choice** (root, home, the working directory and its ancestors, `~/.claude`, `~/.ssh`, `~/.aws`, `<cwd>/.git`); the audit names none.
 - `plan` tests the **effect** of a call (does it mutate files), not the tool name — so `Bash(sed -i *)` is not auto-approved.
 - **Start-mode precedence**: `--permission-mode` flag → `permissions.defaultMode` → built-in default. `auto` and `bypassPermissions` written into a settings file are **ignored**. The built-in default is `auto` for an interactive terminal session and `default` for a headless run, subject to three overrides: a settings file with `disableAutoMode: "disable"`, a HIPAA-configured session, and a session where auto mode is unavailable.
+- **Implementation choice (`CC-014`).** The CLI is the only production caller of `resolveStartMode`, and it threads all three overrides:
+  - `disableAutoMode: "disable"` in the **merged** settings document disables auto mode. The merge is the settings loader's own: the highest tier that defines the key wins (`TIER_PRECEDENCE`).
+  - a HIPAA-configured session is a merged settings document whose `hipaa` member is `true`, or an object whose `enabled` member is `true`. **The audit names the override but not its key**: the key is this implementation's own.
+  - auto mode being **unavailable** has **no signal** in this implementation: the CLI has no availability probe, so `autoAvailable` is the constant `true` and this override never fires. **Reported, not hidden.**
 - The `defaultMode` tier order follows the **observed** `TOP_LEVEL_KEY_ORDER` (`policySettings`, `flagSettings`, `userSettings`); the project-side tiers do not define a `defaultMode`. The **rule-list** order is `policySettings`, `flagSettings`, `localSettings`, `projectSettings`, `userSettings` — the observed `MERGED_KEY_ORDER` with the two unplaced tiers added. The rule-list **combination** (concatenating every tier's lists rather than "first source that defines the key wins") is a **implementation choice**, fail-safe, and labelled.
 - A machine-admin (`policySettings`) deny beats a user allow, because the deny list is scanned across all tiers before any allow.
 
@@ -141,6 +145,7 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | `plan` never auto-approves an edit, by effect not by tool name | implementation choice | same file — "modes" |
 | `acceptEdits` auto-approves inside the working directory or an added directory, and still prompts for `rm` on a critical path | REA observed + implementation choice (the critical-path list) | same file |
 | Start-mode precedence, the settings-file rule, and the three availability overrides | REA observed | same file — "start mode" |
+| The CLI threads all three start-mode overrides, and the HIPAA key and the unavailable signal are this implementation's | **implementation choice** | `tests/contracts/cli-surface.test.ts` — the start-mode tests |
 | The `defaultMode` tier order follows the observed `TOP_LEVEL_KEY_ORDER` | implementation choice | same file |
 | The rule-list combination is concatenation, not "first source wins" | implementation choice | same file |
 | A machine-admin deny beats a user allow | implementation choice (fail-safe) | same file |
