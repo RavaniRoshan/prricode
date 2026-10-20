@@ -716,14 +716,14 @@ export interface PreToolUseHookApproval {
 - Consumes: `src/platform/sandbox/launcher.ts` (`launchSandbox`, the sandbox status), `src/platform/sandbox/policy.ts` (`SandboxPolicy`, `DEFAULT_SANDBOX_POLICY`, `readSandboxPolicy`, `evaluateSandbox`).
 - Produces: the `Bash` tool routes its command through `launchSandbox` when the policy says the command is sandboxed, and runs it unconfined — with the reason recorded — when the policy says so.
 
-- [ ] **Step 1: Write the failing test** — a `Bash` call with the sandbox enabled runs through the launcher; a call the policy exempts runs unconfined and says so; a call whose sandbox cannot be started is refused when `failIfUnavailable` is set and runs unconfined when it is not; and `dangerouslyDisableSandbox` **never** skips a permission rule.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the tool does not call the launcher.
-- [ ] **Step 3: Implement the wiring** in `src/tools/builtins/bash.ts` and `src/config/loader.ts` — add `SettingsLoadResult.sandboxPolicy` (built with `readSandboxPolicy`), resolve the policy, call `evaluateSandbox` **with the backend's real availability** as its fourth argument, and route the command through `launchSandbox` or run it directly, recording the reason, the exemptions and the `sandboxed` flag in the result. The tool's existing timeout, output cap, and environment handling stay as they are.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing safety test** — the sandboxed command cannot see the host's environment (the agent's credentials are not in it), and a denied sandbox leaves the tool's result reporting the refusal rather than a bare non-zero exit.
-- [ ] **Step 6: Implement the safety behavior** and correct the tool's header, which currently says the sandbox is not implemented.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Commit.**
+- [x] **Step 1: Write the failing test** — a `Bash` call with the sandbox enabled runs through the launcher; a call the policy exempts runs unconfined and says so; a call whose sandbox cannot be started is refused when `failIfUnavailable` is set and runs unconfined when it is not; and `dangerouslyDisableSandbox` **never** skips a permission rule.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the tool does not call the launcher.
+- [x] **Step 3: Implement the wiring** in `src/tools/builtins/bash.ts` and `src/config/loader.ts` — add `SettingsLoadResult.sandboxPolicy` (built with `readSandboxPolicy`), resolve the policy, call `evaluateSandbox` **with the backend's real availability** as its fourth argument, and route the command through `launchSandbox` or run it directly, recording the reason, the exemptions and the `sandboxed` flag in the result. The tool's existing timeout, output cap, and environment handling stay as they are.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing safety test** — the sandboxed command cannot see the host's environment (the agent's credentials are not in it), and a denied sandbox leaves the tool's result reporting the refusal rather than a bare non-zero exit.
+- [x] **Step 6: Implement the safety behavior** and correct the tool's header, which currently says the sandbox is not implemented.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Commit.**
   ```bash
   git add src/tools tests/security/bash-sandbox.test.ts
   git commit -m "feat(tools): route the Bash tool through the sandbox"
@@ -923,14 +923,14 @@ export interface PreToolUseHookApproval {
 
 **Interfaces:** Consumes: `src/agent/loop.ts` (`createAgentRuntime`), `src/session/store.ts`. Produces: `parseArgs(argv: string[]): ParsedArgs`, `runCommand(parsed: ParsedArgs): Promise<number>`, `runHeadless(opts: HeadlessOptions): AsyncIterable<HeadlessEvent>`.
 
-- [ ] **Step 1: Write the failing args test** — `--print`/`-p` takes one prompt argument, `--continue` and `--resume <id>` are mutually exclusive, `--output-format json|text|stream-json` is validated, and an unknown flag is an error with exit code 2.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement `src/cli/args.ts`** with a discriminated-union result.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing headless test** — `--print` with `--output-format json` writes exactly one JSON document to stdout and exits 0 on success, non-zero on a provider error; `--output-format stream-json` writes one JSON object per event.
-- [ ] **Step 6: Implement `src/cli/headless.ts`** and `output.ts`.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Commit.**
+- [x] **Step 1: Write the failing args test** — `--print`/`-p` takes one prompt argument, `--continue` and `--resume <id>` are mutually exclusive, `--output-format json|text|stream-json` is validated, and an unknown flag is an error with exit code 2.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement `src/cli/args.ts`** with a discriminated-union result.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing headless test** — `--print` with `--output-format json` writes exactly one JSON document to stdout and exits 0 on success, non-zero on a provider error; `--output-format stream-json` writes one JSON object per event.
+- [x] **Step 6: Implement `src/cli/headless.ts`** and `output.ts`.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Commit.**
   ```bash
   git add src/cli tests/contracts/cli-surface.test.ts
   git commit -m "feat(cli): argument parsing, headless mode, output contracts"
@@ -944,20 +944,20 @@ export interface PreToolUseHookApproval {
 
 **Design note (library choice).** Ink 8 is the only viable option on Node 24: OpenTUI requires Node ≥ 26.4.0, and `blessed` has been unmaintained since 2015. Ink is also the only candidate with a real screen-reader story (`INK_SCREEN_READER=true` plus an ARIA subset), which matters because the target is expected to be usable with a screen reader. Three known Ink behaviours shape the implementation: the default `maxFps` is 30 and `incrementalRendering` is opt-in and off by default, so a streaming turn must enable it or it will re-render the whole frame at 30 Hz; Ink has **no** built-in markdown, so markdown rendering is this implementation's own job (the maintained option is `markdansi`, not the stale `ink-markdown`); and Ink redraws the whole visible terminal on every state change, so a full-screen TUI loses terminal scrollback. The target's own CLI is a scrollback-append TUI, so this implementation must **not** use Ink's alternate-screen mode — otherwise `/clear` semantics, terminal search, and scrollback all diverge from the target.
 
-- [ ] **Step 1: Write the failing render test** — `renderMessages` produces one block per assistant message, one per tool call with its result, and marks a denied tool call with its decision source and reason type.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement the renderers** as pure functions over session events.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing markdown test** — a partially-streamed markdown fragment renders as text rather than throwing or dropping the fragment; a fenced code block renders with its language preserved.
-- [ ] **Step 6: Implement `src/ui/render/markdown.ts`** using `markdansi` (or an equivalent), tolerating an incomplete fragment.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing screen-reader test** — with `INK_SCREEN_READER=true`, the rendered tree exposes an ARIA role and label for the message list, the input, and the approval prompt.
-- [ ] **Step 9: Implement the ARIA attributes** in `src/ui/app.ts`.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Write the failing scrollback test** — the app does **not** enter the alternate screen, so content written before the session start remains in the terminal's scrollback.
-- [ ] **Step 12: Implement the app shell** without `alternateScreen`, with `incrementalRendering` enabled and `maxFps` tuned for streaming.
-- [ ] **Step 13: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 14: Commit.**
+- [x] **Step 1: Write the failing render test** — `renderMessages` produces one block per assistant message, one per tool call with its result, and marks a denied tool call with its decision source and reason type.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement the renderers** as pure functions over session events.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing markdown test** — a partially-streamed markdown fragment renders as text rather than throwing or dropping the fragment; a fenced code block renders with its language preserved.
+- [x] **Step 6: Implement `src/ui/render/markdown.ts`** using `markdansi` (or an equivalent), tolerating an incomplete fragment.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing screen-reader test** — with `INK_SCREEN_READER=true`, the rendered tree exposes an ARIA role and label for the message list, the input, and the approval prompt.
+- [x] **Step 9: Implement the ARIA attributes** in `src/ui/app.ts`.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Write the failing scrollback test** — the app does **not** enter the alternate screen, so content written before the session start remains in the terminal's scrollback.
+- [x] **Step 12: Implement the app shell** without `alternateScreen`, with `incrementalRendering` enabled and `maxFps` tuned for streaming.
+- [x] **Step 13: Run it to verify it passes** — expected: PASS.
+- [x] **Step 14: Commit.**
   ```bash
   git add src/ui tests/contracts/ui-render.test.ts
   git commit -m "feat(ui): interactive renderer over the shared runtime"
@@ -969,23 +969,23 @@ export interface PreToolUseHookApproval {
 
 **Interfaces:** Consumes: `src/provider/registry.ts`, `src/provider/catalog.ts`. Produces: `providerCommand(args: string[], registry: ProviderRegistry): Promise<CommandResult>` supporting `list`, `add`, `remove`, `use`, `test`; `catalogCommand(args: string[], registry: ProviderRegistry): Promise<CommandResult>` supporting `list`, `search`, `show`.
 
-- [ ] **Step 1: Write the failing command test** — `provider list` prints one row per connection with its id, name, route, base URL, and credential *status*; the output contains no credential value even when the underlying env var is set.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement `src/cli/commands/provider.ts`**.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing catalog test** — `catalog list` groups by family and shows the per-route model ids; `catalog search <query>` filters by id and display name; a model not served by the active route is shown as unavailable for that route rather than hidden.
-- [ ] **Step 6: Implement `src/cli/commands/catalog.ts`**.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing non-interactive test** — the same operations are available as `--provider list` style non-interactive flags with machine-readable output.
-- [ ] **Step 9: Implement the non-interactive form** and the `src/ui/modals/providerPicker.ts` picker.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Write the failing catalog-refresh test** — a catalog refresh that changes a model's provider ids **must not** change a connection's id, name, route, or credential reference; a user override of a catalog-owned field survives the refresh.
-- [ ] **Step 12: Implement the refresh contract** with the catalog and the connection table as separate records, so a refresh can rewrite catalog-owned metadata but never routing identity or a credential reference.
-- [ ] **Step 13: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 14: Write the failing partial-credential test** — a connection whose credential cannot be resolved is reported as unusable **for that connection only**, and the other connections are unaffected; the active-connection resolution refuses to select an unusable one and names it in the error.
-- [ ] **Step 15: Implement the per-connection failure isolation** and the active-connection error message.
-- [ ] **Step 16: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 17: Commit.**
+- [x] **Step 1: Write the failing command test** — `provider list` prints one row per connection with its id, name, route, base URL, and credential *status*; the output contains no credential value even when the underlying env var is set.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement `src/cli/commands/provider.ts`**.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing catalog test** — `catalog list` groups by family and shows the per-route model ids; `catalog search <query>` filters by id and display name; a model not served by the active route is shown as unavailable for that route rather than hidden.
+- [x] **Step 6: Implement `src/cli/commands/catalog.ts`**.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing non-interactive test** — the same operations are available as `--provider list` style non-interactive flags with machine-readable output.
+- [x] **Step 9: Implement the non-interactive form** and the `src/ui/modals/providerPicker.ts` picker.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Write the failing catalog-refresh test** — a catalog refresh that changes a model's provider ids **must not** change a connection's id, name, route, or credential reference; a user override of a catalog-owned field survives the refresh.
+- [x] **Step 12: Implement the refresh contract** with the catalog and the connection table as separate records, so a refresh can rewrite catalog-owned metadata but never routing identity or a credential reference.
+- [x] **Step 13: Run it to verify it passes** — expected: PASS.
+- [x] **Step 14: Write the failing partial-credential test** — a connection whose credential cannot be resolved is reported as unusable **for that connection only**, and the other connections are unaffected; the active-connection resolution refuses to select an unusable one and names it in the error.
+- [x] **Step 15: Implement the per-connection failure isolation** and the active-connection error message.
+- [x] **Step 16: Run it to verify it passes** — expected: PASS.
+- [x] **Step 17: Commit.**
   ```bash
   git add src/cli/commands src/ui/modals tests/contracts/provider-command.test.ts
   git commit -m "feat(provider): manager command and catalog browsing"
