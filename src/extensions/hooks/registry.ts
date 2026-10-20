@@ -118,6 +118,7 @@ export {
   type HookPermissionMap,
   type HookResult,
   type HookRunner,
+  type PreToolUseHookApproval,
   type PermissionRequestResult,
   type RunHooksOptions,
 } from './runner.js';
