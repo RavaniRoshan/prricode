@@ -41,6 +41,11 @@ jobs:
           node-version: '24'
       - name: Install
         run: bun install --frozen-lockfile
+      - name: Install bubblewrap
+        # The sandbox's real-backend tests **skip** when bubblewrap is absent,
+        # so without this the suite would pass without ever exercising the
+        # sandbox's confinement.
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Test
         run: bun run test
 
