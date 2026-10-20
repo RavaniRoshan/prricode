@@ -530,6 +530,19 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
     checkPermissions(input: I, ctx: ToolContext): Promise<PermissionDecision | undefined>;
     validateInput(input: I, ctx: ToolContext): Promise<{ ok: true } | { ok: false; message: string; errorCode: number }>;
     execute(input: I, ctx: ToolContext): Promise<O>;
+    /**
+     * Re-run the WHOLE permission check against a rewritten input.
+     * A hook may rewrite the tool input; the rewrite must not escape the deny
+     * list, the ask list, the allow scope, or the mode dispatch. The re-check
+     * may only RESTRICT the call — the stricter of the two verdicts wins. The
+     * re-check's hook keeps its denial but loses its approval and its rewrite,
+     * because the approval was given for the original call.
+     */
+    recheckPermission(input: I, ctx: ToolContext): Promise<ToolRecheck>;
+  }
+  export interface ToolRecheck {
+    decision: PermissionDecision | undefined;   // undefined = the tool expressed no opinion
+    approvedPath?: string;                        // the path the check approved, as the call named it
   }
   export interface ToolRegistry {
     register(tool: ToolDefinition): void;
@@ -549,17 +562,17 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   export async function runTool(registry: ToolRegistry, name: string, input: unknown, ctx: ToolContext): Promise<ToolResultEnvelope>;
   ```
 
-- [ ] **Step 1: Write the failing registry test** — registering a tool makes it discoverable; `get` on an unknown name returns `undefined`; `list` returns registration order.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement `src/tools/registry.ts`** and `FILE_MUTATING_TOOLS`.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing runner test** — a tool whose `checkPermissions` denies produces an envelope with `isError: true` and the decision attached, and the tool's `execute` is **not** called; a tool whose `validateInput` fails produces `isError: true` with the validation message and the error code.
-- [ ] **Step 6: Implement `src/tools/runner.ts`** with the order: check permissions → validate input → execute → wrap the result. Record the permission decision on every envelope.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing built-in tool tests** — one per built-in tool covering its input schema rejection and its normal path: `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `TodoWrite`, `NotebookEdit`, `Task`.
-- [ ] **Step 9: Implement the built-in tools** under `src/tools/builtins/`, one file per tool, each with a `checkPermissions` that consults the rules and a `validateInput` that returns typed error codes.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Commit.**
+- [x] **Step 1: Write the failing registry test** — registering a tool makes it discoverable; `get` on an unknown name returns `undefined`; `list` returns registration order.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement `src/tools/registry.ts`** and `FILE_MUTATING_TOOLS`.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing runner test** — a tool whose `checkPermissions` denies produces an envelope with `isError: true` and the decision attached, and the tool's `execute` is **not** called; a tool whose `validateInput` fails produces `isError: true` with the validation message and the error code.
+- [x] **Step 6: Implement `src/tools/runner.ts`** with the order: check permissions → validate input → execute → wrap the result. Record the permission decision on every envelope.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing built-in tool tests** — one per built-in tool covering its input schema rejection and its normal path: `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `TodoWrite`, `NotebookEdit`, `Task`.
+- [x] **Step 9: Implement the built-in tools** under `src/tools/builtins/`, one file per tool, each with a `checkPermissions` that consults the rules and a `validateInput` that returns typed error codes.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Commit.**
   ```bash
   git add src/tools tests/contracts/tool-registry.test.ts
   git commit -m "feat(tools): registry, runner, built-in tools"
