@@ -89,17 +89,19 @@
  *     so nothing at all is carried — and an **`ask` is carried**, because the
  *     permission vocabulary has an exact word for it and the call becomes the
  *     question the prompt asks.
- *   - **The creator of the `PreToolUse` approval is generic in the shape it
- *     produces.** The `PreToolUse` approval cannot be assignable to the
- *     narrower permission-request approval — it knows two values the narrower
- *     one does not — so the creator is generic in its approval shape, with the
- *     `PreToolUse` shape as the default. A caller with no context gets the
- *     `PreToolUse` shape, and a caller that hands the creator to the
- *     permission-request adapter gets the shape that adapter accepts, so
- *     **both** adapters take it unchanged. The shape produced at run time is
- *     always the `PreToolUse` one, and the permission-request adapter treats an
- *     `ask` and a `defer` as **no opinion** — the way it treats every decision
- *     it does not know.
+ *   - **The creator of the `PreToolUse` approval has exactly one return type:
+ *     the `PreToolUse` approval itself.** The creator is **not** generic. A
+ *     generic creator would let the *contextual type* of the call site choose
+ *     the shape, and the compiler would then believe that the decision is one
+ *     of `allow` and `deny` while the value at run time can be an `ask` — the
+ *     unsoundness would be silent, because the shape produced at run time is
+ *     the same either way. The `PreToolUse` approval is **assignable** to the
+ *     permission layer's `HookApproval` — the two share the same four-value
+ *     vocabulary — so it plugs straight into `createPreToolUseHook` with no
+ *     adaptation and no cast. A `PreToolUse` producer is wired to
+ *     `createPreToolUseHook` and to the `preToolUseHook` seam; the
+ *     permission-request adapter takes the `PermissionRequest` approval, which
+ *     is the narrower shape.
  */
 
 import { spawn } from 'node:child_process';
@@ -110,7 +112,7 @@ import {
   type PermissionMode,
   type ToolContext,
 } from '../../permissions/decision.js';
-import type { HookApproval, PermissionRequestHookApproval } from '../../permissions/prompts.js';
+import type { PermissionRequestHookApproval } from '../../permissions/prompts.js';
 
 import { matchToolName } from './matcher.js';
 import type { HookEvent, HookHandlerType, HookSeverity, HookSpec } from './registry.js';
@@ -1073,11 +1075,17 @@ export interface PreToolUseHookApproval {
  * nothing is carried — not the decision and not the rewrite. An **`ask` is
  * carried**: the permission vocabulary has an exact word for it, and the call
  * becomes the question the prompt asks.
+ *
+ * **Only the `PreToolUse` results are merged.** A result of another event is
+ * not a decision about this seam, so it is ignored: a `PermissionRequest`
+ * result handed to this function says nothing about a `PreToolUse` call, and
+ * merging it would let one event's decision decide another event's call.
  */
 export function mergePreToolUseApproval(
   results: readonly HookResult[],
 ): PreToolUseHookApproval | undefined {
-  const merged = mergeHookResults(results);
+  const relevant = results.filter((result) => result.hookEventName === 'PreToolUse');
+  const merged = mergeHookResults(relevant);
   if (!merged) return undefined;
   const decision = effectiveDecision(merged);
   if (decision === undefined) return undefined;
@@ -1164,18 +1172,25 @@ export function createHookApproval(
  * mode, `bypassPermissions` included. This implementation picks the stricter of the
  * target's two behaviours and documents the choice.
  *
- * **The creator is generic in the approval shape it produces.** The
- * `PreToolUse` approval knows `ask` and `defer`, so it cannot be assignable to
- * the narrower permission-request approval; the type parameter says which
- * adapter takes the result, and the default is the `PreToolUse` shape. The
- * shape produced at run time is always the `PreToolUse` one, and the
- * permission-request adapter treats an `ask` and a `defer` as no opinion.
+ * **The creator is not generic.** Its return type is exactly
+ * `PreToolUseHookApproval | undefined` — the plan's signature — and there is
+ * no cast. A generic creator would resolve its type parameter from the
+ * *contextual type* of wherever it is placed, so a caller that wanted the
+ * narrower permission-request approval would get one, and the compiler would
+ * then believe that `decision.behavior` is one of `allow` and `deny` while the
+ * value at run time can be an `ask`. The shape produced at run time is the
+ * same either way, so the unsoundness would be silent.
+ *
+ * The approval is **assignable** to the permission layer's `HookApproval` — the
+ * two share the same four-value decision vocabulary — so
+ * `createPreToolUseHook({ approval: createPreToolUseApproval(specs) })`
+ * compiles unchanged, with no adaptation and no cast.
  */
-export function createPreToolUseApproval<T extends HookApproval = PreToolUseHookApproval>(
+export function createPreToolUseApproval(
   specs: readonly HookSpec[],
   options: RunHooksOptions = {},
-): (ctx: ToolContext) => Promise<T | undefined> {
-  return async (ctx: ToolContext): Promise<T | undefined> => {
+): (ctx: ToolContext) => Promise<PreToolUseHookApproval | undefined> {
+  return async (ctx: ToolContext): Promise<PreToolUseHookApproval | undefined> => {
     const results = await runHooks(
       specs,
       'PreToolUse',
@@ -1188,11 +1203,7 @@ export function createPreToolUseApproval<T extends HookApproval = PreToolUseHook
       undefined,
       options,
     );
-    const approval = mergePreToolUseApproval(results);
-    if (approval === undefined) return undefined;
-    // The shape produced at run time is always the `PreToolUse` one; the type
-    // parameter only says which adapter takes the result.
-    return approval as T;
+    return mergePreToolUseApproval(results);
   };
 }
 

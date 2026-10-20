@@ -18,7 +18,10 @@
  * `PermissionRequest` seam — because the input the tool will act on is not known
  * before them, and the safety check judges **that** input. It holds in every
  * mode, including `bypassPermissions`, and it still precedes the mode dispatch.
- * The tool's own `safetyCheckForTool` refuses arguments the tool cannot verify.
+ * The tool's own `safetyCheckForTool` refuses arguments the tool cannot verify:
+ * it is the permission layer's `verifyToolInput` and the refusal it builds, so
+ * the tool layer does not verify the same arguments a second time — the check
+ * runs on the effective input, which is the input the tool will act on.
  *
  * **Both hook seams are consulted.** The `PreToolUse` seam is the seam the hooks
  * module's `createPreToolUseApproval` plugs into: it may deny the call, ask for
@@ -32,6 +35,54 @@
  * the *original* input, so the tool runs the **same** check again with the
  * effective one: the ask list, the allow scope and the mode dispatch apply to the
  * path the call will really act on. The re-check may only restrict the call.
+ *
+ * **The seams are consulted three times for a rewritten call.** The first
+ * consultation judges the **original** input — the call as the model made it —
+ * and the other two judge the **effective** input: the permission layer's own
+ * re-check of the rewritten input, and the tool layer's re-check, which is the
+ * second line of defence and owns the write path. A `command` hook therefore
+ * runs three processes for one rewritten call. The number is a property of the
+ * two re-checks and not a choice: the re-check has to see the effective input,
+ * or a rewrite could escape the deny list, the ask list and the allow scope.
+ *
+ * **The re-check keeps the denial of either seam and nothing else.** An
+ * approval was given for the **original** call and it does not carry the
+ * rewritten one, so a `PreToolUse` hook that **approves and rewrites** a call
+ * that **no rule covers** cannot approve it: the re-check leaves the call as
+ * the generic prompt, the runner escalates it to the approval prompt, and with
+ * no prompt to answer it the call is **refused** (`permission_unresolved`) —
+ * even though the permission layer allowed it and the hook approved it. A call
+ * a rule **does** cover is unaffected: the rule's own allow carries it through
+ * the re-check.
+ *
+ * **The two layers consult the seams in the same order.** The `PreToolUse` seam
+ * speaks first in the permission layer, so it speaks first here too, and a
+ * refusal names the same seam in both layers.
+ *
+ * **The hook seams are the session's, and the session's assembly supplies
+ * them.** The tools never build a seam themselves: `BuiltinToolDeps` carries
+ * the two callbacks, and the assembly that constructs those dependencies — the
+ * CLI's session assembly — is where the hooks module's creators are plugged
+ * in:
+ *
+ * ```ts
+ * const deps: BuiltinToolDeps = {
+ *   rules,
+ *   mode,
+ *   cwd,
+ *   hook: createPermissionRequestHook({
+ *     approval: createHookApproval(hookRegistry.for('PermissionRequest')),
+ *   }),
+ *   preToolUseHook: createPreToolUseHook({
+ *     approval: createPreToolUseApproval(hookRegistry.for('PreToolUse')),
+ *   }),
+ * };
+ * ```
+ *
+ * The **agent runtime** carries the same seam: its own `permissionOptions()`
+ * (`src/agent/loop.ts`) has to pass the `preToolUseHook` the same way, or a
+ * turn that goes through the runtime's own permission service would not be
+ * gated by the `PreToolUse` hooks.
  *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
@@ -104,7 +155,8 @@ export interface BuiltinToolDeps {
    *
    * It is the seam the hooks module's `createPreToolUseApproval` plugs into: the
    * hook may deny the call, ask the user for a decision, approve it and rewrite
-   * the tool input.
+   * the tool input. The **session's assembly** supplies it — the `preToolUseHook`
+   * of the dependencies it builds (see the module header for the wiring).
    *
    * The **precedence is the permission layer's**, not the hook's: the seam runs
    * after the deny list and the ask list and before the mode's semantics, so an
@@ -181,7 +233,9 @@ export async function recheckToolPermissions(
   } = {},
 ): Promise<ToolRecheck> {
   // The re-check consults **both** seams through the one stricter hook, so the
-  // `PreToolUse` seam is not consulted a second time on its own.
+  // `PreToolUse` seam is not consulted a second time on its own. The seams are
+  // consulted in the **same order** as the permission layer consults them, so
+  // the two layers report the same refusal.
   const stricter = recheckHook(deps);
   const decision = await runToolCheck(ctx, deps, options, stricter, undefined);
   const approvedPath =
@@ -231,10 +285,13 @@ async function runToolCheck(
  * rewrite is dropped, because the rewrite has already been applied and a second
  * one would need a third check, and so on.
  *
- * **Both seams are consulted, and only a denial is kept.** The `PermissionRequest`
- * seam speaks first — it is the later event — and a denial of either seam is
- * final, so a denial there ends the consultation. The `PreToolUse` seam speaks
- * too: its denial is a denial as well.
+ * **Both seams are consulted, and only a denial is kept.** The `PreToolUse`
+ * seam speaks first — it is the earlier event, and the permission layer
+ * consults it first too — and a denial of either seam is final, so a denial
+ * there ends the consultation. The `PermissionRequest` seam speaks too: its
+ * denial is a denial as well. Consulting them in the **same order** as the
+ * permission layer is what makes the two layers name the same seam in the
+ * refusal they report.
  *
  * The re-check is the tool layer's **second line of defence** and it owns the
  * write path, so it is deliberately **stricter** than the permission layer's own
@@ -243,9 +300,9 @@ async function runToolCheck(
  */
 function recheckHook(deps: BuiltinToolDeps): ToolHook {
   return async (ctx: ToolContext) => {
-    const denied = await denialFrom(ctx, deps.hook);
+    const denied = await denialFrom(ctx, deps.preToolUseHook);
     if (denied !== undefined) return denied;
-    return denialFrom(ctx, deps.preToolUseHook);
+    return denialFrom(ctx, deps.hook);
   };
 }
 

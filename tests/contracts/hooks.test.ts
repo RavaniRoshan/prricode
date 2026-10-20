@@ -66,7 +66,7 @@ import {
   type HookResult,
 } from '../../src/extensions/hooks/runner.js';
 import { checkPermission, type ToolContext } from '../../src/permissions/decision.js';
-import { createPermissionRequestHook } from '../../src/permissions/prompts.js';
+import { createPermissionRequestHook, createPreToolUseHook } from '../../src/permissions/prompts.js';
 import type { RuleSet } from '../../src/permissions/rules.js';
 
 const NODE = process.execPath;
@@ -1748,14 +1748,14 @@ describe('the PreToolUse seam', () => {
       },
     });
 
-    const hook = createPermissionRequestHook({
+    const hook = createPreToolUseHook({
       approval: createPreToolUseApproval([spec]),
     });
 
     const decision = await checkPermission(toolContext(), {
       rules: ruleSet(),
       mode: 'default',
-      hook,
+      preToolUseHook: hook,
     });
 
     expect(decision.behavior).toBe('deny');
@@ -1770,14 +1770,14 @@ describe('the PreToolUse seam', () => {
       hookSpecificOutput: { permissionDecision: 'allow' },
     });
 
-    const hook = createPermissionRequestHook({
+    const hook = createPreToolUseHook({
       approval: createPreToolUseApproval([spec]),
     });
 
     const decision = await checkPermission(toolContext(), {
       rules: ruleSet({ deny: ['Bash'] }),
       mode: 'default',
-      hook,
+      preToolUseHook: hook,
     });
 
     expect(decision.behavior).toBe('deny');
@@ -1788,14 +1788,14 @@ describe('the PreToolUse seam', () => {
       hookSpecificOutput: { permissionDecision: 'allow' },
     });
 
-    const hook = createPermissionRequestHook({
+    const hook = createPreToolUseHook({
       approval: createPreToolUseApproval([spec]),
     });
 
     const decision = await checkPermission(toolContext(), {
       rules: ruleSet({ ask: ['Bash'] }),
       mode: 'default',
-      hook,
+      preToolUseHook: hook,
     });
 
     expect(decision.behavior).toBe('ask');
@@ -1811,14 +1811,14 @@ describe('the PreToolUse seam', () => {
       },
     });
 
-    const hook = createPermissionRequestHook({
+    const hook = createPreToolUseHook({
       approval: createPreToolUseApproval([spec]),
     });
 
     const decision = await checkPermission(toolContext(), {
       rules: ruleSet(),
       mode: 'bypassPermissions',
-      hook,
+      preToolUseHook: hook,
     });
 
     expect(decision.behavior).toBe('deny');

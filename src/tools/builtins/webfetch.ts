@@ -14,9 +14,12 @@
  * **The safety check runs after the hook seams, on the effective input**, because
  * it is independent of the rule engine and holds in every mode, including
  * `bypassPermissions`. The input a hook rewrote is not known before the hook
- * seams have run, and the check judges the URL that will really be fetched, so
- * it runs once, on that input. The tool's own check is `safetyCheckForTool`,
- * which refuses a URL that is not an http(s) URL.
+ * seams have run, and the check judges the URL that will really be fetched. It
+ * runs **once** on a call that no hook rewrote, and **twice** on a call that one
+ * did: once in the tool's own check, and once in the tool layer's re-check of
+ * the rewritten input — the re-check is the second line of defence and it runs
+ * the same check on the input the call will act on. The tool's own check is
+ * `safetyCheckForTool`, which refuses a URL that is not an http(s) URL.
  *
  * **The body is read under a byte cap.** The response is consumed as a stream and
  * the reading stops at the cap, so a body of any size costs at most the cap: a
