@@ -514,6 +514,34 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   git commit -m "feat(permissions): rule evaluation, decision vocabulary, safety checks"
   ```
 
+### CC-007b — The `PreToolUse` permission seam
+
+**Why this task exists.** `CC-012` implemented the hook side of the `PreToolUse` decision — `createPreToolUseApproval` and `mergePreToolUseApproval` in `src/extensions/hooks/runner.ts` — but the permission engine has no way to receive it. The plan's CC-012 design note requires that "a `PreToolUse` hook returning `allow` must not override a deny or ask rule, and a hook returning `deny` must hold in every mode including `bypassPermissions` — the target changed this behaviour in a later release without a deprecation warning, so this implementation must pick one and document it." This implementation's pick is the **stricter** of the target's two behaviors, and it cannot be enforced until the permission engine consults the hook.
+
+**Files:** Modify `src/permissions/decision.ts`; Modify `src/permissions/prompts.ts`; Create `tests/contracts/permission-hook.test.ts`.
+
+**Interfaces:**
+- Consumes: `src/extensions/hooks/runner.ts` (`createPreToolUseApproval`, `mergePreToolUseApproval`) — read only; `src/extensions/hooks/registry.ts` (`HookSpec`).
+- Produces: a `preToolUseHook?: (ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>` member on `CheckPermissionOptions`; a call site in `checkPermission` **after the ask list and before the mode's semantics**.
+
+- [ ] **Step 1: Write the failing precedence test** — a `PreToolUse` hook returning `allow` does **not** override a deny rule, and does **not** override an ask rule; a `PreToolUse` hook returning `deny` holds in `default`, `plan`, `acceptEdits`, `auto`, `dontAsk` and `bypassPermissions`.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the option does not exist.
+- [ ] **Step 3: Add the option and the call site** in `src/permissions/decision.ts` — the hook runs after the deny and ask lists, so its `allow` can never rescue a call the rules refuse, and its `deny` is returned immediately. A hook that returns `undefined` expresses no opinion and changes nothing.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Write the failing combination test** — when both a `PreToolUse` hook and the `PermissionRequest` seam are wired, the **stricter** of the two decisions wins: a `PreToolUse` `allow` and a `PermissionRequest` `deny` gives `deny`; a `PreToolUse` `deny` and a `PermissionRequest` `allow` gives `deny`.
+- [ ] **Step 6: Implement the combination** — the two seams must not be able to cancel each other.
+- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 8: Write the failing rewrite test** — a `PreToolUse` hook that rewrites the tool input has the **whole** permission check re-run against the **effective** input, and a rewritten input the tool's validator rejects **denies** the call.
+- [ ] **Step 9: Implement the rewrite handling** — the `createPermissionRequestHook` wrapper already applies the safety check and the tool's validator to a rewritten input, so the `PreToolUse` seam must go through the same path.
+- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 11: Commit.**
+  ```bash
+  git add src/permissions tests/contracts/permission-hook.test.ts
+  git commit -m "feat(permissions): the PreToolUse hook seam"
+  ```
+
+**Design note — this implementation's pick.** The target changed this behaviour in a later release without a deprecation warning, so the target's own behavior at `2.1.303` is ambiguous from the outside. This implementation picks the **stricter** of the two: **an `allow` never overrides a deny or an ask rule, and a `deny` holds in every mode, `bypassPermissions` included.** This is a labelled implementation choice, recorded in the module header and in `docs/compatibility/permission-matrix.md`.
+
 ### CC-008 — Tool registry and built-in tools
 
 **Files:** Create `src/tools/registry.ts`, `src/tools/builtins/*.ts`, `src/tools/runner.ts`; Create `tests/contracts/tool-registry.test.ts`.
