@@ -79,13 +79,22 @@
  * repeat; this implementation accepts it because the audit's matcher syntax has `*`
  * wildcards.
  *
- * This implementation is deliberately **narrower** in four places, and it refuses loudly
+ * This implementation is deliberately **narrower** in seven places, and it refuses loudly
  * in each of them rather than guessing: the repetition count is bounded, the
  * whole program is bounded by the node budget, the lookaround and the
- * backreferences are not regular, and the **legacy octal escapes** (`\01` and
- * a `\0` followed by a digit) and the **control escape without a letter**
- * (`\c1`) belong to Annex B rather than to the language a matcher is written
- * in.
+ * backreferences are not regular, the **legacy octal escapes** (`\01` and
+ * a `\0` followed by a digit) belong to Annex B rather than to the language a
+ * matcher is written in, a `\x` or `\u` with **no** hex digits is refused
+ * (JavaScript reads it as the literal `x` or `u`), a class escape used as a
+ * **range endpoint** (`[\d-a]`) is refused (JavaScript accepts it as a range),
+ * and a `\9` **inside a character class** is refused (JavaScript accepts it as
+ * the literal `9`).
+ *
+ * One further refusal is a narrowness but not a defect: a **control escape**
+ * whose letter is not a control letter (`\c1`, `\c_`) is refused. The
+ * parenthesised note that used to call this "a control escape without a
+ * letter" was wrong — ECMAScript's `ControlLetter` is `DecimalDigit | _`, and
+ * V8 *accepts* `/\c1/` and `/\c_/`, both of which match nothing.
  *
  * ## The compiler is bounded, and the bound is on the **whole** program
  *
