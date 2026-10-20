@@ -43,6 +43,8 @@ import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { spawn } from 'node:child_process';
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import * as policyModule from '../../src/platform/sandbox/policy.js';
@@ -84,10 +86,12 @@ import {
   isBlockedAddress,
 } from '../../src/platform/sandbox/proxy.js';
 import {
+  BUBBLEWRAP_ADVISORY,
   BUBBLEWRAP_MINIMUM_VERSION,
   SANDBOX_PROXY_SOCKET_PATH,
   SANDBOX_PROXY_SOCKET_VARIABLE,
   SandboxRefusedError,
+  bubblewrapBackend,
   buildSandboxPlan,
   launchSandbox,
   planFilesystemPolicy,
@@ -95,6 +99,7 @@ import {
   probeEnforcementBinary,
   probeUserNamespace,
   sandboxEnvironment,
+  type SandboxAdvisory,
   type SandboxBackend,
   type SandboxProcess,
 } from '../../src/platform/sandbox/launcher.js';
@@ -133,6 +138,75 @@ const unavailableBackend: SandboxBackend = {
     throw new Error('the test backend must not start');
   },
 };
+
+/**
+ * A backend that runs the command on the host and reports the sandbox as up.
+ *
+ * It carries the enforcement the test needs — a named advisory, for instance —
+ * without depending on the version of bubblewrap the host happens to ship.
+ */
+function fakeBackend(options: { advisory?: SandboxAdvisory } = {}): SandboxBackend {
+  return {
+    name: 'test-fake',
+    async isAvailable() {
+      return { available: true };
+    },
+    async describe() {
+      return {
+        binary: '/usr/bin/bwrap',
+        version: '0.9.0',
+        setuid: false,
+        warnings: [],
+        problems: [],
+        ...(options.advisory === undefined ? {} : { advisory: options.advisory }),
+      };
+    },
+    async start(_plan, spec): Promise<SandboxProcess> {
+      const child = spawn('/bin/sh', ['-c', spec.command], {
+        cwd: spec.cwd,
+        env: { PATH: '/usr/bin:/bin' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.setEncoding('utf8');
+      child.stdout?.on('data', (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr?.setEncoding('utf8');
+      child.stderr?.on('data', (chunk: string) => {
+        stderr += chunk;
+      });
+      const exited = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
+        (resolve) => {
+          child.on('close', (code, signal) => {
+            resolve({ exitCode: code, signal });
+          });
+        },
+      );
+      return {
+        pid: child.pid ?? -1,
+        establishment: Promise.resolve({
+          established: true,
+          layers: {
+            filesystem: true,
+            seccomp: true,
+            pathPolicy: false,
+            network: true,
+            supervisor: false,
+          },
+        }),
+        async wait() {
+          const { exitCode, signal } = await exited;
+          return { exitCode, signal, stdout, stderr };
+        },
+        kill() {
+          child.kill('SIGKILL');
+        },
+      };
+    },
+  };
+}
 
 /** Compare two dotted version numbers, the way the launcher does. */
 function compareVersions(left: string, right: string): number {
@@ -299,6 +373,91 @@ describe('CC-017 step 1 — the sandbox policy', () => {
   it('still exempts the plain command the exclusion names', () => {
     const result = evaluateSandbox(
       policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] }),
+      'linux',
+      'git status',
+      'available',
+    );
+    expect(result.decision).toBe('unconfined');
+    expect(result.exemptions).toEqual(['git status']);
+  });
+
+  // --- fix round 2, finding 1: the substitution check ran after the redirections were stripped ---
+
+  it('never exempts a command whose redirection target carries a command substitution', () => {
+    const excluded = policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] });
+
+    // Every spelling of a redirection: the target is deleted by the stripping,
+    // and the substitution has to be caught before that happens.
+    for (const command of [
+      'git status > "$(rm -rf /tmp/x)"',
+      'git status >> "$(rm -rf /tmp/x)"',
+      'git status < "$(rm -rf /tmp/x)"',
+      'git status 2> "$(rm -rf /tmp/x)"',
+      'git status >"$(rm -rf /tmp/x)"',
+      'git status > `rm -rf /tmp/x`',
+    ]) {
+      const result = evaluateSandbox(excluded, 'linux', command, 'available');
+      expect(result.decision, command).toBe('allow');
+      expect(result.exemptions, command).toBeUndefined();
+    }
+  });
+
+  it('never exempts a glob entry over a command that carries a command substitution', () => {
+    const excluded = policy({ allowUnsandboxedCommands: true, excludedCommands: ['git *'] });
+
+    // The glob covers the whole sub-command, so it is the one that must not be
+    // allowed to cover a substitution.
+    for (const command of [
+      'git status > "$(rm -rf /tmp/x)"',
+      'git status >> "$(rm -rf /tmp/x)"',
+      'git status < "$(rm -rf /tmp/x)"',
+      'git status 2> "$(rm -rf /tmp/x)"',
+      'git status >"$(rm -rf /tmp/x)"',
+      'git status > `rm -rf /tmp/x`',
+      'git status "$(rm -rf /tmp/x)"',
+      'git status $( $( rm -rf /tmp/x ) )',
+    ]) {
+      const result = evaluateSandbox(excluded, 'linux', command, 'available');
+      expect(result.decision, command).toBe('allow');
+      expect(result.exemptions, command).toBeUndefined();
+    }
+  });
+
+  it('still exempts the plain command and the plain glob the exclusion names', () => {
+    expect(matchingExclusions('git status', ['git status'])).toEqual(['git status']);
+    expect(matchingExclusions('git status', ['git *'])).toEqual(['git *']);
+    // A redirection that carries no substitution is still stripped before the
+    // comparison.
+    expect(matchingExclusions('git status > out.txt', ['git status'])).toEqual(['git status']);
+  });
+
+  it('does not exempt a command that an exclusion entry only names in part', () => {
+    // An entry that is exactly `git` does not cover `git status`.
+    expect(matchingExclusions('git status', ['git'])).toEqual([]);
+    expect(matchingExclusions('git', ['git'])).toEqual(['git']);
+  });
+
+  it('never exempts a command that carries a process substitution', () => {
+    // A shell that supports the process substitution runs the command inside
+    // the parentheses, exactly as it runs a `$( … )`.
+    const excluded = policy({ allowUnsandboxedCommands: true, excludedCommands: ['git *'] });
+    for (const command of [
+      'git status <(rm -rf /tmp/x)',
+      'git status >(rm -rf /tmp/x)',
+      'git status > <(rm -rf /tmp/x)',
+    ]) {
+      const result = evaluateSandbox(excluded, 'linux', command, 'available');
+      expect(result.decision, command).toBe('allow');
+      expect(result.exemptions, command).toBeUndefined();
+    }
+  });
+
+  // --- fix round 2, finding 6: the entry was reported with its stray space ---
+
+  it('reports the trimmed form of an exclusion entry', () => {
+    expect(matchingExclusions('git status', ['git status '])).toEqual(['git status']);
+    const result = evaluateSandbox(
+      policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status '] }),
       'linux',
       'git status',
       'available',
@@ -1011,6 +1170,259 @@ describe('CC-017 step 5 — the launcher', () => {
     expect(mapped.readOnlyPaths).toEqual(['/a']);
     expect(mapped.readWritePaths).toEqual(['/b']);
     expect(mapped.protectedPaths).toEqual(['/c', '/d', '/e']);
+  });
+
+  // --- fix round 2, finding 1: a substitution in a redirection target was an escape ---
+
+  it.skipIf(!bubblewrapAvailable)(
+    'never runs a substituted command on the host when the command is exempt',
+    async () => {
+      const root = temporaryDirectory();
+      const outside = temporaryDirectory();
+      const insideVictim = path.join(root, 'inside-victim.txt');
+      const outsideVictim = path.join(outside, 'outside-victim.txt');
+
+      const launched = await launchSandbox({
+        command:
+          `git status > "$(touch ${JSON.stringify(insideVictim)} ${JSON.stringify(outsideVictim)})"`,
+        cwd: root,
+        policy: policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] }),
+      });
+
+      // The command is **not** exempt: the shell evaluates the substitution
+      // before the command runs, so the exemption would run it on the host.
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      // The substitution ran inside the sandbox, so neither file is on the host.
+      // This is the proof: an exempt command would have created both of them.
+      expect(existsSync(insideVictim)).toBe(false);
+      expect(existsSync(outsideVictim)).toBe(false);
+
+      expect(launched.status.sandboxed).toBe(true);
+      expect(launched.status.exemptions).toBeUndefined();
+    },
+  );
+
+  // --- fix round 2, finding 2: a symlinked protected path aborted the launch ---
+
+  it('refuses the launch with a named reason when a protected path is a symbolic link', async () => {
+    const root = temporaryDirectory();
+    const target = path.join(root, 'settings.json');
+    writeFileSync(target, '{"token":"s3cret"}');
+    const link = path.join(root, 'link.json');
+    symlinkSync(target, link);
+
+    const plan = buildSandboxPlan({ command: 'true', cwd: root, protectedPaths: [link] });
+    expect(plan.refusals).toHaveLength(1);
+    expect(plan.refusals[0]).toContain(link);
+    expect(plan.refusals[0]).toMatch(/symbolic link/);
+    // Nothing is masked: the launch is refused instead of dying inside bwrap.
+    expect(plan.masks).toHaveLength(0);
+
+    await expect(
+      launchSandbox({ command: 'echo RAN', cwd: root, protectedPaths: [link] }),
+    ).rejects.toBeInstanceOf(SandboxRefusedError);
+  });
+
+  it('refuses the launch when the parent of a protected path is a symbolic link', () => {
+    const root = temporaryDirectory();
+    const real = path.join(root, 'real');
+    mkdirSync(real);
+    writeFileSync(path.join(real, 'settings.json'), '{}');
+    const link = path.join(root, 'link');
+    symlinkSync(real, link);
+    const protectedPath = path.join(link, 'settings.json');
+
+    const plan = buildSandboxPlan({ command: 'true', cwd: root, protectedPaths: [protectedPath] });
+    expect(plan.refusals).toHaveLength(1);
+    expect(plan.refusals[0]).toMatch(/symbolic link/);
+    expect(plan.masks).toHaveLength(0);
+  });
+
+  // --- fix round 2, finding 3: a symlinked mask target was not refused ---
+
+  it('refuses the launch with a named reason when the mask target is a symbolic link', () => {
+    const root = temporaryDirectory();
+    const real = path.join(root, 'real');
+    mkdirSync(real);
+    const link = path.join(root, 'link');
+    symlinkSync(real, link);
+
+    // The mask would be a tmpfs on the link, which the backend cannot mount.
+    const plan = buildSandboxPlan({ command: 'true', cwd: root, protectedPaths: [link] });
+    expect(plan.refusals).toHaveLength(1);
+    expect(plan.refusals[0]).toContain(link);
+    expect(plan.refusals[0]).toMatch(/symbolic link/);
+    expect(plan.masks).toHaveLength(0);
+  });
+
+  // --- fix round 2, finding 4: the advisory of an old bubblewrap was only a warning ---
+
+  it('promotes the advisory of an old backend to a named condition in the status', async () => {
+    const root = temporaryDirectory();
+    const advisory: SandboxAdvisory = {
+      id: BUBBLEWRAP_ADVISORY,
+      fixedIn: BUBBLEWRAP_MINIMUM_VERSION,
+      version: '0.9.0',
+      detail: 'bubblewrap 0.9.0 predates 0.12.0, which fixes CVE-2026-87766',
+    };
+
+    const launched = await launchSandbox({
+      command: 'echo advisory',
+      cwd: root,
+      backend: fakeBackend({ advisory }),
+    });
+
+    // The condition is named, so the caller can branch on it.
+    expect(launched.status.advisory?.id).toBe(BUBBLEWRAP_ADVISORY);
+    expect(launched.status.advisory?.version).toBe('0.9.0');
+    expect(launched.status.advisory?.fixedIn).toBe(BUBBLEWRAP_MINIMUM_VERSION);
+    // And it is a line of the reduced protection, so it cannot be missed.
+    expect(launched.status.reducedProtection.join(' ')).toMatch(/CVE-2026-87766/);
+    await launched.cleanup();
+  });
+
+  it('names the advisory of an old bubblewrap in the enforcement probe', () => {
+    const root = temporaryDirectory();
+    const fake = path.join(root, 'bwrap');
+    writeFileSync(fake, '#!/bin/sh\necho "bubblewrap 0.9.0"\n');
+    chmodSync(fake, 0o755);
+
+    const enforcement = probeEnforcementBinary(fake);
+    expect(enforcement.advisory?.id).toBe(BUBBLEWRAP_ADVISORY);
+    expect(enforcement.advisory?.version).toBe('0.9.0');
+    expect(enforcement.advisory?.fixedIn).toBe(BUBBLEWRAP_MINIMUM_VERSION);
+    // The backend is not refused over the version: the advisory is a condition.
+    expect(enforcement.problems).toEqual([]);
+  });
+
+  it.skipIf(!bubblewrapAvailable)(
+    'keeps an old bubblewrap available and reports its advisory',
+    async () => {
+      const backend = bubblewrapBackend();
+      const probe = await backend.isAvailable();
+      const enforcement = await backend.describe?.();
+      const version = enforcement?.version ?? '0.0.0';
+
+      if (compareVersions(version, BUBBLEWRAP_MINIMUM_VERSION) < 0) {
+        // The version never refuses the backend, and the advisory is visible.
+        expect(enforcement?.advisory?.id).toBe(BUBBLEWRAP_ADVISORY);
+        expect(probe.reason ?? '').not.toMatch(/CVE-2026-87766/);
+        expect(probe.warning ?? '').toMatch(/CVE-2026-87766/);
+
+        const root = temporaryDirectory();
+        const launched = await launchSandbox({ command: 'echo version', cwd: root });
+        expect(launched.status.advisory?.id).toBe(BUBBLEWRAP_ADVISORY);
+        expect(launched.status.reducedProtection.join(' ')).toMatch(/CVE-2026-87766/);
+        await launched.cleanup();
+        return;
+      }
+
+      // A fixed version carries no advisory at all.
+      expect(enforcement?.advisory).toBeUndefined();
+      expect(probe.warning ?? '').not.toMatch(/CVE-2026-87766/);
+    },
+  );
+
+  // --- fix round 2, finding 5: the unconfined path leaked the environment ---
+
+  it('filters the environment of an exempt command too', async () => {
+    const root = temporaryDirectory();
+    const command = 'echo "key=[$ANTHROPIC_API_KEY]"';
+    const launched = await launchSandbox({
+      command,
+      cwd: root,
+      env: { PATH: '/usr/bin:/bin', ANTHROPIC_API_KEY: 'sk-s3cret' },
+      policy: policy({ allowUnsandboxedCommands: true, excludedCommands: [command] }),
+    });
+
+    expect(launched.status.sandboxed).toBe(false);
+    expect(launched.status.exemptions).toEqual([command]);
+    const result = await launched.wait();
+    await launched.cleanup();
+
+    // The exempt command is still the agent's command: it does not see the key.
+    expect(result.stdout).toContain('key=[]');
+    expect(result.stdout).not.toContain('sk-s3cret');
+  });
+
+  it('does not leak the host environment into an exempt command', async () => {
+    const root = temporaryDirectory();
+    const command = 'echo "marker=[$CLONE_SANDBOX_HOST_MARKER]"';
+    process.env['CLONE_SANDBOX_HOST_MARKER'] = 'host-secret';
+    try {
+      const launched = await launchSandbox({
+        command,
+        cwd: root,
+        policy: policy({ allowUnsandboxedCommands: true, excludedCommands: [command] }),
+      });
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      expect(result.stdout).toContain('marker=[]');
+      expect(result.stdout).not.toContain('host-secret');
+    } finally {
+      delete process.env['CLONE_SANDBOX_HOST_MARKER'];
+    }
+  });
+
+  // --- fix round 2: the probes ---
+
+  it('resolves a relative protected path against the working directory', () => {
+    const root = temporaryDirectory();
+    const configDirectory = path.join(root, 'config');
+    mkdirSync(configDirectory);
+
+    const plan = buildSandboxPlan({
+      command: 'true',
+      cwd: root,
+      protectedPaths: ['config/settings.json'],
+    });
+
+    expect(plan.protectedPaths).toEqual([path.join(configDirectory, 'settings.json')]);
+    expect(plan.masks[0]?.target).toBe(configDirectory);
+    expect(plan.masks[0]?.kind).toBe('tmpfs');
+  });
+
+  it('masks a protected path that carries a trailing slash', () => {
+    const root = temporaryDirectory();
+    const configDirectory = path.join(root, 'config');
+    mkdirSync(configDirectory);
+
+    const plan = buildSandboxPlan({ command: 'true', cwd: root, protectedPaths: ['config/'] });
+
+    expect(plan.protectedPaths).toEqual([configDirectory]);
+    expect(plan.masks[0]?.target).toBe(configDirectory);
+    expect(plan.refusals).toHaveLength(0);
+  });
+
+  it('never masks the root of the filesystem', () => {
+    const root = temporaryDirectory();
+
+    const plan = buildSandboxPlan({ command: 'true', cwd: root, protectedPaths: ['/'] });
+
+    expect(plan.protectedPaths).toEqual(['/']);
+    expect(plan.masks).toHaveLength(0);
+    expect(plan.refusals).toHaveLength(0);
+  });
+
+  it.skipIf(!bubblewrapAvailable)('binds a read-write path that is a file', async () => {
+    const root = temporaryDirectory();
+    const file = path.join(root, 'notes.txt');
+    writeFileSync(file, 'hello');
+
+    const launched = await launchSandbox({
+      command: `cat ${JSON.stringify(file)}; echo "rc=$?"`,
+      cwd: root,
+      readWritePaths: [file],
+    });
+
+    expect(launched.status.sandboxed).toBe(true);
+    const result = await launched.wait();
+    await launched.cleanup();
+
+    expect(result.stdout).toContain('hello');
   });
 });
 

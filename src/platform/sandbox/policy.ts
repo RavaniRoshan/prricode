@@ -49,7 +49,12 @@
  *     command runs, so `git status "$(rm -rf /tmp/x)"` would run the `rm` on the
  *     host while the command itself is exempt. A part that carries a substitution
  *     is rejected outright, which is the fail-safe reading: the command is then
- *     sandboxed like any other.
+ *     sandboxed like any other. The check runs on the **raw** part, before the
+ *     redirections are stripped, because a substitution inside a redirection
+ *     target is a substitution too: `git status > "$(rm -rf /tmp/x)"` would run
+ *     the `rm` on the host just as surely. The **process substitution** forms
+ *     (`<( … )` and `>( … )`) are refused as well, because a shell that
+ *     supports them runs the command inside the parentheses.
  *   - `enabledPlatforms` is a **whitelist**: a platform that is not in the list is
  *     excluded. An unset list takes the default (`['linux']`, the only platform the
  *     implementation's backend implements); an explicitly empty list excludes every platform.
@@ -218,20 +223,28 @@ export function evaluateSandbox(
  * substitution is never exempt: the shell evaluates the substitution before the
  * command runs, so an exempt part that carries one would run the substituted
  * command on the host.
+ *
+ * **The substitution check runs on the raw part.** The redirections are
+ * stripped *after* it, because `stripRedirections` deletes the redirection's
+ * target — and a target that carries a substitution is exactly the escape this
+ * check exists to stop. The entry that is reported is the **trimmed** entry, so
+ * a list that carries a stray space does not report one.
  */
 export function matchingExclusions(command: string, entries: readonly string[]): string[] {
   if (entries.length === 0) return [];
-  const parts = splitShellCommand(command)
-    .map((part) => stripWrappers(stripRedirections(part)).trim())
-    .filter((part) => part.length > 0);
+  const parts = splitShellCommand(command).filter((part) => part.trim().length > 0);
   if (parts.length === 0) return [];
 
   const matched = new Set<string>();
-  for (const part of parts) {
-    if (carriesCommandSubstitution(part)) return [];
+  for (const rawPart of parts) {
+    // The raw part, before anything is stripped: a substitution in a
+    // redirection target is a substitution.
+    if (carriesCommandSubstitution(rawPart)) return [];
+    const part = stripWrappers(stripRedirections(rawPart)).trim();
+    if (part.length === 0) continue;
     const entry = entries.find((candidate) => exclusionMatches(candidate, part));
     if (entry === undefined) return [];
-    matched.add(entry);
+    matched.add(entry.trim());
   }
   return [...matched];
 }
@@ -241,10 +254,23 @@ export function matchingExclusions(command: string, entries: readonly string[]):
  *
  * Both spellings are refused: `$( … )` and the backtick form. The shell expands
  * them before the command runs, so a sub-command that carries one is not the
- * command the exclusion entry names.
+ * command the exclusion entry names. The check runs on the **raw** part, so a
+ * substitution that hides in a redirection target is caught as well.
+ *
+ * The **process substitution** forms (`<( … )` and `>( … )`) are refused too.
+ * They are not command substitutions, but a shell that supports them runs the
+ * command inside the parentheses, so an exempt part that carries one would run
+ * it on the host exactly as a `$( … )` would. This implementation's shell is `/bin/sh`,
+ * which is `dash` on some hosts and `bash` on others, so the refusal does not
+ * depend on which one it is.
  */
 function carriesCommandSubstitution(part: string): boolean {
-  return part.includes('$(') || part.includes('`');
+  return (
+    part.includes('$(') ||
+    part.includes('`') ||
+    part.includes('<(') ||
+    part.includes('>(')
+  );
 }
 
 /**
@@ -254,6 +280,10 @@ function carriesCommandSubstitution(part: string): boolean {
  * covers the sub-command only when it is the sub-command: the entry must cover
  * the **whole** sub-command, so `git status` does not cover `git status
  * --short` and, above all, does not cover `git status "$(rm -rf /tmp/x)"`.
+ *
+ * The entry is **trimmed** before it is compared, so a list that carries a
+ * stray space still covers the command it names; the trimmed form is the one
+ * that is reported.
  */
 function exclusionMatches(entry: string, part: string): boolean {
   const trimmed = entry.trim();

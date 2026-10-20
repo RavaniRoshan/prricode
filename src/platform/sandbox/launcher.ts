@@ -41,6 +41,15 @@
  * setuid-capable builds, and a distribution's version alone does not prove that
  * the fix is present.
  *
+ * **The version policy: an old bubblewrap stays available.** The advisory is
+ * promoted to a **named condition** — the status carries it as `advisory` and
+ * repeats it in `reducedProtection` — so the caller can branch on it rather
+ * than discover it in a log line. Refusing the backend would be *worse*: the
+ * implementation's `failIfUnavailable` default refuses the command outright, and the
+ * target's own default runs it **unconfined**, which is strictly less safe than
+ * running it inside a sandbox whose backend may carry a known advisory. The
+ * implementation therefore keeps the isolation and makes the risk visible.
+ *
  * **The backend.** The mount namespace, the namespaces and the seccomp filter are
  * established by **bubblewrap**, which is what the target itself uses on
  * Linux/WSL2. This implementation builds the plan itself — every bind, every mask, the
@@ -62,10 +71,20 @@
  *   - when neither is possible, the launch is **refused with a named reason**:
  *     this implementation never creates a directory on the host to make a mask fit.
  *
+ * **A mask never lands on a symbolic link.** A mask is a mount, and a mount
+ * lands on a **name**: a name that resolves through a link is mounted on the
+ * link rather than on the object it names, so the backend either fails the
+ * launch (`Can't create file at …`, `Can't mkdir …: Not a directory`) or masks
+ * something the caller did not name. A protected path that resolves through a
+ * link is therefore **refused with a named reason**, before the backend is
+ * started — the launch fails loudly instead of dying inside bubblewrap.
+ *
  * **The environment.** The sandboxed process gets an **allowlist**, never the
  * host's environment: `PATH`, `HOME`, `LANG`, `TERM` and the proxy-socket
  * variable, whatever the caller passes. The agent's API key therefore never
- * enters the sandbox, and the status does not echo the environment at all.
+ * enters the sandbox, and the status does not echo the environment at all. The
+ * **unconfined** path gets the same filtered environment: an exempt command is
+ * still the agent's command, so it must not see the host's environment either.
  *
  * Implementation choices (the plan does not pin them, so they are marked here):
  *
@@ -88,6 +107,7 @@ import { randomBytes } from 'node:crypto';
 import {
   closeSync,
   existsSync,
+  lstatSync,
   openSync,
   rmSync,
   statSync,
@@ -159,10 +179,13 @@ const BUBBLEWRAP_BINARY = '/usr/bin/bwrap';
  * The bubblewrap version that carries the CVE-2026-87766 fix.
  *
  * The fix is **not** backported to the setuid-capable builds, so the version
- * alone does not prove that the fix is present: the launcher reports the version
- * and warns when it is below this one.
+ * alone does not prove that the fix is present: the launcher reports the
+ * version, promotes the advisory to a named condition, and warns.
  */
 export const BUBBLEWRAP_MINIMUM_VERSION = '0.12.0';
+
+/** The advisory that the minimum version carries the fix for. */
+export const BUBBLEWRAP_ADVISORY = 'CVE-2026-87766';
 
 /**
  * The environment the sandboxed process gets when the caller supplies none.
@@ -365,11 +388,16 @@ export function buildSandboxPlan(spec: SandboxSpec): SandboxPlan {
     });
   }
 
+  // A relative path is relative to the **working directory** of the sandbox and
+  // not to the directory the launcher happens to run in: a policy that names
+  // `config/settings.json` means the one inside the tree the command runs in.
+  const inTree = (entry: string): string => path.resolve(workingDirectory, entry);
+
   const filesystem = planFilesystemPolicy(spec.filesystem ?? spec.policy?.filesystem ?? {});
 
   const readOnlyPaths = [...(spec.readOnlyPaths ?? []), ...filesystem.readOnlyPaths];
   for (const readOnly of readOnlyPaths) {
-    const resolved = path.resolve(readOnly);
+    const resolved = inTree(readOnly);
     mounts.push({
       kind: 'ro-bind',
       source: resolved,
@@ -380,7 +408,7 @@ export function buildSandboxPlan(spec: SandboxSpec): SandboxPlan {
 
   const readWritePaths = [...(spec.readWritePaths ?? []), ...filesystem.readWritePaths];
   for (const writable of readWritePaths) {
-    const resolved = path.resolve(writable);
+    const resolved = inTree(writable);
     mounts.push({
       kind: 'bind',
       source: resolved,
@@ -404,7 +432,7 @@ export function buildSandboxPlan(spec: SandboxSpec): SandboxPlan {
   const protectedPaths = [
     ...(spec.protectedPaths ?? []),
     ...filesystem.protectedPaths,
-  ].map((entry) => path.resolve(entry));
+  ].map((entry) => inTree(entry));
 
   const masks: SandboxMask[] = [];
   const refusals: string[] = [];
@@ -491,6 +519,13 @@ interface MaskPlan {
  * path; an empty file is bound over the protected path when the parent cannot
  * carry the mask and the path itself exists. When neither is possible the launch
  * is refused: this implementation never creates a directory on the host to make a mask fit.
+ *
+ * A protected path that **resolves through a symbolic link** is refused as well.
+ * A mask is a mount, and a mount lands on a *name*: a name that is a link is
+ * mounted on the link rather than on the object it names, so the backend either
+ * fails the launch (`Can't create file at …`) or masks something the caller did
+ * not name. The refusal names the link, so the caller can fix the path instead
+ * of watching the sandbox die inside bubblewrap.
  */
 function planMask(protectedPath: string, binds: readonly PlanBind[]): MaskPlan {
   const containing = containingBind(protectedPath, binds);
@@ -498,6 +533,18 @@ function planMask(protectedPath: string, binds: readonly PlanBind[]): MaskPlan {
     // The path is inside no bind, so the sandbox does not see it at all and
     // there is nothing to mask.
     return {};
+  }
+
+  // The parts of the path that the bind carries are the parts that exist as
+  // they are on the host inside the sandbox; the bind's own target is created
+  // as a real directory there, so a link above it does not carry in.
+  const link = symlinkBelow(protectedPath, containing.target);
+  if (link !== undefined) {
+    return {
+      refusal:
+        `the protected path ${protectedPath} cannot be masked: ${link} is a symbolic link, ` +
+        'and a mask would land on the link rather than on the path it names',
+    };
   }
 
   const stats = statOrUndefined(protectedPath);
@@ -528,6 +575,35 @@ function planMask(protectedPath: string, binds: readonly PlanBind[]): MaskPlan {
   // The bind that holds the path is read-only, so the sandbox can neither create
   // the path nor write to it. There is nothing to mask.
   return {};
+}
+
+/**
+ * The first part of a path, below a root, that is a symbolic link.
+ *
+ * The parts at or above the root are not inspected: the backend creates the
+ * root itself as a real directory inside the sandbox, so a link there does not
+ * carry in. A path that is not below the root at all has no such part.
+ */
+function symlinkBelow(candidate: string, root: string): string | undefined {
+  const relative = path.relative(root, candidate);
+  if (relative.length === 0 || relative === '..' || relative.startsWith(`..${path.sep}`)) {
+    return undefined;
+  }
+  let current = root;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    if (isSymbolicLink(current)) return current;
+  }
+  return undefined;
+}
+
+/** Whether a path is a symbolic link. */
+function isSymbolicLink(candidate: string): boolean {
+  try {
+    return lstatSync(candidate).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -645,6 +721,24 @@ export interface SandboxProcess {
   kill(): void;
 }
 
+/**
+ * The advisory that applies to the backend the launcher drives.
+ *
+ * It is a **named condition**, not a footnote: the caller can branch on
+ * `advisory.id` and decide what to do about it, and the status repeats it in
+ * `reducedProtection` so it cannot be missed.
+ */
+export interface SandboxAdvisory {
+  /** The identifier of the advisory, e.g. `CVE-2026-87766`. */
+  readonly id: string;
+  /** The version of the backend that carries the fix. */
+  readonly fixedIn: string;
+  /** The version of the backend that is installed. */
+  readonly version: string;
+  /** What the advisory means for the sandbox. */
+  readonly detail: string;
+}
+
 /** The enforcement a backend depends on. */
 export interface BackendEnforcement {
   /** The binary the backend drives. */
@@ -657,6 +751,8 @@ export interface BackendEnforcement {
   warnings: readonly string[];
   /** The reasons the enforcement cannot be used. */
   problems: readonly string[];
+  /** The advisory that applies to the enforcement, when one does. */
+  advisory?: SandboxAdvisory;
 }
 
 /** The backend that establishes the sandbox. */
@@ -691,6 +787,14 @@ export interface SandboxStatus {
   exemptions?: readonly string[];
   /** What the launcher knows about the enforcement the backend depends on. */
   enforcement?: BackendEnforcement;
+  /**
+   * The advisory that applies to the backend, when one does.
+   *
+   * A **named condition**: `advisory.id` says which advisory, `advisory.version`
+   * says which version carries it, and `advisory.fixedIn` says which version
+   * fixes it. The same advisory is repeated in `reducedProtection`.
+   */
+  advisory?: SandboxAdvisory;
   /** The plan the backend established. */
   plan: SandboxPlan;
 }
@@ -786,6 +890,12 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
   if (enforcement !== undefined) {
     for (const warning of enforcement.warnings) notes.push(warning);
   }
+  const advisory = enforcement?.advisory;
+  if (advisory !== undefined) {
+    // The advisory is a named condition **and** a line of the reduced
+    // protection, so it cannot be missed by a reader of the status alone.
+    reducedProtection.push(advisoryCondition(backend.name, advisory));
+  }
   notes.push(
     'the seccomp-notification supervisor is not attached: it needs a native listener, so the sandbox observes nothing.',
   );
@@ -816,6 +926,7 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
     reducedProtection,
     notes,
     ...(establishment.reason === undefined ? {} : { reason: establishment.reason }),
+    ...(advisory === undefined ? {} : { advisory }),
     ...(enforcement === undefined ? {} : { enforcement }),
     plan,
   };
@@ -834,6 +945,16 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
       await sandboxProcess.wait().catch(() => undefined);
     },
   };
+}
+
+/**
+ * The advisory as a line of the reduced protection.
+ *
+ * The line names the advisory and the backend it applies to, so a reader of
+ * the status alone can tell that the protection is reduced and why.
+ */
+function advisoryCondition(backendName: string, advisory: SandboxAdvisory): string {
+  return `the ${backendName} backend carries ${advisory.id}: ${advisory.detail}`;
 }
 
 /**
@@ -881,7 +1002,10 @@ async function runUnconfined(
 ): Promise<LaunchedSandbox> {
   const child = spawn('/bin/sh', ['-c', spec.command], {
     cwd: spec.cwd,
-    env: spec.env ?? process.env,
+    // The **same filtered environment** the sandboxed path uses: an exempt
+    // command is still the agent's command, so it must not see the host's
+    // environment — the agent's API key is in it.
+    env: sandboxEnvironment(spec),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const sandboxProcess = collect(child);
@@ -892,16 +1016,26 @@ async function runUnconfined(
     notes.push(`the sandbox backend was unavailable: ${availabilityReason}`);
   }
   if (availabilityWarning !== undefined) notes.push(availabilityWarning);
+  if (enforcement !== undefined) {
+    for (const warning of enforcement.warnings) notes.push(warning);
+  }
+
+  const advisory = enforcement?.advisory;
+  const reducedProtection = [...landlock.reducedProtection];
+  if (advisory !== undefined) {
+    reducedProtection.push(advisoryCondition(backendName, advisory));
+  }
 
   const status: SandboxStatus = {
     sandboxed: false,
     backend: backendName,
     layers: { ...NO_LAYERS },
     landlock,
-    reducedProtection: [...landlock.reducedProtection],
+    reducedProtection,
     notes,
     ...(evaluation.reason === undefined ? {} : { reason: evaluation.reason }),
     ...(evaluation.exemptions === undefined ? {} : { exemptions: evaluation.exemptions }),
+    ...(advisory === undefined ? {} : { advisory }),
     ...(enforcement === undefined ? {} : { enforcement }),
     plan: buildSandboxPlan(spec),
   };
@@ -1066,7 +1200,17 @@ export function bubblewrapBackend(): SandboxBackend {
       if (!probe.available) {
         return { available: false, reason: probe.reason };
       }
-      return { available: true, ...(probe.warning === undefined ? {} : { warning: probe.warning }) };
+      // The version never makes the backend unavailable: the advisory is a
+      // named condition on the status, and a refusal would run the command
+      // unconfined, which is strictly less safe.
+      const warnings = [
+        ...(info.advisory === undefined ? [] : [info.advisory.detail]),
+        ...(probe.warning === undefined ? [] : [probe.warning]),
+      ];
+      return {
+        available: true,
+        ...(warnings.length === 0 ? {} : { warning: warnings.join('; ') }),
+      };
     },
     async start(plan: SandboxPlan, spec: SandboxSpec): Promise<SandboxProcess> {
       const filter = buildSeccompFilter({ denied: plan.deniedSyscalls });
@@ -1140,14 +1284,17 @@ function bubblewrapLayers(): SandboxLayers {
  *
  * The **version** and the **setuid bit** are both read: a setuid bubblewrap is a
  * problem, because this design never uses a setuid helper, and a version below
- * the one that carries the CVE-2026-87766 fix is a warning, because the fix is
- * not backported to the setuid-capable builds.
+ * the one that carries the CVE-2026-87766 fix is an **advisory**, because the
+ * fix is not backported to the setuid-capable builds. The advisory is a named
+ * condition on the status, not a warning that scrolls past: the backend stays
+ * available, and the caller is told which advisory applies.
  */
 export function probeEnforcementBinary(binary: string): BackendEnforcement {
   const problems: string[] = [];
   const warnings: string[] = [];
   let setuid = false;
   let version: string | undefined;
+  let advisory: SandboxAdvisory | undefined;
 
   try {
     const stats = statSync(binary);
@@ -1168,11 +1315,17 @@ export function probeEnforcementBinary(binary: string): BackendEnforcement {
   if (version === undefined) {
     warnings.push(`the version of the bubblewrap binary at ${binary} could not be read`);
   } else if (compareVersions(version, BUBBLEWRAP_MINIMUM_VERSION) < 0) {
-    warnings.push(
-      `bubblewrap ${version} predates ${BUBBLEWRAP_MINIMUM_VERSION}, which fixes CVE-2026-87766 ` +
-        '(a symlink traversal through bubblewrap’s /oldroot staging mount); the fix is not ' +
-        'backported to the setuid-capable builds, so the version alone does not prove that it is present',
-    );
+    const detail =
+      `bubblewrap ${version} predates ${BUBBLEWRAP_MINIMUM_VERSION}, which fixes ${BUBBLEWRAP_ADVISORY} ` +
+      '(a symlink traversal through bubblewrap’s /oldroot staging mount); the fix is not ' +
+      'backported to the setuid-capable builds, so the version alone does not prove that it is present';
+    warnings.push(detail);
+    advisory = {
+      id: BUBBLEWRAP_ADVISORY,
+      fixedIn: BUBBLEWRAP_MINIMUM_VERSION,
+      version,
+      detail,
+    };
   }
 
   return {
@@ -1181,6 +1334,7 @@ export function probeEnforcementBinary(binary: string): BackendEnforcement {
     setuid,
     warnings,
     problems,
+    ...(advisory === undefined ? {} : { advisory }),
   };
 }
 
