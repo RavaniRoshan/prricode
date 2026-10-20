@@ -42,6 +42,18 @@
  *     named `__proto__` can never reach `Object.prototype` through it. The
  *     target "guards against `__proto__` as a skill name", and this implementation refuses
  *     the name outright: `setOverride('__proto__', …)` throws.
+ *   - The merged settings' `skillOverrides` block is merged **per leaf**, so a
+ *     **user** tier's override for skill `beta` survives a **local** tier that
+ *     declares `skillOverrides: { alpha: … }`. This **diverges** from the
+ *     audit's "the first source that defines a key wins", which is a **per-key**
+ *     order: under the target's model the local block would replace the user
+ *     block whole, and `beta` would fall through to the session, the policy
+ *     tier and the flag tier. The merge is inherited from `CC-003`'s
+ *     `mergeMergedSettings` (`src/config/tiers.ts`), which merges two plain
+ *     objects recursively so that two tiers that each define a different skill
+ *     both survive. This implementation keeps that model, and the divergence is
+ *     **observable through the skill overrides**, so it is pinned by a test in
+ *     `tests/contracts/extensions.test.ts`.
  */
 
 import {

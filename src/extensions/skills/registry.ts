@@ -5,6 +5,28 @@
  * milestone of
  * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
  *
+ * ## What is observed and what is not
+ *
+ * The audit's §2.8 closes with:
+ *
+ * > **Partial:** the **subagent definition lifecycle** — where a subagent's
+ * > definition is found, parsed and registered — and the standalone
+ * > (non-plugin) skill directory scan were not traced to resolved relations.
+ * > Their names and storage are observed; their behavior was not.
+ *
+ * So the split is:
+ *
+ *   - **Observed** — the *names* and the *storage* of a skill: a skill lives in
+ *     a directory named after it and holds a `SKILL.md`; and the **origins**
+ *     the plan's Step 1 names — `project`, `local`, `user`, `plugin` and
+ *     `mcp`.
+ *   - **A implementation choice** — the *behavior* of the standalone (non-plugin) skill
+ *     directory scan, because §2.8 marks that scan **partial**. The mechanics
+ *     below — a `SKILL.md` per subdirectory, the `description` read from its
+ *     frontmatter, the `own` flag, the precedence, the byte limit — are the
+ *     implementation's. This implementation models the scan on the plugin command discovery,
+ *     whose rules §2.8 *does* observe.
+ *
  * ## The four discovery sources
  *
  * The plan's Step 1: "a skill in a project `.claude/skills` directory is
@@ -32,12 +54,33 @@
  *
  * ## The precedence
  *
- * The plan orders the sources `project, local, user, plugin, mcp`. A name that
- * two roots provide is won by the earlier source in that order; two roots of
- * the same source are won by the order they were declared in.
+ * A name two roots provide is won by the earlier source in the order
+ * `project > local > user > plugin > mcp`; two roots of the same source are
+ * won by the order they were declared in.
+ *
+ * Implementation choice: the plan **names** the five origins but does not order them,
+ * and the audit marks the scan partial — so the order is this implementation's. It is
+ * load-bearing: `local` beating `user` is exactly what makes the plan's Step 5
+ * work.
+ *
+ * A name two **contributed** skills provide — two plugins that ship a skill
+ * with the same name — is a **collision**: the winner is the first one
+ * declared, and the other providers are reported in `collidesWith` rather
+ * than dropped silently.
+ *
+ * ## The cost of a lookup (a implementation choice)
+ *
+ * The registry is **re-scanned** every time it is asked for its skills, so a
+ * skill written after the registry was created is found. A `resolve(name)`
+ * therefore costs a directory walk of every root, a `stat` of every
+ * `SKILL.md`, and — for a file that changed — a read and a parse; the parse
+ * is **cached** by size and modification time, so an unchanged file is not
+ * read twice. The tiers are merged once per resolved skill, so resolving N
+ * skills merges the settings N times.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import type { Stats } from 'node:fs';
 import path from 'node:path';
 
 import type { SettingsTierMap } from '../../config/tiers.js';
@@ -63,6 +106,16 @@ import {
 } from './source.js';
 
 export type { DiscoveredItem, DiscoverySource, SkillSource } from './source.js';
+
+/**
+ * The byte limit a skill file may not exceed.
+ *
+ * Implementation choice — see the file header. The plugin command path caps a command
+ * file at 10 000 bytes; a skill definition is a longer document, so the
+ * implementation's cap is 1 MiB. A file over the cap is **surfaced** with a problem
+ * rather than read.
+ */
+export const SKILL_FILE_BYTE_LIMIT = 1_048_576;
 
 /**
  * A directory the registry scans for skills.
@@ -118,6 +171,14 @@ export interface Skill {
   mode: SkillOverrideMode;
   /** The plugin or the MCP server that contributes the skill, when one does. */
   provider?: string;
+  /**
+   * The other providers that provide a skill with this name.
+   *
+   * A name two **contributed** skills provide is a collision: the winner is
+   * the first one declared, and the losers are reported here rather than
+   * dropped silently.
+   */
+  collidesWith?: string[];
 }
 
 /** A skill the session may use. */
@@ -198,24 +259,27 @@ export function defaultSkillRoots(cwd: string, configDir: string): SkillRoot[] {
   ];
 }
 
-function readSkillFile(filePath: string): { description?: string; problem?: string } {
-  let text: string;
-  try {
-    text = readFileSync(filePath, 'utf8');
-  } catch {
-    return { problem: 'the skill file could not be read' };
-  }
-  const parsed = parseFrontmatter(text);
-  const problem = parsed.problem ?? skillFrontmatterProblem(parsed.frontmatter);
-  const rawDescription = frontmatterValue(parsed.frontmatter, 'description');
-  const description = isTextScalar(rawDescription) ? rawDescription : undefined;
-  return {
-    ...(description === undefined ? {} : { description }),
-    ...(problem === undefined ? {} : { problem }),
-  };
+/** What a skill file's read found. */
+interface SkillFileContent {
+  /** The description, when the frontmatter carries a text one. */
+  description?: string;
+  /** The problem with the skill, when there is one. */
+  problem?: string;
 }
 
-/** Whether a path is a directory. */
+/** A skill file that was read, with the stat that proved it is current. */
+interface CachedSkillFile {
+  /** The size of the file when it was read. */
+  size: number;
+  /** The modification time of the file when it was read. */
+  mtimeMs: number;
+  /** What the read found. */
+  content: SkillFileContent;
+}
+
+/**
+ * Whether a path is a directory.
+ */
 function isDirectory(candidatePath: string): boolean {
   try {
     return statSync(candidatePath).isDirectory();
@@ -238,6 +302,49 @@ export function createSkillRegistry(options: SkillRegistryOptions = {}): SkillRe
       ? defaultSkillRoots(options.cwd, options.configDir)
       : []);
   const contributions: SkillContribution[] = [...(options.contributions ?? [])];
+
+  // The read cache: a skill file that has not changed is not read twice.
+  const fileCache = new Map<string, CachedSkillFile>();
+
+  const readSkillFile = (filePath: string): SkillFileContent => {
+    let stats: Stats;
+    try {
+      stats = statSync(filePath);
+    } catch {
+      return { problem: 'the skill file could not be read' };
+    }
+
+    // A file over the byte limit is surfaced, not read.
+    if (stats.size > SKILL_FILE_BYTE_LIMIT) {
+      return { problem: 'the skill file is over the byte limit' };
+    }
+
+    const cached = fileCache.get(filePath);
+    if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+      return cached.content;
+    }
+
+    let text: string;
+    try {
+      text = readFileSync(filePath, 'utf8');
+    } catch {
+      return { problem: 'the skill file could not be read' };
+    }
+    const parsed = parseFrontmatter(text);
+    const problem = parsed.problem ?? skillFrontmatterProblem(parsed.frontmatter);
+    const rawDescription = frontmatterValue(parsed.frontmatter, 'description');
+    const description = isTextScalar(rawDescription) ? rawDescription : undefined;
+    const content: SkillFileContent = {
+      ...(description === undefined ? {} : { description }),
+      ...(problem === undefined ? {} : { problem }),
+    };
+    fileCache.set(filePath, {
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+      content,
+    });
+    return content;
+  };
 
   const collect = (): Candidate[] => {
     const candidates: Candidate[] = [];
@@ -322,6 +429,14 @@ export function createSkillRegistry(options: SkillRegistryOptions = {}): SkillRe
       const source = shadowed ? (synced?.source ?? winner.source) : winner.source;
       const own = shadowed ? false : winner.own;
 
+      // A name two **contributed** skills provide is a collision: the losers
+      // are reported rather than dropped silently.
+      const collidesWith = sorted
+        .slice(1)
+        .filter((candidate) => candidate.source === winner.source)
+        .map((candidate) => candidate.provider ?? candidate.path)
+        .filter((provider, index, all) => all.indexOf(provider) === index);
+
       const mode =
         resolveSkillOverrideMode(name, {
           tiers: options.tiers,
@@ -337,6 +452,7 @@ export function createSkillRegistry(options: SkillRegistryOptions = {}): SkillRe
         ...(winner.description === undefined ? {} : { description: winner.description }),
         ...(winner.problem === undefined ? {} : { problem: winner.problem }),
         ...(winner.provider === undefined ? {} : { provider: winner.provider }),
+        ...(collidesWith.length === 0 ? {} : { collidesWith }),
       });
     }
 

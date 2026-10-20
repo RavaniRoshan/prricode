@@ -38,7 +38,35 @@
  *     manifest is broken only when it is not a JSON object.
  *   - The **reason** a plugin with no `SKILL.md` at its root is broken is the
  *     implementation's; the audit pins only the "it is not a JSON object" reason.
+ *
+ * ## The path boundary (a implementation choice)
+ *
+ * A manifest is **untrusted input**: it arrives from a marketplace or a shared
+ * repository, and every path it declares is resolved against the plugin root.
+ * The target's behavior here is **unobserved** — the audit says nothing about
+ * a plugin reaching outside its own root — so the refusal is a **implementation
+ * choice**. The plan's Global Constraint requires that "permissions, **path
+ * boundaries**, shell execution, approval prompts, and credential redaction
+ * are enforced by **implementation-owned** code, independent of model instructions", so
+ * the boundary is enforced here, in this implementation's own code.
+ *
+ * The rule is: a declared path is used only when it is **inside the plugin
+ * root**, where "inside" means
+ *
+ *   - the path, resolved against the plugin root, is the root itself or lies
+ *     under it — the comparison is made on the **lexically resolved** path, so
+ *     a `../` escape is refused before anything is read; and
+ *   - the path, with **every symlink resolved** (`realpath`), is still the
+ *     root itself or under it — so a symlink inside the root that points
+ *     outside it is refused too.
+ *
+ * A refused path is reported with a **named reason**:
+ * `PLUGIN_PATH_OUTSIDE_ROOT_REASON` for the lexical escape and
+ * `PLUGIN_PATH_SYMLINK_OUTSIDE_ROOT_REASON` for the symlink escape.
  */
+
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
 
 import { isPlainObject } from '../skills/frontmatter.js';
 
@@ -141,6 +169,89 @@ export interface PluginManifestParse {
   manifest?: PluginManifest;
   /** The reason the manifest is broken, when it is. */
   reason?: string;
+}
+
+/**
+ * The reason a manifest-declared path is refused because it leaves the plugin
+ * root.
+ *
+ * Implementation choice — see the file header.
+ */
+export const PLUGIN_PATH_OUTSIDE_ROOT_REASON = 'it resolves outside the plugin root';
+
+/**
+ * The reason a manifest-declared path is refused because a symlink inside the
+ * plugin root points outside it.
+ *
+ * Implementation choice — see the file header.
+ */
+export const PLUGIN_PATH_SYMLINK_OUTSIDE_ROOT_REASON =
+  'it is a symlink that resolves outside the plugin root';
+
+/** The result of resolving a manifest-declared path against the plugin root. */
+export interface PluginPathResolution {
+  /** Whether the path may be used. */
+  ok: boolean;
+  /** The absolute path, resolved against the plugin root. */
+  path: string;
+  /** The path with every symlink resolved, when the path exists. */
+  real?: string;
+  /** The reason the path was refused, when it was. */
+  reason?: string;
+}
+
+/**
+ * The real path of a path, or `undefined` when it cannot be resolved.
+ */
+function realPathOrUndefined(candidate: string): string | undefined {
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a path is a root itself or lies under it.
+ */
+function isUnder(root: string, candidate: string): boolean {
+  if (candidate === root) return true;
+  const prefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  return candidate.startsWith(prefix);
+}
+
+/**
+ * Resolve a manifest-declared path against the plugin root and refuse it when
+ * it leaves the root.
+ *
+ * The path is refused when it escapes the root **lexically** (`../outside`),
+ * and when a **symlink** inside the root points outside it — the second check
+ * is made on the `realpath` of the path, so a link cannot smuggle a path out
+ * of the root. A path that does not exist is *not* refused here: the caller
+ * reports that separately.
+ *
+ * Implementation choice — see the file header.
+ */
+export function resolvePluginPath(root: string, declared: string): PluginPathResolution {
+  const rootPath = path.resolve(root);
+  const resolved = path.resolve(rootPath, declared);
+
+  if (!isUnder(rootPath, resolved)) {
+    return { ok: false, path: resolved, reason: PLUGIN_PATH_OUTSIDE_ROOT_REASON };
+  }
+
+  const real = realPathOrUndefined(resolved);
+  if (real === undefined) {
+    // The path does not exist; the caller reports that itself.
+    return { ok: true, path: resolved };
+  }
+
+  const rootReal = realPathOrUndefined(rootPath) ?? rootPath;
+  if (!isUnder(rootReal, real)) {
+    return { ok: false, path: resolved, reason: PLUGIN_PATH_SYMLINK_OUTSIDE_ROOT_REASON };
+  }
+
+  return { ok: true, path: resolved, real };
 }
 
 /**

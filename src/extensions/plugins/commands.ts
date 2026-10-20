@@ -39,6 +39,15 @@
  *   - A directory that holds a `SKILL.md` in a **subdirectory** contributes no
  *     command — the subdirectory is a skill, not a command — but it does
  *     silence the "no commands found" warning.
+ *
+ * ## The path boundary (a implementation choice)
+ *
+ * A manifest is untrusted input, so every path it declares is resolved against
+ * the plugin root and **refused** when it leaves it — the lexical escape and
+ * the symlink escape alike. The rule, its named reasons and its implementation-choice
+ * status live in `./manifest.ts`; this module applies it to the commands path,
+ * to the command file it reads, and to the `commandsMetadata` source it
+ * matches a name against.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -46,6 +55,8 @@ import path from 'node:path';
 
 import { parseFrontmatter } from '../skills/frontmatter.js';
 import { isSafeLookupName } from '../skills/source.js';
+
+import { resolvePluginPath } from './manifest.js';
 
 /**
  * The byte limit a plugin command file may not exceed.
@@ -181,7 +192,11 @@ function metadataKeyForPath(
   for (const [key, entry] of Object.entries(metadata)) {
     if (!isSafeLookupName(key)) continue;
     if (typeof entry?.source !== 'string') continue;
-    if (path.resolve(root, entry.source) !== target) continue;
+    // A metadata source is a manifest-declared path, so it is refused when it
+    // leaves the plugin root — an escaping source may not name a command.
+    const resolution = resolvePluginPath(root, entry.source);
+    if (!resolution.ok) continue;
+    if (path.resolve(resolution.path) !== target) continue;
     return key;
   }
   return undefined;
@@ -208,32 +223,47 @@ export function discoverPluginCommands(
   const warnings: string[] = [];
 
   const addFileCommand = (filePath: string): void => {
-    const size = fileSize(filePath);
+    // The command file is read only when it is inside the plugin root — a
+    // symlinked file may not smuggle a body out of the root.
+    const resolution = resolvePluginPath(root, filePath);
+    if (!resolution.ok) {
+      warnings.push(
+        `Skipping plugin command \`${resolution.path}\`: ${resolution.reason}`,
+      );
+      return;
+    }
+
+    const size = fileSize(resolution.path);
     if (size !== undefined && size > byteLimit) {
       warnings.push(
-        `Skipping plugin command \`${filePath}\`: exceeds ${byteLimit} byte limit`,
+        `Skipping plugin command \`${resolution.path}\`: exceeds \`${byteLimit}\` byte limit`,
       );
       return;
     }
 
     let text: string;
     try {
-      text = readFileSync(filePath, 'utf8');
+      text = readFileSync(resolution.path, 'utf8');
     } catch {
-      warnings.push(`Skipping plugin command \`${filePath}\`: it could not be read`);
+      warnings.push(`Skipping plugin command \`${resolution.path}\`: it could not be read`);
       return;
     }
 
     const parsed = parseFrontmatter(text);
-    const metadataKey = metadataKeyForPath(commandsMetadata, root, filePath);
-    const baseName = path.basename(filePath, '.md');
+    const metadataKey = metadataKeyForPath(commandsMetadata, root, resolution.path);
+    const baseName = path.basename(resolution.path, '.md');
     const name = metadataKey === undefined ? `${plugin}:${baseName}` : `${plugin}:${metadataKey}`;
+
+    // The body is stored in the interner, and the command carries the interned
+    // body — so two commands with the same body share one string.
+    const bodyId = interner.intern(parsed.body);
+    const body = interner.resolve(bodyId) ?? parsed.body;
 
     commands.push({
       name,
-      path: filePath,
-      bodyId: interner.intern(parsed.body),
-      body: parsed.body,
+      path: resolution.path,
+      bodyId,
+      body,
       frontmatter: parsed.frontmatter,
       ...(parsed.problem === undefined ? {} : { frontmatterProblem: parsed.problem }),
       inline: false,
@@ -241,7 +271,12 @@ export function discoverPluginCommands(
   };
 
   for (const declared of commandsPaths) {
-    const commandsPath = path.resolve(root, declared);
+    const resolution = resolvePluginPath(root, declared);
+    if (!resolution.ok) {
+      warnings.push(`Skipping plugin command \`${resolution.path}\`: ${resolution.reason}`);
+      continue;
+    }
+    const commandsPath = resolution.path;
 
     if (isDirectory(commandsPath)) {
       let entries: string[] = [];
@@ -288,11 +323,12 @@ export function discoverPluginCommands(
     if (typeof entry?.source === 'string') continue;
 
     const body = entry.content;
+    const bodyId = interner.intern(body);
     commands.push({
       name: `${plugin}:${key}`,
       path: `<inline:${plugin}:${key}>`,
-      bodyId: interner.intern(body),
-      body,
+      bodyId,
+      body: interner.resolve(bodyId) ?? body,
       frontmatter: {},
       inline: true,
     });

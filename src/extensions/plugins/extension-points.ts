@@ -39,6 +39,9 @@
  *     throwing: a host that does not implement a point is not an error.
  *   - The registry never **mutates** the caller's payload; the defaults are
  *     applied to a copy.
+ *   - The `telemetry.log` destination is **normalized** to the two the audit
+ *     names: `anthropic`, unless the caller asked for `collector`. A caller
+ *     that asked for anything else is given `anthropic`.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -158,8 +161,13 @@ export function createExtensionPointRegistry(): ExtensionPointRegistry {
       effective['tool_use_id'] = generateToolUseId();
     }
 
-    if (point === 'telemetry.log' && effective['destination'] === undefined) {
-      effective['destination'] = DEFAULT_TELEMETRY_DESTINATION;
+    if (point === 'telemetry.log') {
+      const requested = effective['destination'];
+      // The target gives the point a destination of `anthropic` unless the
+      // caller asked for `collector`.
+      if (requested !== COLLECTOR_TELEMETRY_DESTINATION) {
+        effective['destination'] = DEFAULT_TELEMETRY_DESTINATION;
+      }
     }
 
     return effective;

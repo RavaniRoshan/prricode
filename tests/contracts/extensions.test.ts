@@ -25,10 +25,18 @@
  *   - the plugin command discovery rules: the three naming shapes, the
  *     empty-directory warning, the byte limit and the body interning;
  *   - the marketplace install flow: refused versus failed, the two disable
- *     reasons, the enable hint, the version transition and the orphan marker.
+ *     reasons, the enable hint, the version transition and the orphan marker;
+ *   - the plugin **path boundary**: a manifest path that leaves the plugin
+ *     root — lexically or through a symlink — is refused, for the commands,
+ *     skills, agents and every other manifest-declared key;
+ *   - the **collisions** between two plugins that provide the same skill or
+ *     subagent name: they are reported, not dropped silently;
+ *   - the **byte caps** on the skill and subagent definition files;
+ *   - the IDE bridge's **action** validation: an action is a single path
+ *     segment.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -53,16 +61,21 @@ import {
   SKILL_SAVE_MODES,
   SKILL_SYNCED_FOLDER_NOTE,
   SKILL_TELEMETRY_EVENTS,
+  isSkillSaveMode,
   proposeSkillReadCheck,
   selectSkillSaveMode,
   skillSaveGuidance,
 } from '../../src/extensions/skills/save.js';
 import {
   createSkillRegistry,
+  SKILL_FILE_BYTE_LIMIT,
   type Skill,
   type SkillRoot,
 } from '../../src/extensions/skills/registry.js';
-import { createSubagentRegistry } from '../../src/extensions/subagents/registry.js';
+import {
+  createSubagentRegistry,
+  SUBAGENT_FILE_BYTE_LIMIT,
+} from '../../src/extensions/subagents/registry.js';
 import {
   EXTENSION_POINTS,
   createExtensionPointRegistry,
@@ -81,7 +94,7 @@ import {
   createPluginManager,
   type PluginInstallRequest,
 } from '../../src/extensions/plugins/registry.js';
-import { createIdeBridge, type IdeIntegration } from '../../src/integration/ide/bridge.js';
+import { createIdeBridge, IDE_ACTIONS, isIdeAction, type IdeIntegration } from '../../src/integration/ide/bridge.js';
 
 const temps: string[] = [];
 
@@ -233,6 +246,54 @@ describe('skill discovery', () => {
     expect(skill?.source).toBe('plugin');
     expect(skill?.provider).toBe('demo');
   });
+
+  it('never lets a skill directory named "__proto__" reach the prototype', () => {
+    const root = tempDir();
+    writeSkill(root, '__proto__');
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((skill) => skill.name)).toEqual([]);
+    expect(registry.resolve('__proto__')).toBeUndefined();
+    expect(({} as Record<string, unknown>)['__proto__']).toBe(Object.prototype);
+  });
+
+  it('surfaces a skill file over the byte limit rather than reading it', () => {
+    const root = tempDir();
+    const skillDir = path.join(root, 'huge');
+    mkdirSync(skillDir, { recursive: true });
+    writeFile(path.join(skillDir, 'SKILL.md'), 'x'.repeat(SKILL_FILE_BYTE_LIMIT + 1));
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+    const skill = registry.resolve('huge');
+
+    expect(skill).toBeDefined();
+    expect(skill?.problem).toBe('the skill file is over the byte limit');
+    expect(skill?.description).toBeUndefined();
+  });
+
+  it('reports a skill name two plugins provide, instead of dropping one silently', () => {
+    const registry = createSkillRegistry({
+      contributions: [
+        {
+          name: 'shared',
+          source: 'plugin',
+          path: '/plugins/first/skills/shared/SKILL.md',
+          provider: 'first',
+        },
+        {
+          name: 'shared',
+          source: 'plugin',
+          path: '/plugins/second/skills/shared/SKILL.md',
+          provider: 'second',
+        },
+      ],
+    });
+
+    const skill = registry.resolve('shared');
+    expect(skill?.provider).toBe('first');
+    expect(skill?.collidesWith).toEqual(['second']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -363,6 +424,19 @@ describe('the skill override resolution', () => {
     expect(registry.resolve('project-skill')?.mode).toBe('on');
   });
 
+  it('merges the skillOverrides block per leaf, so a user tier survives a local tier', () => {
+    const tiers = tierMap({
+      localSettings: { skillOverrides: { alpha: 'off' } },
+      userSettings: { skillOverrides: { beta: 'name-only' } },
+    });
+
+    // The audit's "the first source that defines a key wins" is a **per-key**
+    // order, so the local block would replace the user block whole. This implementation
+    // merges per leaf (CC-003's model), so `beta` survives.
+    expect(resolveSkillOverrideMode('alpha', { tiers })).toBe('off');
+    expect(resolveSkillOverrideMode('beta', { tiers })).toBe('name-only');
+  });
+
   it('keeps the session store shape: read, brought and skillOverrides', () => {
     const session = createSkillSessionStore();
     expect(session.read).toBe(false);
@@ -460,6 +534,12 @@ describe('the skill frontmatter rule', () => {
         frontmatterProblem: 'the description is not text',
       }),
     ).not.toThrow();
+  });
+
+  it('treats a present-but-undefined frontmatter field as absent', () => {
+    // The audit's literal reading — "the first of … whose value is not a
+    // string" — would throw for an `undefined` value. This implementation skips it.
+    expect(() => assertSkillFrontmatter({ source: undefined })).not.toThrow();
   });
 
   it('parses the frontmatter with key normalization and reports the problem', () => {
@@ -590,6 +670,19 @@ describe('the extension-point registry', () => {
     expect(seen['destination']).toBe('collector');
   });
 
+  it('normalizes any other telemetry destination to anthropic', async () => {
+    const registry = createExtensionPointRegistry();
+    let seen: Record<string, unknown> = {};
+    registry.register('telemetry.log', (payload) => {
+      seen = payload;
+      return 'ok';
+    });
+
+    await registry.invoke('telemetry.log', { event: 'x', destination: 'somewhere-else' });
+
+    expect(seen['destination']).toBe('anthropic');
+  });
+
   it('validates the frontmatter at the skill.prompt extension point', async () => {
     const registry = createExtensionPointRegistry();
     registry.register('skill.prompt', () => 'prompt');
@@ -612,6 +705,21 @@ describe('the extension-point registry', () => {
     });
 
     expect(resolved).toMatchObject({ name: 'a-skill', source: 'built-in' });
+  });
+
+  it('keeps the source the skill.prompt frontmatter carries', async () => {
+    const registry = createExtensionPointRegistry();
+    registry.register('skill.prompt', (payload) => ({
+      name: payload['name'],
+      body: 'Body.',
+    }));
+
+    const resolved = await registry.invoke('skill.prompt', {
+      name: 'a-skill',
+      frontmatter: { description: 'A skill.', source: 'plugin' },
+    });
+
+    expect(resolved).toMatchObject({ name: 'a-skill', source: 'plugin' });
   });
 });
 
@@ -751,6 +859,24 @@ describe('the skill-save protocol', () => {
     expect(inside.note).toBe(SKILL_SYNCED_FOLDER_NOTE);
     expect(inside.guidance.endsWith(SKILL_SYNCED_FOLDER_NOTE)).toBe(true);
     expect(outside.note).toBeUndefined();
+  });
+
+  it('always selects a known guidance mode, so the note\'s "known mode" rule holds', () => {
+    const requests = [
+      { files: ['/tmp/skill/SKILL.md'], tools: [cloudTool] },
+      { files: ['/tmp/skill/SKILL.md'], tools: [cardTool] },
+      { files: ['/tmp/skill/SKILL.md'], tools: [linkTool] },
+      { files: ['/tmp/skill/SKILL.md'], tools: [] },
+      { files: ['/tmp/skill/SKILL.md'], tools: [cloudTool], remote: true },
+      { files: ['/tmp/skill/SKILL.md'], tools: [cloudTool], agentId: 'agent-1' },
+      { files: ['/tmp/other.md'], tools: [cloudTool] },
+    ];
+
+    for (const request of requests) {
+      const mode = selectSkillSaveMode(request);
+      expect(isSkillSaveMode(mode)).toBe(true);
+      expect(skillSaveGuidance(request).mode).toBe(mode);
+    }
   });
 
   it('states the note the target appends', () => {
@@ -945,6 +1071,124 @@ describe('the plugin manifest schema', () => {
     expect(manager.resolve('__proto__')).toBeUndefined();
     expect(manager.resolve('constructor')).toBeUndefined();
   });
+
+  it('discovers the plugins under the plugins root', () => {
+    const pluginsRoot = tempDir();
+    writeFile(
+      path.join(pluginsRoot, 'demo', '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'demo' }),
+    );
+    writeFile(
+      path.join(pluginsRoot, 'demo', 'SKILL.md'),
+      '---\ndescription: A.\n---\n\nBody.\n',
+    );
+    writeFile(path.join(pluginsRoot, 'notes.txt'), 'not a plugin');
+
+    const manager = createPluginManager({ pluginsRoot });
+    const discovered = manager.discover();
+
+    expect(discovered.map((entry) => entry.name)).toEqual(['demo']);
+    expect(discovered[0]?.source).toBe('plugin');
+    expect(discovered[0]?.path).toBe(path.join(pluginsRoot, 'demo'));
+  });
+
+  it('discovers nothing when there is no plugins root', () => {
+    expect(createPluginManager().discover()).toEqual([]);
+  });
+
+  it('contributes both values when a key is declared at the top level and under experimental', () => {
+    const parsed = parsePluginManifest(
+      {
+        name: 'demo',
+        commands: 'commands',
+        experimental: { commands: 'more-commands' },
+      },
+      '/plugins/demo/.claude-plugin/plugin.json',
+    );
+
+    expect(parsed.manifest?.directories['commands']).toEqual([
+      'commands',
+      'more-commands',
+    ]);
+  });
+
+  it('reports a skill name two plugins provide, instead of dropping one silently', () => {
+    const first = tempDir();
+    const second = tempDir();
+
+    writeFile(
+      path.join(first, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'first', skills: 'skills' }),
+    );
+    writeFile(path.join(first, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeSkill(path.join(first, 'skills'), 'shared');
+
+    writeFile(
+      path.join(second, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'second', skills: 'skills' }),
+    );
+    writeFile(path.join(second, 'SKILL.md'), '---\ndescription: B.\n---\n\nBody.\n');
+    writeSkill(path.join(second, 'skills'), 'shared');
+
+    const manager = createPluginManager();
+    manager.load(first);
+    manager.load(second);
+
+    // The manager contributes both — the collision is reported, not dropped.
+    const skills = manager.skills();
+    expect(skills.map((skill) => skill.provider)).toEqual(['first', 'second']);
+
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('shared');
+    expect(warning?.message).toContain('first');
+    expect(warning?.message).toContain('second');
+
+    // The registry resolves the collision and names the other provider.
+    const registry = createSkillRegistry({ contributions: skills });
+    expect(registry.resolve('shared')?.collidesWith).toEqual(['second']);
+  });
+
+  it('reports a subagent name two plugins provide, instead of dropping one silently', () => {
+    const first = tempDir();
+    const second = tempDir();
+
+    writeFile(
+      path.join(first, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'first', agents: 'agents' }),
+    );
+    writeFile(path.join(first, 'SKILL.md'), '---\ndescription: A.\n---\n\nBody.\n');
+    writeFile(
+      path.join(first, 'agents', 'planner.md'),
+      '---\ndescription: P.\n---\n\nBody.\n',
+    );
+
+    writeFile(
+      path.join(second, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'second', agents: 'agents' }),
+    );
+    writeFile(path.join(second, 'SKILL.md'), '---\ndescription: B.\n---\n\nBody.\n');
+    writeFile(
+      path.join(second, 'agents', 'planner.md'),
+      '---\ndescription: P.\n---\n\nBody.\n',
+    );
+
+    const manager = createPluginManager();
+    manager.load(first);
+    manager.load(second);
+
+    // The manager contributes both — the collision is reported, not dropped.
+    const agents = manager.agents();
+    expect(agents.map((agent) => agent.provider)).toEqual(['first', 'second']);
+
+    const warning = manager.logs().find((log) => log.level === 'warn');
+    expect(warning?.message).toContain('planner');
+    expect(warning?.message).toContain('first');
+    expect(warning?.message).toContain('second');
+
+    // The registry resolves the collision and names the other provider.
+    const registry = createSubagentRegistry({ contributions: agents });
+    expect(registry.resolve('planner')?.collidesWith).toEqual(['second']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1278,7 @@ describe('the plugin command discovery rules', () => {
   it('skips a command file over the byte limit', () => {
     const root = tempDir();
     const big = path.join(root, 'commands', 'big.md');
-    writeFile(big, 'x'.repeat(PLUGIN_COMMAND_BYTE_LIMIT + 1));
+    writeFile(big, 'x'.repeat(10_001));
 
     const discovery = discoverPluginCommands({
       plugin: 'demo',
@@ -1042,10 +1286,16 @@ describe('the plugin command discovery rules', () => {
       commandsPaths: ['commands'],
     });
 
+    // The limit is pinned with a literal, and the message carries the limit
+    // in backticks — the target's exact wording.
     expect(discovery.warnings).toContain(
-      `Skipping plugin command \`${big}\`: exceeds ${PLUGIN_COMMAND_BYTE_LIMIT} byte limit`,
+      `Skipping plugin command \`${big}\`: exceeds \`10000\` byte limit`,
     );
     expect(discovery.commands).toHaveLength(0);
+  });
+
+  it('pins the command byte limit at 10000 bytes', () => {
+    expect(PLUGIN_COMMAND_BYTE_LIMIT).toBe(10_000);
   });
 
   it('interns identical skill bodies', () => {
@@ -1094,6 +1344,222 @@ describe('the plugin command discovery rules', () => {
     });
 
     expect(discovery.commands).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plugins: the path boundary
+// ---------------------------------------------------------------------------
+
+describe('the plugin path boundary', () => {
+  /** A plugin root and a directory beside it that the plugin may not read. */
+  function pluginAndOutside(): { base: string; root: string; outside: string } {
+    const base = tempDir();
+    const root = path.join(base, 'plugin');
+    const outside = path.join(base, 'outside');
+    mkdirSync(root, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFile(path.join(root, 'SKILL.md'), '---\ndescription: Demo.\n---\n\nBody.\n');
+    return { base, root, outside };
+  }
+
+  it('refuses a manifest commands path that escapes the plugin root', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'secret.md'), 'TOP SECRET BODY');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', commands: '../outside' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    expect(manager.commands('evil')).toHaveLength(0);
+    const warning = manager.logs().find((log) => log.message.includes('outside the plugin root'));
+    expect(warning).toBeDefined();
+    expect(warning?.level).toBe('warn');
+    expect(manager.logs().some((log) => log.message.includes('TOP SECRET'))).toBe(false);
+  });
+
+  it('refuses a manifest commands file path that escapes the plugin root', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'secret.md'), 'TOP SECRET BODY');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', commands: '../outside/secret.md' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    expect(manager.commands('evil')).toHaveLength(0);
+    expect(
+      manager.logs().some((log) => log.message.includes('outside the plugin root')),
+    ).toBe(true);
+  });
+
+  it('refuses a manifest skills path that escapes the plugin root', () => {
+    const { root, outside } = pluginAndOutside();
+    writeSkill(outside, 'stolen');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', skills: '../outside/skills' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    expect(manager.skills()).toHaveLength(0);
+    expect(
+      manager.logs().some((log) => log.message.includes('outside the plugin root')),
+    ).toBe(true);
+  });
+
+  it('refuses a manifest agents path that escapes the plugin root', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'planner.md'), '---\ndescription: Plans.\n---\n\nBody.\n');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', agents: '../outside/agents' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    expect(manager.agents()).toHaveLength(0);
+    expect(
+      manager.logs().some((log) => log.message.includes('outside the plugin root')),
+    ).toBe(true);
+  });
+
+  it('refuses a symlink inside the plugin root that points outside it', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'secret.md'), 'TOP SECRET BODY');
+    symlinkSync(outside, path.join(root, 'commands'), 'dir');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', commands: 'commands' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    expect(manager.commands('evil')).toHaveLength(0);
+    const warning = manager.logs().find((log) => log.message.includes('outside the plugin root'));
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain('symlink');
+  });
+
+  it('refuses a symlinked command file inside the plugin root that points outside it', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'secret.md'), 'TOP SECRET BODY');
+    mkdirSync(path.join(root, 'commands'), { recursive: true });
+    symlinkSync(path.join(outside, 'secret.md'), path.join(root, 'commands', 'leak.md'));
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'evil', commands: 'commands' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    expect(manager.commands('evil')).toHaveLength(0);
+    expect(
+      manager.logs().some((log) => log.message.includes('outside the plugin root')),
+    ).toBe(true);
+  });
+
+  it('refuses every other manifest-declared path that escapes the plugin root', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({
+        name: 'evil',
+        mcpServers: '../outside/mcp.json',
+        lspServers: '../outside/lsp.json',
+        hooks: '../outside/hooks.json',
+        outputStyles: '../outside/styles',
+        themes: '../outside/themes',
+        workflows: '../outside/workflows',
+        monitors: '../outside/monitors',
+      }),
+    );
+
+    const manager = createPluginManager();
+    const plugin = manager.load(root);
+
+    const escaped = manager.logs().filter((log) => log.message.includes('outside the plugin root'));
+    expect(escaped.length).toBe(7);
+
+    const files = plugin.manifest?.files as
+      | Record<string, string[] | undefined>
+      | undefined;
+    const directories = plugin.manifest?.directories as
+      | Record<string, string[] | undefined>
+      | undefined;
+
+    for (const key of ['mcpServers', 'lspServers', 'hooks']) {
+      expect(escaped.some((log) => log.message.includes(`\`${key}\``))).toBe(true);
+      expect(files?.[key] ?? []).toEqual([]);
+    }
+    for (const key of ['outputStyles', 'themes', 'workflows', 'monitors']) {
+      expect(escaped.some((log) => log.message.includes(`\`${key}\``))).toBe(true);
+      expect(directories?.[key] ?? []).toEqual([]);
+    }
+  });
+
+  it('refuses an escaping path handed straight to the command discovery', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'secret.md'), 'TOP SECRET BODY');
+
+    const discovery = discoverPluginCommands({
+      plugin: 'evil',
+      root,
+      commandsPaths: ['../outside/secret.md'],
+    });
+
+    expect(discovery.commands).toHaveLength(0);
+    expect(
+      discovery.warnings.some((warning) => warning.includes('outside the plugin root')),
+    ).toBe(true);
+  });
+
+  it('refuses a commands metadata source that escapes the plugin root', () => {
+    const { root, outside } = pluginAndOutside();
+    writeFile(path.join(outside, 'secret.md'), 'TOP SECRET BODY');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({
+        name: 'evil',
+        commands: { greeting: { source: '../outside/secret.md' } },
+      }),
+    );
+
+    const manager = createPluginManager();
+    const plugin = manager.load(root);
+
+    expect(plugin.manifest?.commands).toEqual([]);
+    expect(manager.commands('evil')).toHaveLength(0);
+    expect(
+      manager.logs().some((log) => log.message.includes('outside the plugin root')),
+    ).toBe(true);
+  });
+
+  it('keeps a manifest path that stays inside the plugin root', () => {
+    const { root } = pluginAndOutside();
+    writeFile(path.join(root, 'commands', 'hello.md'), '---\ndescription: Hi.\n---\n\nHello.\n');
+    writeFile(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'demo', commands: 'commands' }),
+    );
+
+    const manager = createPluginManager();
+    manager.load(root);
+
+    expect(manager.commands('demo').map((command) => command.name)).toEqual(['demo:hello']);
+    expect(
+      manager.logs().some((log) => log.message.includes('outside the plugin root')),
+    ).toBe(false);
   });
 });
 
@@ -1248,12 +1714,44 @@ describe('the marketplace install flow', () => {
 
   it('drops a stray orphan marker from the staged plugin', async () => {
     const stage = tempDir();
-    writeFile(path.join(stage, '.orphan'), 'marker');
+    const marker = path.join(stage, '.orphan');
+    writeFile(marker, 'marker');
     const manager = createPluginManager();
 
     await manager.installFromMarketplace(installRequest({ stagedPath: stage }));
 
+    // The marker is gone — not merely unreported.
+    expect(existsSync(marker)).toBe(false);
     expect(manager.logs().some((log) => log.message.includes('orphan marker'))).toBe(false);
+  });
+
+  it('reports the dependency note and the other-projects note', async () => {
+    const manager = createPluginManager();
+    const result = await manager.installFromMarketplace(
+      installRequest({
+        plugin: {
+          id: 'demo@marketplace',
+          name: 'demo',
+          version: '1.2.3',
+          commandSources: ['trusted'],
+          dependencies: ['left-pad'],
+        },
+        otherProjects: true,
+      }),
+    );
+
+    expect(result.depNote).toBe('This plugin needs left-pad.');
+    expect(result.otherProjectsNote).toBe(
+      'This plugin is also installed for your other projects.',
+    );
+  });
+
+  it('reports no dependency note and no other-projects note when there are none', async () => {
+    const manager = createPluginManager();
+    const result = await manager.installFromMarketplace(installRequest());
+
+    expect(result.depNote).toBeUndefined();
+    expect(result.otherProjectsNote).toBeUndefined();
   });
 
   it('warns when it cannot drop the stray orphan marker', async () => {
@@ -1342,6 +1840,44 @@ describe('the subagent registry', () => {
     expect(applied.map((agent) => agent.name)).toEqual(['reviewer']);
     expect(applied[0]).toMatchObject({ invocable: true, autoInvocable: true });
   });
+
+  it('surfaces a subagent file over the byte limit rather than reading it', () => {
+    const cwd = tempDir();
+    const configDir = tempDir();
+    const agents = path.join(cwd, '.claude', 'agents');
+    mkdirSync(agents, { recursive: true });
+    writeFile(path.join(agents, 'huge.md'), 'x'.repeat(SUBAGENT_FILE_BYTE_LIMIT + 1));
+
+    const registry = createSubagentRegistry({ cwd, configDir });
+    const definition = registry.resolve('huge');
+
+    expect(definition).toBeDefined();
+    expect(definition?.problem).toBe('the subagent file is over the byte limit');
+    expect(definition?.body).toBe('');
+  });
+
+  it('reports a subagent name two plugins provide, instead of dropping one silently', () => {
+    const registry = createSubagentRegistry({
+      contributions: [
+        {
+          name: 'planner',
+          source: 'plugin',
+          path: '/plugins/first/agents/planner.md',
+          provider: 'first',
+        },
+        {
+          name: 'planner',
+          source: 'plugin',
+          path: '/plugins/second/agents/planner.md',
+          provider: 'second',
+        },
+      ],
+    });
+
+    const definition = registry.resolve('planner');
+    expect(definition?.provider).toBe('first');
+    expect(definition?.collidesWith).toEqual(['second']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1402,5 +1938,80 @@ describe('the IDE bridge', () => {
 
     expect(response.ok).toBe(false);
     expect(response.error).toContain('nope');
+  });
+
+  it('names the two observed IDE actions', () => {
+    expect([...IDE_ACTIONS]).toEqual(['executeCode', 'getDiagnostics']);
+    expect(isIdeAction('executeCode')).toBe(true);
+    expect(isIdeAction('getDiagnostics')).toBe(true);
+    expect(isIdeAction('somethingElse')).toBe(false);
+    expect(isIdeAction(42)).toBe(false);
+  });
+
+  it('refuses an action that is not a single path segment', async () => {
+    const configDir = tempDir();
+    writeFile(
+      path.join(configDir, 'ide', 'vscode.lock'),
+      JSON.stringify({ ide: 'vscode', port: 1234 }),
+    );
+
+    const seen: unknown[] = [];
+    const bridge = createIdeBridge({
+      configDir,
+      transport: {
+        send: async (_integration: IdeIntegration, request) => {
+          seen.push(request.action);
+          return { ok: true };
+        },
+      },
+    });
+
+    const response = await bridge.apply({ ide: 'vscode', action: '../../admin' });
+
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain('action');
+    expect(seen).toHaveLength(0);
+  });
+
+  it('refuses an action that carries a path separator', async () => {
+    const configDir = tempDir();
+    writeFile(
+      path.join(configDir, 'ide', 'vscode.lock'),
+      JSON.stringify({ ide: 'vscode', port: 1234 }),
+    );
+
+    const bridge = createIdeBridge({
+      configDir,
+      transport: { send: async () => ({ ok: true }) },
+    });
+
+    const response = await bridge.apply({ ide: 'vscode', action: 'a/b' });
+
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain('action');
+  });
+
+  it('applies an action outside the observed set, as a single path segment', async () => {
+    const configDir = tempDir();
+    writeFile(
+      path.join(configDir, 'ide', 'vscode.lock'),
+      JSON.stringify({ ide: 'vscode', port: 1234 }),
+    );
+
+    const seen: unknown[] = [];
+    const bridge = createIdeBridge({
+      configDir,
+      transport: {
+        send: async (_integration: IdeIntegration, request) => {
+          seen.push(request.action);
+          return { ok: true };
+        },
+      },
+    });
+
+    const response = await bridge.apply({ ide: 'vscode', action: 'formatDocument' });
+
+    expect(response.ok).toBe(true);
+    expect(seen).toEqual(['formatDocument']);
   });
 });

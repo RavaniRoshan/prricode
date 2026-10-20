@@ -23,6 +23,18 @@
  *     is broken with the reason `it has no plugin manifest`.
  *   - The **command bodies** of every plugin share one interner, so identical
  *     bodies are stored once across the whole session.
+ *   - The **path boundary**: every path a manifest declares is resolved
+ *     against the plugin root and **refused** when it leaves it — the lexical
+ *     escape and the symlink escape alike. The rule, its named reasons and its
+ *     implementation-choice status live in `./manifest.ts`; this module applies it when
+ *     a plugin is loaded, so a refused path is dropped from the manifest the
+ *     record holds, and again when a command, a skill or an agent is read.
+ *   - A **collision** between two plugins that provide a skill — or a
+ *     subagent — under the same name is **reported**, not dropped silently:
+ *     the manager logs a warning naming both providers, and the resolved
+ *     record carries the other providers in `collidesWith`. The names stay
+ *     **un-namespaced** — a plugin's skill is named after its directory, as
+ *     the target's plugin skills are.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -40,10 +52,15 @@ import {
   type PluginCommandMetadata,
 } from './commands.js';
 import {
+  PLUGIN_DIRECTORY_KEYS,
+  PLUGIN_FILE_KEYS,
   PLUGIN_MANIFEST_CANDIDATES,
   PLUGIN_MISSING_MANIFEST_REASON,
   PLUGIN_MISSING_SKILL_REASON,
   parsePluginManifest,
+  resolvePluginPath,
+  type PluginDirectoryKey,
+  type PluginFileKey,
   type PluginManifest,
 } from './manifest.js';
 import {
@@ -156,6 +173,75 @@ export function findPluginManifest(root: string): string | undefined {
 }
 
 /**
+ * The manifest of a plugin, with every path that leaves the root dropped.
+ *
+ * The manifest is **untrusted input**, so every path it declares — the
+ * directory keys, the file keys and the command metadata's `source` — is
+ * resolved against the plugin root and refused when it leaves it. A refused
+ * path is **dropped** from the manifest the record holds, so no later
+ * consumer can pick it up, and it is reported with its named reason.
+ *
+ * Implementation choice — see the file header.
+ */
+export function containPluginPaths(
+  root: string,
+  manifest: PluginManifest,
+): { manifest: PluginManifest; warnings: string[] } {
+  const warnings: string[] = [];
+
+  const keep = (key: string, paths: readonly string[]): string[] => {
+    const kept: string[] = [];
+    for (const declared of paths) {
+      const resolution = resolvePluginPath(root, declared);
+      if (!resolution.ok) {
+        warnings.push(
+          `Refusing the plugin's \`${key}\` path \`${declared}\`: ${resolution.reason}`,
+        );
+        continue;
+      }
+      kept.push(declared);
+    }
+    return kept;
+  };
+
+  const directories = Object.create(null) as Partial<
+    Record<PluginDirectoryKey, string[]>
+  >;
+  for (const key of PLUGIN_DIRECTORY_KEYS) {
+    const declared = manifest.directories[key];
+    if (declared === undefined) continue;
+    const kept = keep(key, declared);
+    if (kept.length > 0) directories[key] = kept;
+  }
+
+  const files = Object.create(null) as Partial<Record<PluginFileKey, string[]>>;
+  for (const key of PLUGIN_FILE_KEYS) {
+    const declared = manifest.files[key];
+    if (declared === undefined) continue;
+    const kept = keep(key, declared);
+    if (kept.length > 0) files[key] = kept;
+  }
+
+  const commands: PluginManifest['commands'] = [];
+  for (const entry of manifest.commands) {
+    if (entry.source === undefined) {
+      commands.push(entry);
+      continue;
+    }
+    const resolution = resolvePluginPath(root, entry.source);
+    if (!resolution.ok) {
+      warnings.push(
+        `Refusing the plugin's \`commands\` path \`${entry.source}\`: ${resolution.reason}`,
+      );
+      continue;
+    }
+    commands.push(entry);
+  }
+
+  return { manifest: { ...manifest, directories, files, commands }, warnings };
+}
+
+/**
  * Create a plugin manager.
  */
 export function createPluginManager(options: PluginManagerOptions = {}): PluginManager {
@@ -163,6 +249,7 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
   const interner = options.interner ?? new SkillBodyInterner();
   const logs: PluginLogRecord[] = [];
   const installations: PluginInstallRecord[] = [];
+  const reportedCollisions = new Set<string>();
 
   const record = (log: PluginLogRecord): void => {
     logs.push(log);
@@ -215,7 +302,14 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
       return broken;
     }
 
-    const manifest = parsed.manifest;
+    // A manifest is untrusted input: every path it declares is checked
+    // against the plugin root, and a path that leaves it is dropped from the
+    // manifest the record holds and reported.
+    const contained = containPluginPaths(root, parsed.manifest);
+    for (const warning of contained.warnings) {
+      record({ level: 'warn', message: warning });
+    }
+    const manifest = contained.manifest;
     const name = manifest.name ?? path.basename(root);
     const hasRootSkill = existsSync(path.join(root, 'SKILL.md'));
 
@@ -270,7 +364,15 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
   const skillsOf = (plugin: PluginRecord): SkillContribution[] => {
     const contributions: SkillContribution[] = [];
     for (const declared of plugin.manifest?.directories['skills'] ?? []) {
-      const skillsDir = path.resolve(plugin.root, declared);
+      const resolution = resolvePluginPath(plugin.root, declared);
+      if (!resolution.ok) {
+        record({
+          level: 'warn',
+          message: `Skipping plugin skill \`${resolution.path}\`: ${resolution.reason}`,
+        });
+        continue;
+      }
+      const skillsDir = resolution.path;
       if (!isDirectory(skillsDir)) continue;
       let entries: string[] = [];
       try {
@@ -279,7 +381,18 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
         continue;
       }
       for (const entry of entries) {
+        // A skill directory's name is caller-supplied data, so it may never
+        // be a prototype key.
+        if (!isSafeLookupName(entry)) continue;
         const skillFile = path.join(skillsDir, entry, 'SKILL.md');
+        const fileResolution = resolvePluginPath(plugin.root, skillFile);
+        if (!fileResolution.ok) {
+          record({
+            level: 'warn',
+            message: `Skipping plugin skill \`${fileResolution.path}\`: ${fileResolution.reason}`,
+          });
+          continue;
+        }
         if (!existsSync(skillFile)) continue;
         contributions.push({
           name: entry,
@@ -295,7 +408,15 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
   const agentsOf = (plugin: PluginRecord): SubagentContribution[] => {
     const contributions: SubagentContribution[] = [];
     for (const declared of plugin.manifest?.directories['agents'] ?? []) {
-      const agentsDir = path.resolve(plugin.root, declared);
+      const resolution = resolvePluginPath(plugin.root, declared);
+      if (!resolution.ok) {
+        record({
+          level: 'warn',
+          message: `Skipping plugin agent \`${resolution.path}\`: ${resolution.reason}`,
+        });
+        continue;
+      }
+      const agentsDir = resolution.path;
       if (!isDirectory(agentsDir)) continue;
       let entries: string[] = [];
       try {
@@ -305,10 +426,20 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
       }
       for (const entry of entries) {
         if (!entry.endsWith('.md')) continue;
+        const agentName = entry.slice(0, -'.md'.length);
+        if (!isSafeLookupName(agentName)) continue;
         const agentFile = path.join(agentsDir, entry);
+        const fileResolution = resolvePluginPath(plugin.root, agentFile);
+        if (!fileResolution.ok) {
+          record({
+            level: 'warn',
+            message: `Skipping plugin agent \`${fileResolution.path}\`: ${fileResolution.reason}`,
+          });
+          continue;
+        }
         if (!existsSync(agentFile)) continue;
         contributions.push({
-          name: entry.slice(0, -'.md'.length),
+          name: agentName,
           source: 'plugin',
           path: agentFile,
           provider: plugin.name,
@@ -319,6 +450,40 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
   };
 
   const pluginsRoot = options.pluginsRoot;
+
+  /**
+   * Report a name two plugins provide.
+   *
+   * The names stay un-namespaced — a plugin's skill is named after its
+   * directory — so two plugins that ship the same name collide. The
+   * collision is **reported** rather than dropped silently; the first
+   * contribution wins, and the skill registry carries the other providers in
+   * `collidesWith`.
+   *
+   * Implementation choice — see the file header.
+   */
+  const reportCollisions = (
+    contributions: readonly { name: string; provider?: string; path: string }[],
+    kind: 'skill' | 'subagent',
+  ): void => {
+    const byName = new Map<string, { name: string; provider?: string; path: string }[]>();
+    for (const contribution of contributions) {
+      const bucket = byName.get(contribution.name);
+      if (bucket) bucket.push(contribution);
+      else byName.set(contribution.name, [contribution]);
+    }
+    for (const [name, bucket] of byName) {
+      if (bucket.length < 2) continue;
+      const key = `${kind}:${name}`;
+      if (reportedCollisions.has(key)) continue;
+      reportedCollisions.add(key);
+      const providers = bucket.map((contribution) => contribution.provider ?? contribution.path);
+      record({
+        level: 'warn',
+        message: `Two plugins provide the ${kind} \`${name}\` (${providers.join(', ')}); only the first one is used.`,
+      });
+    }
+  };
 
   return {
     list(): readonly PluginRecord[] {
@@ -355,10 +520,14 @@ export function createPluginManager(options: PluginManagerOptions = {}): PluginM
       return commandsOf(record_);
     },
     skills(): SkillContribution[] {
-      return [...plugins.values()].flatMap((plugin) => skillsOf(plugin));
+      const contributions = [...plugins.values()].flatMap((plugin) => skillsOf(plugin));
+      reportCollisions(contributions, 'skill');
+      return contributions;
     },
     agents(): SubagentContribution[] {
-      return [...plugins.values()].flatMap((plugin) => agentsOf(plugin));
+      const contributions = [...plugins.values()].flatMap((plugin) => agentsOf(plugin));
+      reportCollisions(contributions, 'subagent');
+      return contributions;
     },
     apply(plugin: string): PluginApplication {
       const found = plugins.get(plugin);

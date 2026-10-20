@@ -26,6 +26,18 @@
  *
  * The default transport posts to `http://127.0.0.1:<port>/<action>`; this implementation
  * refuses to send anything to a host that is not a loopback address.
+ *
+ * ## The action is a path segment (a implementation choice)
+ *
+ * The action is interpolated into the request path, so this implementation **validates
+ * it as a single path segment**: it may not be empty, may not be `.` or `..`,
+ * and may not carry a `/`, a `\` or a NUL. An action that fails the check is
+ * refused before anything is sent.
+ *
+ * Implementation choice: the target's own behavior here is unobserved — the audit
+ * names the two actions but says nothing about the request path — so the
+ * check, and the fact that this implementation accepts an action **outside** the two
+ * observed ones as long as it is a single segment, are this implementation's.
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -43,6 +55,35 @@ export const IDE_ACTIONS = ['executeCode', 'getDiagnostics'] as const;
 
 /** One of the observed IDE actions. */
 export type IdeAction = (typeof IDE_ACTIONS)[number];
+
+/**
+ * Whether a value is one of the observed IDE actions.
+ */
+export function isIdeAction(value: unknown): value is IdeAction {
+  return typeof value === 'string' && (IDE_ACTIONS as readonly string[]).includes(value);
+}
+
+/**
+ * Whether an action may be used as a single path segment.
+ *
+ * The action is interpolated into the request path, so it may not be empty,
+ * may not be `.` or `..`, and may not carry a separator or a NUL.
+ *
+ * Implementation choice — see the file header.
+ */
+export function isSafeIdeAction(action: string): boolean {
+  if (action.length === 0) return false;
+  if (action === '.' || action === '..') return false;
+  if (action.includes('/') || action.includes('\\')) return false;
+  if (action.includes('\0')) return false;
+  return true;
+}
+
+/**
+ * The reason an action is refused.
+ */
+export const IDE_UNSAFE_ACTION_ERROR =
+  'The action is not a valid IDE action: it must be a single path segment.';
 
 /** An IDE integration the CLI can talk to. */
 export interface IdeIntegration {
@@ -66,7 +107,13 @@ export interface IdeIntegration {
 export interface IdeRequest {
   /** The IDE the request is for. */
   ide: string;
-  /** The action to apply. */
+  /**
+   * The action to apply.
+   *
+   * The action is a **single path segment**: it may not be empty, may not be
+   * `.` or `..`, and may not carry a separator. An action outside the two
+   * observed ones is accepted as long as it is a single segment.
+   */
   action: IdeAction | (string & {});
   /** The action's argument, when it takes one. */
   argument?: string;
@@ -145,7 +192,8 @@ function isAlive(pid: unknown): boolean {
 /**
  * The default transport: an HTTP POST to the integration's loopback port.
  *
- * This implementation refuses to send anything to a host that is not a loopback address.
+ * This implementation refuses to send anything to a host that is not a loopback address,
+ * and refuses an action that is not a single path segment.
  */
 export function createHttpIdeTransport(): IdeTransport {
   return {
@@ -153,6 +201,9 @@ export function createHttpIdeTransport(): IdeTransport {
       const endpoint = integration.endpoint;
       if (endpoint === undefined) {
         throw new Error(`The ${integration.name} integration has no endpoint.`);
+      }
+      if (!isSafeIdeAction(request.action)) {
+        throw new Error(IDE_UNSAFE_ACTION_ERROR);
       }
       const url = new URL(endpoint);
       if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost' && url.hostname !== '::1') {
@@ -245,6 +296,16 @@ export function createIdeBridge(options: IdeBridgeOptions): IdeBridge {
       }));
     },
     async apply(request: IdeRequest): Promise<IdeResponse> {
+      // The action becomes a path segment, so it is validated before the
+      // request is sent.
+      if (!isSafeIdeAction(request.action)) {
+        return {
+          ok: false,
+          ide: request.ide,
+          action: request.action,
+          error: IDE_UNSAFE_ACTION_ERROR,
+        };
+      }
       const integration = resolve(request.ide);
       if (!integration) {
         return {

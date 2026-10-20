@@ -16,10 +16,17 @@
  * mcp      an MCP server that contributes the item
  * ```
  *
- * The **plan** fixes the five names, and the audit fixes the four the skill
- * discovery paths actually use: a skill in a project's `.claude/skills` is
- * `project`, a skill in `~/.claude/skills` is `user`, a plugin-provided skill
- * is `plugin` and an MCP-provided skill is `mcp`.
+ * The **plan** names the five origins: its interface line lists "(project,
+ * local, user, plugin, mcp)", and its Step 1 names the four the skill
+ * discovery paths use — a skill in a project's `.claude/skills` is `project`,
+ * a skill in `~/.claude/skills` is `user`, a plugin-provided skill is
+ * `plugin` and an MCP-provided skill is `mcp`.
+ *
+ * The **order** the origins take precedence in is a **implementation choice**: the plan
+ * names the five origins but does not order them, and the audit marks the
+ * standalone skill directory scan **partial** — so both the order and the
+ * taxonomy it implies are this implementation's. The order is load-bearing: `local`
+ * beating `user` is exactly what makes the plan's Step 5 work.
  *
  * ## `local` is the local scope
  *
@@ -27,10 +34,10 @@
  * an item that belongs to **this machine and this user** and is not shared
  * with the project. The concrete case the plan names is the **local skill
  * override** of a synced skill — a skill the user wrote locally that shadows a
- * copy synced from their account. The override takes precedence (the plan
- * orders the sources `project, local, user, plugin, mcp`), but the record it
- * produces keeps the **sync's** `source` and reports `own: false`, because the
- * skill itself is still the account's.
+ * copy synced from their account. The override takes precedence (this implementation's
+ * order is `project, local, user, plugin, mcp`), but the record it produces
+ * keeps the **sync's** `source` and reports `own: false`, because the skill
+ * itself is still the account's.
  *
  * ## A resolved skill may be `built-in`
  *
@@ -68,8 +75,10 @@ export interface DiscoveredItem {
 /**
  * The order the sources take precedence in.
  *
- * The plan lists them as "(project, local, user, plugin, mcp)", and the order
- * is what decides which of two candidates for the same name wins.
+ * Implementation choice: the plan **names** the five origins — "(project, local, user,
+ * plugin, mcp)" — but does not order them, and the audit marks the standalone
+ * skill directory scan **partial**. The order below is this implementation's, and it is
+ * what decides which of two candidates for the same name wins.
  */
 export const DISCOVERY_SOURCE_ORDER: readonly DiscoverySource[] = [
   'project',

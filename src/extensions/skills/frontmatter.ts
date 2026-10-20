@@ -32,7 +32,12 @@
  *     invent a second wording.
  *   - A field that is **present but `undefined`** is treated as absent. A JSON
  *     document cannot carry `undefined`, so the distinction cannot be observed
- *     from a settings file.
+ *     from a settings file. This **diverges** from the audit's literal reading
+ *     — "the first of `source`, `pluginName`, `path`, or `frontmatterProblem`
+ *     whose value is not a string" — under which an `undefined` value is not a
+ *     string and would name itself in the message. This implementation skips it, and the
+ *     divergence is pinned by a test in
+ *     `tests/contracts/extensions.test.ts`.
  *   - The **problem strings** the parser reports are this implementation's. The audit says
  *     only that the parse "reports the frontmatter **as written** alongside a
  *     **problem** describing what was wrong with it".

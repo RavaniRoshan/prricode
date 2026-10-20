@@ -26,17 +26,37 @@
  *
  * ## The precedence
  *
- * The plan orders the sources `project, local, user, plugin, mcp`, and the
- * registry follows that order: a name two roots provide is won by the earlier
- * source in that order.
+ * A name two roots provide is won by the earlier source in the order
+ * `project > local > user > plugin > mcp`, and the registry follows that
+ * order.
+ *
+ * Implementation choice: the plan **names** the five origins but does not order them,
+ * and the audit marks the subagent lifecycle partial — so the order is the
+ * implementation's, and the whole registry follows the skill registry's model.
+ *
+ * A name two **contributed** subagents provide — two plugins that ship a
+ * subagent with the same name — is a **collision**: the winner is the first one
+ * declared, and the other providers are reported in `collidesWith` rather than
+ * dropped silently.
+ *
+ * ## The cost of a lookup (a implementation choice)
+ *
+ * The registry is **re-scanned** every time it is asked for its subagents, so
+ * a definition written after the registry was created is found. A
+ * `resolve(name)` therefore costs a directory walk of every root, a `stat` of
+ * every definition file, and — for a file that changed — a read and a parse;
+ * the parse is **cached** by size and modification time, so an unchanged file
+ * is not read twice. The tiers are merged once per resolved subagent.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import type { Stats } from 'node:fs';
 import path from 'node:path';
 
 import type { SettingsTierMap } from '../../config/tiers.js';
 
-import { frontmatterValue, parseFrontmatter } from '../skills/frontmatter.js';import {
+import { frontmatterValue, parseFrontmatter } from '../skills/frontmatter.js';
+import {
   resolveSkillOverrideMode,
   skillInvocability,
   type SkillInvocability,
@@ -51,6 +71,15 @@ import {
 } from '../skills/source.js';
 
 export type { DiscoveredItem, DiscoverySource } from '../skills/source.js';
+
+/**
+ * The byte limit a subagent definition file may not exceed.
+ *
+ * Implementation choice — see the file header. A definition is a long document, so the
+ * implementation's cap is 1 MiB; a file over the cap is **surfaced** with a problem
+ * rather than read.
+ */
+export const SUBAGENT_FILE_BYTE_LIMIT = 1_048_576;
 
 /** A directory the registry scans for subagent definitions. */
 export interface SubagentRoot {
@@ -100,6 +129,14 @@ export interface SubagentDefinition {
   problem?: string;
   /** The plugin or the MCP server that contributes the subagent, when one does. */
   provider?: string;
+  /**
+   * The other providers that provide a subagent with this name.
+   *
+   * A name two **contributed** subagents provide is a collision: the winner is
+   * the first one declared, and the losers are reported here rather than
+   * dropped silently.
+   */
+  collidesWith?: string[];
   /** The resolved override mode. A subagent with no override is `on`. */
   mode: SkillOverrideMode;
 }
@@ -146,54 +183,32 @@ interface Candidate extends Omit<SubagentDefinition, 'mode'> {
   order: number;
 }
 
-function isDirectory(candidatePath: string): boolean {
-  try {
-    return statSync(candidatePath).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function readDefinition(filePath: string): {
+/** What a definition file's read found. */
+interface DefinitionContent {
   name?: string;
   description?: string;
   model?: string;
   tools?: string[];
   body: string;
   problem?: string;
-} {
-  let text: string;
+}
+
+/** A definition file that was read, with the stat that proved it is current. */
+interface CachedDefinitionFile {
+  /** The size of the file when it was read. */
+  size: number;
+  /** The modification time of the file when it was read. */
+  mtimeMs: number;
+  /** What the read found. */
+  content: DefinitionContent;
+}
+
+function isDirectory(candidatePath: string): boolean {
   try {
-    text = readFileSync(filePath, 'utf8');
+    return statSync(candidatePath).isDirectory();
   } catch {
-    return { body: '', problem: 'the subagent file could not be read' };
+    return false;
   }
-  const parsed = parseFrontmatter(text);
-  const frontmatter = parsed.frontmatter;
-  const description = frontmatterValue(frontmatter, 'description');
-  const model = frontmatterValue(frontmatter, 'model');
-  const rawTools = frontmatterValue(frontmatter, 'tools');
-  const tools =
-    typeof rawTools === 'string'
-      ? rawTools
-          .split(',')
-          .map((tool) => tool.trim())
-          .filter((tool) => tool.length > 0)
-      : undefined;
-  const name = frontmatterValue(frontmatter, 'name');
-
-  const problem =
-    parsed.problem ??
-    (typeof description === 'string' ? undefined : 'the description is not text');
-
-  return {
-    ...(typeof name === 'string' ? { name } : {}),
-    ...(typeof description === 'string' ? { description } : {}),
-    ...(typeof model === 'string' ? { model } : {}),
-    ...(tools === undefined ? {} : { tools }),
-    body: parsed.body,
-    ...(problem === undefined ? {} : { problem }),
-  };
 }
 
 /**
@@ -222,6 +237,63 @@ export function createSubagentRegistry(options: SubagentRegistryOptions = {}): S
       ? defaultSubagentRoots(options.cwd, options.configDir)
       : []);
   const contributions: SubagentContribution[] = [...(options.contributions ?? [])];
+
+  // The read cache: a definition file that has not changed is not read twice.
+  const fileCache = new Map<string, CachedDefinitionFile>();
+
+  const readDefinition = (filePath: string): DefinitionContent => {
+    let stats: Stats;
+    try {
+      stats = statSync(filePath);
+    } catch {
+      return { body: '', problem: 'the subagent file could not be read' };
+    }
+
+    // A file over the byte limit is surfaced, not read.
+    if (stats.size > SUBAGENT_FILE_BYTE_LIMIT) {
+      return { body: '', problem: 'the subagent file is over the byte limit' };
+    }
+
+    const cached = fileCache.get(filePath);
+    if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+      return cached.content;
+    }
+
+    let text: string;
+    try {
+      text = readFileSync(filePath, 'utf8');
+    } catch {
+      return { body: '', problem: 'the subagent file could not be read' };
+    }
+    const parsed = parseFrontmatter(text);
+    const frontmatter = parsed.frontmatter;
+    const description = frontmatterValue(frontmatter, 'description');
+    const model = frontmatterValue(frontmatter, 'model');
+    const rawTools = frontmatterValue(frontmatter, 'tools');
+    const tools =
+      typeof rawTools === 'string'
+        ? rawTools
+            .split(',')
+            .map((tool) => tool.trim())
+            .filter((tool) => tool.length > 0)
+        : undefined;
+    const name = frontmatterValue(frontmatter, 'name');
+
+    const problem =
+      parsed.problem ??
+      (typeof description === 'string' ? undefined : 'the description is not text');
+
+    const content: DefinitionContent = {
+      ...(typeof name === 'string' ? { name } : {}),
+      ...(typeof description === 'string' ? { description } : {}),
+      ...(typeof model === 'string' ? { model } : {}),
+      ...(tools === undefined ? {} : { tools }),
+      body: parsed.body,
+      ...(problem === undefined ? {} : { problem }),
+    };
+    fileCache.set(filePath, { size: stats.size, mtimeMs: stats.mtimeMs, content });
+    return content;
+  };
 
   const collect = (): Candidate[] => {
     const candidates: Candidate[] = [];
@@ -296,12 +368,25 @@ export function createSubagentRegistry(options: SubagentRegistryOptions = {}): S
       const winner = sorted[0];
       if (!winner) continue;
       const { order: _order, ...definition } = winner;
+
+      // A name two **contributed** subagents provide is a collision: the
+      // losers are reported rather than dropped silently.
+      const collidesWith = sorted
+        .slice(1)
+        .filter((candidate) => candidate.source === winner.source)
+        .map((candidate) => candidate.provider ?? candidate.path)
+        .filter((provider, index, all) => all.indexOf(provider) === index);
+
       const mode =
         resolveSkillOverrideMode(name, {
           tiers: options.tiers,
           session: session ?? options.session,
         }) ?? 'on';
-      definitions.push({ ...definition, mode });
+      definitions.push({
+        ...definition,
+        mode,
+        ...(collidesWith.length === 0 ? {} : { collidesWith }),
+      });
     }
 
     return definitions;

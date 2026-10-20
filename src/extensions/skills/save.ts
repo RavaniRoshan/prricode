@@ -52,6 +52,11 @@
  *   - The **synced-folder test** is the caller's: the request says whether the
  *     file is inside the synced folder. This implementation does not guess it from the
  *     path, because only the account sync knows where that folder is.
+ *   - The note is appended "only for a known mode" — the audit's rule. The
+ *     implementation's selector returns one of the five modes by construction, so the
+ *     condition holds always; the rule is kept as a **property of the
+ *     selector**, and it is pinned by a test rather than by a runtime guard
+ *     that can never fail.
  */
 
 import { readFileSync, statSync } from 'node:fs';
@@ -274,8 +279,13 @@ export function skillSaveGuidance(request: SkillSaveRequest): SkillSaveGuidance 
   const toolName = tool?.name ?? 'skill-save';
   const guidance = skillSaveModeGuidance(mode, toolName);
 
-  // The note is appended only for a known mode.
-  if (request.inSyncedFolder === true && isSkillSaveMode(mode)) {
+  // The note is appended only for a known mode. This implementation's selector returns
+  // one of the five modes by construction — `selectSkillSaveMode` has no other
+  // outcome — so the condition holds always and there is no unknown mode to
+  // guard against. (Implementation choice: the audit's "only for a known mode" is a
+  // rule about a mode the target's selector may fail to produce; this implementation's
+  // selector cannot.)
+  if (request.inSyncedFolder === true) {
     return { mode, guidance: `${guidance}\n${SKILL_SYNCED_FOLDER_NOTE}`, note: SKILL_SYNCED_FOLDER_NOTE };
   }
 
