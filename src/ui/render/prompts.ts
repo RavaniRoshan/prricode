@@ -167,6 +167,13 @@ function choiceLabels(toolName: string): readonly string[] {
  *
  * **Implementation choice.** The wording is this implementation's own; the audit records no
  * prompt text.
+ *
+ * The tool's name is **stripped** here as well: the prompt strips the name
+ * before it hands it over, so the choices have to strip it **themselves** to
+ * be safe on their own. The hostile input the contract test uses is the
+ * **OSC** form and not only the CSI one, because a scanner that knows only
+ * the CSI form handles a CSI-only input exactly as well as the shared
+ * scanner does.
  */
 export function approvalChoices(toolName: string): readonly ApprovalChoiceView[] {
   const name = stripControlSequences(toolName);
@@ -182,7 +189,11 @@ export function approvalChoices(toolName: string): readonly ApprovalChoiceView[]
  * The pieces of the prompt a decision gets.
  *
  * The tool's name and the reason are **stripped** of their control sequences:
- * both reach the terminal, and the name is caller-supplied.
+ * both reach the terminal, and the name is caller-supplied. The hostile
+ * input the contract test uses is the **OSC** form and not only the CSI
+ * one, because a scanner that knows only the CSI form handles a CSI-only
+ * input exactly as well as the shared scanner does — and Ink's own sanitiser
+ * **preserves** the OSC form.
  */
 export function approvalPromptParts(
   decision: PermissionDecision,

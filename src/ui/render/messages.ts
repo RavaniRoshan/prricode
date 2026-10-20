@@ -109,6 +109,12 @@
  * text **exactly**, on its own, rather than looking at the finished block
  * and hoping the right layer did the work.
  *
+ * Every path's hostile input carries the **OSC** form and not only the CSI
+ * one: a scanner that knows only the CSI form handles a CSI-only input
+ * exactly as well as the shared scanner does, so the OSC form is what tells
+ * the two apart. The OSC form matters here because Ink's own sanitiser
+ * **preserves** it.
+ *
  * ## What is observed and what is a implementation choice
  *
  * The audit pins the permission **vocabulary** — the behaviors, the sources and
@@ -498,6 +504,13 @@ function bashLines(content: Record<string, unknown>): string[] {
  * `permission_request` record is the log of the checks that led to it. The
  * record is the fallback, and it is the record that carries the **reason
  * text** — the envelope's summary has none.
+ *
+ * The function **fails closed** on its own: the decision is caller-supplied,
+ * so a behavior outside the closed vocabulary — which the types forbid but a
+ * caller can still build at runtime — is the **strictest** one, and the
+ * strictest behavior is `deny`. The fold normalises the decision too, but
+ * that normalisation is **redundant** here on purpose: the exported reader
+ * must not depend on its only caller to fail closed.
  */
 export function toolResultLines(
   envelope: ToolResultEnvelope | undefined,
@@ -505,17 +518,21 @@ export function toolResultLines(
 ): string[] {
   const lines: string[] = [];
 
+  // The decision, with its behaviour inside the closed vocabulary. An
+  // unknown behaviour is the strictest one, and the strictest is `deny`.
+  const closed = decision === undefined ? undefined : closedDecision(decision);
+
   const envelopeDecision = envelope?.permissionDecision;
-  const denied = decision?.behavior === 'deny' || envelopeDecision?.decision === 'deny';
+  const denied = closed?.behavior === 'deny' || envelopeDecision?.decision === 'deny';
   if (denied) {
     // The decision that refused the call: the envelope's summary when it
     // refused it, and the strictest record otherwise.
-    const deciding = envelopeDecision?.decision === 'deny' ? envelopeDecision : decision;
-    const source = deciding?.source ?? envelopeDecision?.source ?? decision?.source ?? 'unknown';
+    const deciding = envelopeDecision?.decision === 'deny' ? envelopeDecision : closed;
+    const source = deciding?.source ?? envelopeDecision?.source ?? closed?.source ?? 'unknown';
     const reasonType =
-      deciding?.reasonType ?? envelopeDecision?.reasonType ?? decision?.reasonType ?? 'other';
+      deciding?.reasonType ?? envelopeDecision?.reasonType ?? closed?.reasonType ?? 'other';
     lines.push(`denied (source: ${source}, reason type: ${reasonType})`);
-    const reason = decision?.reason;
+    const reason = closed?.reason;
     if (reason !== undefined && reason !== '') lines.push(stripControlSequences(reason));
   }
 
@@ -655,6 +672,11 @@ function stricterDecision(
  * rule fails closed — and the strictest behavior is `deny`. Normalising it
  * is what makes the failure **visible**: the call is marked as a denial
  * instead of being shown as a call that was allowed.
+ *
+ * The rule is used by the **fold**, which merges two decisions, and by the
+ * **exported** result reader, which takes a decision straight from its
+ * caller. The second use is the load-bearing one: the reader must fail
+ * closed whether or not the fold normalised the decision first.
  */
 function closedDecision(decision: PermissionDecision): PermissionDecision {
   if (decision.behavior === 'allow' || decision.behavior === 'ask' || decision.behavior === 'deny') {

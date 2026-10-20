@@ -65,8 +65,21 @@
  *      conversation's model blocks *are* the model's blocks). It is **not**
  *      observed by spying on the call: an ESM namespace spy cannot see an
  *      intra-module call.
+ *  17. **Every** strip site carries a hostile input of **its own**, and the
+ *      hostile input is the **OSC** form and not only the CSI one: a scanner
+ *      that knows only the CSI form handles a CSI-only input exactly as well
+ *      as the shared scanner does, so the OSC form is what tells the two
+ *      apart. The sites that were **masked** — the error message, the denial
+ *      reason, the compact JSON, the unmatched result's id and the approval's
+ *      choices — each have a **named** test of their own.
+ *  18. The **shared** scanner is the **only** escape-handling code in the
+ *      renderers: a second, weaker scanner anywhere in them fails the suite.
+ *  19. The **exported** result reader **fails closed** on a behaviour outside
+ *      the closed vocabulary, so a caller that hands it a decision straight
+ *      from outside the fold still gets a denial marker.
  */
 
+import { readFileSync } from 'node:fs';
 import { PassThrough, Writable } from 'node:stream';
 
 import type { RenderOptions } from 'ink';
@@ -850,6 +863,18 @@ describe('renderApprovalPrompt — the approval prompt', () => {
  * text also catches a **second, weaker scanner**: a renderer that dropped the
  * CSI sequences and let the OSC through would fail on the exact text even
  * though the shared stripper had already removed both.
+ *
+ * **Every site carries the OSC form, and not only the CSI one.** A scanner
+ * that knows only the CSI form handles a CSI-only input exactly as well as
+ * the shared scanner does, so a CSI-only input cannot tell the two apart —
+ * the OSC form is what does. The hostile input at every site below therefore
+ * carries **both**: the CSI sequence (`ESC [ ? 1049 h`, the alternate screen
+ * this implementation must never enter) and the OSC sequence (`ESC ] 0 ; pwned BEL`,
+ * which retitles the window and which Ink's own sanitiser **preserves**).
+ *
+ * The sites are **named after the strip they pin**, so a strip that is
+ * removed — or a strip that is replaced by a weaker one — is caught at that
+ * site and not by the layer next to it.
  */
 describe('the control-sequence strip — one path at a time', () => {
   it('strips the tool result in the result reader itself', () => {
@@ -878,8 +903,100 @@ describe('the control-sequence strip — one path at a time', () => {
     expect(lines).toEqual(['sandboxed', 'exit code 0', 'out']);
   });
 
+  it('strips the error message of a tool result itself', () => {
+    // The error branch is its **own** reader: the message does not go
+    // through the line splitter, so nothing else strips it on this path.
+    const lines = toolResultLines(
+      {
+        toolUseId: 'c1',
+        content: {
+          type: 'error',
+          message: 'boom\u001b[?1049h\u001b]0;pwned\u0007',
+          errorCode: 13,
+        },
+        isError: true,
+      },
+      undefined,
+    );
+
+    expect(lines).toEqual(['boom (error code 13)']);
+  });
+
+  it('strips the denial reason itself', () => {
+    // The reason is the decision's own text, and the decision is
+    // caller-supplied. The block renderer strips the line it is given, so
+    // the reason has to be stripped **here** to be stripped at all.
+    const lines = toolResultLines(undefined, {
+      behavior: 'deny',
+      source: 'hook',
+      reasonType: 'safetyCheck',
+      reason: 'A safety check refused this call.\u001b[?1049h\u001b]0;pwned\u0007',
+    });
+
+    expect(lines).toEqual([
+      'denied (source: hook, reason type: safetyCheck)',
+      'A safety check refused this call.',
+    ]);
+  });
+
+  it('strips the compact JSON of a tool input itself', () => {
+    // The compact JSON is the summary of a tool this implementation does not know, and
+    // the **JSON encoding** is what makes the strip visible here: an escape
+    // that survived it would be encoded as a literal six-character escape in
+    // the text, so the strip that comes afterwards would not catch it.
+    expect(summarizeToolInput('Mystery', { note: 'ls\u001b[?1049h\u001b]0;pwned\u0007' })).toBe(
+      '{"note": "ls"}',
+    );
+  });
+
+  it('strips the tool summary itself', () => {
+    expect(summarizeToolInput('Bash', { command: 'ls\u001b[?1049h' })).toBe('ls');
+    expect(summarizeToolInput('Bash', { command: 'ls\u001b]0;pwned\u0007' })).toBe('ls');
+  });
+
+  it('strips the tool name in the block header itself', () => {
+    // The name is the **caller's** name — a model chose it — and nothing
+    // else strips it: the summary and the result lines are stripped on
+    // their own paths, and the name is on neither of them.
+    const block = renderToolBlock('Bash\u001b[?1049h\u001b]0;pwned\u0007', 'ls', []);
+
+    expect(block).toBe('⏺ Bash(ls)');
+  });
+
+  it('strips the summary in the block header itself', () => {
+    const block = renderToolBlock('Bash', 'ls\u001b[?1049h\u001b]0;pwned\u0007', []);
+
+    expect(block).toBe('⏺ Bash(ls)');
+  });
+
+  it('strips the result lines in the block itself', () => {
+    // The lines arrive already stripped by the reader that produced them, so
+    // the block has to strip them **itself** to be safe on its own.
+    const block = renderToolBlock('Bash', 'ls', ['out\u001b[?1049h\u001b]0;pwned\u0007']);
+
+    expect(block).toBe('⏺ Bash(ls)\n  ⎿ out');
+  });
+
+  it('strips the tool result id of an unmatched result itself', () => {
+    // An unmatched result is a block of its own: it never reaches the block
+    // renderer, so the id is stripped **here** or not at all.
+    const blocks = renderMessages([
+      toolResult('r1', {
+        toolUseId: 'nobody\u001b[?1049h\u001b]0;pwned\u0007',
+        content: { type: 'text', text: 'the orphan body' },
+        isError: false,
+      }),
+    ]);
+
+    expect(blocks).toEqual(['⏺ unmatched tool result\n  ⎿ toolUseId: nobody']);
+  });
+
   it('strips the tool block itself', () => {
-    const block = renderToolBlock('Bash\u001b[?1049h', 'ls\u001b]0;pwned\u0007', ['out\u001b[2J']);
+    const block = renderToolBlock(
+      'Bash\u001b[?1049h\u001b]0;pwned\u0007',
+      'ls\u001b]0;pwned\u0007',
+      ['out\u001b[2J\u001b]0;pwned\u0007'],
+    );
 
     expect(block).toBe('⏺ Bash(ls)\n  ⎿ out');
   });
@@ -887,14 +1004,57 @@ describe('the control-sequence strip — one path at a time', () => {
   it('does not render an empty parenthesis for a summary that is only an escape', () => {
     // The summary is tested **after** it is stripped: a summary that is only
     // an escape is an empty summary, and an empty summary has no parentheses.
-    const block = renderToolBlock('Bash', '\u001b[2J', []);
+    const block = renderToolBlock('Bash', '\u001b[2J\u001b]0;pwned\u0007', []);
 
     expect(block).toBe('⏺ Bash');
   });
 
-  it('strips the tool summary itself', () => {
-    expect(summarizeToolInput('Bash', { command: 'ls\u001b[?1049h' })).toBe('ls');
-    expect(summarizeToolInput('Bash', { command: 'ls\u001b]0;pwned\u0007' })).toBe('ls');
+  it('strips the tool name in the approval prompt itself', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No permission rule matched.',
+      },
+      'Bash\u001b[?1049h\u001b]0;pwned\u0007',
+    );
+
+    expect(prompt).toContain('Bash needs your approval.');
+    expect(prompt).not.toContain('\u001b');
+    expect(prompt).not.toContain('pwned');
+  });
+
+  it('strips the reason in the approval prompt itself', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No rule matched.\u001b[?1049h\u001b]0;pwned\u0007',
+      },
+      'Bash',
+    );
+
+    expect(prompt).toBe(
+      [
+        'Bash needs your approval.',
+        '',
+        'No rule matched.',
+        '',
+        '❯ 1. Yes',
+        "  2. Yes, and don't ask again for this Bash call",
+        '  3. No, and tell the assistant what to do differently',
+      ].join('\n'),
+    );
+  });
+
+  it('strips the tool name in the approval choices themselves', () => {
+    // The prompt strips the name before it hands it to the choices, so the
+    // choices have to strip it **themselves** to be safe on their own.
+    const choices = approvalChoices('Bash\u001b[?1049h\u001b]0;pwned\u0007');
+
+    expect(choices[1]?.label).toBe("Yes, and don't ask again for this Bash call");
   });
 
   it('strips the approval prompt itself', () => {
@@ -903,7 +1063,7 @@ describe('the control-sequence strip — one path at a time', () => {
         behavior: 'ask',
         source: 'unknown',
         reasonType: 'other',
-        reason: 'No rule matched.\u001b[2J',
+        reason: 'No rule matched.\u001b[2J\u001b]0;pwned\u0007',
       },
       'Bash\u001b]0;pwned\u0007',
     );
@@ -927,12 +1087,103 @@ describe('the control-sequence strip — one path at a time', () => {
   });
 
   it('strips the markdown itself', () => {
-    expect(renderMarkdown('a\u001b[2Jb')).toBe('ab');
+    expect(renderMarkdown('a\u001b[2Jb\u001b]0;pwned\u0007')).toBe('ab');
   });
 
   it('strips the approval label itself', () => {
     expect(approvalLabel('Bash\u001b]0;pwned\u0007')).toBe('Approval required for Bash');
     expect(approvalLabel('')).toBe('Approval required for the tool');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The shared scanner                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The **shared** scanner is the only escape-handling code in the renderers.
+ *
+ * The renderers strip for themselves, and every one of those strips is the
+ * **same** scanner: the one the markdown renderer uses. A second scanner —
+ * a second, weaker one in particular — would be a second set of rules for
+ * the same job, and the paths that mask each other would hide it.
+ *
+ * The guard is **structural** as well as behavioural: a second scanner has
+ * to name the escape character, and only the shared scanner does — it
+ * compares **code points**, so it never writes the character down at all.
+ */
+describe('the shared scanner — the only escape-handling code', () => {
+  /** The renderers, and the app that mounts them. */
+  const RENDERERS = [
+    'src/ui/render/markdown.ts',
+    'src/ui/render/messages.ts',
+    'src/ui/render/prompts.ts',
+    'src/ui/app.ts',
+  ] as const;
+
+  /** The number of strip sites in the renderers this task owns. */
+  const STRIP_SITES: ReadonlyMap<string, number> = new Map([
+    ['src/ui/render/messages.ts', 9],
+    ['src/ui/render/prompts.ts', 3],
+  ]);
+
+  it('never writes the escape character down outside the shared scanner', () => {
+    for (const file of RENDERERS) {
+      const source = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
+
+      // A second scanner would have to name the escape character: as a
+      // literal escape, or as the byte it stands for.
+      expect(source, file).not.toMatch(/\\u001[bB]|\\x1[bB]|\\033|\\u\{1[bB]\}/);
+      // The shared scanner is the one that compares code points, so only it
+      // may name the byte.
+      if (file !== 'src/ui/render/markdown.ts') {
+        expect(source, file).not.toMatch(/0x1b/i);
+      }
+    }
+  });
+
+  it('gives every strip site a named test, so a new site cannot be added quietly', () => {
+    for (const [file, sites] of STRIP_SITES) {
+      const source = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
+      const calls = source.split('stripControlSequences(').length - 1;
+
+      // Every one of the sites above has a test named after it. A site added
+      // without one breaks this count, and a site that stopped stripping
+      // breaks the test it is named by.
+      expect(calls, file).toBe(sites);
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The exported result reader                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The exported reader is a **public** function, and its decision argument is
+ * **caller-supplied**. The fold normalises the decision before it hands it
+ * over, so the reader never sees an unknown behaviour in production — but
+ * the reader must not **depend** on its only caller to fail closed.
+ */
+describe('toolResultLines — the exported result reader', () => {
+  it('fails closed on a behaviour outside the closed vocabulary', () => {
+    // The types forbid it, but a caller can still build one at runtime. The
+    // permission layer's own rule treats an unknown behaviour as the
+    // **strictest**, and the reader shares that rule: the call is marked as
+    // a denial rather than shown as a call that was allowed.
+    const outside = {
+      behavior: 'maybe',
+      source: 'hook',
+      reasonType: 'safetyCheck',
+      reason: 'An unknown behaviour decided this call.',
+    } as unknown as PermissionDecision;
+
+    const lines = toolResultLines(undefined, outside);
+
+    expect(lines).toEqual([
+      'denied (source: hook, reason type: safetyCheck)',
+      'An unknown behaviour decided this call.',
+    ]);
   });
 });
 
