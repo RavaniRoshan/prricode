@@ -58,7 +58,7 @@ The built executable needs **neither** the host's Node **nor** the host's
 | [`docs/compatibility/results.md`](docs/compatibility/results.md) | the **measured** result per row — `match`, `partial`, `mismatch`, `not-tested` or `unknown` — with the command that reproduces it |
 | [`docs/compatibility/`](docs/compatibility/) | the per-surface conformance tables: [permissions](docs/compatibility/permission-matrix.md), [sessions](docs/compatibility/session-format.md), [the command line](docs/compatibility/command-surface.md), [extensions](docs/compatibility/extension-surface.md), [the sandbox](docs/compatibility/sandbox-surface.md), [providers](docs/compatibility/provider-catalog.md), [the UI](docs/compatibility/tool-surface.md), [settings](docs/compatibility/settings-precedence.md), [packaging](docs/compatibility/packaging.md) |
 | [`docs/PROGRESS.md`](docs/PROGRESS.md) | the live ledger: every milestone, its review, and its outcome |
-| [`docs/superpowers/plans/`](docs/superpowers/plans/) | the implementation plan — 26 milestones, 301 steps, each with its file paths, its interfaces and its test-first order |
+| [`docs/superpowers/plans/`](docs/superpowers/plans/) | the implementation plan — 27 milestones, 307 steps, each with its file paths, its interfaces and its test-first order |
 | [`research/`](research/) | the deep-research report and its version-sensitivity table |
 
 ## The three rules this code holds to
