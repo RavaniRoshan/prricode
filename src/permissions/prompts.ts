@@ -21,38 +21,42 @@
  * **The remote transport dispatcher** accepts only the `can_use_tool` subtype. A
  * request whose `request_id` is **not a string** is dropped with **no response**,
  * because no response is possible. A malformed request is denied with a synthesized
- * denial. An in-flight `request_id` is not dispatched twice. A computer-folder
- * prompt is validated strictly: exactly three string arguments, no CR, LF, U+2028 or
- * U+2029 in the folder path or the computer name, and a path that must equal its own
- * normalized form.
+ * denial. An in-flight `request_id` is not dispatched twice.
+ *
+ * **The computer-folder and repository-trust tool names are configuration, not
+ * constants.** The audit names neither tool, so the names come from the transport
+ * layer that knows them. A request whose input *looks* like a computer-folder
+ * prompt but whose tool name is not the configured one is **refused**, not
+ * forwarded: an unrecognised prompt must never be forwarded unvalidated. The
+ * computer-folder prompt is validated strictly: exactly three string arguments, no
+ * CR, LF, U+2028 or U+2029 in the folder path or the computer name, and a path **and
+ * a computer name** that must equal their own normalized form.
  *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
  *   - The audit does not name the tool that carries the computer-folder prompt, so
- *     this implementation recognises a configurable placeholder name
- *     (`COMPUTER_FOLDER_PROMPT_TOOL`) and validates that prompt strictly. The same
- *     holds for the repository-trust prompt.
+ *     this implementation takes the name from the transport layer's configuration and refuses
+ *     a prompt-shaped request whose name it does not know.
  *   - The three arguments of the computer-folder prompt are taken to be the folder
  *     path, the computer name and an opaque identifier.
+ *   - The approval prompt shows the **command text** as well as the resolved
+ *     destinations: the resolved destination is what the kernel will act on, and
+ *     the command text is what the user asked about. A prompt that shows only
+ *     fabricated paths the user cannot verify is as bad as one that shows only a
+ *     literal string.
  */
 
 import path from 'node:path';
 
-import type { PermissionDecision, ToolContext } from './decision.js';
+import { describeReason, type PermissionDecision, type ToolContext } from './decision.js';
 import {
-  describeReason,
   extractPrimaryValue,
   extractToolPath,
   resolvePathTargets,
   shellInvocation,
-  shellSubCommands,
+  shellSubCommandParts,
+  shellSubCommandMutatesFiles,
 } from './rules.js';
-
-/** The tool this implementation recognises as the computer-folder prompt. */
-export const COMPUTER_FOLDER_PROMPT_TOOL = 'computer_folder';
-
-/** The tool this implementation recognises as the repository-trust prompt. */
-export const REPOSITORY_TRUST_PROMPT_TOOL = 'repository_trust';
 
 /** The result of validating a tool's arguments. */
 export type ToolInputVerification = { ok: true } | { ok: false; message: string };
@@ -90,7 +94,8 @@ export function verifyToolInput(toolName: string, input: unknown): ToolInputVeri
     return { ok: true };
   }
 
-  const toolPath = readField(input, 'file_path') ?? readField(input, 'notebook_path') ?? readField(input, 'path');
+  const toolPath =
+    readField(input, 'file_path') ?? readField(input, 'notebook_path') ?? readField(input, 'path');
   if (toolPath !== undefined) {
     if (typeof toolPath !== 'string' || toolPath.length === 0) {
       return { ok: false, message: 'the path argument is missing' };
@@ -227,6 +232,32 @@ export function applyPermissionRequestHook(
 }
 
 /**
+ * The hook seam of `checkPermission`.
+ *
+ * The returned callback is the `hook` option of a permission check: it runs
+ * **after** the deny list, so a hook approval can never override a deny rule, and
+ * the check refuses a hook approval that would override an ask rule as well.
+ */
+export function createPermissionRequestHook(opts: {
+  /** The hook's own approval, or `undefined` when the hook did not decide. */
+  approval: (
+    ctx: ToolContext,
+  ) => PermissionRequestHookApproval | undefined | Promise<PermissionRequestHookApproval | undefined>;
+  /** The safety check, run against the rewritten input. */
+  safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
+  /** The tool's own validator, run against the rewritten input. */
+  validate?: ToolInputValidator;
+}): (ctx: ToolContext) => Promise<PermissionDecision | undefined> {
+  return async (ctx: ToolContext) => {
+    const approval = await opts.approval(ctx);
+    return applyPermissionRequestHook(approval, ctx, {
+      safetyCheck: opts.safetyCheck,
+      validate: opts.validate,
+    });
+  };
+}
+
+/**
  * The input the tool receives.
  *
  * A hook that rewrote the input decides what runs; without a rewrite the original
@@ -252,8 +283,10 @@ export interface ApprovalPromptInput {
 /**
  * The approval prompt.
  *
- * The prompt shows the **resolved** destination, not the literal command string: a
- * prompt that shows the literal string is a prompt that can be lied to by a symlink.
+ * The prompt shows the **command text** and the **resolved** destination: the
+ * resolved destination is what the kernel will act on (a prompt that shows the
+ * literal string alone is a prompt that can be lied to by a symlink), and the
+ * command text is what the user is being asked about.
  */
 export function buildApprovalPrompt(input: ApprovalPromptInput): string {
   const { toolName, decision } = input;
@@ -266,13 +299,13 @@ export function buildApprovalPrompt(input: ApprovalPromptInput): string {
 
   const parts: string[] = [`${toolName} wants to run this command.`];
 
+  const command = extractPrimaryValue(ctx);
+  if (command !== undefined) parts.push(command);
+
   const destinations = resolvedDestinations(ctx, input.cwd);
   if (destinations.length > 0) {
     const listed = destinations.map((destination) => `  ${destination}`).join('\n');
     parts.push(`The resolved destination is:\n${listed}`);
-  } else {
-    const command = extractPrimaryValue(ctx);
-    if (command !== undefined) parts.push(command);
   }
 
   parts.push(describeReason(decision, toolName));
@@ -283,7 +316,10 @@ export function buildApprovalPrompt(input: ApprovalPromptInput): string {
  * The resolved destinations of a call.
  *
  * For a file tool it is the resolved path; for a shell command it is the resolved
- * path of every path argument of every sub-command.
+ * path of every redirection target and of every argument that is **plausibly a
+ * path** — an argument of a file-mutating command, or an argument that names a
+ * path. A URL, a flag and an ordinary word are not paths, and resolving them would
+ * show the user paths that do not exist.
  */
 export function resolvedDestinations(ctx: ToolContext, cwd?: string): string[] {
   const options = cwd === undefined ? {} : { cwd };
@@ -298,16 +334,39 @@ export function resolvedDestinations(ctx: ToolContext, cwd?: string): string[] {
   if (ctx.toolName === 'Bash') {
     const command = extractPrimaryValue(ctx);
     if (command === undefined) return destinations;
-    for (const subCommand of shellSubCommands(command)) {
-      const invocation = shellInvocation(subCommand);
+    for (const part of shellSubCommandParts(command)) {
+      // A redirection target is always a path: the shell will write there.
+      for (const redirect of part.redirects) {
+        if (redirect.target === undefined) continue;
+        destinations.push(resolvePathTargets(redirect.target, options).resolved);
+      }
+      const invocation = shellInvocation(part.text);
+      const mutating = shellSubCommandMutatesFiles(part);
       for (const argument of invocation.args) {
-        if (argument.startsWith('-')) continue;
+        if (!isPlausiblePath(argument, mutating)) continue;
         destinations.push(resolvePathTargets(argument, options).resolved);
       }
     }
   }
 
   return destinations;
+}
+
+/**
+ * Whether an argument is plausibly a filesystem path.
+ *
+ * A flag is not a path, a URL is not a path, and an ordinary word is not a path
+ * either — resolving `https://example.com/x` would show the user
+ * `/work/https:/example.com/x`, a path that does not exist. The arguments of a
+ * file-mutating command are paths, because that command writes them.
+ */
+function isPlausiblePath(argument: string, mutating: boolean): boolean {
+  if (argument.length === 0) return false;
+  if (argument.startsWith('-')) return false;
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(argument)) return false;
+  if (mutating) return true;
+  if (argument.startsWith('~') || argument.startsWith('.')) return true;
+  return argument.includes('/');
 }
 
 /** The text of a remote permission prompt. */
@@ -319,7 +378,7 @@ export function buildPermissionPromptText(input: {
   const parts: string[] = [`${input.toolName} requests permission.`];
   if (input.description) parts.push(input.description);
   if (input.decisionReason) parts.push(`Reason: ${input.decisionReason}`);
-  return parts.join('\n\n');
+  return parts.join('\n');
 }
 
 // --- the remote transport dispatcher --------------------------------------------
@@ -365,7 +424,12 @@ export interface TransportPermissionDispatcherOptions {
   requestDecision?: (
     request: TransportPermissionRequest,
   ) => Promise<{ behavior: 'allow' | 'deny'; updatedInput?: unknown; message?: string }>;
-  /** The tool that carries the computer-folder prompt. */
+  /**
+   * The tool that carries the computer-folder prompt.
+   *
+   * The name comes from the transport layer, which is the only place that knows
+   * it. Without it, a request that looks like a computer-folder prompt is refused.
+   */
   computerFolderTool?: string;
   /** The tool that carries the repository-trust prompt. */
   repositoryTrustTool?: string;
@@ -411,7 +475,7 @@ function hasForbiddenControlCharacter(value: string): boolean {
  *
  * The prompt carries exactly three string arguments: the folder path, the computer
  * name and an opaque identifier. The path and the computer name may not contain a
- * CR, LF, U+2028 or U+2029, and the path must equal its own normalized form.
+ * CR, LF, U+2028 or U+2029, and **both** must equal their own normalized form.
  */
 export function validateComputerFolderInput(
   input: unknown,
@@ -459,7 +523,27 @@ export function validateComputerFolderInput(
     };
   }
 
+  if (path.normalize(computerName) !== computerName) {
+    return {
+      ok: false,
+      message: 'The computer-folder prompt carries a computer name that is not normalized.',
+      reason: 'the computer-folder prompt computer name is not equal to its normalized form',
+    };
+  }
+
   return { ok: true };
+}
+
+/**
+ * Whether an input looks like a computer-folder prompt.
+ *
+ * The computer-folder prompt carries exactly three string arguments, so an input
+ * of that shape is a computer-folder prompt whose tool name the dispatcher did not
+ * recognise. Such a request is **refused** rather than forwarded unvalidated.
+ */
+export function looksLikeComputerFolderInput(input: unknown): boolean {
+  if (!Array.isArray(input) || input.length !== 3) return false;
+  return input.every((value) => typeof value === 'string');
 }
 
 /**
@@ -474,8 +558,8 @@ export function validateComputerFolderInput(
 export function createTransportPermissionDispatcher(
   opts: TransportPermissionDispatcherOptions = {},
 ): TransportPermissionDispatcher {
-  const computerFolderTool = opts.computerFolderTool ?? COMPUTER_FOLDER_PROMPT_TOOL;
-  const repositoryTrustTool = opts.repositoryTrustTool ?? REPOSITORY_TRUST_PROMPT_TOOL;
+  const computerFolderTool = opts.computerFolderTool;
+  const repositoryTrustTool = opts.repositoryTrustTool;
   const inFlight = new Set<string>();
 
   const dispatch = async (request: CanUseToolRequest): Promise<TransportDispatchResult> => {
@@ -509,17 +593,25 @@ export function createTransportPermissionDispatcher(
       );
     }
 
-    if (toolName === computerFolderTool) {
+    if (computerFolderTool !== undefined && toolName === computerFolderTool) {
       const validation = validateComputerFolderInput(record['input']);
       if (!validation.ok) {
         return denialResponse(requestId, validation.message, validation.reason);
       }
+    } else if (looksLikeComputerFolderInput(record['input'])) {
+      // The request looks like a computer-folder prompt, but its tool name is not
+      // the configured one: it is refused rather than forwarded unvalidated.
+      return denialResponse(
+        requestId,
+        'The request looks like a computer-folder prompt, but its tool name is not a configured computer-folder prompt.',
+        'the request looks like a computer-folder prompt but its tool name is not configured',
+      );
     }
 
     const description = record['description'];
     const decisionReason = record['decision_reason'];
     const prompt =
-      toolName === repositoryTrustTool
+      repositoryTrustTool !== undefined && toolName === repositoryTrustTool
         ? `Do you trust this repository?\n\n${typeof description === 'string' ? description : ''}`
         : buildPermissionPromptText({
             toolName,
@@ -562,5 +654,3 @@ export function createTransportPermissionDispatcher(
     inFlight: () => [...inFlight],
   };
 }
-
-export { describeReason } from './rules.js';

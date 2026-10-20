@@ -1,6 +1,6 @@
 /**
- * The permission decision vocabulary, the mode semantics, and the start-mode
- * resolution.
+ * The permission decision vocabulary, the mode semantics, the host-level gates
+ * and the start-mode resolution.
  *
  * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.5 (Permissions) and the
  * `CC-007` milestone of
@@ -23,7 +23,10 @@
  *   - `dontAsk` **denies** anything that would prompt, and denies `AskUserQuestion`,
  *     MCP tools marked `requiresUserInteraction`, network-path reads and org-ask
  *     connector tools **even if allow-listed** — and it never consults the prompt;
- *   - `plan` never auto-approves a file edit, not even with a matching allow rule;
+ *   - `plan` never auto-approves a file edit, not even with a matching allow rule.
+ *     "Auto-approves an edit" is a property of the **effect**, not of the tool
+ *     name, so a `Bash` allow rule that covers `sed -i` does not auto-approve it
+ *     either;
  *   - `acceptEdits` auto-approves Edit/Write plus `mkdir`, `touch`, `rm`, `rmdir`,
  *     `mv`, `cp` and `sed`, but only for paths inside the working directory or an
  *     added directory and only after a symlink check — and `rm` / `rmdir` on a
@@ -31,10 +34,9 @@
  *   - `auto` is a classifier review that **fails closed**: no verdict means deny.
  *
  * The `auto` review is **server-side by default** in current releases, with a local
- * model call as the fallback; the local model is selected by
- * `CLAUDE_CODE_AUTO_MODE_MODEL` and server-side review is disabled with
- * `CLAUDE_CODE_AUTO_MODE_SERVER=0`. This implementation therefore never assumes a local
- * classifier call, and `resolveAutoModeReview` reports which path is available.
+ * model call as the fallback. This implementation never assumes a local model call: the
+ * review is supplied by the caller as a callback, and **which** path the review uses
+ * is not implemented in this module.
  *
  * The **start-mode precedence** is `--permission-mode` flag → `permissions.defaultMode`
  * → the built-in default. `auto` and `bypassPermissions` written into a settings
@@ -42,6 +44,19 @@
  * session and `default` for a headless run, subject to three availability
  * overrides: `disableAutoMode: "disable"`, a HIPAA-configured session, and a session
  * where auto mode is unavailable.
+ *
+ * **The hooks run after the deny list.** A `PermissionRequest` hook may approve a
+ * call and rewrite its input, but an approval never overrides a **deny** or an
+ * **ask** rule — the research states it outright ("a hook returning `allow` does
+ * not override a deny or ask rule"). The hook therefore runs *after* the deny list
+ * has been evaluated, and an ask rule that matches takes precedence over the hook's
+ * approval. A hook approval that carries `classifierApprovable: false` cannot be
+ * laundered into an approval by the auto-mode review.
+ *
+ * **The host-level gates** are the two the audit names: the
+ * `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` restriction, which blocks every prompt and
+ * tool call when the personal configuration has problems, and a hook failure of
+ * severity `stop`, which denies every tool call.
  *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
@@ -55,24 +70,56 @@
  *   - The auto-mode classifier is supplied by the caller as a callback, because the
  *     review is server-side by default and this implementation must not assume a local model
  *     call.
+ *   - In `auto` mode an explicit `permissions.ask` rule **still forces a prompt**:
+ *     the classifier reviews the call, and a classifier approval does not turn the
+ *     ask into an allow. The review may still *deny* the call outright.
+ *   - A hook approval that the classifier may not approve (`classifierApprovable:
+ *     false`) becomes an **ask** in `auto` mode rather than a denial: a person
+ *     decides, and the classifier cannot decide for them.
+ *   - The reason kinds are the audit's observed six plus `noRuleMatch`, a reimplementation
+ *     addition so that the audit's `permissionPromptTool` ("a named tool requires
+ *     approval for this command") keeps its observed meaning instead of also
+ *     covering "no rule matched".
+ *   - The "don't ask again" affordance **computes** the rules to persist and the
+ *     five-rule cap, but **does not write them**: the write to
+ *     `.claude/settings.local.json` is not implemented in this module.
+ *   - The permission **rule lists** are merged keys, so they follow the **observed**
+ *     `MERGED_KEY_ORDER` (`localSettings`, `projectSettings`, `userSettings`).
+ *     `permissions.defaultMode` is a scalar under a top-level key, so it follows the
+ *     **observed** `TOP_LEVEL_KEY_ORDER`. The two tiers that neither observed
+ *     ordering names — the machine policy and the feature flags — are placed first
+ *     in the rule lists, because a machine policy rule must win the first-match
+ *     scan; that placement is a **implementation choice**, not an observed ordering, and the
+ *     project-side tiers' placement for `defaultMode` is a implementation choice too.
  */
 
 import path from 'node:path';
 
-import { TIER_PRECEDENCE, documentOf, type SettingsSource } from '../config/tiers.js';
-import type { SettingsLoadResult } from '../config/loader.js';
+import {
+  MERGED_KEY_ORDER,
+  TOP_LEVEL_KEY_ORDER,
+  documentOf,
+  type SettingsSource,
+} from '../config/tiers.js';
+import type { SettingsLoadError, SettingsLoadResult } from '../config/loader.js';
 
 import {
+  FILE_MUTATING_TOOL_NAMES,
   collectRuleWarnings,
+  evaluateListOutcome,
   evaluateRuleList,
   extractPrimaryValue,
   extractToolPath,
   isCriticalPath,
   isInsideDirectory,
   resolvePathTargets,
+  shellSubCommandMutatesFiles,
+  shellSubCommandParts,
   shellInvocation,
   shellSubCommands,
   type PathTargets,
+  type RuleDecision,
+  type RuleListOutcome,
   type RuleSet,
 } from './rules.js';
 
@@ -100,6 +147,9 @@ export type PermissionReasonType = 'rule' | 'safetyCheck' | 'other';
  * `permissionPromptTool` names a tool that requires approval; `sandboxOverride` is
  * "Run outside of the sandbox"; `workingDir` is the working directory; and
  * `safetyCheck` is a refusal that is independent of the rule engine.
+ *
+ * `noRuleMatch` is a **implementation addition**: it is the case where no rule matched at
+ * all, which the audit's `permissionPromptTool` would otherwise have to cover.
  */
 export type PermissionReasonKind =
   | 'rule'
@@ -107,7 +157,8 @@ export type PermissionReasonKind =
   | 'permissionPromptTool'
   | 'sandboxOverride'
   | 'workingDir'
-  | 'safetyCheck';
+  | 'safetyCheck'
+  | 'noRuleMatch';
 
 /** The permission modes, including the `manual` alias of `default`. */
 export type PermissionMode =
@@ -170,6 +221,24 @@ export interface AutoModeVerdict {
   category?: string;
 }
 
+/** A host-level gate that blocks every prompt and tool call. */
+export interface HostGate {
+  /** Whether the gate blocks the call. */
+  blocked: boolean;
+  /** The reason shown to the user; it names the offending file paths. */
+  reason: string;
+  /** The offending file paths. */
+  paths: string[];
+}
+
+/** A hook failure reported by the host. */
+export interface HostHookFailure {
+  /** The severity of the failure; `stop` blocks every tool call. */
+  severity: string;
+  /** The failure message. */
+  message?: string;
+}
+
 /** The options a permission check runs with. */
 export interface CheckPermissionOptions {
   /** The rule lists to evaluate. */
@@ -182,6 +251,15 @@ export interface CheckPermissionOptions {
    * A denial it returns holds in every mode, including `bypassPermissions`.
    */
   safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
+  /**
+   * The `PermissionRequest` hook, run **after** the deny list.
+   *
+   * The hook may deny the call, approve it, and rewrite the tool input. An
+   * approval never overrides a deny rule or an ask rule, and an approval that
+   * carries `classifierApprovable: false` cannot be turned into an approval by
+   * the auto-mode review.
+   */
+  hook?: (ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
   /**
    * The prompt. Only consulted for a decision that would prompt, and **never** in
    * `dontAsk`.
@@ -198,6 +276,18 @@ export interface CheckPermissionOptions {
   cwd?: string;
   /** Extra directories `acceptEdits` may write inside. */
   additionalDirs?: string[];
+  /**
+   * A host-level gate, e.g. the `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` restriction.
+   *
+   * A blocked gate denies every prompt and tool call.
+   */
+  hostGate?: HostGate;
+  /**
+   * A hook failure reported by the host.
+   *
+   * A failure of severity `stop` denies every tool call.
+   */
+  hookFailure?: HostHookFailure;
 }
 
 /** The options the start mode is resolved from. */
@@ -227,14 +317,35 @@ const ACCEPT_EDITS_COMMANDS: ReadonlySet<string> = new Set([
   'sed',
 ]);
 
-/** The tools that mutate a file. */
-const FILE_MUTATING_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'NotebookEdit']);
+/** The file-mutating tools. The set lives in the rule module: one source of truth. */
+const FILE_MUTATING_TOOLS: ReadonlySet<string> = new Set(FILE_MUTATING_TOOL_NAMES);
 
-/** The environment variable that selects the local auto-mode model. */
-export const AUTO_MODE_MODEL_ENV = 'CLAUDE_CODE_AUTO_MODE_MODEL';
+/**
+ * The environment variable that restricts personal configuration.
+ *
+ * When it is set, the personal configuration tiers have problems: every prompt and
+ * every tool call is blocked, and the message names the offending file paths.
+ */
+export const RESTRICT_PERSONAL_CONFIG_ENV = 'CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG';
 
-/** The environment variable that disables the server-side auto-mode review. */
-export const AUTO_MODE_SERVER_ENV = 'CLAUDE_CODE_AUTO_MODE_SERVER';
+/**
+ * The reason a hook failure of severity `stop` denies every tool call with.
+ *
+ * The wording is the audit's, verbatim.
+ */
+export const HOST_HOOK_FAILURE_REASON =
+  'A problem with your own settings or hooks is blocking tool calls';
+
+/**
+ * The settings file the "don't ask again" rules are persisted to.
+ *
+ * The **write** is not implemented in this module; only the computation of the
+ * rules and the cap are.
+ */
+export const PERSISTED_RULES_SETTINGS_PATH = '.claude/settings.local.json';
+
+/** The maximum number of rules the "don't ask again" affordance persists. */
+export const MAX_PERSISTED_RULES = 5;
 
 /**
  * Resolve the `manual` alias.
@@ -246,35 +357,153 @@ export function normalizePermissionMode(mode: PermissionMode): Exclude<Permissio
   return mode === 'manual' ? 'default' : mode;
 }
 
-function attachWarnings(decision: PermissionDecision, warnings: string[]): PermissionDecision {
+function attachWarnings<T extends PermissionDecision>(decision: T, warnings: string[]): T {
   if (warnings.length === 0) return decision;
   return { ...decision, warnings };
 }
 
-function askDecision(rule?: { content: string; source: string }, reason?: string): PermissionDecision {
-  const text =
-    reason ??
-    (rule
-      ? `Permission rule '${rule.content}' from ${rule.source} requires approval for this call.`
-      : 'This call requires approval.');
-  const decision: PermissionDecision = {
+/**
+ * The reason text of a decision.
+ *
+ * The reason kinds are the ones the audit records: `rule`,
+ * `subcommandResults`, `permissionPromptTool`, `sandboxOverride`, `workingDir` and
+ * `safetyCheck`, plus this implementation's `noRuleMatch`.
+ */
+export function describeReason(decision: PermissionDecision, toolName: string): string {
+  const kind: PermissionReasonKind | 'other' =
+    decision.reasonKind ??
+    (decision.reasonType === 'rule'
+      ? 'rule'
+      : decision.reasonType === 'safetyCheck'
+        ? 'safetyCheck'
+        : 'other');
+
+  switch (kind) {
+    case 'rule':
+      return describeRuleReason(decision, toolName);
+    case 'subcommandResults':
+      return describeSubcommandReason(decision, toolName);
+    case 'permissionPromptTool':
+      return decision.reason ?? `The ${toolName} tool requires approval for this command.`;
+    case 'noRuleMatch':
+      return decision.reason ?? `No permission rule matched, so this ${toolName} call requires approval.`;
+    case 'sandboxOverride':
+      return 'Run outside of the sandbox';
+    case 'workingDir':
+      return decision.reason ?? `This ${toolName} call is allowed because it stays inside the working directory.`;
+    case 'safetyCheck':
+      return decision.reason ?? `A safety check refused this ${toolName} call.`;
+    default:
+      return decision.reason ?? `This ${toolName} call requires approval.`;
+  }
+}
+
+function describeRuleReason(decision: PermissionDecision, toolName: string): string {
+  const rule = decision.rule;
+  if (!rule) return decision.reason ?? `This ${toolName} call requires approval.`;
+  const attribution = `Permission rule '${rule.content}' from ${rule.source}`;
+  if (decision.behavior === 'deny') return `${attribution} denies this ${toolName} call.`;
+  if (decision.behavior === 'allow') return `${attribution} allows this ${toolName} call.`;
+  return `${attribution} requires approval for this ${toolName} command.`;
+}
+
+function describeSubcommandReason(decision: PermissionDecision, toolName: string): string {
+  const subcommands = decision.subcommandResults;
+  if (!subcommands) return decision.reason ?? `This ${toolName} call requires approval.`;
+  const rule = decision.rule;
+  const attribution = rule ? `Permission rule '${rule.content}' from ${rule.source}` : 'The command';
+  const list = subcommands.commands.join(', ');
+  if (decision.behavior === 'deny') {
+    return `${attribution} denies ${subcommands.count} of ${subcommands.total} parts of this command: ${list}.`;
+  }
+  return `${attribution} requires approval for ${subcommands.count} of ${subcommands.total} parts of this command: ${list}.`;
+}
+
+/**
+ * Attach the reason text to a decision.
+ *
+ * The reason belongs to the decision layer, so the rule module produces the
+ * decision and this module renders it.
+ */
+function withReason<T extends PermissionDecision>(decision: T, toolName: string): T {
+  if (decision.reason !== undefined) return decision;
+  return { ...decision, reason: describeReason(decision, toolName) };
+}
+
+/**
+ * Evaluate the rule lists against a tool call.
+ *
+ * The lists are scanned `deny` → `ask` → `allow`, and the first rule **in a list**
+ * that matches is the rule that matched: specificity is irrelevant, and an allow
+ * rule can never carve an exception out of a deny.
+ *
+ * Returns `undefined` when nothing matched, so the caller can escalate to a prompt.
+ * The decision never carries a rewritten tool input — a rule is a pure predicate.
+ */
+export function evaluateRules(rules: RuleSet, tool: ToolContext): RuleDecision | undefined {
+  for (const kind of ['deny', 'ask', 'allow'] as const) {
+    const outcome = evaluateListOutcome(rules, rules[kind], kind, tool);
+    if (outcome.decision) {
+      return attachWarnings(withReason(outcome.decision, tool.toolName), collectRuleWarnings(rules, tool));
+    }
+  }
+  return undefined;
+}
+
+function askDecision(
+  toolName: string,
+  reason?: string,
+  reasonKind: PermissionReasonKind = 'noRuleMatch',
+): PermissionDecision {
+  const text = reason ?? `No permission rule matched, so this ${toolName} call requires approval.`;
+  return {
     behavior: 'ask',
     source: 'unknown',
-    reasonType: rule ? 'rule' : 'other',
-    reasonKind: rule ? 'rule' : 'permissionPromptTool',
+    reasonType: 'other',
+    reasonKind,
     reason: text,
     message: text,
   };
-  if (rule) decision.rule = rule;
-  return decision;
+}
+
+/**
+ * The escalation of a call an allow rule did not cover.
+ *
+ * When an allow rule covers only part of a compound command, the sub-commands it
+ * does **not** cover are named, so the escalation is not the generic ask.
+ */
+function allowFailureEscalation(tool: ToolContext, outcome: RuleListOutcome): PermissionDecision {
+  const decision: PermissionDecision = {
+    behavior: 'ask',
+    source: 'unknown',
+    reasonType: 'rule',
+    reasonKind: 'subcommandResults',
+    subcommandResults: {
+      commands: [...outcome.unmatched],
+      count: outcome.unmatched.length,
+      total: outcome.total,
+    },
+  };
+  if (outcome.rule) decision.rule = outcome.rule;
+  return withReason(decision, tool.toolName);
+}
+
+/** The hook's approval, as the mode layer sees it. */
+interface HookApproval {
+  /** The hook's decision. */
+  decision: PermissionDecision;
+  /** Whether an ask rule overrode the approval. */
+  overridden: boolean;
 }
 
 /**
  * Check a tool call against the rules and the active mode.
  *
- * The order is: the safety check first (it is independent of the rule engine and
- * holds in every mode), then the deny list (a deny rule blocks in every mode),
- * then the mode's own semantics.
+ * The order is: the host-level gates first (they block everything), then the
+ * safety check (independent of the rule engine and holding in every mode), then
+ * the deny list (a deny rule blocks in every mode), then the ask list, then the
+ * `PermissionRequest` hook (an approval never overrides a deny or an ask rule),
+ * and finally the mode's own semantics.
  */
 export async function checkPermission(
   ctx: ToolContext,
@@ -284,24 +513,93 @@ export async function checkPermission(
   const rules = opts.rules;
   const warnings = collectRuleWarnings(rules, ctx);
 
+  // 0. The host-level gates block every prompt and every tool call.
+  const gate = opts.hostGate;
+  if (gate?.blocked) {
+    return attachWarnings(
+      { behavior: 'deny', source: 'unknown', reasonType: 'other', reason: gate.reason },
+      warnings,
+    );
+  }
+  const failure = opts.hookFailure;
+  if (failure && failure.severity === 'stop') {
+    return attachWarnings(
+      { behavior: 'deny', source: 'hook', reasonType: 'other', reason: HOST_HOOK_FAILURE_REASON },
+      warnings,
+    );
+  }
+
   // 1. The safety check is independent of the rule engine and holds in every mode.
   const safety = opts.safetyCheck?.(ctx);
   if (safety) return attachWarnings(safety, warnings);
 
   // 2. A deny rule blocks in every mode, including `bypassPermissions`.
   const denied = evaluateRuleList(rules, rules.deny, 'deny', ctx);
-  if (denied) return attachWarnings(denied, warnings);
+  if (denied) return attachWarnings(withReason(denied, ctx.toolName), warnings);
 
-  const decision = await decideForMode(ctx, opts, mode, rules);
+  // 3. The ask list. An ask rule beats a hook approval.
+  const asked = evaluateRuleList(rules, rules.ask, 'ask', ctx);
 
-  // 3. The prompt is consulted for a decision that would prompt — never in
+  // 4. The hook runs **after** the deny list, so an approval can never override a
+  //    deny rule, and an ask rule is never overridden by it either.
+  let hookApproval: HookApproval | undefined;
+  const hookDecision = opts.hook ? await opts.hook(ctx) : undefined;
+  if (hookDecision) {
+    if (hookDecision.behavior === 'deny') return attachWarnings(hookDecision, warnings);
+    if (hookDecision.behavior === 'allow') {
+      hookApproval = { decision: hookDecision, overridden: asked !== undefined };
+    }
+  }
+
+  // 5. The mode's own semantics.
+  const decision = applyHookApproval(
+    await decideForMode(ctx, opts, mode, rules, asked, hookApproval),
+    hookApproval,
+  );
+
+  // 6. The prompt is consulted for a decision that would prompt — never in
   //    `dontAsk`, which denies instead of asking.
   if (decision.behavior === 'ask' && mode !== 'dontAsk' && opts.canUseTool) {
     const resolved = await opts.canUseTool(ctx, decision);
     if (resolved) return attachWarnings(resolved, warnings);
   }
 
-  return attachWarnings(decision, warnings);
+  return attachWarnings(withReason(decision, ctx.toolName), warnings);
+}
+
+/**
+ * Apply a hook's approval to the decision the mode produced.
+ *
+ * An approval replaces a **generic** prompt — the case where no rule matched and
+ * nothing else forced a prompt. It never replaces a denial, never replaces a
+ * mode-level refusal (`permissionPromptTool`), and never replaces the ask of an
+ * ask rule. A hook that rewrote the input keeps its rewrite on every decision the
+ * call ends up with, because the rewritten input is what the tool receives.
+ */
+function applyHookApproval(
+  decision: PermissionDecision,
+  hookApproval: HookApproval | undefined,
+): PermissionDecision {
+  if (!hookApproval) return decision;
+  const hook = hookApproval.decision;
+
+  if (decision.behavior === 'allow') {
+    return hook.updatedInput !== undefined ? { ...decision, updatedInput: hook.updatedInput } : decision;
+  }
+  if (decision.behavior === 'deny') return decision;
+
+  // The call would prompt.
+  if (hookApproval.overridden) {
+    // An ask rule matched: the ask stands.
+    return hook.updatedInput !== undefined ? { ...decision, updatedInput: hook.updatedInput } : decision;
+  }
+  if (decision.reasonKind !== 'noRuleMatch' && decision.reasonKind !== 'subcommandResults') {
+    // A mode-level refusal, a degraded deny rule and a safety check all stand:
+    // only the **generic** prompt — the case where no rule matched — is replaced by
+    // the hook's approval.
+    return decision;
+  }
+  return { ...hook, reason: hook.reason ?? 'A PermissionRequest hook approved this call.' };
 }
 
 async function decideForMode(
@@ -309,21 +607,23 @@ async function decideForMode(
   opts: CheckPermissionOptions,
   mode: Exclude<PermissionMode, 'manual'>,
   rules: RuleSet,
+  asked: RuleDecision | undefined,
+  hookApproval: HookApproval | undefined,
 ): Promise<PermissionDecision> {
   switch (mode) {
     case 'bypassPermissions':
-      return decideBypassPermissions(ctx, rules);
+      return decideBypassPermissions(ctx, rules, asked, hookApproval);
     case 'dontAsk':
-      return decideDontAsk(ctx, rules);
+      return decideDontAsk(ctx, rules, asked);
     case 'plan':
-      return decidePlan(ctx, rules);
+      return decidePlan(ctx, rules, asked);
     case 'acceptEdits':
-      return decideAcceptEdits(ctx, opts, rules);
+      return decideAcceptEdits(ctx, opts, rules, asked);
     case 'auto':
-      return decideAuto(ctx, opts, rules);
+      return decideAuto(ctx, opts, rules, asked, hookApproval);
     case 'default':
     default:
-      return decideDefault(ctx, rules);
+      return decideDefault(ctx, rules, asked);
   }
 }
 
@@ -333,9 +633,16 @@ async function decideForMode(
  * A deny rule still blocks (handled before this function), an ask rule still
  * prompts, and an allow rule has **no effect** — it is not consulted at all.
  */
-function decideBypassPermissions(ctx: ToolContext, rules: RuleSet): PermissionDecision {
-  const asked = evaluateRuleList(rules, rules.ask, 'ask', ctx);
+function decideBypassPermissions(
+  ctx: ToolContext,
+  rules: RuleSet,
+  asked: RuleDecision | undefined,
+  hookApproval: HookApproval | undefined,
+): PermissionDecision {
   if (asked) return asked;
+  if (hookApproval && !hookApproval.overridden) {
+    return { ...hookApproval.decision, reason: hookApproval.decision.reason ?? 'A PermissionRequest hook approved this call.' };
+  }
   return {
     behavior: 'allow',
     source: 'unknown',
@@ -350,18 +657,38 @@ function decideBypassPermissions(ctx: ToolContext, rules: RuleSet): PermissionDe
  * Anything that would prompt is **denied** rather than prompted, and the
  * always-denied categories are denied **even if an allow rule matches**.
  */
-function decideDontAsk(ctx: ToolContext, rules: RuleSet): PermissionDecision {
+function decideDontAsk(
+  ctx: ToolContext,
+  rules: RuleSet,
+  asked: RuleDecision | undefined,
+): PermissionDecision {
   const refusal = dontAskRefusal(ctx);
   if (refusal) return refusal;
 
-  const asked = evaluateRuleList(rules, rules.ask, 'ask', ctx);
   if (asked) {
     const rule = asked.rule;
     return dontAskDenial(dontAskReason(rule), rule);
   }
 
-  const allowed = evaluateRuleList(rules, rules.allow, 'allow', ctx);
-  if (allowed) return allowed;
+  const allowed = evaluateListOutcome(rules, rules.allow, 'allow', ctx);
+  if (allowed.decision) return allowed.decision;
+  if (allowed.unmatched.length > 0) {
+    // The allow rule did not cover every part of the command, so the call would
+    // prompt — and `dontAsk` denies a prompt.
+    const decision: PermissionDecision = {
+      behavior: 'deny',
+      source: 'unknown',
+      reasonType: 'other',
+      subcommandResults: {
+        commands: [...allowed.unmatched],
+        count: allowed.unmatched.length,
+        total: allowed.total,
+      },
+      reason: `dontAsk mode is active: ${allowed.unmatched.length} of ${allowed.total} parts of this command need approval (${allowed.unmatched.join(', ')}), so the call is denied instead of prompted.`,
+    };
+    if (allowed.rule) decision.rule = allowed.rule;
+    return decision;
+  }
 
   return dontAskDenial(dontAskReason(undefined), undefined);
 }
@@ -393,6 +720,7 @@ function dontAskReason(rule?: { content: string; source: string }): string {
   }
   return 'dontAsk mode is active: this call would require approval, so it is denied instead of prompted.';
 }
+
 /**
  * The categories `dontAsk` denies even when an allow rule matches.
  *
@@ -460,21 +788,42 @@ function isNetworkPath(value: string): boolean {
  * `plan`.
  *
  * A file edit is **never** auto-approved, not even with a matching allow rule.
+ * "Auto-approves an edit" is a property of the **effect**, so a `Bash` call whose
+ * effect is a file write is refused as well.
  */
-function decidePlan(ctx: ToolContext, rules: RuleSet): PermissionDecision {
-  const asked = evaluateRuleList(rules, rules.ask, 'ask', ctx);
+function decidePlan(
+  ctx: ToolContext,
+  rules: RuleSet,
+  asked: RuleDecision | undefined,
+): PermissionDecision {
   if (asked) return asked;
 
-  if (FILE_MUTATING_TOOLS.has(ctx.toolName)) {
+  if (mutatesFiles(ctx)) {
     return askDecision(
-      undefined,
+      ctx.toolName,
       `Plan mode never auto-approves a file edit, so this ${ctx.toolName} call requires approval.`,
+      'permissionPromptTool',
     );
   }
 
-  const allowed = evaluateRuleList(rules, rules.allow, 'allow', ctx);
-  if (allowed) return allowed;
-  return askDecision(undefined);
+  const allowed = evaluateListOutcome(rules, rules.allow, 'allow', ctx);
+  if (allowed.decision) return allowed.decision;
+  if (allowed.unmatched.length > 0) return allowFailureEscalation(ctx, allowed);
+  return askDecision(ctx.toolName);
+}
+
+/**
+ * Whether a call's **effect** is a file write.
+ *
+ * A file-mutating tool obviously is one; a shell call is one when one of its
+ * sub-commands mutates a file, whether by its program or by a write redirection.
+ */
+function mutatesFiles(ctx: ToolContext): boolean {
+  if (FILE_MUTATING_TOOLS.has(ctx.toolName)) return true;
+  if (ctx.toolName !== 'Bash') return false;
+  const command = extractPrimaryValue(ctx);
+  if (command === undefined) return false;
+  return shellSubCommandParts(command).some((part) => shellSubCommandMutatesFiles(part));
 }
 
 /**
@@ -488,93 +837,144 @@ function decideAcceptEdits(
   ctx: ToolContext,
   opts: CheckPermissionOptions,
   rules: RuleSet,
+  asked: RuleDecision | undefined,
 ): PermissionDecision {
-  const asked = evaluateRuleList(rules, rules.ask, 'ask', ctx);
   if (asked) return asked;
 
-  const allowed = evaluateRuleList(rules, rules.allow, 'allow', ctx);
-  if (allowed) return allowed;
+  const allowed = evaluateListOutcome(rules, rules.allow, 'allow', ctx);
+  if (allowed.decision) return allowed.decision;
 
+  // An allow rule that covers only part of the chain approves nothing, but the
+  // mode's own auto-approval still applies. The escalation that names the
+  // sub-commands is the fallback when the mode does not approve the call either.
+  const approved = acceptEditsApproval(ctx, opts, rules);
+  if (approved) return approved;
+
+  if (allowed.unmatched.length > 0) return allowFailureEscalation(ctx, allowed);
+  return askDecision(ctx.toolName, undefined, 'permissionPromptTool');
+}
+
+/**
+ * The `acceptEdits` auto-approval of a call, when there is one.
+ *
+ * Edit/Write plus the safe shell commands are auto-approved, but only for paths
+ * inside the working directory or an added directory and only after a symlink
+ * check. `rm` and `rmdir` on a **critical** path still prompt.
+ */
+function acceptEditsApproval(
+  ctx: ToolContext,
+  opts: CheckPermissionOptions,
+  rules: RuleSet,
+): PermissionDecision | undefined {
   const directories = allowedDirectories(rules, opts);
 
   if (FILE_MUTATING_TOOLS.has(ctx.toolName)) {
     const toolPath = extractToolPath(ctx);
-    if (toolPath === undefined) return askDecision(undefined);
+    if (toolPath === undefined) return undefined;
     const targets = resolvePathTargets(toolPath, { cwd: rules.cwd });
-    if (!isAllowedTarget(targets, directories)) return askDecision(undefined);
-    return workingDirectoryDecision(ctx, targets);
+    const directory = matchingDirectory(targets, directories);
+    if (!directory) return undefined;
+    return workingDirectoryDecision(targets, directory);
   }
 
-  if (ctx.toolName === 'Bash') {
-    const command = extractPrimaryValue(ctx);
-    if (command === undefined) return askDecision(undefined);
-    const subCommands = shellSubCommands(command);
-    if (subCommands.length === 0) return askDecision(undefined);
+  if (ctx.toolName !== 'Bash') return undefined;
 
-    for (const subCommand of subCommands) {
-      const invocation = shellInvocation(subCommand);
-      if (!ACCEPT_EDITS_COMMANDS.has(invocation.program)) return askDecision(undefined);
+  const command = extractPrimaryValue(ctx);
+  if (command === undefined) return undefined;
+  const subCommands = shellSubCommands(command);
+  if (subCommands.length === 0) return undefined;
 
-      const paths = invocation.args.filter((argument) => !argument.startsWith('-'));
-      if (invocation.program === 'sed') paths.shift();
-      if (paths.length === 0) return askDecision(undefined);
+  const wheres = new Set<string>();
+  for (const subCommand of subCommands) {
+    const invocation = shellInvocation(subCommand);
+    if (!ACCEPT_EDITS_COMMANDS.has(invocation.program)) return undefined;
 
-      for (const candidate of paths) {
-        const targets = resolvePathTargets(candidate, { cwd: rules.cwd });
-        if (!isAllowedTarget(targets, directories)) return askDecision(undefined);
-        if (
-          (invocation.program === 'rm' || invocation.program === 'rmdir') &&
-          isCriticalPath(targets.requested, rules)
-        ) {
-          return askDecision(
-            undefined,
-            `The critical path '${targets.requested}' is not auto-approved in acceptEdits mode.`,
-          );
-        }
+    const paths = invocation.args.filter((argument) => !argument.startsWith('-'));
+    if (invocation.program === 'sed') paths.shift();
+    if (paths.length === 0) return undefined;
+
+    for (const candidate of paths) {
+      const targets = resolvePathTargets(candidate, { cwd: rules.cwd });
+      const directory = matchingDirectory(targets, directories);
+      if (!directory) return undefined;
+      if (
+        (invocation.program === 'rm' || invocation.program === 'rmdir') &&
+        isCriticalPath(targets.requested, rules)
+      ) {
+        return undefined;
       }
+      wheres.add(describeDirectory(directory));
     }
-    return {
-      behavior: 'allow',
-      source: 'unknown',
-      reasonType: 'other',
-      reasonKind: 'workingDir',
-      reason: 'Every part of this command stays inside the working directory.',
-    };
   }
-
-  return askDecision(undefined);
-}
-
-function workingDirectoryDecision(ctx: ToolContext, targets: PathTargets): PermissionDecision {
   return {
     behavior: 'allow',
     source: 'unknown',
     reasonType: 'other',
     reasonKind: 'workingDir',
-    reason: `The path '${targets.requested}' resolves inside the working directory.`,
+    reason: `Every part of this command stays inside ${[...wheres].join(' and ')}.`,
   };
 }
 
-function allowedDirectories(rules: RuleSet, opts: CheckPermissionOptions): string[] {
-  const directories = [path.resolve(opts.cwd ?? rules.cwd ?? process.cwd())];
+/** A directory `acceptEdits` may write inside. */
+interface AllowedDirectory {
+  /** The absolute path of the directory. */
+  path: string;
+  /** Whether it is the working directory or a directory the user added. */
+  kind: 'workingDirectory' | 'additionalDirectory';
+}
+
+function allowedDirectories(rules: RuleSet, opts: CheckPermissionOptions): AllowedDirectory[] {
+  const directories: AllowedDirectory[] = [
+    {
+      path: path.resolve(opts.cwd ?? rules.cwd ?? process.cwd()),
+      kind: 'workingDirectory',
+    },
+  ];
   for (const extra of [...(rules.additionalDirs ?? []), ...(opts.additionalDirs ?? [])]) {
-    directories.push(path.resolve(extra));
+    directories.push({ path: path.resolve(extra), kind: 'additionalDirectory' });
   }
   return directories;
 }
 
 /**
- * Whether a path may be written in `acceptEdits` mode.
+ * The allowed directory a path lies in.
  *
- * Both the **requested** path and the **resolved** target must be inside an allowed
- * directory: that is the symlink check, and it is what stops a symlink inside the
- * working directory from redirecting the write outside it.
+ * Both the **requested** path and the **resolved** target must be inside it: that
+ * is the symlink check, and it is what stops a symlink inside the working
+ * directory from redirecting the write outside it.
  */
-function isAllowedTarget(targets: PathTargets, directories: string[]): boolean {
-  return directories.some(
+function matchingDirectory(
+  targets: PathTargets,
+  directories: AllowedDirectory[],
+): AllowedDirectory | undefined {
+  return directories.find(
     (directory) =>
-      isInsideDirectory(targets.requested, directory) && isInsideDirectory(targets.resolved, directory),
+      isInsideDirectory(targets.requested, directory.path) &&
+      isInsideDirectory(targets.resolved, directory.path),
   );
+}
+
+/** How a directory is named in the reason of an `acceptEdits` approval. */
+function describeDirectory(directory: AllowedDirectory): string {
+  if (directory.kind === 'workingDirectory') return 'the working directory';
+  return `the added directory '${directory.path}'`;
+}
+
+function workingDirectoryDecision(
+  targets: PathTargets,
+  directory: AllowedDirectory | undefined,
+): PermissionDecision {
+  const where =
+    directory === undefined || directory.kind === 'workingDirectory'
+      ? 'the working directory'
+      : `the added directory '${directory.path}'`;
+  return {
+    behavior: 'allow',
+    source: 'unknown',
+    reasonType: 'other',
+    reasonKind: 'workingDir',
+    reason: `The path '${targets.requested}' resolves inside ${where}.`,
+  };
 }
 
 /**
@@ -582,59 +982,100 @@ function isAllowedTarget(targets: PathTargets, directories: string[]): boolean {
  *
  * The auto-mode review replaces the prompt, and it **fails closed**: a missing
  * verdict is a denial. An allow rule is still an allow — the user already approved
- * it — while a call that would prompt (including one an ask rule matched) is sent
- * to the review.
+ * it — while a call that would prompt is sent to the review.
+ *
+ * An explicit `permissions.ask` rule still forces a prompt: the classifier may
+ * deny the call outright, but it may not turn the ask into an allow. A hook
+ * approval that the classifier may not approve cannot become an allow either.
  */
 async function decideAuto(
   ctx: ToolContext,
   opts: CheckPermissionOptions,
   rules: RuleSet,
+  asked: RuleDecision | undefined,
+  hookApproval: HookApproval | undefined,
 ): Promise<PermissionDecision> {
-  const allowed = evaluateRuleList(rules, rules.allow, 'allow', ctx);
-  if (allowed) return allowed;
+  const allowed = evaluateListOutcome(rules, rules.allow, 'allow', ctx);
+  if (allowed.decision) return allowed.decision;
 
-  const asked = evaluateRuleList(rules, rules.ask, 'ask', ctx);
   const verdict = await opts.classifier?.(ctx);
 
   if (!verdict) {
-    return {
+    const decision: PermissionDecision = {
       behavior: 'deny',
       source: 'classifier',
       reasonType: 'other',
       reason:
         'The auto-mode review returned no verdict, so the call is denied: the review fails closed.',
-      rule: asked?.rule,
     };
+    if (asked?.rule) decision.rule = asked.rule;
+    return decision;
   }
 
-  if (verdict.verdict === 'allow') {
-    return {
-      behavior: 'allow',
+  if (verdict.verdict === 'block') {
+    const category = verdict.category ? ` (${verdict.category})` : '';
+    const decision: PermissionDecision = {
+      behavior: 'deny',
       source: 'classifier',
       reasonType: 'other',
-      reason: 'The auto-mode review approved this call.',
+      reason: `The auto-mode review blocked this call${category}.`,
     };
+    if (asked?.rule) decision.rule = asked.rule;
+    return decision;
   }
 
-  const category = verdict.category ? ` (${verdict.category})` : '';
-  return {
-    behavior: 'deny',
+  // The classifier approved the call.
+  if (hookApproval && hookApproval.decision.classifierApprovable === false) {
+    // The approval cannot be laundered by the classifier, so a person decides.
+    const decision: PermissionDecision = {
+      behavior: 'ask',
+      source: 'hook',
+      reasonType: 'other',
+      reasonKind: 'permissionPromptTool',
+      reason:
+        'The auto-mode review approved this call, but the hook approval cannot be approved by a classifier, so it requires approval.',
+    };
+    if (hookApproval.decision.updatedInput !== undefined) {
+      decision.updatedInput = hookApproval.decision.updatedInput;
+    }
+    return decision;
+  }
+
+  if (asked) {
+    // An explicit ask rule still forces a prompt: the classifier does not turn an
+    // ask into an allow.
+    const decision: PermissionDecision = { ...asked };
+    if (hookApproval?.decision.updatedInput !== undefined) {
+      decision.updatedInput = hookApproval.decision.updatedInput;
+    }
+    return decision;
+  }
+
+  const decision: PermissionDecision = {
+    behavior: 'allow',
     source: 'classifier',
     reasonType: 'other',
-    reason: `The auto-mode review blocked this call${category}.`,
-    rule: asked?.rule,
+    reason: 'The auto-mode review approved this call.',
   };
+  if (hookApproval?.decision.updatedInput !== undefined) {
+    decision.updatedInput = hookApproval.decision.updatedInput;
+  }
+  return decision;
 }
 
 /** `default` (and its `manual` alias). */
-function decideDefault(ctx: ToolContext, rules: RuleSet): PermissionDecision {
-  const asked = evaluateRuleList(rules, rules.ask, 'ask', ctx);
+function decideDefault(
+  ctx: ToolContext,
+  rules: RuleSet,
+  asked: RuleDecision | undefined,
+): PermissionDecision {
   if (asked) return asked;
 
-  const allowed = evaluateRuleList(rules, rules.allow, 'allow', ctx);
-  if (allowed) return allowed;
+  const allowed = evaluateListOutcome(rules, rules.allow, 'allow', ctx);
+  if (allowed.decision) return allowed.decision;
+  if (allowed.unmatched.length > 0) return allowFailureEscalation(ctx, allowed);
 
-  return askDecision(undefined);
+  return askDecision(ctx.toolName);
 }
 
 /**
@@ -666,34 +1107,43 @@ export function resolveStartMode(opts: StartModeOptions): PermissionMode {
   return 'default';
 }
 
-/** How the auto-mode review is reached. */
-export interface AutoModeReviewPlan {
-  /** Which path the review uses. */
-  kind: 'server' | 'local' | 'unavailable';
-  /** The local model, when the local path is selected. */
-  model?: string;
-  /** Whether the server-side review is enabled. */
-  serverSide: boolean;
-}
-
 /**
- * How the auto-mode review is reached in this environment.
+ * The rules the "don't ask again" affordance persists.
  *
- * The review is **server-side by default**; the local model call is the fallback.
- * `CLAUDE_CODE_AUTO_MODE_SERVER=0` disables the server-side review, and
- * `CLAUDE_CODE_AUTO_MODE_MODEL` selects the local model.
+ * One rule per sub-command that needs approval, **capped at five rules**. The
+ * rules are returned for the caller to write; **this module does not write them**
+ * — the write to `.claude/settings.local.json` is not implemented here.
  */
-export function resolveAutoModeReview(
-  env: NodeJS.ProcessEnv = process.env,
-): AutoModeReviewPlan {
-  const serverEnabled = env[AUTO_MODE_SERVER_ENV] !== '0';
-  if (serverEnabled) return { kind: 'server', serverSide: true };
+export function persistentAllowRules(
+  tool: ToolContext,
+  decision: PermissionDecision,
+  opts: { cap?: number } = {},
+): string[] {
+  const cap = opts.cap ?? MAX_PERSISTED_RULES;
+  if (cap <= 0) return [];
 
-  const model = env[AUTO_MODE_MODEL_ENV];
-  if (typeof model === 'string' && model.length > 0) {
-    return { kind: 'local', model, serverSide: false };
+  const rules: string[] = [];
+  const add = (rule: string): void => {
+    if (rules.length >= cap) return;
+    if (rules.includes(rule)) return;
+    rules.push(rule);
+  };
+
+  if (tool.toolName === 'Bash') {
+    const subCommands = decision.subcommandResults?.commands ?? [];
+    for (const subCommand of subCommands) add(`Bash(${subCommand})`);
+    if (subCommands.length === 0) {
+      const command = extractPrimaryValue(tool);
+      if (command !== undefined) {
+        for (const part of shellSubCommands(command)) add(`Bash(${part})`);
+      }
+    }
+    return rules;
   }
-  return { kind: 'unavailable', serverSide: false };
+
+  const toolPath = extractToolPath(tool);
+  if (toolPath !== undefined) add(`${tool.toolName}(${toolPath})`);
+  return rules;
 }
 
 // --- the settings adapter --------------------------------------------------------
@@ -718,7 +1168,43 @@ export interface SettingsPermissions {
   rules: RuleSet;
   /** `permissions.defaultMode`, when a settings file defines one. */
   defaultMode?: PermissionMode;
+  /** The host-level gate, when the personal configuration blocks the session. */
+  gate?: HostGate;
 }
+
+/**
+ * The tiers the rule lists are collected from, highest first.
+ *
+ * `MERGED_KEY_ORDER` is the **observed** per-key merge order for merged settings
+ * (`localSettings`, `projectSettings`, `userSettings`), and the permission rule
+ * lists are merged keys, so the rule lists follow it.
+ *
+ * `policySettings` and `flagSettings` are **not** named by that ordering: the audit
+ * does not derive a per-key merge for them, so their placement here is a **implementation
+ * choice**. They are listed first, because a machine policy rule must win the
+ * first-match scan of a list. This implementation does not claim this ordering is
+ * target-verified.
+ */
+const RULE_TIER_ORDER: readonly SettingsSource[] = [
+  'policySettings',
+  'flagSettings',
+  ...MERGED_KEY_ORDER,
+];
+
+/**
+ * The tiers `permissions.defaultMode` is resolved from, highest first.
+ *
+ * `TOP_LEVEL_KEY_ORDER` is the **observed** order for a top-level settings key
+ * (`policySettings`, `flagSettings`, `userSettings`), and `permissions` is a
+ * top-level key. The project-side tiers are consulted afterwards: the audit does
+ * not derive a per-key merge for them, so their placement is a **implementation choice**
+ * (they keep the `MERGED_KEY_ORDER` relation to each other).
+ */
+const DEFAULT_MODE_TIER_ORDER: readonly SettingsSource[] = [
+  ...TOP_LEVEL_KEY_ORDER,
+  'localSettings',
+  'projectSettings',
+];
 
 /**
  * Build the rule lists from the loaded settings tiers.
@@ -731,13 +1217,19 @@ export interface SettingsPermissions {
  * `permissions.defaultMode` is taken from the highest tier that defines one.
  * `auto` and `bypassPermissions` are **not** filtered here: `resolveStartMode`
  * ignores them when they come from a settings file.
+ *
+ * The **host-level gate** is computed here: with
+ * `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` set, a personal configuration with
+ * problems blocks every prompt and tool call, and the message names the offending
+ * file paths.
  */
 export function permissionsFromSettings(
   result: SettingsLoadResult,
-  opts: { cwd?: string; configDir?: string } = {},
+  opts: { cwd?: string; configDir?: string; env?: NodeJS.ProcessEnv } = {},
 ): SettingsPermissions {
   const cwd = path.resolve(opts.cwd ?? process.cwd());
   const configDir = path.resolve(opts.configDir ?? cwd);
+  const env = opts.env ?? process.env;
 
   const allow: string[] = [];
   const deny: string[] = [];
@@ -752,7 +1244,7 @@ export function permissionsFromSettings(
   };
   let defaultMode: PermissionMode | undefined;
 
-  for (const source of TIER_PRECEDENCE) {
+  for (const source of RULE_TIER_ORDER) {
     const tier = result.tiers.get(source);
     if (!tier) continue;
     const document = documentOf(tier.value);
@@ -777,13 +1269,6 @@ export function permissionsFromSettings(
       }
     }
 
-    if (defaultMode === undefined) {
-      const mode = permissions['defaultMode'];
-      if (typeof mode === 'string' && PERMISSION_MODES.has(mode)) {
-        defaultMode = mode as PermissionMode;
-      }
-    }
-
     // `permissions.additionalDirectories` are the directories `acceptEdits` may
     // write inside, beside the working directory.
     const directories = permissions['additionalDirectories'];
@@ -793,6 +1278,20 @@ export function permissionsFromSettings(
         if (additionalDirs.includes(directory)) continue;
         additionalDirs.push(directory);
       }
+    }
+  }
+
+  for (const source of DEFAULT_MODE_TIER_ORDER) {
+    if (defaultMode !== undefined) break;
+    const tier = result.tiers.get(source);
+    if (!tier) continue;
+    const document = documentOf(tier.value);
+    if (!isPlainObject(document)) continue;
+    const permissions = document['permissions'];
+    if (!isPlainObject(permissions)) continue;
+    const mode = permissions['defaultMode'];
+    if (typeof mode === 'string' && PERMISSION_MODES.has(mode)) {
+      defaultMode = mode as PermissionMode;
     }
   }
 
@@ -806,14 +1305,89 @@ export function permissionsFromSettings(
     settingsDirs,
     additionalDirs,
   };
-  return defaultMode === undefined ? { rules } : { rules, defaultMode };
+
+  const gate = personalConfigGate(result, { env });
+  if (defaultMode === undefined) return gate ? { rules, gate } : { rules };
+  return gate ? { rules, defaultMode, gate } : { rules, defaultMode };
+}
+
+/**
+ * The settings tiers that belong to the **personal** configuration.
+ *
+ * The machine policy and the feature flags are not personal configuration, so a
+ * problem in them does not block the session through this gate.
+ */
+const PERSONAL_TIERS: ReadonlySet<SettingsSource> = new Set<SettingsSource>([
+  'userSettings',
+  'projectSettings',
+  'localSettings',
+]);
+
+/**
+ * Whether the personal configuration is restricted.
+ *
+ * The environment variable is the transport the target uses; any value other than
+ * an empty string, `0` and `false` restricts the personal configuration.
+ */
+export function isPersonalConfigRestricted(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env[RESTRICT_PERSONAL_CONFIG_ENV];
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === '' || normalized === '0' || normalized === 'false') return false;
+  return true;
+}
+
+/**
+ * The host-level gate of a settings load result.
+ *
+ * With `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` set, a personal configuration with
+ * problems blocks **every** prompt and tool call, and the message is built from the
+ * offending file paths.
+ *
+ * The restriction has a second effect that belongs to the **loader**: the
+ * project-side tiers are suppressed when the settings are read
+ * (`loadSettings`'s `restricted` option). This gate is the audit's other effect —
+ * the block on every prompt and tool call — and it is computed from the load
+ * result the caller already has.
+ */
+export function personalConfigGate(
+  result: SettingsLoadResult,
+  opts: { env?: NodeJS.ProcessEnv } = {},
+): HostGate | undefined {
+  const env = opts.env ?? process.env;
+  if (!isPersonalConfigRestricted(env)) return undefined;
+
+  const offending = offendingPersonalErrors(result);
+  if (offending.length === 0) return undefined;
+
+  const paths = [...new Set(offending.map((error) => error.path))];
+  const detail = offending.map((error) => `${error.path} (${error.message})`).join('; ');
+  return {
+    blocked: true,
+    reason: `Your personal configuration has problems, so every prompt and tool call is blocked: ${detail}.`,
+    paths,
+  };
+}
+
+/**
+ * The load errors of the personal configuration that block the session.
+ *
+ * A file that could not be read, was not valid JSON or failed validation is an
+ * `error`. A personal tier that is **linked away** — the project settings file is
+ * a link to the user settings file — is a warning, and it blocks as well: the
+ * restriction exists precisely to keep such a file from steering the session.
+ */
+function offendingPersonalErrors(result: SettingsLoadResult): SettingsLoadError[] {
+  const linkedAway = new Set(result.linkedAway);
+  const offending: SettingsLoadError[] = [];
+  for (const error of result.errors) {
+    if (!PERSONAL_TIERS.has(error.source)) continue;
+    if (error.severity === 'error' || linkedAway.has(error.source)) offending.push(error);
+  }
+  return offending;
 }
 
 // Re-exported so that a caller only ever needs the decision module for the
 // vocabulary and the checks, and the rule module for the rules themselves.
-export {
-  collectRuleWarnings,
-  describeReason,
-  evaluateRules,
-  type RuleSet,
-} from './rules.js';
+export { collectRuleWarnings };
+export type { RuleDecision, RuleSet };

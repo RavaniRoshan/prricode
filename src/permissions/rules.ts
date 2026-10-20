@@ -5,6 +5,13 @@
  * `research/reference-agent-2.1.303-research.md` §5 (Permission models and known
  * security failures).
  *
+ * **One responsibility:** the rule syntax and the rule matching — how a rule is
+ * parsed, and which call it matches. The shell lexing lives in
+ * `src/permissions/shell.ts` and the path anchoring in `src/permissions/paths.ts`;
+ * the reason text lives in `src/permissions/decision.ts`, with the decision
+ * layer. The public surface of this module is re-exported from those two
+ * modules, so an importer of `rules.js` sees the same names it saw before.
+ *
  * **A rule is a pure predicate.** It answers "allow", "deny" or "ask", and it names
  * the rule and the tier it came from. It never rewrites the tool input: a rule that
  * silently changed what runs is exactly the defect this design avoids, so the
@@ -22,7 +29,9 @@
  * target had a 50-sub-command cap that silently skipped every deny check and
  * degraded to a generic, auto-approvable ask, and this implementation does not reproduce it.
  * A deny or ask rule fires when **any** sub-command matches; an allow rule approves
- * only when **every** sub-command matches.
+ * only when **every** sub-command matches. When an allow rule covers only part of a
+ * chain, the sub-commands it does **not** cover are carried forward, so the
+ * escalation names them instead of degrading to a generic ask.
  *
  * **Quoted text is never stripped.** The target once had a validator that removed
  * single-quoted text before checking, so a payload inside quotes passed. This implementation
@@ -38,14 +47,16 @@
  * **Path rules** use four anchors: `//path` (filesystem root), `~/path` (home),
  * `/path` (**relative to the settings source**, not the filesystem root) and
  * `path` / `./path` (the working directory). A deny or ask pattern that names a
- * single segment matches that segment at any depth; an allow pattern matches only
- * at the anchored depth.
+ * single segment matches that segment at any depth **below its anchor**; an allow
+ * pattern matches only at the anchored depth.
  *
  * **Symlink semantics are asymmetric**: an allow rule requires **both** the
  * requested path and the resolved target to match, while a deny rule fires if
  * **either** matches. The path must also be **re-resolved after the check** — a
  * resolution taken before the check is a point-in-time fact, and this implementation exposes
- * `reResolvePath` so the write path never trusts it.
+ * `reResolvePath` so the write path never trusts it. `reResolvePath` is a **seam
+ * that is not yet enforced**: the tool runner (`CC-008`) owns the write and must
+ * call it; nothing in this module calls it on a write path.
  *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
@@ -54,25 +65,51 @@
  *     `user_abort`, `user_reject`, `unknown`) has no member for "the rule engine",
  *     and inventing one would break the closed vocabulary.
  *   - A `!`-negated rule cancels a matching rule **in the same list and from the
- *     same tier**. A negation from another settings file must not cancel a rule the
- *     user wrote elsewhere.
+ *     same tier**. The research says a negation works "only within the same
+ *     settings file"; this implementation is **narrower**, because a tier is not a file: a
+ *     rule and a negation that came from two different files of the same tier do
+ *     not cancel each other. Narrower is fail-safe, and the per-list boundary is
+ *     pinned by a test.
  *   - `Tool(param:value)` is recognised as a *parameter* rule only when the prefix is
  *     an identifier and the value does not start with `/` (so `Edit(C:/x)` stays a
  *     path). A parameter rule that names the tool's primary content field
- *     (`command`, `file_path`, `path`, `url`) **cannot be applied to that field**: the
- *     rule is ignored and a warning is produced, exactly as the target does.
+ *     (`command`, `file_path`, `path`, `url`) **cannot be applied to that field**.
+ *     A **deny** rule in that position is **degraded to an ask** rather than
+ *     dropped, and a warning is produced: a deny rule that silently does not apply
+ *     protects nothing. **This degradation is not pinned by the plan, the audit or
+ *     research §5** — the plan does not state the sentence it was read from — so it
+ *     is recorded here as a implementation choice, and the warning says what happened.
  *   - Glob semantics: in a *command* pattern `*` matches any characters; in a *path*
  *     pattern `*` matches within one path segment and `**` crosses segments.
  *   - Redirect targets are matched against the path rules as file operations: a
  *     write redirect (`>`, `>>`, `&>`) is checked as a write, a read redirect (`<`)
- *     as a read.
+ *     as a read. The target of a redirection is never lost: a target glued to the
+ *     operator (`>/etc/passwd`) is the same target as a separated one
+ *     (`> /etc/passwd`).
  */
 
-import { realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
-import path from 'node:path';
-
-import type { PermissionDecision, PermissionReasonKind, ToolContext } from './decision.js';
+import type { PermissionDecision, ToolContext } from './decision.js';
+import {
+  anchorPathPattern,
+  commandGlobMatch,
+  isCriticalPath,
+  isInsideDirectory,
+  pathPatternMatches,
+  resolvePathTargets,
+  type PathContext,
+  type PathMatchKind,
+  type PathTargets,
+} from './paths.js';
+import {
+  shellRedirects,
+  shellSubCommandParts,
+  shellSubCommands,
+  shellInvocation,
+  stripRedirections,
+  stripWrappers,
+  splitShellCommand,
+  type ShellRedirect,
+} from './shell.js';
 
 /**
  * The rule lists a settings document exposes.
@@ -83,21 +120,13 @@ import type { PermissionDecision, PermissionReasonKind, ToolContext } from './de
  * conservative defaults (the process working directory, the home directory and the
  * tier name `settings`).
  */
-export interface RuleSet {
+export interface RuleSet extends PathContext {
   /** Rules that approve a call without asking. */
   allow: string[];
   /** Rules that block a call in every mode. */
   deny: string[];
   /** Rules that always prompt. */
   ask: string[];
-  /** The working directory the `path` / `./path` anchors resolve against. */
-  cwd?: string;
-  /** The directory of the settings file the rules came from; the `/path` anchor resolves against it. */
-  settingsDir?: string;
-  /** The settings directory of each tier, so the `/path` anchor resolves per rule. */
-  settingsDirs?: Record<string, string>;
-  /** The home directory the `~/path` anchor resolves against. */
-  homeDir?: string;
   /** The tier these rules came from, e.g. `userSettings`. */
   source?: string;
   /** Per-rule tier attribution, keyed by the rule text. */
@@ -116,13 +145,18 @@ export interface RuleSet {
 export type RuleDecision = PermissionDecision & { updatedInput?: never };
 
 /** The three rule lists, in the order the target scans them. */
-export type RuleListKind = 'deny' | 'ask' | 'allow';
+export type RuleListKind = PathMatchKind;
 
 /** The primary content fields the target names. */
 export const PRIMARY_CONTENT_FIELDS: readonly string[] = ['command', 'file_path', 'path', 'url'];
 
-/** The file-mutating tool set, exactly as the target names it. */
-export const MUTATING_TOOL_NAMES: readonly string[] = ['Edit', 'Write', 'NotebookEdit'];
+/**
+ * The file-mutating tool set, exactly as the target names it.
+ *
+ * This is the **single source of truth** for the set: the mode layer, the redirect
+ * matcher and the plan-mode effect check all read it from here.
+ */
+export const FILE_MUTATING_TOOL_NAMES: readonly string[] = ['Edit', 'Write', 'NotebookEdit'];
 
 const PRIMARY_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
   Bash: ['command'],
@@ -147,18 +181,6 @@ const PATH_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
 };
 
 const DEFAULT_PATH_FIELDS: readonly string[] = ['file_path', 'notebook_path', 'path'];
-
-/** The shell wrappers the target strips before matching a command. */
-const SHELL_WRAPPERS: ReadonlySet<string> = new Set([
-  'timeout',
-  'time',
-  'nice',
-  'nohup',
-  'stdbuf',
-  'command',
-  'builtin',
-  'noglob',
-]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -218,536 +240,6 @@ export function extractPrimaryValue(tool: ToolContext): string | undefined {
     if (typeof value === 'string') return value;
   }
   return undefined;
-}
-
-// --- shell parsing -------------------------------------------------------------
-
-/**
- * Split a compound command into its sub-commands.
- *
- * The split happens on `&&`, `||`, `;`, `|`, `|&`, `&` and newlines, and only
- * **outside** quotes: an operator inside a quoted string is a literal character. The
- * quoted text itself is kept, because stripping it before checking is the defect the
- * implementation must not reproduce.
- *
- * There is deliberately **no cap** on the number of sub-commands.
- */
-export function splitShellCommand(command: string): string[] {
-  const parts: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let index = 0;
-
-  const push = (): void => {
-    const trimmed = current.trim();
-    if (trimmed.length > 0) parts.push(trimmed);
-    current = '';
-  };
-
-  while (index < command.length) {
-    const character = command[index] ?? '';
-    if (quote !== null) {
-      current += character;
-      if (character === quote) {
-        quote = null;
-      } else if (character === '\\' && quote === '"') {
-        const next = command[index + 1];
-        if (next !== undefined) {
-          current += next;
-          index += 1;
-        }
-      }
-      index += 1;
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      quote = character;
-      current += character;
-      index += 1;
-      continue;
-    }
-    if (character === '\\') {
-      const next = command[index + 1];
-      if (next !== undefined) {
-        current += character + next;
-        index += 2;
-        continue;
-      }
-    }
-    if (character === '&' && command[index + 1] === '&') {
-      push();
-      index += 2;
-      continue;
-    }
-    if (character === '|' && command[index + 1] === '|') {
-      push();
-      index += 2;
-      continue;
-    }
-    if (character === '|' && command[index + 1] === '&') {
-      push();
-      index += 2;
-      continue;
-    }
-    if (character === '|' || character === ';' || character === '&') {
-      push();
-      index += 1;
-      continue;
-    }
-    if (character === '\n') {
-      push();
-      index += 1;
-      continue;
-    }
-    current += character;
-    index += 1;
-  }
-  push();
-  return parts;
-}
-
-/** A redirection found in a command. */
-export interface ShellRedirect {
-  /** The operator, e.g. `>`, `>>`, `<`. */
-  operator: string;
-  /** The redirection target, when it is a file rather than a file descriptor. */
-  target: string | undefined;
-  /** Whether the redirection writes to its target. */
-  writes: boolean;
-}
-
-interface SplitRedirectsResult {
-  /** The command with every redirection removed. */
-  text: string;
-  /** The redirections that were removed. */
-  redirects: ShellRedirect[];
-}
-
-/**
- * Split a command into its text and its redirections.
- *
- * A redirection is a token that starts with `<` or `>`, optionally preceded by a
- * file-descriptor number. A token that also carries `&` either duplicates a file
- * descriptor (`2>&1`, which has no file target) or is the `&>` form, which writes.
- */
-function splitRedirects(command: string): SplitRedirectsResult {
-  const tokens = tokenizeShell(command);
-  const kept: string[] = [];
-  const redirects: ShellRedirect[] = [];
-
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index] ?? '';
-    const operator = redirectOperator(token);
-    if (operator === undefined) {
-      kept.push(token);
-      continue;
-    }
-    if (operator.kind === 'descriptor') {
-      // `2>&1` — a file-descriptor duplication, not a file operation.
-      redirects.push({ operator: operator.operator, target: undefined, writes: false });
-      continue;
-    }
-    const next = tokens[index + 1];
-    if (next === undefined) {
-      redirects.push({ operator: operator.operator, target: undefined, writes: operator.writes });
-      continue;
-    }
-    index += 1;
-    redirects.push({ operator: operator.operator, target: next, writes: operator.writes });
-  }
-
-  return { text: kept.join(' '), redirects };
-}
-
-interface RedirectOperator {
-  operator: string;
-  writes: boolean;
-  kind: 'file' | 'descriptor';
-}
-
-function redirectOperator(token: string): RedirectOperator | undefined {
-  const match = /^(\d*)(&>>|&>|[<>]{1,3})(.*)$/.exec(token);
-  if (!match) return undefined;
-  const fd = match[1] ?? '';
-  const operator = match[2] ?? '';
-  const rest = match[3] ?? '';
-  if (operator === '&>') {
-    return { operator: `&${fd}>`, writes: true, kind: 'file' };
-  }
-  if (operator === '&>>') {
-    return { operator: `&${fd}>>`, writes: true, kind: 'file' };
-  }
-  if (rest.startsWith('&')) {
-    // `2>&1` — duplicating a descriptor, not touching a file.
-    return { operator: `${fd}${operator}&${rest.slice(1)}`, writes: false, kind: 'descriptor' };
-  }
-  if (rest.length > 0) {
-    // A target glued to the operator, e.g. `>out.txt`.
-    return { operator: `${fd}${operator}`, writes: operator.startsWith('>'), kind: 'file' };
-  }
-  return { operator: `${fd}${operator}`, writes: operator.startsWith('>'), kind: 'file' };
-}
-
-/**
- * Split a command into whitespace-separated tokens, keeping quoted text intact.
- */
-function tokenizeShell(command: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-  let index = 0;
-
-  const push = (): void => {
-    if (current.length > 0) tokens.push(current);
-    current = '';
-  };
-
-  while (index < command.length) {
-    const character = command[index] ?? '';
-    if (quote !== null) {
-      current += character;
-      if (character === quote) quote = null;
-      index += 1;
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      quote = character;
-      current += character;
-      index += 1;
-      continue;
-    }
-    if (character === '\\') {
-      const next = command[index + 1];
-      if (next !== undefined) {
-        current += next;
-        index += 2;
-        continue;
-      }
-    }
-    if (/\s/.test(character)) {
-      push();
-      index += 1;
-      continue;
-    }
-    current += character;
-    index += 1;
-  }
-  push();
-  return tokens;
-}
-
-/** The command with every redirection removed. */
-export function stripRedirections(command: string): string {
-  return splitRedirects(command).text.trim();
-}
-
-/** The redirections of a command. */
-export function shellRedirects(command: string): ShellRedirect[] {
-  return splitRedirects(command).redirects;
-}
-
-/**
- * Strip the shell wrappers the target strips before matching.
- *
- * `timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin` and `noglob`
- * are stripped, and a bare `xargs` is stripped. `direnv exec`, `devbox run`,
- * `mise exec`, `npx` and `docker exec` are **not** stripped: the target does not
- * strip them, so a rule written for the wrapped command does not fire.
- */
-export function stripWrappers(command: string): string {
-  let tokens = tokenizeShell(command);
-  for (;;) {
-    const first = tokens[0];
-    if (first === undefined) break;
-    if (first === 'xargs') {
-      const second = tokens[1];
-      if (second !== undefined && second.startsWith('-')) break;
-      tokens = tokens.slice(1);
-      continue;
-    }
-    if (!SHELL_WRAPPERS.has(first)) break;
-    tokens = tokens.slice(1);
-    if (first === 'timeout') {
-      const next = tokens[0];
-      if (next !== undefined && /^\d+[smhd]?$/.test(next)) tokens = tokens.slice(1);
-      continue;
-    }
-    if (first === 'nice') {
-      const next = tokens[0];
-      if (next !== undefined && /^-n$/.test(next)) {
-        tokens = tokens.slice(1);
-        const adjustment = tokens[0];
-        if (adjustment !== undefined) tokens = tokens.slice(1);
-      }
-      continue;
-    }
-    if (first === 'stdbuf') {
-      const next = tokens[0];
-      if (next !== undefined && /^-[iome]0$/.test(next)) tokens = tokens.slice(1);
-      continue;
-    }
-  }
-  return tokens.join(' ');
-}
-
-/**
- * The sub-commands of a command, with the wrappers and the redirections stripped.
- */
-export function shellSubCommands(command: string): string[] {
-  return splitShellCommand(command).map((part) => stripWrappers(stripRedirections(part)));
-}
-
-/** The program and the arguments of a command, with the wrappers stripped. */
-export function shellInvocation(command: string): { program: string; args: string[] } {
-  const tokens = tokenizeShell(stripWrappers(command));
-  const program = tokens[0] ?? '';
-  return { program, args: tokens.slice(1) };
-}
-
-// --- glob matching -------------------------------------------------------------
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Match a **command** pattern.
- *
- * `*` matches any characters (including spaces and slashes) and `?` matches one
- * character. This is the command-text flavour: a command pattern is not a path
- * pattern, so it does not stop at a path separator.
- */
-export function commandGlobMatch(pattern: string, value: string): boolean {
-  let source = '^';
-  for (const character of pattern) {
-    if (character === '*') source += '[\\s\\S]*';
-    else if (character === '?') source += '[\\s\\S]';
-    else source += escapeRegExp(character);
-  }
-  source += '$';
-  return new RegExp(source).test(value);
-}
-
-function segmentGlobMatch(pattern: string, value: string): boolean {
-  let source = '^';
-  for (const character of pattern) {
-    if (character === '*') source += '[^/]*';
-    else if (character === '?') source += '[^/]';
-    else source += escapeRegExp(character);
-  }
-  source += '$';
-  return new RegExp(source).test(value);
-}
-
-// --- path handling -------------------------------------------------------------
-
-/** The two paths a path rule is matched against. */
-export interface PathTargets {
-  /** The requested path, made absolute and normalized but **not** symlink-resolved. */
-  requested: string;
-  /** The resolved target, with the symlinks followed. */
-  resolved: string;
-}
-
-/**
- * Resolve the deepest existing ancestor of a path and re-append the missing tail.
- *
- * A path that does not exist yet still resolves through its deepest existing
- * ancestor, so a symlinked directory in the path is followed.
- */
-function resolveDeepestExisting(absolute: string): string {
-  const tail: string[] = [];
-  let current = absolute;
-  for (;;) {
-    try {
-      const real = realpathSync(current);
-      return tail.length > 0 ? path.join(real, ...tail) : real;
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return absolute;
-      tail.unshift(path.basename(current));
-      current = parent;
-    }
-  }
-}
-
-function expandHome(input: string, homeDir: string): string {
-  if (input === '~') return homeDir;
-  if (input.startsWith('~/')) return path.join(homeDir, input.slice(2));
-  return input;
-}
-
-/**
- * The requested and the resolved path of a tool's path.
- *
- * The **requested** path is the path the tool asked for; the **resolved** path is
- * where the kernel would actually end up. An allow rule requires both to match; a
- * deny rule fires when either does.
- */
-export function resolvePathTargets(input: string, opts: { cwd?: string } = {}): PathTargets {
-  const cwd = path.resolve(opts.cwd ?? process.cwd());
-  const home = homedir();
-  const requested = path.resolve(cwd, expandHome(input, home));
-  return { requested, resolved: resolveDeepestExisting(requested) };
-}
-
-/**
- * Re-resolve a path **after** the permission check.
- *
- * The resolution taken before the check is a point-in-time fact: a symlink can be
- * swapped between the check and the write. The write path therefore re-resolves and
- * compares, rather than trusting the earlier result.
- */
-export function reResolvePath(targets: PathTargets, opts: { cwd?: string } = {}): PathTargets {
-  return resolvePathTargets(targets.requested, opts);
-}
-
-/** Whether two resolutions describe the same file. */
-export function sameResolution(left: PathTargets, right: PathTargets): boolean {
-  return left.resolved === right.resolved;
-}
-
-interface AnchoredPattern {
-  /** The anchored pattern, split into path segments. */
-  segments: string[];
-  /** Whether the pattern named a single segment, and therefore matches at any depth. */
-  singleSegment: boolean;
-}
-
-/**
- * Anchor a path pattern.
- *
- * `//path` resolves against the filesystem root, `~/path` against the home
- * directory, `/path` against the **settings source** directory, and `path` /
- * `./path` against the working directory.
- *
- * The settings source is the tier the rule came from, so a `/path` rule in the user
- * settings and a `/path` rule in the project settings anchor differently.
- */
-export function anchorPathPattern(
-  pattern: string,
-  rules: RuleSet,
-  source?: string,
-): AnchoredPattern {
-  const home = rules.homeDir ?? homedir();
-  const cwd = path.resolve(rules.cwd ?? process.cwd());
-  const settingsDir = settingsDirFor(rules, source);
-
-  let base: string;
-  let rest: string;
-  if (pattern.startsWith('//')) {
-    base = '/';
-    rest = pattern.slice(2);
-  } else if (pattern === '~') {
-    base = home;
-    rest = '';
-  } else if (pattern.startsWith('~/')) {
-    base = home;
-    rest = pattern.slice(2);
-  } else if (pattern.startsWith('/')) {
-    base = settingsDir;
-    rest = pattern.slice(1);
-  } else if (pattern.startsWith('./')) {
-    base = cwd;
-    rest = pattern.slice(2);
-  } else {
-    base = cwd;
-    rest = pattern;
-  }
-
-  const joined = rest.length > 0 ? path.join(base, rest) : base;
-  const restSegments = rest.split('/').filter((segment) => segment.length > 0);
-  return {
-    segments: joined.split('/').filter((segment) => segment.length > 0),
-    singleSegment: restSegments.length === 1,
-  };
-}
-
-/**
- * The settings directory a rule's `/path` anchor resolves against.
- *
- * The lookup is an **own-property** check: the tier name is caller-supplied data.
- */
-function settingsDirFor(rules: RuleSet, source?: string): string {
-  const cwd = path.resolve(rules.cwd ?? process.cwd());
-  if (source !== undefined) {
-    const dirs = rules.settingsDirs;
-    if (dirs && Object.hasOwn(dirs, source)) {
-      const dir = dirs[source];
-      if (typeof dir === 'string') return path.resolve(dir);
-    }
-  }
-  return path.resolve(rules.settingsDir ?? cwd);
-}
-
-function matchSegments(pattern: string[], candidate: string[], pi: number, ci: number): boolean {
-  if (pi >= pattern.length) {
-    // The pattern is exhausted: it names a directory, so everything under it matches.
-    return true;
-  }
-  if (ci >= candidate.length) return false;
-  const segment = pattern[pi] ?? '';
-  if (segment === '**') {
-    for (let skip = ci; skip <= candidate.length; skip += 1) {
-      if (matchSegments(pattern, candidate, pi + 1, skip)) return true;
-    }
-    return false;
-  }
-  if (!segmentGlobMatch(segment, candidate[ci] ?? '')) return false;
-  return matchSegments(pattern, candidate, pi + 1, ci + 1);
-}
-
-/**
- * Whether a path pattern matches a candidate path.
- *
- * A deny or ask pattern that names a single segment matches that segment at any
- * depth; an allow pattern matches only at the anchored depth.
- */
-export function pathPatternMatches(
-  pattern: string,
-  candidate: string,
-  rules: RuleSet,
-  kind: RuleListKind,
-  source?: string,
-): boolean {
-  const anchored = anchorPathPattern(pattern, rules, source);
-  if (anchored.segments.length === 0) return false;
-  const candidateSegments = candidate.split('/').filter((segment) => segment.length > 0);
-  if (matchSegments(anchored.segments, candidateSegments, 0, 0)) return true;
-  if (kind === 'allow' || !anchored.singleSegment) return false;
-  const segment = anchored.segments[anchored.segments.length - 1] ?? '';
-  return candidateSegments.some((candidateSegment) => segmentGlobMatch(segment, candidateSegment));
-}
-
-/** Whether a path lies inside a directory. */
-export function isInsideDirectory(candidate: string, directory: string): boolean {
-  const relative = path.relative(path.resolve(directory), path.resolve(candidate));
-  if (relative === '') return true;
-  return !relative.startsWith('..') && !path.isAbsolute(relative);
-}
-
-/**
- * Whether a path is **critical**: deleting or replacing it would break the session
- * or the machine, not just the project.
- *
- * The audit does not enumerate the critical paths, so the list is a implementation choice: the
- * filesystem root, the home directory, the working directory and its ancestors, the
- * configuration directory, and the credential directories.
- */
-export function isCriticalPath(candidate: string, rules: RuleSet): boolean {
-  const resolved = path.resolve(candidate);
-  const home = path.resolve(rules.homeDir ?? homedir());
-  const cwd = path.resolve(rules.cwd ?? process.cwd());
-
-  if (resolved === path.parse(resolved).root) return true;
-  if (resolved === home) return true;
-  if (isInsideDirectory(cwd, resolved)) return true;
-  if (resolved === path.join(home, '.claude')) return true;
-  if (isInsideDirectory(path.join(home, '.claude'), resolved)) return true;
-  if (isInsideDirectory(path.join(home, '.ssh'), resolved)) return true;
-  if (isInsideDirectory(path.join(home, '.aws'), resolved)) return true;
-  if (isInsideDirectory(path.join(cwd, '.git'), resolved)) return true;
-  return false;
 }
 
 // --- rule parsing --------------------------------------------------------------
@@ -865,6 +357,23 @@ interface MatchContext {
   kind: RuleListKind;
 }
 
+/** The result of evaluating one rule list. */
+export interface RuleListOutcome {
+  /** The decision of the first rule in the list that matched, when one matched. */
+  decision: RuleDecision | undefined;
+  /**
+   * The sub-commands an allow rule did **not** cover.
+   *
+   * The first allow rule of the list is the one reported: the lists are scanned in
+   * order and the first rule is the rule that spoke for the list.
+   */
+  unmatched: string[];
+  /** The number of sub-commands the command was split into. */
+  total: number;
+  /** The rule whose sub-commands were not covered. */
+  rule: { content: string; source: string } | undefined;
+}
+
 function matchRule(parsed: ParsedRule, context: MatchContext): MatchResult {
   const { tool } = context;
   if (parsed.malformed) return NO_MATCH;
@@ -875,8 +384,9 @@ function matchRule(parsed: ParsedRule, context: MatchContext): MatchResult {
   if (parsed.param !== undefined) {
     if (!sameTool) return NO_MATCH;
     // A parameter rule that names the tool's primary content field cannot be
-    // applied to that field: the rule is ignored. `collectRuleWarnings` reports the
-    // ignored rule to the user.
+    // applied to that field: the rule cannot match. `collectRuleWarnings` reports
+    // the rule to the user, and a deny rule in that position is degraded to an ask
+    // rather than dropped.
     const primary = primaryFieldsFor(tool.toolName);
     if (primary.includes(parsed.param)) return NO_MATCH;
     const value = readInputField(tool.input, parsed.param);
@@ -922,7 +432,7 @@ function matchRule(parsed: ParsedRule, context: MatchContext): MatchResult {
 }
 
 /** The tools whose rules describe a write to a file. */
-const REDIRECT_WRITE_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'NotebookEdit']);
+const REDIRECT_WRITE_TOOLS: ReadonlySet<string> = new Set(FILE_MUTATING_TOOL_NAMES);
 
 /** The tools whose rules describe a read of a file. */
 const REDIRECT_READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep', 'LS']);
@@ -946,9 +456,9 @@ function matchRedirectTargetRule(parsed: ParsedRule, context: MatchContext): Mat
   const command = extractPrimaryValue(tool);
   if (command === undefined) return NO_MATCH;
 
-  const redirects = shellRedirects(command).filter(
-    (redirect) => redirect.target !== undefined && redirect.writes === writes,
-  );
+  const redirects = shellSubCommandParts(command)
+    .flatMap((part) => part.redirects)
+    .filter((redirect) => redirect.target !== undefined && redirect.writes === writes);
   if (redirects.length === 0) return NO_MATCH;
 
   const matchedTargets: string[] = [];
@@ -1038,29 +548,68 @@ function matchPathRule(
 // --- the evaluator -------------------------------------------------------------
 
 /**
- * Evaluate the rule lists against a tool call.
- *
- * The lists are scanned `deny` → `ask` → `allow`, and the first rule **in a list**
- * that matches is the rule that matched: specificity is irrelevant, and an allow
- * rule can never carve an exception out of a deny.
- *
- * Returns `undefined` when nothing matched, so the caller can escalate to a prompt.
- * The decision never carries a rewritten tool input — a rule is a pure predicate.
- */
-export function evaluateRules(rules: RuleSet, tool: ToolContext): RuleDecision | undefined {
-  for (const kind of ['deny', 'ask', 'allow'] as const) {
-    const decision = evaluateRuleList(rules, rules[kind], kind, tool);
-    if (decision) return decision;
-  }
-  return undefined;
-}
-
-/**
  * Evaluate one rule list.
  *
  * The exported form is the building block the mode layer uses: the deny list is
  * evaluated on its own, before the mode is taken into account, because a deny rule
  * blocks in **every** mode.
+ *
+ * A **deny** rule that cannot be applied to the call — a `Tool(param:value)` rule
+ * that names the tool's primary content field — is degraded to an **ask** rather
+ * than dropped: a deny rule that silently does not apply protects nothing.
+ */
+export function evaluateListOutcome(
+  rules: RuleSet,
+  list: readonly string[],
+  kind: RuleListKind,
+  tool: ToolContext,
+): RuleListOutcome {
+  const context: MatchContext = { rules, tool, kind };
+  const negations = list.filter((entry) => parseRule(entry).negated);
+
+  let degraded: RuleDecision | undefined;
+  let unmatched: string[] = [];
+  let total = 0;
+  let partialRule: { content: string; source: string } | undefined;
+
+  for (const entry of list) {
+    const parsed = parseRule(entry);
+    if (parsed.negated) continue;
+    if (parsed.malformed) continue;
+
+    if (parsed.param !== undefined && isPrimaryContentRule(parsed, tool)) {
+      if (kind === 'deny' && degraded === undefined) degraded = degradedDenyDecision(parsed, rules);
+      continue;
+    }
+
+    const match = matchRule(parsed, context);
+    if (!match.matched) {
+      if (kind === 'allow' && match.offending.length > 0 && unmatched.length === 0) {
+        unmatched = [...match.offending];
+        total = match.total;
+        partialRule = { content: parsed.raw, source: ruleSourceOf(rules, parsed.raw) };
+      }
+      continue;
+    }
+
+    if (isCancelledByNegation(parsed, negations, context)) continue;
+
+    return {
+      decision: buildDecision(kind, parsed, match, rules, tool),
+      unmatched: [],
+      total: match.total,
+      rule: undefined,
+    };
+  }
+
+  return { decision: degraded, unmatched, total, rule: partialRule };
+}
+
+/**
+ * The decision view of {@link evaluateListOutcome}.
+ *
+ * The mode layer uses the outcome form when it needs the sub-commands an allow
+ * rule did not cover; this form is the decision alone.
  */
 export function evaluateRuleList(
   rules: RuleSet,
@@ -1068,22 +617,37 @@ export function evaluateRuleList(
   kind: RuleListKind,
   tool: ToolContext,
 ): RuleDecision | undefined {
-  const context: MatchContext = { rules, tool, kind };
-  const negations = list.filter((entry) => parseRule(entry).negated);
+  return evaluateListOutcome(rules, list, kind, tool).decision;
+}
 
-  for (const entry of list) {
-    const parsed = parseRule(entry);
-    if (parsed.negated) continue;
-    if (parsed.malformed) continue;
+/**
+ * Whether a parameter rule names the tool's primary content field.
+ *
+ * A rule in that position cannot be applied to the field it names.
+ */
+function isPrimaryContentRule(parsed: ParsedRule, tool: ToolContext): boolean {
+  if (parsed.param === undefined) return false;
+  if (parsed.toolName !== tool.toolName) return false;
+  return primaryFieldsFor(tool.toolName).includes(parsed.param);
+}
 
-    const match = matchRule(parsed, context);
-    if (!match.matched) continue;
-
-    if (isCancelledByNegation(parsed, negations, context)) continue;
-
-    return buildDecision(kind, parsed, match, rules, tool);
-  }
-  return undefined;
+/**
+ * The decision a **deny** rule that cannot be applied is degraded to.
+ *
+ * The rule still speaks for the call, so the decision names it and asks for
+ * approval instead of silently letting the call through.
+ */
+function degradedDenyDecision(parsed: ParsedRule, rules: RuleSet): RuleDecision {
+  const source = ruleSourceOf(rules, parsed.raw);
+  const field = parsed.param ?? '';
+  return {
+    behavior: 'ask',
+    source: 'unknown',
+    reasonType: 'rule',
+    reasonKind: 'rule',
+    rule: { content: parsed.raw, source },
+    reason: `Permission rule '${parsed.raw}' from ${source} could not be applied to '${field}', the primary content field of ${parsed.toolName}, so it was degraded to an approval request.`,
+  };
 }
 
 /**
@@ -1137,7 +701,6 @@ function buildDecision(
     }
   }
 
-  decision.reason = describeReason(decision, tool.toolName);
   return decision;
 }
 
@@ -1153,76 +716,32 @@ export function collectRuleWarnings(rules: RuleSet, tool: ToolContext): string[]
   const warnings: string[] = [];
   const primary = primaryFieldsFor(tool.toolName);
 
-  for (const entry of [...rules.deny, ...rules.ask, ...rules.allow]) {
-    const parsed = parseRule(entry);
-    if (parsed.negated) continue;
-    if (parsed.malformed) {
-      warnings.push(`Permission rule '${entry}' is malformed and was ignored.`);
-      continue;
+  for (const [kind, list] of [
+    ['deny', rules.deny],
+    ['ask', rules.ask],
+    ['allow', rules.allow],
+  ] as const) {
+    for (const entry of list) {
+      const parsed = parseRule(entry);
+      if (parsed.negated) continue;
+      if (parsed.malformed) {
+        warnings.push(`Permission rule '${entry}' is malformed and was ignored.`);
+        continue;
+      }
+      if (parsed.param === undefined) continue;
+      if (parsed.toolName !== tool.toolName) continue;
+      if (!primary.includes(parsed.param)) continue;
+      warnings.push(
+        kind === 'deny'
+          ? `Permission rule '${entry}' could not be applied: '${parsed.param}' is the primary content field of ${tool.toolName}, so the rule was degraded to an approval request. Write a ${tool.toolName}(<pattern>) rule instead.`
+          : `Permission rule '${entry}' is ignored: '${parsed.param}' is the primary content field of ${tool.toolName}, so a ${tool.toolName}(<pattern>) rule is required instead.`,
+      );
     }
-    if (parsed.param === undefined) continue;
-    if (parsed.toolName !== tool.toolName) continue;
-    if (!primary.includes(parsed.param)) continue;
-    warnings.push(
-      `Permission rule '${entry}' is ignored: '${parsed.param}' is the primary content field of ${tool.toolName}, so a ${tool.toolName}(<pattern>) rule is required instead.`,
-    );
   }
   return warnings;
 }
 
-// --- reason text ---------------------------------------------------------------
-
-/**
- * The user-facing text for a decision.
- *
- * The reason kinds are the ones the audit records: `rule`,
- * `subcommandResults`, `permissionPromptTool`, `sandboxOverride`, `workingDir` and
- * `safetyCheck`.
- */
-export function describeReason(decision: PermissionDecision, toolName: string): string {
-  const kind: PermissionReasonKind | 'other' =
-    decision.reasonKind ??
-    (decision.reasonType === 'rule'
-      ? 'rule'
-      : decision.reasonType === 'safetyCheck'
-        ? 'safetyCheck'
-        : 'other');
-
-  switch (kind) {
-    case 'rule':
-      return describeRuleReason(decision, toolName);
-    case 'subcommandResults':
-      return describeSubcommandReason(decision, toolName);
-    case 'permissionPromptTool':
-      return `The ${toolName} tool requires approval for this command.`;
-    case 'sandboxOverride':
-      return 'Run outside of the sandbox';
-    case 'workingDir':
-      return decision.reason ?? `This ${toolName} call is allowed because it stays inside the working directory.`;
-    case 'safetyCheck':
-      return decision.reason ?? `A safety check refused this ${toolName} call.`;
-    default:
-      return decision.reason ?? `This ${toolName} call requires approval.`;
-  }
-}
-
-function describeRuleReason(decision: PermissionDecision, toolName: string): string {
-  const rule = decision.rule;
-  if (!rule) return decision.reason ?? `This ${toolName} call requires approval.`;
-  const attribution = `Permission rule '${rule.content}' from ${rule.source}`;
-  if (decision.behavior === 'deny') return `${attribution} denies this ${toolName} call.`;
-  if (decision.behavior === 'allow') return `${attribution} allows this ${toolName} call.`;
-  return `${attribution} requires approval for this ${toolName} command.`;
-}
-
-function describeSubcommandReason(decision: PermissionDecision, toolName: string): string {
-  const subcommands = decision.subcommandResults;
-  if (!subcommands) return decision.reason ?? `This ${toolName} call requires approval.`;
-  const rule = decision.rule;
-  const attribution = rule ? `Permission rule '${rule.content}' from ${rule.source}` : 'The command';
-  const list = subcommands.commands.join(', ');
-  if (decision.behavior === 'deny') {
-    return `${attribution} denies ${subcommands.count} of ${subcommands.total} parts of this command: ${list}.`;
-  }
-  return `${attribution} requires approval for ${subcommands.count} of ${subcommands.total} parts of this command: ${list}.`;
-}
+// The shell and path surfaces are re-exported so that an importer of `rules.js`
+// keeps seeing the names it saw before the split.
+export * from './shell.js';
+export * from './paths.js';

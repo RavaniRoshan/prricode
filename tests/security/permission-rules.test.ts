@@ -39,15 +39,27 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  HOST_HOOK_FAILURE_REASON,
+  RESTRICT_PERSONAL_CONFIG_ENV,
   checkPermission,
   collectRuleWarnings,
   describeReason,
   evaluateRules,
+  isPersonalConfigRestricted,
+  permissionsFromSettings,
+  personalConfigGate,
   type PermissionDecision,
   type RuleSet,
   type ToolContext,
 } from '../../src/permissions/decision.js';
-import { reResolvePath, resolvePathTargets } from '../../src/permissions/rules.js';
+import type { SettingsLoadResult } from '../../src/config/loader.js';
+import type { SettingsSource, SettingsTier } from '../../src/config/tiers.js';
+import {
+  commandGlobMatch,
+  reResolvePath,
+  resolvePathTargets,
+  shellRedirects,
+} from '../../src/permissions/rules.js';
 
 const tempDirs: string[] = [];
 
@@ -255,6 +267,34 @@ describe('the path rule anchors', () => {
 
     expect(decision).toBeUndefined();
   });
+
+  it('matches a single-segment deny pattern at any depth below its anchor', () => {
+    const decision = evaluateRules(
+      rules({ deny: ['Read(secrets)'], cwd: '/work' }),
+      tool({ toolName: 'Read', input: { file_path: '/work/a/b/secrets' } }),
+    );
+
+    expect(decision?.behavior).toBe('deny');
+  });
+
+  it('does not let a single-segment deny pattern reach outside its anchor', () => {
+    const decision = evaluateRules(
+      rules({ deny: ['Read(secrets)'], cwd: '/work' }),
+      tool({ toolName: 'Read', input: { file_path: '/etc/secrets' } }),
+    );
+
+    // "At any depth" means "at any depth below the anchor", not "anywhere".
+    expect(decision).toBeUndefined();
+  });
+
+  it('matches a single-segment deny pattern at any depth below the filesystem root', () => {
+    const decision = evaluateRules(
+      rules({ deny: ['Read(//secrets)'], cwd: '/work' }),
+      tool({ toolName: 'Read', input: { file_path: '/etc/a/secrets' } }),
+    );
+
+    expect(decision?.behavior).toBe('deny');
+  });
 });
 
 describe('symlink semantics', () => {
@@ -351,16 +391,80 @@ describe('redirect targets are file operations', () => {
 
     expect(decision).toBeUndefined();
   });
+
+  it('denies a write redirect whose target is glued to the operator', () => {
+    const decision = evaluateRules(
+      rules({ deny: ['Write(//etc/**)'] }),
+      tool({ input: { command: 'echo pwned >/etc/passwd' } }),
+    );
+
+    expect(decision?.behavior).toBe('deny');
+  });
+
+  it('denies an appending redirect whose target is glued to the operator', () => {
+    const decision = evaluateRules(
+      rules({ deny: ['Write(//etc/**)'] }),
+      tool({ input: { command: 'echo pwned >>/etc/passwd' } }),
+    );
+
+    expect(decision?.behavior).toBe('deny');
+  });
+
+  it('denies a combined redirect whose target is glued to the operator', () => {
+    const decision = evaluateRules(
+      rules({ deny: ['Write(//etc/**)'] }),
+      tool({ input: { command: 'echo pwned &>/etc/passwd' } }),
+    );
+
+    expect(decision?.behavior).toBe('deny');
+  });
+
+  it('never takes the next command of a chain as the target of a redirect', () => {
+    const decision = evaluateRules(
+      rules({ deny: ['Write(//etc/**)'] }),
+      tool({ input: { command: 'echo pwned >/etc/passwd && rm x' } }),
+    );
+
+    expect(decision?.behavior).toBe('deny');
+    expect(decision?.subcommandResults?.commands).toEqual(['/etc/passwd']);
+  });
+
+  it('reports the target of a glued redirection', () => {
+    expect(shellRedirects('echo pwned >/etc/passwd')).toEqual([
+      { operator: '>', target: '/etc/passwd', writes: true },
+    ]);
+    expect(shellRedirects('echo pwned >> /etc/passwd')).toEqual([
+      { operator: '>>', target: '/etc/passwd', writes: true },
+    ]);
+    expect(shellRedirects('echo pwned &>/etc/passwd')).toEqual([
+      { operator: '&>', target: '/etc/passwd', writes: true },
+    ]);
+  });
+
+  it('reports no target when a redirection names none', () => {
+    expect(shellRedirects('echo pwned >')).toEqual([
+      { operator: '>', target: undefined, writes: true },
+    ]);
+  });
+
+  it('does not treat a file-descriptor duplication as a file operation', () => {
+    expect(shellRedirects('echo hi 2>&1')).toEqual([
+      { operator: '2>&1', target: undefined, writes: false },
+    ]);
+  });
 });
 
 describe('the primary content field', () => {
-  it('ignores a Tool(param:value) rule that targets the primary content field', () => {
+  it('degrades a deny rule that targets the primary content field into an ask', () => {
     const decision = evaluateRules(
       rules({ deny: ['Bash(command:rm *)'] }),
       tool({ input: { command: 'rm -rf /' } }),
     );
 
-    expect(decision).toBeUndefined();
+    // A deny rule that silently does not apply protects nothing: it is degraded
+    // to an approval request rather than dropped.
+    expect(decision?.behavior).toBe('ask');
+    expect(decision?.rule?.content).toBe('Bash(command:rm *)');
   });
 
   it('does not resolve an inherited member for a tool named after one', () => {
@@ -376,13 +480,13 @@ describe('the primary content field', () => {
     }
   });
 
-  it('still ignores a primary-content-field rule for such a tool', () => {
+  it('still degrades a primary-content-field rule for such a tool', () => {
     const decision = evaluateRules(
       rules({ deny: ['constructor(command:ls *)'] }),
       tool({ toolName: 'constructor', input: { command: 'ls -l' } }),
     );
 
-    expect(decision).toBeUndefined();
+    expect(decision?.behavior).toBe('ask');
     expect(
       collectRuleWarnings(
         rules({ deny: ['constructor(command:ls *)'] }),
@@ -471,5 +575,207 @@ describe('the modes cannot be used to escape a rule', () => {
     );
 
     expect(decision.behavior).toBe('deny');
+  });
+});
+
+describe('the scope of a negation', () => {
+  it('does not let a negation in the allow list cancel a deny rule', () => {
+    const decision = evaluateRules(
+      rules({ deny: ['Bash(rm *)'], allow: ['!Bash(rm *)'] }),
+      tool({ input: { command: 'rm x' } }),
+    );
+
+    // The negation scope is the list and the tier: a negation written in one list
+    // never cancels a rule of another list.
+    expect(decision?.behavior).toBe('deny');
+  });
+
+  it('does not let a negation in the ask list cancel an allow rule', () => {
+    const decision = evaluateRules(
+      rules({ allow: ['Bash(rm *)'], ask: ['!Bash(rm *)'] }),
+      tool({ input: { command: 'rm x' } }),
+    );
+
+    expect(decision?.behavior).toBe('allow');
+  });
+});
+
+describe('the plan mode refuses an edit by its effect', () => {
+  it('does not let plan mode auto-approve an edit made through a shell command', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'sed -i s/a/b/ /work/x.txt' } }), {
+      rules: rules({ allow: ['Bash(sed -i *)'] }),
+      mode: 'plan',
+    });
+
+    // "Plan never auto-approves an edit" is a property of the effect, not of the
+    // tool name.
+    expect(decision.behavior).toBe('ask');
+  });
+
+  it('does not let plan mode auto-approve a write redirection', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'echo pwned > /work/x.txt' } }), {
+      rules: rules({ allow: ['Bash(echo *)'] }),
+      mode: 'plan',
+    });
+
+    expect(decision.behavior).toBe('ask');
+  });
+
+  it('still auto-approves a command with no file effect in plan mode', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules({ allow: ['Bash(ls *)'] }),
+      mode: 'plan',
+    });
+
+    expect(decision.behavior).toBe('allow');
+  });
+});
+
+describe('acceptEdits writes inside the allowed directories only', () => {
+  function makeWorkspace(): { root: string; work: string; outside: string } {
+    const root = makeTempDir();
+    const work = path.join(root, 'work');
+    const outside = path.join(root, 'outside');
+    mkdirSync(work, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, 'secret.txt'), 'secret', 'utf8');
+    symlinkSync(path.join(outside, 'secret.txt'), path.join(work, 'link.txt'));
+    return { root, work, outside };
+  }
+
+  it('auto-approves an edit inside an added directory', async () => {
+    const decision = await checkPermission(
+      tool({ toolName: 'Edit', input: { file_path: '/srv/shared/a.txt' } }),
+      { rules: rules({ additionalDirs: ['/srv/shared'] }), mode: 'acceptEdits' },
+    );
+
+    expect(decision.behavior).toBe('allow');
+    // The reason says what is true: the path is inside an *added* directory.
+    expect(decision.reason).toContain('/srv/shared');
+    expect(decision.reason).not.toContain('the working directory');
+  });
+
+  it('does not auto-approve a write through a symlink that leaves the tree', async () => {
+    const { work } = makeWorkspace();
+
+    const decision = await checkPermission(
+      tool({ toolName: 'Edit', input: { file_path: path.join(work, 'link.txt') } }),
+      { rules: rules({ cwd: work }), mode: 'acceptEdits' },
+    );
+
+    expect(decision.behavior).toBe('ask');
+  });
+
+  it('auto-approves the safe shell commands', async () => {
+    const commands = [
+      'touch /work/a.txt',
+      'rmdir /work/sub',
+      'mv /work/a.txt /work/b.txt',
+      'cp /work/a.txt /work/b.txt',
+      'sed -i s/a/b/ /work/a.txt',
+    ];
+
+    for (const command of commands) {
+      const decision = await checkPermission(tool({ input: { command } }), {
+        rules: rules(),
+        mode: 'acceptEdits',
+      });
+      expect(decision.behavior, command).toBe('allow');
+    }
+  });
+});
+
+describe('the glob matcher', () => {
+  it('matches a command pattern with several stars against a long command', () => {
+    const pattern = 'a*a*a*a*a';
+
+    // A backtracking matcher would take exponential time on this input: the
+    // pattern is user data and the command is model data.
+    const long = `${'a'.repeat(20000)}!`;
+    expect(commandGlobMatch(pattern, long)).toBe(false);
+    expect(commandGlobMatch(pattern, 'a'.repeat(20000))).toBe(true);
+  });
+
+  it('matches the command flavour across a path separator', () => {
+    // A command pattern is not a path pattern: `*` crosses a separator there.
+    expect(commandGlobMatch('a*b', 'a/b')).toBe(true);
+  });
+});
+
+describe('the host-level gates', () => {
+  function loadedWithProblem(): SettingsLoadResult {
+    return {
+      tiers: new Map<SettingsSource, SettingsTier>(),
+      errors: [
+        {
+          source: 'userSettings',
+          path: '/config/settings.json',
+          severity: 'error',
+          message: 'settings file is not valid JSON',
+        },
+      ],
+      readMode: new Map(),
+      linkedAway: [],
+    };
+  }
+
+  it('recognises the personal-config restriction environment variable', () => {
+    expect(isPersonalConfigRestricted({ [RESTRICT_PERSONAL_CONFIG_ENV]: '1' })).toBe(true);
+    expect(isPersonalConfigRestricted({ [RESTRICT_PERSONAL_CONFIG_ENV]: '0' })).toBe(false);
+    expect(isPersonalConfigRestricted({})).toBe(false);
+  });
+
+  it('denies every call when the personal configuration has problems and the restriction is set', async () => {
+    const permissions = permissionsFromSettings(loadedWithProblem(), {
+      cwd: '/work',
+      configDir: '/config',
+      env: { [RESTRICT_PERSONAL_CONFIG_ENV]: '1' },
+    });
+
+    expect(permissions.gate?.blocked).toBe(true);
+    expect(permissions.gate?.paths).toContain('/config/settings.json');
+
+    const decision = await checkPermission(tool(), {
+      rules: permissions.rules,
+      mode: 'default',
+      hostGate: permissions.gate,
+    });
+
+    expect(decision.behavior).toBe('deny');
+    // The message is built from the offending file paths.
+    expect(decision.reason).toContain('/config/settings.json');
+  });
+
+  it('does not gate the session when the restriction is not set', () => {
+    const permissions = permissionsFromSettings(loadedWithProblem(), {
+      cwd: '/work',
+      configDir: '/config',
+      env: {},
+    });
+
+    expect(permissions.gate).toBeUndefined();
+    expect(personalConfigGate(loadedWithProblem(), { env: {} })).toBeUndefined();
+  });
+
+  it('denies every call when a hook failure has the severity stop', async () => {
+    const decision = await checkPermission(tool(), {
+      rules: rules(),
+      mode: 'default',
+      hookFailure: { severity: 'stop', message: 'the hook crashed' },
+    });
+
+    expect(decision.behavior).toBe('deny');
+    expect(decision.reason).toBe(HOST_HOOK_FAILURE_REASON);
+    expect(decision.reason).toBe('A problem with your own settings or hooks is blocking tool calls');
+  });
+
+  it('leaves the session intact for a hook failure of another severity', async () => {
+    const decision = await checkPermission(tool(), {
+      rules: rules({ allow: ['Bash(ls *)'] }),
+      mode: 'default',
+      hookFailure: { severity: 'non-blocking', message: 'the hook complained' },
+    });
+
+    expect(decision.behavior).toBe('allow');
   });
 });

@@ -15,12 +15,15 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  MAX_PERSISTED_RULES,
+  PERSISTED_RULES_SETTINGS_PATH,
   checkPermission,
   collectRuleWarnings,
   describeReason,
   evaluateRules,
   normalizePermissionMode,
   permissionsFromSettings,
+  persistentAllowRules,
   resolveStartMode,
   type PermissionDecision,
   type RuleSet,
@@ -31,8 +34,10 @@ import type { SettingsSource, SettingsTier } from '../../src/config/tiers.js';
 import {
   applyPermissionRequestHook,
   buildApprovalPrompt,
+  createPermissionRequestHook,
   createTransportPermissionDispatcher,
   effectiveInput,
+  looksLikeComputerFolderInput,
   safetyCheckForTool,
 } from '../../src/permissions/prompts.js';
 
@@ -678,7 +683,7 @@ describe('resolveStartMode', () => {
 });
 
 describe('the approval prompt', () => {
-  it('shows the resolved destination rather than the literal command string', () => {
+  it('shows the resolved destination as well as the command text', () => {
     const decision: PermissionDecision = {
       behavior: 'ask',
       source: 'unknown',
@@ -693,8 +698,69 @@ describe('the approval prompt', () => {
       cwd: '/work',
     });
 
+    // The resolved destination is what the kernel acts on, and the command text is
+    // what the user is being asked about: the prompt shows both.
     expect(prompt).toContain('out.txt');
-    expect(prompt).not.toContain('cp /work/link.txt /work/out.txt');
+    expect(prompt).toContain('cp /work/link.txt /work/out.txt');
+  });
+
+  it('shows the command text of a call with no resolved destination', () => {
+    const decision: PermissionDecision = {
+      behavior: 'ask',
+      source: 'unknown',
+      reasonType: 'other',
+      reasonKind: 'permissionPromptTool',
+    };
+
+    const prompt = buildApprovalPrompt({
+      toolName: 'Bash',
+      input: { command: 'curl https://example.com/x' },
+      decision,
+      cwd: '/work',
+    });
+
+    // The URL is not a path, so it is not resolved — but it is shown.
+    expect(prompt).toContain('https://example.com/x');
+    expect(prompt).not.toContain('/work/https:/');
+  });
+
+  it('does not resolve an ordinary word into a path', () => {
+    const decision: PermissionDecision = {
+      behavior: 'ask',
+      source: 'unknown',
+      reasonType: 'other',
+      reasonKind: 'permissionPromptTool',
+    };
+
+    const prompt = buildApprovalPrompt({
+      toolName: 'Bash',
+      input: { command: 'git commit -m "a message"' },
+      decision,
+      cwd: '/work',
+    });
+
+    expect(prompt).toContain('git commit -m "a message"');
+    expect(prompt).not.toContain('/work/commit');
+    expect(prompt).not.toContain('/work/"a message"');
+  });
+
+  it('resolves the target of a write redirection', () => {
+    const decision: PermissionDecision = {
+      behavior: 'ask',
+      source: 'unknown',
+      reasonType: 'other',
+      reasonKind: 'permissionPromptTool',
+    };
+
+    const prompt = buildApprovalPrompt({
+      toolName: 'Bash',
+      input: { command: 'echo pwned >/etc/passwd' },
+      decision,
+      cwd: '/work',
+    });
+
+    expect(prompt).toContain('/etc/passwd');
+    expect(prompt).toContain('echo pwned >/etc/passwd');
   });
 });
 
@@ -857,6 +923,7 @@ describe('the transport permission dispatcher', () => {
   it('denies a computer-folder prompt whose input is not exactly three string arguments', async () => {
     const dispatcher = createTransportPermissionDispatcher({
       requestDecision: async () => ({ behavior: 'allow' as const }),
+      computerFolderTool: 'computer_folder',
     });
 
     for (const input of [
@@ -883,6 +950,7 @@ describe('the transport permission dispatcher', () => {
   it('denies a folder path or computer name containing CR, LF, U+2028 or U+2029', async () => {
     const dispatcher = createTransportPermissionDispatcher({
       requestDecision: async () => ({ behavior: 'allow' as const }),
+      computerFolderTool: 'computer_folder',
     });
 
     const bad = ['\r', '\n', '\u2028', '\u2029'];
@@ -910,6 +978,7 @@ describe('the transport permission dispatcher', () => {
   it('denies a path that is not equal to its own normalized form', async () => {
     const dispatcher = createTransportPermissionDispatcher({
       requestDecision: async () => ({ behavior: 'allow' as const }),
+      computerFolderTool: 'computer_folder',
     });
 
     const result = await dispatcher.dispatch({
@@ -917,6 +986,25 @@ describe('the transport permission dispatcher', () => {
       request_id: 'norm-1',
       tool_name: 'computer_folder',
       input: ['/work//folder/../other', 'host', 'id'],
+    });
+
+    expect(result.kind).toBe('response');
+    if (result.kind === 'response') {
+      expect(result.response.response.behavior).toBe('deny');
+    }
+  });
+
+  it('denies a computer name that is not equal to its own normalized form', async () => {
+    const dispatcher = createTransportPermissionDispatcher({
+      requestDecision: async () => ({ behavior: 'allow' as const }),
+      computerFolderTool: 'computer_folder',
+    });
+
+    const result = await dispatcher.dispatch({
+      subtype: 'can_use_tool',
+      request_id: 'norm-2',
+      tool_name: 'computer_folder',
+      input: ['/work/folder', 'host//name', 'id'],
     });
 
     expect(result.kind).toBe('response');
@@ -945,5 +1033,354 @@ describe('the transport permission dispatcher', () => {
 
     expect(prompt).toContain('Fetch a URL over the network');
     expect(prompt).toContain('The command reaches the network');
+  });
+});
+
+describe('the compound-command escalation', () => {
+  it('names the sub-commands an allow rule did not cover', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'echo hello && rm -rf /' } }), {
+      rules: rules({ allow: ['Bash(echo *)'] }),
+      mode: 'default',
+    });
+
+    // The allow rule covers `echo hello` but not `rm -rf /`: the escalation names
+    // the part that needs approval instead of degrading to a generic ask.
+    expect(decision.behavior).toBe('ask');
+    expect(decision.reasonKind).toBe('subcommandResults');
+    expect(decision.subcommandResults?.commands).toEqual(['rm -rf /']);
+    expect(decision.subcommandResults?.count).toBe(1);
+    expect(decision.subcommandResults?.total).toBe(2);
+    expect(decision.reason).toContain('rm -rf /');
+  });
+
+  it('names the sub-commands in plan mode as well', async () => {
+    const decision = await checkPermission(
+      tool({ input: { command: 'echo hello && curl https://example.com' } }),
+      {
+        rules: rules({ allow: ['Bash(echo *)'] }),
+        mode: 'plan',
+      },
+    );
+
+    expect(decision.reasonKind).toBe('subcommandResults');
+    expect(decision.subcommandResults?.commands).toEqual(['curl https://example.com']);
+  });
+
+  it('denies rather than prompts when dontAsk meets an allow rule that does not cover the chain', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'echo hello && rm -rf /' } }), {
+      rules: rules({ allow: ['Bash(echo *)'] }),
+      mode: 'dontAsk',
+    });
+
+    expect(decision.behavior).toBe('deny');
+    expect(decision.subcommandResults?.commands).toEqual(['rm -rf /']);
+  });
+});
+
+describe('the auto-mode review', () => {
+  it('does not let the classifier turn an ask rule into an allow', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules({ ask: ['Bash(git push *)'] }),
+      mode: 'auto',
+      classifier: async () => ({ verdict: 'allow' as const }),
+    });
+
+    // An explicit `permissions.ask` rule still forces a prompt: the classifier
+    // reviews the call, but it may not turn the ask into an allow.
+    expect(decision.behavior).toBe('ask');
+    expect(decision.rule?.content).toBe('Bash(git push *)');
+  });
+
+  it('denies an ask-matched call the review blocks', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules({ ask: ['Bash(git push *)'] }),
+      mode: 'auto',
+      classifier: async () => ({ verdict: 'block' as const, category: 'network' }),
+    });
+
+    expect(decision.behavior).toBe('deny');
+    expect(decision.rule?.content).toBe('Bash(git push *)');
+  });
+
+  it('does not let the classifier launder a hook approval it may not approve', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const }, classifierApprovable: false }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules(),
+      mode: 'auto',
+      hook,
+      classifier: async () => ({ verdict: 'allow' as const }),
+    });
+
+    expect(decision.behavior).not.toBe('allow');
+    expect(decision.behavior).toBe('ask');
+  });
+
+  it('lets the classifier approve a hook approval it may approve', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const } }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules(),
+      mode: 'auto',
+      hook,
+      classifier: async () => ({ verdict: 'allow' as const }),
+    });
+
+    expect(decision.behavior).toBe('allow');
+  });
+});
+
+describe('the hook seam of the permission check', () => {
+  it('runs the hook after the deny list, so an approval never overrides a deny rule', async () => {
+    let hookRan = false;
+    const hook = createPermissionRequestHook({
+      approval: async () => {
+        hookRan = true;
+        return { decision: { behavior: 'allow' as const } };
+      },
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'rm -rf /' } }), {
+      rules: rules({ deny: ['Bash(rm *)'] }),
+      mode: 'default',
+      hook,
+    });
+
+    expect(decision.behavior).toBe('deny');
+    expect(hookRan).toBe(false);
+  });
+
+  it('does not let an approval override an ask rule', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const } }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules({ ask: ['Bash(git push *)'] }),
+      mode: 'default',
+      hook,
+    });
+
+    expect(decision.behavior).toBe('ask');
+    expect(decision.rule?.content).toBe('Bash(git push *)');
+  });
+
+  it('carries the hook rewrite through the permission check', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const }, updatedInput: { command: 'ls' } }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'rm -rf /' } }), {
+      rules: rules(),
+      mode: 'default',
+      hook,
+    });
+
+    expect(decision.behavior).toBe('allow');
+    expect(decision.updatedInput).toEqual({ command: 'ls' });
+    expect(effectiveInput(decision, { command: 'rm -rf /' })).toEqual({ command: 'ls' });
+  });
+
+  it('honours a hook denial in every mode', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'deny' as const, reason: 'not allowed here' } }),
+    });
+
+    for (const mode of ['default', 'bypassPermissions', 'acceptEdits', 'auto'] as const) {
+      const decision = await checkPermission(tool(), { rules: rules(), mode, hook });
+      expect(decision.behavior, mode).toBe('deny');
+    }
+  });
+
+  it('does not let an approval override a deny rule that was degraded into an ask', async () => {
+    const hook = createPermissionRequestHook({
+      approval: async () => ({ decision: { behavior: 'allow' as const } }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'rm -rf /' } }), {
+      rules: rules({ deny: ['Bash(command:rm *)'] }),
+      mode: 'default',
+      hook,
+    });
+
+    expect(decision.behavior).toBe('ask');
+    expect(decision.rule?.content).toBe('Bash(command:rm *)');
+  });
+});
+
+describe('the "don\'t ask again" rules', () => {
+  it('computes one rule per sub-command that needs approval, capped at five rules', () => {
+    const commands = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+    const decision: PermissionDecision = {
+      behavior: 'ask',
+      source: 'unknown',
+      reasonType: 'rule',
+      reasonKind: 'subcommandResults',
+      subcommandResults: { commands, count: commands.length, total: commands.length },
+    };
+
+    const persisted = persistentAllowRules(
+      tool({ input: { command: commands.join(' && ') } }),
+      decision,
+    );
+
+    expect(persisted).toEqual(['Bash(a)', 'Bash(b)', 'Bash(c)', 'Bash(d)', 'Bash(e)']);
+    expect(persisted.length).toBe(MAX_PERSISTED_RULES);
+    expect(MAX_PERSISTED_RULES).toBe(5);
+  });
+
+  it('computes the rule of a file tool from its path', () => {
+    const decision: PermissionDecision = {
+      behavior: 'ask',
+      source: 'unknown',
+      reasonType: 'other',
+    };
+
+    expect(
+      persistentAllowRules(tool({ toolName: 'Write', input: { file_path: '/work/a.txt' } }), decision),
+    ).toEqual(['Write(/work/a.txt)']);
+  });
+
+  it('names the settings file the rules are persisted to', () => {
+    expect(PERSISTED_RULES_SETTINGS_PATH).toBe('.claude/settings.local.json');
+  });
+});
+
+describe('the reason kinds', () => {
+  it('distinguishes the no-rule-matched case from a named tool that requires approval', async () => {
+    const decision = await checkPermission(tool(), { rules: rules(), mode: 'default' });
+
+    expect(decision.reasonKind).toBe('noRuleMatch');
+    expect(decision.reason).toContain('No permission rule matched');
+  });
+
+  it('keeps the audit meaning of the permission-prompt-tool reason', () => {
+    const decision: PermissionDecision = {
+      behavior: 'ask',
+      source: 'unknown',
+      reasonType: 'other',
+      reasonKind: 'permissionPromptTool',
+    };
+
+    expect(describeReason(decision, 'WebFetch')).toBe(
+      'The WebFetch tool requires approval for this command.',
+    );
+  });
+});
+
+describe('the ignored-rule warning', () => {
+  it('reaches the user on the decision', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'rm -rf /' } }), {
+      rules: rules({ deny: ['Bash(command:rm *)'] }),
+      mode: 'default',
+    });
+
+    expect(decision.warnings?.join(' ')).toContain('Bash(command:rm *)');
+  });
+
+  it('degrades a deny rule that cannot be applied into an ask rather than dropping it', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'rm -rf /' } }), {
+      rules: rules({ deny: ['Bash(command:rm *)'] }),
+      mode: 'default',
+    });
+
+    // A deny rule that silently does not apply protects nothing.
+    expect(decision.behavior).toBe('ask');
+    expect(decision.rule?.content).toBe('Bash(command:rm *)');
+  });
+});
+
+describe('the uncovered behaviours', () => {
+  it('prompts for an ask rule in plan mode', async () => {
+    const decision = await checkPermission(tool({ input: { command: 'git push origin main' } }), {
+      rules: rules({ ask: ['Bash(git push *)'] }),
+      mode: 'plan',
+    });
+
+    expect(decision.behavior).toBe('ask');
+    expect(decision.rule?.content).toBe('Bash(git push *)');
+  });
+
+  it('resolves a settings default of manual to default', () => {
+    expect(
+      resolveStartMode({
+        settingsDefault: 'manual',
+        autoAvailable: true,
+        autoDisabledByPolicy: false,
+        interactive: true,
+      }),
+    ).toBe('default');
+  });
+
+  it('propagates the updated input of a decision back to the peer', async () => {
+    const dispatcher = createTransportPermissionDispatcher({
+      requestDecision: async () => ({ behavior: 'allow' as const, updatedInput: { command: 'ls' } }),
+    });
+
+    const result = await dispatcher.dispatch({
+      subtype: 'can_use_tool',
+      request_id: 'u-1',
+      tool_name: 'Bash',
+      input: { command: 'rm -rf /' },
+    });
+
+    expect(result.kind).toBe('response');
+    if (result.kind === 'response') {
+      expect(result.response.response.behavior).toBe('allow');
+      expect(result.response.response.updatedInput).toEqual({ command: 'ls' });
+    }
+  });
+
+  it('builds the repository-trust prompt from the description', async () => {
+    let prompt = '';
+    const dispatcher = createTransportPermissionDispatcher({
+      requestDecision: async (request) => {
+        prompt = request.prompt;
+        return { behavior: 'allow' as const };
+      },
+      repositoryTrustTool: 'repository_trust',
+    });
+
+    await dispatcher.dispatch({
+      subtype: 'can_use_tool',
+      request_id: 'rt-1',
+      tool_name: 'repository_trust',
+      input: { path: '/work' },
+      description: 'A repository at /work',
+    });
+
+    expect(prompt).toContain('Do you trust this repository?');
+    expect(prompt).toContain('A repository at /work');
+  });
+
+  it('refuses a computer-folder-shaped request whose tool name is not configured', async () => {
+    let forwarded = false;
+    const dispatcher = createTransportPermissionDispatcher({
+      requestDecision: async () => {
+        forwarded = true;
+        return { behavior: 'allow' as const };
+      },
+    });
+
+    const result = await dispatcher.dispatch({
+      subtype: 'can_use_tool',
+      request_id: 'cf-x',
+      tool_name: 'some_other_tool',
+      input: ['/work/folder', 'host', 'id'],
+    });
+
+    expect(result.kind).toBe('response');
+    if (result.kind === 'response') {
+      expect(result.response.response.behavior).toBe('deny');
+    }
+    // The unvalidated input was never forwarded.
+    expect(forwarded).toBe(false);
+    expect(looksLikeComputerFolderInput(['/work/folder', 'host', 'id'])).toBe(true);
+    expect(looksLikeComputerFolderInput(['/work/folder'])).toBe(false);
+    expect(looksLikeComputerFolderInput({ path: '/work' })).toBe(false);
   });
 });
