@@ -48,12 +48,17 @@ import {
   DEFAULT_MAX_TURNS,
   sessionKeyOf,
   type AgentRuntime,
+  type AgentRuntimeDeps,
   type TurnInput,
   type TurnResult,
 } from '../../src/agent/loop.js';
 import { TURN_SOURCE } from '../../src/agent/context.js';
 import { groupToolCalls, toolCallsFrom, type ToolCall } from '../../src/agent/dispatch.js';
-import type { PermissionDecision, ToolContext } from '../../src/permissions/decision.js';
+import type {
+  CheckPermissionOptions,
+  PermissionDecision,
+  ToolContext,
+} from '../../src/permissions/decision.js';
 import type {
   ProviderDriver,
   ProviderEvent,
@@ -296,6 +301,9 @@ function harness(options: {
   repeatLastRound?: boolean;
   now?: () => number;
   onRequest?: (request: ProviderRequest, index: number) => void;
+  preToolUseHook?: AgentRuntimeDeps['preToolUseHook'];
+  hook?: AgentRuntimeDeps['hook'];
+  permissionOptions?: AgentRuntimeDeps['permissionOptions'];
 }): Harness {
   const store = new RecordingStore(createSessionStore({ configDir: makeRoot() }));
   const registry = createToolRegistry();
@@ -313,6 +321,9 @@ function harness(options: {
     maxTokens: options.maxTokens,
     maxTurns: options.maxTurns,
     now: options.now,
+    preToolUseHook: options.preToolUseHook,
+    hook: options.hook,
+    permissionOptions: options.permissionOptions,
   });
 
   return { runtime, store, driver };
@@ -1274,5 +1285,109 @@ describe('the tool-call dispatch', () => {
         expect(plan.groups.every((group) => group.length === 1)).toBe(true);
       }
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The seams the runtime's own permission service consults                      */
+/* -------------------------------------------------------------------------- */
+
+describe('the runtime\'s permission options', () => {
+  it('carries the PreToolUse seam when the caller supplies no permission options', async () => {
+    const seen: CheckPermissionOptions[] = [];
+    const seam = (): undefined => undefined;
+
+    const { runtime } = harness({
+      rounds: [
+        { events: toolTurn('toolu_01', 'Echo', { text: 'hi' }) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+      permission: async (_ctx, options) => {
+        seen.push(options);
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+      preToolUseHook: seam,
+    });
+
+    await runtime.runTurn(input);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.preToolUseHook).toBe(seam);
+  });
+
+  it('carries the PermissionRequest seam as well', async () => {
+    const seen: CheckPermissionOptions[] = [];
+    const seam = (): undefined => undefined;
+
+    const { runtime } = harness({
+      rounds: [
+        { events: toolTurn('toolu_01', 'Echo', { text: 'hi' }) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+      permission: async (_ctx, options) => {
+        seen.push(options);
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+      hook: seam,
+    });
+
+    await runtime.runTurn(input);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.hook).toBe(seam);
+  });
+
+  it('keeps a caller-supplied permissionOptions and fills in the seams it lacks', async () => {
+    const seen: CheckPermissionOptions[] = [];
+    const seam = (): undefined => undefined;
+    const supplied: CheckPermissionOptions = {
+      rules: { allow: [], deny: [], ask: [] },
+      mode: 'default',
+    };
+
+    const { runtime } = harness({
+      rounds: [
+        { events: toolTurn('toolu_01', 'Echo', { text: 'hi' }) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+      permission: async (_ctx, options) => {
+        seen.push(options);
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+      permissionOptions: supplied,
+      preToolUseHook: seam,
+    });
+
+    await runtime.runTurn(input);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.mode).toBe('default');
+    expect(seen[0]?.preToolUseHook).toBe(seam);
+  });
+
+  it('leaves the default options untouched when no seam is supplied', async () => {
+    const seen: CheckPermissionOptions[] = [];
+
+    const { runtime } = harness({
+      rounds: [
+        { events: toolTurn('toolu_01', 'Echo', { text: 'hi' }) },
+        { events: finalTurn('done') },
+      ],
+      tools: [fakeTool({ name: 'Echo', output: 'hello' })],
+      permission: async (_ctx, options) => {
+        seen.push(options);
+        return { behavior: 'allow', source: 'unknown', reasonType: 'other' };
+      },
+    });
+
+    await runtime.runTurn(input);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.preToolUseHook).toBeUndefined();
+    expect(seen[0]?.hook).toBeUndefined();
+    expect(seen[0]?.mode).toBe('default');
   });
 });
