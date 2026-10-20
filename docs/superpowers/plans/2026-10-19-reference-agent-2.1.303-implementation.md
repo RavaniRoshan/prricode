@@ -1924,6 +1924,84 @@ compare at all.
   git commit -m "test(compat): the partial rows compare the whole contract"
   ```
 
+### CC-027 — The tools the target has and this implementation does not
+
+**Why this task exists.** A sweep of the target's own tool inventory found that the
+target defines **at least sixteen** tools and this implementation has **ten**. Six were
+never named in the audit and are not here:
+
+| the target's tool | the state here |
+|---|---|
+| `WebSearch` | **absent** — the audit never names it, and there is no implementation |
+| `NotebookRead` | **absent** — the audit never names it; only `NotebookEdit` is here |
+| `AskUserQuestion` | **absent** — the audit never names it |
+| `ExitPlanMode` | **absent** — the audit never names it |
+| `Skill` | **absent as a tool** — the audit covers the skill *system* (§2.8) but not the tool |
+| `Agent` | the target's `Agent` tool is this implementation's `Task` |
+
+A gold-standard clone has the target's tool inventory. Each of these is a user-visible
+capability, and each has to be **established** before it can be implemented: what its
+input is, what it does, what it returns, and what the permission rules say about it.
+
+**Files:** the tool modules the reading names; `src/tools/registry.ts`; the permission
+rules; the tests.
+
+- [ ] **Step 1: Read each tool from the source** — its name, its input schema, its
+  description, its output, its permission behaviour and its concurrency safety. Record it
+  in `/home/shiva/opt/reference-agent-rea/analysis/findings-missing-tools.md`.
+- [ ] **Step 2: Write the failing test** for each tool, in the owning task's suite.
+- [ ] **Step 3: Implement** each tool, and the permission rules that govern it.
+- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 5: Update the compatibility matrix** — the new tools are named, and the rows
+  they belong to record that they are reproduced.
+- [ ] **Step 6: Commit.**
+  ```bash
+  git add src/tools src/permissions tests/contracts docs/compatibility
+  git commit -m "feat(tools): the tools the target has and this implementation did not"
+  ```
+
+---
+
+### CC-028 — The surfaces the audit never covered
+
+**Why this task exists.** A sweep of the audit against the target's own surface
+inventories found several things the target does that **the audit never looked at**, and
+that therefore have no contract row at all. A gold-standard clone cannot omit them
+quietly: each is either established and implemented, or named as a gap.
+
+The surfaces found so far, none of which the audit mentions:
+
+- **project instructions** — the target reads a `CLAUDE.md` from the project and the user
+  directories (the audit's own §2.8 names an `omitClaudeMd` field on a subagent
+  definition, so the target has the concept, and nothing establishes it);
+- **checkpointing** — a surface the target's own documentation names and the audit never
+  opens;
+- **cost and usage accounting** — the audit says nothing about how the target accounts
+  for a run's cost;
+- **output styles** — a settings surface the audit never opens;
+- **the status line** — a customisable status line, named once in the audit and never
+  established;
+- **auto-compaction** — the automatic trigger, distinct from the manual compaction whose
+  behaviour is already `unknown` (`CC-023`).
+
+**Files:** the modules each reading names; the compatibility matrix; the conformance
+documents.
+
+- [ ] **Step 1: Establish each surface from the source** — what it is, where it lives, what
+  it does, and what it produces. Record it in
+  `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-surfaces.md`, which the
+  gap hunt also feeds.
+- [ ] **Step 2: Add a matrix row** for each surface that the target has, with its
+  evidence class and its owning task. A surface that is **not** established is a row
+  with `unknown` — which is honest and is what the report will then say.
+- [ ] **Step 3: Implement** the surfaces the reading established.
+- [ ] **Step 4: Update the conformance documents and the report.**
+- [ ] **Step 5: Commit.**
+  ```bash
+  git add src docs/compatibility docs/reverse-engineering tests
+  git commit -m "feat: the surfaces the audit never covered"
+  ```
+
 ### CC-020 — The divergence layer: PRRICODE as a product of its own
 
 **Why this task exists.** PRRICODE is built in two layers. The **first** is the parity
