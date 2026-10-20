@@ -13,15 +13,20 @@
  *   - Every scenario names the **matrix row** it measures, and the report test
  *     refuses two rows that claim the same scenario.
  *   - Every scenario's probe **observes this implementation**. A probe records what it
- *     read with {@link observe} or {@link observeCall}; the observation is
- *     **strict** when the value is a reimplementation export or the result of a call to
- *     one, and a probe with no strict observation has read nothing of the
- *     implementation at all.
+ *     read with {@link observe} or {@link observeCall}, and the harness records
+ *     **where the value came from**: a value this implementation produced is the return
+ *     of a call to a reimplementation export, a value this implementation handed over a channel, a
+ *     member of one of those, or a reimplementation export that is **not a bare
+ *     constant**. A primitive this implementation merely exports is a bare constant, and
+ *     reading one is not reading this implementation's behaviour.
  *   - Every scenario's probe **asserts on what it observed**. The harness
  *     records the received value of every assertion, and at least one of them
- *     must compare an **observed value** against a different value. A probe
- *     that asserts a constant — `expect(1).toBe(1)`, `expect('deny').toBe('deny')`
- *     — has measured nothing, and the report test says so.
+ *     must compare a value this implementation produced against a **different** value.
+ *     A comparison of a value **with itself** — `expect(c).toBe(c)` — can
+ *     never fail, so the harness reads the probe's own source and refuses it.
+ *     A probe that asserts a constant — `expect(1).toBe(1)`,
+ *     `expect('deny').toBe('deny')` — has measured nothing, and the report
+ *     test says so.
  *   - A probe that throws is a **mismatch**, and the harness says so.
  *   - A scenario that **cannot run** raises {@link NotTestedError} and is
  *     recorded as `not-tested` — never as a failure, and never as a pass.
@@ -1040,7 +1045,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(block).toMatchObject({ value: { deny: ['Bash(rm *)'] } });
       return measured(
         'partial',
-        "Both observed orderings and the whole-block override are reproduced; the audit does not derive the target's per-key merge for ordinary keys.",
+        "Both observed precedence orderings and the whole-block override are reproduced; the audit does not derive the target's per-key merge for ordinary keys.",
       );
     },
   },
@@ -2070,6 +2075,7 @@ export const SCENARIOS: readonly Scenario[] = [
           path: '/tmp/a.jsonl',
           startedAt: 1,
           updatedAt: 2,
+          modifiedAt: 2,
           messageCount: 1,
           title: 'the title',
         },
@@ -2078,6 +2084,7 @@ export const SCENARIOS: readonly Scenario[] = [
           path: '/tmp/b.jsonl',
           startedAt: 1,
           updatedAt: 3,
+          modifiedAt: 3,
           messageCount: 1,
           title: 'the title',
         },
@@ -2092,6 +2099,16 @@ export const SCENARIOS: readonly Scenario[] = [
         resolveSessionTarget(summaries, 'the title'),
       );
       expect(ambiguous.kind).toBe('ambiguous');
+      // The ambiguity error lists the candidates with their modification
+      // times.
+      if (ambiguous.kind !== 'ambiguous') throw new Error('unreachable');
+      expect(ambiguous.candidates.map((candidate) => candidate.sessionId)).toEqual([
+        'session_a',
+        'session_b',
+      ]);
+      expect(ambiguous.message).toContain('matches 2 sessions');
+      expect(ambiguous.message).toContain('session_a');
+      expect(ambiguous.message).toContain('session_b');
       const unknown = observe('the unknown title', resolveSessionTarget(summaries, 'nope'));
       expect(unknown.kind).toBe('not_found');
       // The drop guard: a resume that would split a tool turn is refused.
@@ -2401,7 +2418,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(states[2]?.error).toBeDefined();
       return measured(
         'partial',
-        "This implementation implements a lifecycle with a memo, a retry and a teardown, but the audit traces only the configuration write, so the full target lifecycle is not reproduced.",
+        "This implementation's batched connect returns one state per configuration, in the order the configurations were given, and a failed server is a state and not a crash; the audit traces only the configuration write, so the full target lifecycle is not reproduced.",
       );
     },
   },
@@ -2471,7 +2488,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(observe('the unsafe IDE action', isSafeIdeAction('../etc/passwd'))).toBe(false);
       return measured(
         'partial',
-        "This implementation implements the five subsystems, but the audit records their names and storage and not their behaviour, so the target's behaviour is not reproduced.",
+        "This implementation parses a plugin manifest and rules an IDE action, but the audit records the five subsystems' names and storage and not their behaviour, so the target's behaviour is not reproduced.",
       );
     },
   },
@@ -2777,7 +2794,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(delivery).toMatchObject({ allowed: true });
       return measured(
         'partial',
-        'The project requirement is met — the `/provider` command, the catalog browser, the picker, the credential status vocabulary and the two credential columns — but the target has no such surface, so no target behaviour is matched.',
+        'The project requirement is met — the `/provider` command, the catalog browser, the connection switch and the two credential columns — but the target has no such surface, so no target behaviour is matched.',
       );
     },
   },

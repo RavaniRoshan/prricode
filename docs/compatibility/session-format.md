@@ -41,6 +41,8 @@ A **transcript path** is the second way to name a session. The path's segments a
 
 `SESSION_SCHEMA_VERSION = 1`. Every record carries its own `v`, and the reader checks it **per record**, not only on the first.
 
+**The target's `transcriptSource` is not reproduced.** The audit records that the target's session controller exposes a `transcriptSource` with two observed values — `ccr-api` for a remote transcript and `local-jsonl` for a local one — and switches between them when the active remote changes. This implementation has no remote, so it has nothing to switch between, and **no record of this implementation's carries such a member**. The row `F-24` is therefore reported as a `mismatch` in [`results.md`](results.md): the layout is reproduced and the marker is not.
+
 The record variants are: a **message** record (user, assistant, tool call, tool result), `provider_event`, `permission_request`, and `content_replacement`. Two members are additions over a minimal design and are labelled as such in the source:
 
 - **`parentId`** — the record this one continues. A rewind starts a new chain from the rewind point, so the abandoned branch stays in the file and is pruned on resume. Absent links mean one chain, in file order.

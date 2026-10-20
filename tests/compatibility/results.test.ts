@@ -45,10 +45,12 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
+  OUTCOMES,
   RESULTS_PATH,
   canonicalizeEvidenceClass,
   isOutcome,
   mayReportMatch,
+  parseTotals,
   permittedOutcomes,
   readMatrix,
   readResults,
@@ -246,11 +248,33 @@ describe('the compatibility report', () => {
       expect(result.pinningTest?.title).toBe(scenario.pinning.title);
       const source = testSourceOf(scenario.pinning.file);
       expect(source, `${scenario.pinning.file} does not exist`).toBeDefined();
+      // The pinning test is a **declared** title of that file: a file that
+      // merely repeats the words does not pin anything.
+      const declared = declaredTitlesOf(source ?? '');
       expect(
-        source,
-        `${scenario.pinning.file} has no test called "${scenario.pinning.title}"`,
+        declared,
+        `${scenario.pinning.file} declares no test called "${scenario.pinning.title}"`,
       ).toContain(scenario.pinning.title);
     }
+  });
+
+  it('the totals the report declares are the totals its own rows make', () => {
+    // The report's totals are a claim about its rows. The claim is checked
+    // here, so a row that changes its outcome cannot leave the totals stale.
+    const totals = parseTotals(readFileSync(RESULTS_PATH, 'utf8'));
+    const counted = new Map<Outcome, number>();
+    for (const result of RESULTS) {
+      const outcome = result.outcome as Outcome;
+      counted.set(outcome, (counted.get(outcome) ?? 0) + 1);
+    }
+    for (const outcome of OUTCOMES) {
+      expect(
+        totals.get(outcome),
+        `the report declares ${String(totals.get(outcome))} rows for "${outcome}", but it carries ${String(counted.get(outcome) ?? 0)}`,
+      ).toBe(counted.get(outcome) ?? 0);
+    }
+    const total = [...counted.values()].reduce((sum, count) => sum + count, 0);
+    expect(total, 'the report does not carry one row per matrix row').toBe(MATRIX.length);
   });
 
   it('every results row carries the measurement the harness produced', async () => {

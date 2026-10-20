@@ -20,13 +20,13 @@ Exactly eight, with the target's dispatch order:
 | 7 | `vertex` | `CLAUDE_CODE_USE_VERTEX` | `ANTHROPIC_VERTEX_BASE_URL` | `aiplatform` / `*.googleapis.com` |
 | 8 | `firstParty` | (default) | — | `api.anthropic.com` |
 
-The route selector returns **exactly one** active route. The target's own per-model override layers on top: with Bedrock and Mantle both enabled, an `anthropic.*` model resolves to `mantle`; otherwise, if the catalog has no id for the selected route but has one for `mantle`, the model resolves to `mantle`.
+The route selector returns **exactly one** active route. The target's own per-model override layers on top: with Bedrock and Mantle both enabled, an `anthropic.*` model resolves to `mantle`; otherwise, if the catalog has no id for the selected route but has one for `mantle`, the model resolves to `mantle`. **This implementation reproduces the route selector and only the second half of the override**: the Bedrock+Mantle `anthropic.*` override is target-observed and not implemented, so the rows `F-07` and `F-08` are reported as `mismatch` in [`results.md`](results.md) — see the known limit below.
 
 ## What is the target's, and what is this implementation's extension
 
 | Surface | Target | Implementation |
 |---|---|---|
-| Route selection | one active route from environment flags | **same** — this implementation reproduces it |
+| Route selection | one active route from environment flags, and the per-model `wd(model)` override on top | **same selector** — this implementation reproduces the dispatch order and the single active route; the per-model override's Bedrock+Mantle half is **not** implemented |
 | Model catalog | **built in**, provider-owned, one row per logical model with a `provider_ids` map across all eight providers | **same** — this implementation reproduces the catalog |
 | Connection registry | **does not exist** | **the extension**: N concurrent connections, each with a free-form name, a route, a base URL, and a credential *reference* |
 | Credential model | per-route credential resolution order (bearer-token env var → skip-auth → AWS credential chain → provider-chain resolver) | **the extension**: credentials are always *references* (env var name, file path, OS keychain key) and never values in a catalog |
@@ -218,7 +218,7 @@ Every row of this table is a **project extension**: the target has no such surfa
 | The catalog never reads the credential store | implementation choice | F-07 | same file — "never reads the credential store while the catalog is listed, imported, normalized or resolved" |
 | A model that declares no `context` still normalizes | implementation choice | F-07 | same file — "normalizes a model that declares no context" |
 | `listModels` matches the family and the query case-insensitively | implementation choice | F-07 | same file — "matches the family and the query case-insensitively" |
-| `importCatalog` rejects an unknown `eager_input_streaming` key, a malformed alias key, and a `context` with no `window` | implementation choice | F-07 | same file — the three "rejects …" tests |
+| `importCatalog` rejects an unknown `eager_input_streaming` key, a malformed alias key, and a `context` with no `window` | implementation choice | F-07 | same file — "rejects an unknown eager-input-streaming key", "rejects a malformed alias per_provider key", "rejects a context without a window" |
 
 **Catalog facts, for the record.** 22 models. Families: `haiku`, `sonnet`, `opus`, `fable`, `mythos` (the target's order of first appearance). Nine models carry all eight route ids — `claude-haiku-4-5`, `claude-sonnet-5`, `claude-sonnet-5-5`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-fable-5`, `claude-fable-5-1` — and thirteen omit at least one. Eleven pricing tiers. Four aliases (`opus`, `sonnet`, `haiku`, `fable`) and four `latest_per_family` entries.
 

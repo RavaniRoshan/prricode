@@ -93,7 +93,7 @@ Delegates through a `deps.delegate` seam and reports a typed `taskUnavailable` f
 | An unresolved ask is refused | implementation choice | F-18 | same file |
 | A hook rewrite is what executes, and a validator-rejected rewrite denies | REA observed | F-18 | same file |
 | A rewrite triggers the whole re-check, and the stricter verdict wins | implementation choice | F-18 | same file — the ask / allow-scope / `acceptEdits` rewrite tests and the negative control |
-| The path the check approved is re-resolved before the write, and a swap is refused | implementation choice | F-18 | same file — the "path was re-resolved" tests |
+| The path the check approved is re-resolved before the write, and a swap is refused | implementation choice | F-18 | same file — the "refuses a write whose path was re-resolved to another target after the check" and "refuses a write whose rewritten path was swapped while the re-check ran" tests |
 | Every built-in consults the rule engine | REA observed | F-20 | same file — "the built-in tools and the rule engine" |
 | No tool rewrites its own input | implementation choice (deliberate) | F-20 | same file |
 | `Glob`/`Grep` apply the `Read` deny rules through a symlinked search path | REA observed | F-20 | same file |

@@ -130,9 +130,9 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 
 | Audit claim | Evidence class | Matrix row | Pinned by |
 | --- | --- | --- | --- |
-| The decision vocabulary is exactly the four closed sets | REA observed | F-19 | `tests/contracts/permission-decision.test.ts` — "vocabulary" |
-| Precedence is deny → ask → allow, first match wins, specificity irrelevant | REA observed | F-20 | same file — "precedence" |
-| A rule never rewrites the tool input | implementation choice | F-20 | same file — "vocabulary" (compile-time `updatedInput?: never` pin) |
+| The decision vocabulary is exactly the four closed sets | REA observed | F-19 | `tests/contracts/permission-decision.test.ts` — "uses only the closed behavior, source and reason-type vocabularies" |
+| Precedence is deny → ask → allow, first match wins, specificity irrelevant | REA observed | F-20 | same file — "rule precedence" |
+| A rule never rewrites the tool input | implementation choice | F-20 | same file — "never rewrites the tool input from a rule" (compile-time `updatedInput?: never` pin) |
 | Compound commands split on all seven operators, with no sub-command cap | implementation choice | F-20 | `tests/security/permission-rules.test.ts` — the 51-part and 501-part tests |
 | An allow rule needs every sub-command; deny/ask fire on any | implementation choice | F-20 | same file |
 | Quoted text is not stripped; a quoted operator is not a separator | implementation choice | F-20 | same file |
@@ -140,9 +140,9 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | Allow needs requested **and** resolved; deny fires on either | Documented only | F-20 | same file |
 | A glued redirect target is caught | implementation choice | F-20 | same file — the redirect tests |
 | A deny rule on a primary content field degrades to an ask | implementation choice | F-20 | same file |
-| Deny blocks in every mode; allow has no effect in `bypassPermissions`; ask still prompts there | REA observed | F-20 | `tests/contracts/permission-decision.test.ts` — "modes" |
-| `dontAsk` denies rather than prompts, never consults `canUseTool`, and denies the four always-denied categories | REA observed | F-20 | same file — "modes" |
-| `plan` never auto-approves an edit, by effect not by tool name | implementation choice | F-20 | same file — "modes" |
+| Deny blocks in every mode; allow has no effect in `bypassPermissions`; ask still prompts there | REA observed | F-20 | `tests/contracts/permission-decision.test.ts` — "the permission modes" |
+| `dontAsk` denies rather than prompts, never consults `canUseTool`, and denies the four always-denied categories | REA observed | F-20 | same file — "denies rather than prompts in dontAsk", "never consults canUseTool in dontAsk" |
+| `plan` never auto-approves an edit, by effect not by tool name | implementation choice | F-20 | same file — "never auto-approves a file edit in plan mode, even with a matching allow rule" |
 | `acceptEdits` auto-approves inside the working directory or an added directory, and still prompts for `rm` on a critical path | REA observed + implementation choice (the critical-path list) | F-20 | same file |
 | Start-mode precedence, the settings-file rule, and the three availability overrides | REA observed | F-20 | same file — "resolveStartMode" |
 | The start mode's flag beats `permissions.defaultMode`, which beats the built-in default | REA observed | F-20 | `tests/contracts/permission-decision.test.ts` — "prefers the flag over the settings default", "prefers the settings default over the built-in default" |
@@ -157,13 +157,13 @@ The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny:
 | The rule-list combination is concatenation, not "first source wins" | implementation choice | F-22 | same file |
 | A machine-admin deny beats a user allow | implementation choice (fail-safe) | F-19 | same file |
 | The host gates: the personal-config restriction and the `stop`-severity hook failure | REA observed | F-19 | `tests/security/permission-rules.test.ts` |
-| The safety check denies with `reasonType: 'safetyCheck'`, never a user source | REA observed | F-21 | `tests/contracts/permission-decision.test.ts` — "safety check" |
-| A hook runs after the deny list and never overrides it | REA observed | F-19 | same file — "hook rewrite" |
+| The safety check denies with `reasonType: 'safetyCheck'`, never a user source | REA observed | F-21 | `tests/contracts/permission-decision.test.ts` — "the safety check" |
+| A hook runs after the deny list and never overrides it | REA observed | F-19 | same file — "the hook rewrite path" |
 | A hook approval cannot replace a `subcommandResults` escalation | implementation choice | F-19 | same file |
 | `classifierApprovable: false` cannot be laundered by the auto review | implementation choice | F-18 | same file |
 | The approval prompt shows the command text and the resolved destinations | implementation choice | F-18 | `tests/security/permission-rules.test.ts` — "the approval prompt" |
 | A hook rewrite triggers the **whole** permission re-check, and the stricter of the two verdicts wins | implementation choice | F-23 | `tests/contracts/tool-registry.test.ts` — the rewrite tests (ask-covered path, allow scope, `acceptEdits` working directory, and the negative control) |
-| The path the check approved is the path that is re-resolved, and a swap between the two is refused | implementation choice | F-23 | same file — the "path was re-resolved" and "swapped while the re-check ran" tests |
+| The path the check approved is the path that is re-resolved, and a swap between the two is refused | implementation choice | F-23 | same file — "refuses a write whose path was re-resolved to another target after the check", "refuses a write whose rewritten path was swapped while the re-check ran" |
 | The transport dispatcher's shape, including the dropped non-string `request_id` | REA observed | F-21 | `tests/contracts/permission-decision.test.ts` — "the transport permission dispatcher" |
 | The computer-folder and repository-trust names are configuration, and an unrecognised one is refused | implementation choice (unpinned) | F-19 | `tests/contracts/mcp-control.test.ts` — "the transport permission dispatcher" |
 | The "don't ask again" rule computation and its 5-rule cap | Documented only (the write is not implemented) | F-19 | `tests/contracts/permission-decision.test.ts` |
