@@ -1,9 +1,11 @@
 /**
  * Contract test for the **interactive terminal UI**'s renderers.
  *
- * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.10 (The
- * command-line surface) and the `CC-015` milestone of
+ * Evidence: the `CC-015` milestone of
  * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
+ * The audit records **no** TUI drawing at all — §2.10 is the argument parser —
+ * so every string this test pins is a **implementation choice**, except the permission
+ * vocabulary of §2.5 (the behavior, the source and the reason type).
  *
  * ## What this test pins
  *
@@ -18,10 +20,11 @@
  *   1. `renderMessages` produces **one block per assistant message** and **one
  *      block per tool call**, and the tool block carries the tool's result.
  *   2. A **denied** tool call is marked with the decision's **source** and its
- *      **reason type**, so a reader can tell *who* refused the call and *why
- *      kind* of refusal it was.
+ *      **reason type**, so a reader can tell *who* refused the call and *what
+ *      kind* of refusal it was — and the **strictest** of two decisions wins.
  *   3. A **sandboxed** run's status is shown: whether the command ran inside
- *      the sandbox, and — when it did not — the reason it did not.
+ *      the sandbox, why the sandbox never came up, how far the exemption list
+ *      reaches, and whether the command was stopped for running too long.
  *   4. The renderers are **pure** and **deterministic**.
  *   5. A **caller-supplied** tool name (or input) never reaches a plain-object
  *      lookup: `constructor` and `__proto__` are ordinary names here, and the
@@ -30,27 +33,43 @@
  *      thrown away and it never throws.
  *   7. A **fenced code block** keeps its language, and the block cannot break
  *      out of its fence.
- *   8. The markdown renderer is **safe against hostile input**: it evaluates
- *      nothing, and it strips the control sequences a model could use to
- *      rewrite the terminal.
+ *   8. The renderers are **safe against hostile input**: they evaluate
+ *      nothing, they never call a caller-supplied `toJSON`, and they strip the
+ *      control sequences a model could use to rewrite the terminal — from the
+ *      **code blocks**, the **tool results**, the **tool summaries** and the
+ *      **approval prompt** alike.
  *   9. The **screen-reader tree** names the message list, the input and the
- *      approval prompt: each of the three has an ARIA role and a label.
+ *      approval prompt: each of the three has an ARIA role and a label, the
+ *      messages are **items**, and the three choices are **options**.
  *  10. The app does **not** enter the alternate screen, so the content that
  *      was on the terminal before the session started stays in the scrollback.
+ *  11. The **implementation's own strings** are pinned by their **content**, not by
+ *      their presence: a reworded marker, a missing exemption line or a
+ *      changed choice label is a change the suite must catch.
  */
 
 import { PassThrough, Writable } from 'node:stream';
 
-import { render, type RenderOptions } from 'ink';
-import { createElement, type ReactNode } from 'react';
+import type { RenderOptions } from 'ink';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../../src/session/event.js';
+import type { PermissionDecision } from '../../src/permissions/decision.js';
 import type { ToolResultEnvelope } from '../../src/tools/runner.js';
-import { App, appRenderOptions, renderApp } from '../../src/ui/app.js';
+import {
+  appRenderOptions,
+  inputEcho,
+  renderApp,
+  STREAMING_MAX_FPS,
+  type AppProps,
+} from '../../src/ui/app.js';
 import { renderMarkdown } from '../../src/ui/render/markdown.js';
-import { renderConversation, renderMessages } from '../../src/ui/render/messages.js';
-import { renderApprovalPrompt } from '../../src/ui/render/prompts.js';
+import {
+  KNOWN_INPUT_FIELDS,
+  renderConversation,
+  renderMessages,
+} from '../../src/ui/render/messages.js';
+import { approvalChoices, renderApprovalPrompt } from '../../src/ui/render/prompts.js';
 
 /* -------------------------------------------------------------------------- */
 /* The fixtures                                                                */
@@ -79,7 +98,22 @@ function toolResult(id: string, envelope: ToolResultEnvelope): SessionEvent {
   return { ...base(id), t: 'tool_result', envelope };
 }
 
-/** The `Bash` tool's output shape. */
+/** A permission request record. */
+function permissionRequest(
+  id: string,
+  toolName: string,
+  decision: PermissionDecision,
+): SessionEvent {
+  return { ...base(id), t: 'permission_request', toolName, decision };
+}
+
+/**
+ * The `Bash` tool's output shape.
+ *
+ * The shape is the tool's own (`src/tools/builtins/bash.ts`): every member is
+ * optional but `sandboxed`, and the renderer must tolerate a member that is
+ * not there.
+ */
 function bashOutput(overrides: Partial<{
   text: string;
   stdout: string;
@@ -88,7 +122,10 @@ function bashOutput(overrides: Partial<{
   truncated: boolean;
   sandboxed: boolean;
   sandboxReason: string;
+  sandboxEstablishmentReason: string;
   sandboxExemptions: readonly string[];
+  sandboxExemptionScope: 'none' | 'partial' | 'all';
+  timedOut: boolean;
 }> = {}): Record<string, unknown> {
   const stdout = overrides.stdout ?? 'file1\nfile2';
   return {
@@ -100,9 +137,16 @@ function bashOutput(overrides: Partial<{
     truncated: overrides.truncated ?? false,
     sandboxed: overrides.sandboxed ?? true,
     ...(overrides.sandboxReason === undefined ? {} : { sandboxReason: overrides.sandboxReason }),
+    ...(overrides.sandboxEstablishmentReason === undefined
+      ? {}
+      : { sandboxEstablishmentReason: overrides.sandboxEstablishmentReason }),
     ...(overrides.sandboxExemptions === undefined
       ? {}
       : { sandboxExemptions: overrides.sandboxExemptions }),
+    ...(overrides.sandboxExemptionScope === undefined
+      ? {}
+      : { sandboxExemptionScope: overrides.sandboxExemptionScope }),
+    ...(overrides.timedOut === undefined ? {} : { timedOut: overrides.timedOut }),
   };
 }
 
@@ -179,17 +223,12 @@ describe('renderMessages — the message list', () => {
   it('marks a denied tool call with the source and reason type the permission request recorded', () => {
     const blocks = renderMessages([
       toolCall('c1', 'Bash', { command: 'rm -rf /' }),
-      {
-        ...base('p1'),
-        t: 'permission_request',
-        toolName: 'Bash',
-        decision: {
-          behavior: 'deny',
-          source: 'hook',
-          reasonType: 'safetyCheck',
-          reason: 'A safety check refused this Bash call.',
-        },
-      },
+      permissionRequest('p1', 'Bash', {
+        behavior: 'deny',
+        source: 'hook',
+        reasonType: 'safetyCheck',
+        reason: 'A safety check refused this Bash call.',
+      }),
       toolResult('r1', {
         toolUseId: 'c1',
         content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
@@ -201,6 +240,62 @@ describe('renderMessages — the message list', () => {
     expect(blocks[0]).toContain('hook');
     expect(blocks[0]).toContain('safetyCheck');
     expect(blocks[0]).toContain('A safety check refused this Bash call.');
+  });
+
+  it('keeps the strictest of two permission requests for the same call', () => {
+    // The runtime checks a call twice when a hook rewrites the input: the
+    // first check asks, the re-check denies. The stricter decision is the one
+    // that decided the call, so it is the one the marker carries.
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'rm -rf /' }),
+      permissionRequest('p1', 'Bash', {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No permission rule matched.',
+      }),
+      permissionRequest('p2', 'Bash', {
+        behavior: 'deny',
+        source: 'hook',
+        reasonType: 'safetyCheck',
+        reason: 'A safety check refused this Bash call.',
+      }),
+      toolResult('r1', {
+        toolUseId: 'c1',
+        content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
+        isError: true,
+      }),
+    ]);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toContain('denied (source: hook, reason type: safetyCheck)');
+    expect(blocks[0]).toContain('A safety check refused this Bash call.');
+    expect(blocks[0]).not.toContain('No permission rule matched.');
+    expect(blocks[0]).not.toContain('source: unknown');
+  });
+
+  it('prefers the decision that decided the call over the first request', () => {
+    // The envelope carries the decision the call was settled with; a
+    // `permission_request` record is the log of the checks that led to it.
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'rm -rf /' }),
+      permissionRequest('p1', 'Bash', {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No permission rule matched.',
+      }),
+      toolResult('r1', {
+        toolUseId: 'c1',
+        content: { type: 'error', message: 'The Bash call was denied.', errorCode: 13 },
+        isError: true,
+        permissionDecision: { decision: 'deny', source: 'hook', reasonType: 'safetyCheck' },
+      }),
+    ]);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toContain('denied (source: hook, reason type: safetyCheck)');
+    expect(blocks[0]).not.toContain('source: unknown');
   });
 
   it('shows a sandboxed run as sandboxed', () => {
@@ -218,7 +313,7 @@ describe('renderMessages — the message list', () => {
 
   it('shows the reason a run was not sandboxed, and the exemptions that applied', () => {
     const blocks = renderMessages([
-      toolCall('c1', 'Bash', { command: 'git status' }),
+      toolCall('c1', 'Bash', { command: 'ls -la' }),
       toolResult('r1', {
         toolUseId: 'c1',
         content: bashOutput({
@@ -231,7 +326,95 @@ describe('renderMessages — the message list', () => {
     ]);
 
     expect(blocks[0]).toContain('sandbox.allowUnsandboxedCommands is true');
-    expect(blocks[0]).toContain('git');
+    // The exemption line is pinned by its **content**: the command is `ls`,
+    // so the word `git` can only come from the exemption list.
+    expect(blocks[0]).toContain('  ⎿ sandbox exemptions: git');
+  });
+
+  it('shows why the sandbox never came up, how far the exemptions reach, and a timeout', () => {
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'ls -la' }),
+      toolResult('r1', {
+        toolUseId: 'c1',
+        content: bashOutput({
+          sandboxed: false,
+          sandboxEstablishmentReason: 'the bubblewrap backend is not available',
+          sandboxExemptionScope: 'all',
+          timedOut: true,
+          exitCode: 0,
+        }),
+        isError: false,
+      }),
+    ]);
+
+    expect(blocks[0]).toContain('  ⎿ sandbox not established: the bubblewrap backend is not available');
+    expect(blocks[0]).toContain('  ⎿ sandbox exemption scope: all');
+    expect(blocks[0]).toContain('  ⎿ timed out');
+  });
+
+  it('renders a tool block in this implementation\'s own shape', () => {
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'ls' }),
+      toolResult('r1', { toolUseId: 'c1', content: bashOutput(), isError: false }),
+    ]);
+
+    // The block's format is a implementation choice, so it is pinned whole: the marker,
+    // the header, the indent, the result marker, the sandbox line, the exit
+    // code and the output.
+    expect(blocks[0]).toBe(
+      '⏺ Bash(ls)\n  ⎿ sandboxed\n  ⎿ exit code 0\n  ⎿ file1\n  ⎿ file2',
+    );
+  });
+
+  it('strips the control sequences a tool result could carry', () => {
+    const blocks = renderMessages([
+      toolCall('c1', 'Bash', { command: 'ls' }),
+      toolResult('r1', {
+        toolUseId: 'c1',
+        content: { type: 'text', text: 'out\n\u001b[?1049h\n\u001b]0;pwned\u0007' },
+        isError: false,
+      }),
+    ]);
+
+    expect(blocks[0]).not.toContain('\u001b');
+    expect(blocks[0]).not.toContain('1049');
+    expect(blocks[0]).not.toContain('pwned');
+    expect(blocks[0]).toContain('out');
+  });
+
+  it('strips the control sequences a tool input could carry', () => {
+    const blocks = renderMessages([toolCall('c1', 'Bash', { command: 'ls\u001b[?1049h' })]);
+
+    expect(blocks[0]).not.toContain('\u001b');
+    expect(blocks[0]).not.toContain('1049');
+  });
+
+  it('never calls a caller-supplied toJSON', () => {
+    const toJSON = vi.fn(() => 'leaked');
+    const blocks = renderMessages([toolCall('c1', 'Mystery', { command: 'ls', toJSON })]);
+
+    expect(toJSON).not.toHaveBeenCalled();
+    expect(blocks.join('\n')).not.toContain('leaked');
+  });
+
+  it('looks the summary field up in a Map, so a tool name cannot reach an inherited member', () => {
+    expect(KNOWN_INPUT_FIELDS).toBeInstanceOf(Map);
+    expect(KNOWN_INPUT_FIELDS.get('constructor')).toBeUndefined();
+    expect(KNOWN_INPUT_FIELDS.get('__proto__')).toBeUndefined();
+    expect(KNOWN_INPUT_FIELDS.get('toString')).toBeUndefined();
+  });
+
+  it('reports a tool result that has no tool call, rather than dropping it', () => {
+    const blocks = renderMessages([
+      toolResult('r1', {
+        toolUseId: 'nobody',
+        content: { type: 'text', text: 'the orphan body' },
+        isError: false,
+      }),
+    ]);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toBe('⏺ unmatched tool result\n  ⎿ toolUseId: nobody');
   });
 
   it('is pure: it writes to no terminal and mutates no record', () => {
@@ -258,7 +441,8 @@ describe('renderMessages — the message list', () => {
     expect(renderMessages(events)).toEqual(blocks);
   });
 
-  it('treats a caller-supplied tool name as data, never as a lookup key', () => {    const blocks = renderMessages([
+  it('treats a caller-supplied tool name as data, never as a lookup key', () => {
+    const blocks = renderMessages([
       toolCall('c1', 'constructor', { command: 'ls' }),
       toolCall('c2', '__proto__', { command: 'ls' }),
       toolCall('c3', 'toString', { command: 'ls' }),
@@ -290,6 +474,28 @@ describe('renderMessages — the message list', () => {
     expect(conversation[0]).toContain('Please list the files.');
     expect(conversation[1]).toContain('Listing them now.');
   });
+
+  it('builds the shipped view on the plan\'s blocks', () => {
+    // The app ships the conversation; the conversation is built **on** the
+    // plan's `renderMessages`, so the two cannot drift apart.
+    const events: SessionEvent[] = [
+      { ...base('u1'), t: 'user_message', text: 'Please list the files.' },
+      assistant('a1', 'Listing them now.'),
+      toolCall('c1', 'Read', { file_path: '/work/a.txt' }),
+      toolResult('r1', {
+        toolUseId: 'c1',
+        content: { type: 'text', text: 'the file body' },
+        isError: false,
+      }),
+    ];
+
+    const model = renderMessages(events);
+    const conversation = renderConversation(events);
+
+    expect(model).toHaveLength(2);
+    expect(conversation).toHaveLength(3);
+    expect(conversation.filter((block) => model.includes(block))).toEqual(model);
+  });
 });
 
 describe('renderMarkdown — the markdown renderer', () => {
@@ -319,13 +525,13 @@ describe('renderMarkdown — the markdown renderer', () => {
     expect(rendered).toContain('fn main() {}');
   });
 
-  it('keeps the language of a fenced code block of a single line', () => {
+  it('labels a fenced code block with its language, and shows it verbatim', () => {
     // A block of one line is the case a formatter that only labels a boxed
-    // block loses: the language must survive it too.
+    // block loses: the language must survive it too. The label is pinned
+    // whole, because the label's **shape** is a implementation choice.
     const rendered = renderMarkdown('```rust\nfn main() {}\n```');
 
-    expect(rendered).toContain('rust');
-    expect(rendered).toContain('fn main() {}');
+    expect(rendered).toBe('[rust]\nfn main() {}');
   });
 
   it('does not let a fenced code block break out of its fence', () => {
@@ -364,6 +570,16 @@ describe('renderMarkdown — the markdown renderer', () => {
     expect(rendered).not.toContain('pwned');
     expect(rendered).not.toContain('1049');
     expect(rendered).toContain('plain text');
+  });
+
+  it('drops the payload of a C1 control sequence, not only its introducer', () => {
+    // 0x9b is the 8-bit CSI: a terminal that accepts it acts on `2J` exactly
+    // as it acts on the 7-bit form, so the parameters go with the introducer.
+    const rendered = renderMarkdown('a\u009b2Jb');
+
+    expect(rendered).not.toContain('\u009b');
+    expect(rendered).not.toContain('2J');
+    expect(rendered).toBe('ab');
   });
 
   it('is pure: it writes to no terminal', () => {
@@ -430,6 +646,71 @@ describe('renderApprovalPrompt — the approval prompt', () => {
     expect(prompt).toContain('allowed');
     expect(prompt).not.toContain('1. Yes');
   });
+
+  it('offers exactly the three choices, in this implementation\'s own wording', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No permission rule matched.',
+      },
+      'Bash',
+    );
+
+    expect(prompt).toContain('❯ 1. Yes');
+    expect(prompt).toContain("2. Yes, and don't ask again for this Bash call");
+    expect(prompt).toContain('3. No, and tell the assistant what to do differently');
+    // This implementation is an independent implementation: it never names a product.
+    expect(prompt).not.toContain('Agent');
+  });
+
+  it('numbers the choices from one', () => {
+    const choices = approvalChoices('Bash');
+
+    expect(choices.map((choice) => choice.number)).toEqual([1, 2, 3]);
+    expect(choices.map((choice) => choice.label)).toEqual([
+      'Yes',
+      "Yes, and don't ask again for this Bash call",
+      'No, and tell the assistant what to do differently',
+    ]);
+    expect(choices[0]?.marker).toBe('❯');
+    expect(choices[1]?.marker).toBe(' ');
+  });
+
+  it('does not call a Write a command, and does not oversell the grant', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No permission rule matched.',
+      },
+      'Write',
+    );
+
+    expect(prompt).toContain('Write needs your approval.');
+    expect(prompt).not.toContain('command');
+    // The permission layer persists one rule per sub-command that needs
+    // approval, capped at five: the label must not promise a wider grant.
+    expect(prompt).toContain("don't ask again for this Write call");
+  });
+
+  it('strips the control sequences a tool name or a reason could carry', () => {
+    const prompt = renderApprovalPrompt(
+      {
+        behavior: 'ask',
+        source: 'unknown',
+        reasonType: 'other',
+        reason: 'No permission rule matched.\u001b[?1049h',
+      },
+      'Bash\u001b[?1049h',
+    );
+
+    expect(prompt).not.toContain('\u001b');
+    expect(prompt).not.toContain('1049');
+    expect(prompt).toContain('Bash');
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -468,14 +749,13 @@ function captureStream(options: { isTTY?: boolean } = {}): {
   return { stream, text: () => chunks.join('') };
 }
 
-/**
- * Mount a tree with Ink and collect what it wrote.
- *
- * The mount is a **real** Ink instance — the same one the CLI mounts — with
- * the terminal replaced by a collector. `debug: true` makes every frame go
- * out as it is rendered, so the collected text is the frame itself.
- */
-async function mount(node: ReactNode, options: RenderOptions = {}): Promise<string> {
+/** The streams a mount needs, with the terminal replaced by a collector. */
+function mountStreams(): {
+  stdout: CapturedStream;
+  stdin: PassThrough;
+  stderr: Writable;
+  text: () => string;
+} {
   const { stream, text } = captureStream({ isTTY: true });
   const stdin = new PassThrough();
   const stderr = new Writable({
@@ -483,9 +763,21 @@ async function mount(node: ReactNode, options: RenderOptions = {}): Promise<stri
       callback();
     },
   });
+  return { stdout: stream, stdin, stderr, text };
+}
 
-  const instance = render(node, {
-    stdout: stream,
+/**
+ * Mount the app with **the app's own options**.
+ *
+ * The mount goes through `renderApp`, so the options are this implementation's own:
+ * `alternateScreen: false`, `incrementalRendering: true`, the streaming frame
+ * rate and the screen-reader switch read from the environment. A test that
+ * mounted through Ink's `render` directly would not exercise any of them.
+ */
+async function mountApp(props: AppProps, options: RenderOptions = {}): Promise<string> {
+  const { stdout, stdin, stderr, text } = mountStreams();
+  const instance = renderApp(props, {
+    stdout,
     stdin,
     stderr,
     debug: true,
@@ -514,61 +806,63 @@ const APP_EVENTS: SessionEvent[] = [
   },
 ];
 
+/** The approval the app-level tests show. */
+const APP_APPROVAL = {
+  decision: {
+    behavior: 'ask' as const,
+    source: 'unknown' as const,
+    reasonType: 'other' as const,
+    reason: 'No permission rule matched.',
+  },
+  toolName: 'Bash',
+};
+
+/** Run a body with the screen-reader switch on, and restore it afterwards. */
+async function withScreenReader(body: () => Promise<string>): Promise<string> {
+  const previous = process.env['INK_SCREEN_READER'];
+  process.env['INK_SCREEN_READER'] = 'true';
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) delete process.env['INK_SCREEN_READER'];
+    else process.env['INK_SCREEN_READER'] = previous;
+  }
+}
+
 describe('the app — the screen-reader tree', () => {
   it('exposes an ARIA role and a label for the message list, the input and the approval prompt', async () => {
-    const previous = process.env['INK_SCREEN_READER'];
-    process.env['INK_SCREEN_READER'] = 'true';
-    let output: string;
-    try {
-      output = await mount(
-        createElement(App, {
-          events: APP_EVENTS,
-          input: 'what next?',
-          approval: {
-            decision: {
-              behavior: 'ask',
-              source: 'unknown',
-              reasonType: 'other',
-              reason: 'No permission rule matched.',
-            },
-            toolName: 'Bash',
-          },
-        }),
-      );
-    } finally {
-      if (previous === undefined) delete process.env['INK_SCREEN_READER'];
-      else process.env['INK_SCREEN_READER'] = previous;
-    }
+    const output = await withScreenReader(() =>
+      mountApp({ events: APP_EVENTS, input: 'what next?', approval: APP_APPROVAL }),
+    );
 
     expect(output).toContain('list: Conversation');
     expect(output).toContain('textbox: Message input');
     expect(output).toContain('listbox: Approval required for Bash');
   });
 
+  it('announces the messages as the items of the list', async () => {
+    const output = await withScreenReader(() =>
+      mountApp({ events: APP_EVENTS, input: 'what next?', approval: APP_APPROVAL }),
+    );
+
+    expect(output).toContain('listitem: ⏺ Hello there.');
+    expect(output).toContain('listitem: ⏺ Bash(ls -la)');
+  });
+
+  it('announces the three approval choices as options', async () => {
+    const output = await withScreenReader(() =>
+      mountApp({ events: APP_EVENTS, input: 'what next?', approval: APP_APPROVAL }),
+    );
+
+    expect(output).toContain('option: 1. Yes');
+    expect(output).toContain("option: 2. Yes, and don't ask again for this Bash call");
+    expect(output).toContain('option: 3. No, and tell the assistant what to do differently');
+  });
+
   it('still announces the content of the regions it labels', async () => {
-    const previous = process.env['INK_SCREEN_READER'];
-    process.env['INK_SCREEN_READER'] = 'true';
-    let output: string;
-    try {
-      output = await mount(
-        createElement(App, {
-          events: APP_EVENTS,
-          input: 'what next?',
-          approval: {
-            decision: {
-              behavior: 'ask',
-              source: 'unknown',
-              reasonType: 'other',
-              reason: 'No permission rule matched.',
-            },
-            toolName: 'Bash',
-          },
-        }),
-      );
-    } finally {
-      if (previous === undefined) delete process.env['INK_SCREEN_READER'];
-      else process.env['INK_SCREEN_READER'] = previous;
-    }
+    const output = await withScreenReader(() =>
+      mountApp({ events: APP_EVENTS, input: 'what next?', approval: APP_APPROVAL }),
+    );
 
     // Ink replaces the content of a labelled node with the label, so this implementation
     // renders the content beside the labelled node: the label is announced
@@ -576,6 +870,36 @@ describe('the app — the screen-reader tree', () => {
     expect(output).toContain('Hello there.');
     expect(output).toContain('what next?');
     expect(output).toContain('No permission rule matched.');
+  });
+
+  it('reads the screen-reader switch from the environment', () => {
+    const previous = process.env['INK_SCREEN_READER'];
+    try {
+      delete process.env['INK_SCREEN_READER'];
+      expect(appRenderOptions().isScreenReaderEnabled).toBe(false);
+      process.env['INK_SCREEN_READER'] = 'false';
+      expect(appRenderOptions().isScreenReaderEnabled).toBe(false);
+      process.env['INK_SCREEN_READER'] = 'true';
+      expect(appRenderOptions().isScreenReaderEnabled).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env['INK_SCREEN_READER'];
+      else process.env['INK_SCREEN_READER'] = previous;
+    }
+  });
+});
+
+describe('the app — the input echo', () => {
+  it('strips the control sequences the typed text could carry', () => {
+    expect(inputEcho('\u001b[?1049h')).not.toContain('\u001b');
+    expect(inputEcho('\u001b[?1049h')).not.toContain('1049');
+    expect(inputEcho('hello')).toBe('> hello');
+    expect(inputEcho('')).toBe('');
+  });
+
+  it('does not write a control sequence the typed text carried', async () => {
+    const output = await mountApp({ events: APP_EVENTS, input: 'x\u001b[?1049h' });
+
+    expect(output).not.toContain('\u001b[?1049h');
   });
 });
 
@@ -587,7 +911,10 @@ describe('the app — the scrollback', () => {
   it('enables incremental rendering and tunes the frame rate for streaming', () => {
     const options = appRenderOptions();
     expect(options.incrementalRendering).toBe(true);
-    expect(options.maxFps).toBeGreaterThan(0);
+    // The rate is a documented implementation choice: a streaming turn rewrites only
+    // the lines that changed, so 60 frames a second is affordable.
+    expect(STREAMING_MAX_FPS).toBe(60);
+    expect(options.maxFps).toBe(60);
   });
 
   it('never writes the alternate-screen sequences to the terminal', async () => {
@@ -612,5 +939,15 @@ describe('the app — the scrollback', () => {
     const written = text();
     expect(written).not.toContain('\u001b[?1049h');
     expect(written).not.toContain('\u001b[?1049l');
+  });
+});
+
+describe('the app — the mounted view', () => {
+  it('shows the conversation the plan\'s renderers produce', async () => {
+    const output = await mountApp({ events: APP_EVENTS, input: 'what next?' });
+
+    expect(output).toContain('⏺ Hello there.');
+    expect(output).toContain('⏺ Bash(ls -la)');
+    expect(output).toContain('> what next?');
   });
 });

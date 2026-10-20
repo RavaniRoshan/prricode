@@ -1,9 +1,11 @@
 /**
  * The message-list renderer.
  *
- * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.10 (The
- * command-line surface) and §2.5 (Permissions), and the `CC-015` milestone of
+ * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.5 (Permissions) and
+ * the `CC-015` milestone of
  * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
+ * The audit records **no** TUI drawing at all — §2.10 is the argument parser,
+ * not a terminal — so everything this module draws is a **implementation choice**.
  *
  * ## What this module is
  *
@@ -35,6 +37,13 @@
  * belong to the tool call they answer, and they are folded into that call's
  * block.
  *
+ * A `tool_result` with **no** tool call is the one exception: it is reported
+ * as a block of its own. The audit records that the target *normalizes* the
+ * `tool_use` / `tool_result` sequence and **reports** a mismatch
+ * (`tengu_tool_use_tool_result_mismatch_error`), so the pairing invariant is
+ * checked and not merely assumed — and a renderer that dropped the mismatch
+ * silently would be assuming it.
+ *
  * ## A denied tool call is marked
  *
  * A denial is the one thing in the list a reader must not be able to miss, and
@@ -49,16 +58,20 @@
  *   ⎿ Permission rule 'rm -rf *' from localSettings denies this Bash call.
  * ```
  *
- * The source and the reason type come from the `permission_request` record
- * when the transcript carries one — it is the full decision — and from the
- * tool result's own envelope otherwise.
+ * The source and the reason type come from the decision that **decided** the
+ * call: the tool result's own envelope carries it as the summary the model
+ * observes, and a `permission_request` record is the log of the checks that
+ * led to it. When the runtime checks a call **twice** — which it does when a
+ * hook rewrites the input — the **strictest** of the two decisions is the one
+ * that decided the call, and the marker carries that one.
  *
  * ## A sandboxed run shows its status
  *
  * The `Bash` tool reports whether the command ran **inside** the sandbox, the
- * reason it did not, and the exemptions that applied. The block shows all
- * three, because "the command ran" and "the command ran *confined*" are
- * different facts and a reader must not have to guess which one happened.
+ * reason it did not, the reason the sandbox **never came up**, the exemptions
+ * that applied and how far they reach. The block shows all of them, because
+ * "the command ran" and "the command ran *confined*" are different facts and a
+ * reader must not have to guess which one happened.
  *
  * ## Caller-supplied data is data
  *
@@ -68,13 +81,26 @@
  * `Object.hasOwn`, and the tables the renderer looks names up in are **Maps**,
  * so a name can never resolve to an inherited member of `Object.prototype`.
  *
+ * A tool's **result** is caller-supplied too — the model chooses what the tool
+ * printed — so every string that reaches the terminal is **stripped** of its
+ * control sequences by the shared stripper (`./markdown.ts`), the same one the
+ * markdown renderer uses.
+ *
  * ## What is observed and what is a implementation choice
  *
  * The audit pins the permission **vocabulary** — the behaviors, the sources and
  * the reason types — and the tool-result **metadata**. It says nothing about
- * how the terminal draws a message, so the block markers (`⏺` and `⎿`), the
- * indentation, the truncation limits and the tool-summary fields are **implementation
- * choices**, and they are marked as such below.
+ * how the terminal draws a message, so the following are **implementation choices**, and
+ * they are marked as such below:
+ *
+ *   - the **block format**: the block markers (`⏺` and `⎿`), the indentation
+ *     and the truncation limits;
+ *   - the **denial marker's wording**: `denied (source: …, reason type: …)`;
+ *   - the **sandbox status lines**: `sandboxed`, `not sandboxed: …`,
+ *     `sandbox not established: …`, `sandbox exemptions: …` and
+ *     `sandbox exemption scope: …`;
+ *   - the **tool-summary fields** the summary names;
+ *   - the **unmatched-result report**: `unmatched tool result`.
  */
 
 import type { PermissionDecision } from '../../permissions/decision.js';
@@ -82,7 +108,7 @@ import { isRecord, ownBoolean, ownNumber, ownString } from '../../session/event.
 import type { SessionEvent } from '../../session/event.js';
 import type { ToolResultEnvelope } from '../../tools/runner.js';
 
-import { renderMarkdown } from './markdown.js';
+import { renderMarkdown, stripControlSequences } from './markdown.js';
 
 /* -------------------------------------------------------------------------- */
 /* The constants                                                               */
@@ -139,13 +165,27 @@ export const MAX_BLOCK_CHARS = 4000;
 export const MAX_SUMMARY_CHARS = 80;
 
 /**
+ * The label of a tool result that has no tool call.
+ *
+ * **Implementation choice.** The audit records that the target *reports* a
+ * `tool_use` / `tool_result` mismatch (§2.5); the wording of the report is
+ * this implementation's own.
+ */
+export const UNMATCHED_RESULT_LABEL = 'unmatched tool result';
+
+/**
  * The field of a tool's input that names the call.
  *
  * The table is a **Map** and not a plain object, because a tool name is
  * caller-supplied data: `KNOWN_INPUT_FIELDS.get('constructor')` reaches
  * `undefined`, while a plain object would reach `Object.prototype.constructor`.
+ *
+ * The table is **exported** so that the contract test can pin the property
+ * itself: the behaviour of a `Map` and of a plain object happens to agree on
+ * every input the renderer accepts, so only the table's own type can tell the
+ * two apart.
  */
-const KNOWN_INPUT_FIELDS: ReadonlyMap<string, string> = new Map<string, string>([
+export const KNOWN_INPUT_FIELDS: ReadonlyMap<string, string> = new Map<string, string>([
   ['Bash', 'command'],
   ['Edit', 'file_path'],
   ['Glob', 'pattern'],
@@ -185,9 +225,12 @@ function ownStringArray(record: Record<string, unknown>, key: string): string[] 
  *
  * The result never carries a trailing empty line, so a block does not end with
  * a stray marker.
+ *
+ * The text is **stripped** first: it comes from a tool's output, which the
+ * model chose, and an escape sequence in it would reach the terminal.
  */
 function splitLines(text: string): string[] {
-  const lines = text.split('\n');
+  const lines = stripControlSequences(text).split('\n');
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   return lines;
 }
@@ -199,10 +242,13 @@ function splitLines(text: string): string[] {
  * `JSON.stringify`: `JSON.stringify` calls a `toJSON` method when the value
  * has one, and a tool's output is caller-supplied data. Members that are
  * functions, symbols or `undefined` are skipped.
+ *
+ * Every string is **stripped** of its control sequences for the same reason:
+ * the value came from the model.
  */
 function compactJson(value: unknown, depth = 0): string {
   if (value === null) return 'null';
-  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'string') return JSON.stringify(stripControlSequences(value));
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   if (Array.isArray(value)) {
     if (depth >= 3) return '…';
@@ -226,9 +272,12 @@ function compactJson(value: unknown, depth = 0): string {
 
 /**
  * Collapse text into one line and cap it.
+ *
+ * The text is **stripped** first: a tool's input is caller-supplied, and the
+ * summary of a call is shown on the terminal.
  */
 function oneLine(text: string): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim();
+  const collapsed = stripControlSequences(text).replace(/\s+/g, ' ').trim();
   if (collapsed.length <= MAX_SUMMARY_CHARS) return collapsed;
   return `${collapsed.slice(0, MAX_SUMMARY_CHARS - 1)}…`;
 }
@@ -267,6 +316,10 @@ export function summarizeToolInput(toolName: string, input: unknown): string {
  * The `Bash` tool's output carries the sandbox's own report, so it is read
  * first: a run that did **not** happen inside the sandbox must not look like
  * one that did.
+ *
+ * Every string here came from the **model** — a tool's output is the model's
+ * to choose — so every line is stripped of its control sequences before it
+ * can reach the terminal.
  */
 function contentLines(envelope: ToolResultEnvelope): string[] {
   const content = envelope.content;
@@ -279,7 +332,8 @@ function contentLines(envelope: ToolResultEnvelope): string[] {
       const message = ownString(content, 'message');
       const code = ownNumber(content, 'errorCode');
       if (message !== undefined) {
-        return code === undefined ? [message] : [`${message} (error code ${code})`];
+        const text = stripControlSequences(message);
+        return code === undefined ? [text] : [`${text} (error code ${code})`];
       }
     }
     if (type === 'text') {
@@ -299,8 +353,17 @@ function contentLines(envelope: ToolResultEnvelope): string[] {
 /**
  * The lines of a `Bash` tool's output.
  *
- * The shape is the tool's own: `{ type, text, stdout, stderr, exitCode,
- * truncated, sandboxed, sandboxReason, sandboxExemptions }`.
+ * The shape is the tool's own (`src/tools/builtins/bash.ts`): `{ type, text,
+ * stdout, stderr, exitCode, truncated, sandboxed, sandboxReason,
+ * sandboxEstablishmentReason, sandboxExemptions, sandboxExemptionScope,
+ * sandboxAvailability, timedOut }`.
+ *
+ * Every member but the first is **optional**, and the tool is not the only
+ * writer of this shape: a reader that required a member would break on a
+ * result that does not carry it. So each member is read on its own, and a
+ * member that is absent is simply not shown.
+ *
+ * **Implementation choice.** The wording of the status lines is this implementation's own.
  */
 function bashLines(content: Record<string, unknown>): string[] {
   const lines: string[] = [];
@@ -315,13 +378,28 @@ function bashLines(content: Record<string, unknown>): string[] {
     lines.push('not sandboxed');
   }
 
+  // The sandbox **never came up**: the backend could not be established, so
+  // the run was unconfined for a reason the policy never gave.
+  const establishment = ownString(content, 'sandboxEstablishmentReason');
+  if (establishment !== undefined && establishment !== '') {
+    lines.push(`sandbox not established: ${establishment}`);
+  }
+
   const exemptions = ownStringArray(content, 'sandboxExemptions');
   if (exemptions !== undefined && exemptions.length > 0) {
     lines.push(`sandbox exemptions: ${exemptions.join(', ')}`);
   }
 
+  // The **reach** of the exemption list: `all` means the list exempts every
+  // command, which is a hazard the reader must see.
+  const scope = ownString(content, 'sandboxExemptionScope');
+  if (scope !== undefined && scope !== '') {
+    lines.push(`sandbox exemption scope: ${scope}`);
+  }
+
   const exitCode = ownNumber(content, 'exitCode');
   if (exitCode !== undefined) lines.push(`exit code ${exitCode}`);
+  if (ownBoolean(content, 'timedOut') === true) lines.push('timed out');
   if (ownBoolean(content, 'truncated') === true) lines.push('output truncated');
 
   const stdout = ownString(content, 'stdout') ?? ownString(content, 'text');
@@ -341,6 +419,12 @@ function bashLines(content: Record<string, unknown>): string[] {
  * A **denial** is marked with the decision's **source** and its **reason
  * type**, so a reader can tell who refused the call and what kind of refusal
  * it was.
+ *
+ * The decision that **decided** the call comes first: the tool result's own
+ * envelope carries it as the summary the model observes, and a
+ * `permission_request` record is the log of the checks that led to it. The
+ * record is the fallback, and it is the record that carries the **reason
+ * text** — the envelope's summary has none.
  */
 export function toolResultLines(
   envelope: ToolResultEnvelope | undefined,
@@ -351,11 +435,15 @@ export function toolResultLines(
   const envelopeDecision = envelope?.permissionDecision;
   const denied = decision?.behavior === 'deny' || envelopeDecision?.decision === 'deny';
   if (denied) {
-    const source = decision?.source ?? envelopeDecision?.source ?? 'unknown';
-    const reasonType = decision?.reasonType ?? envelopeDecision?.reasonType ?? 'other';
+    // The decision that refused the call: the envelope's summary when it
+    // refused it, and the strictest record otherwise.
+    const deciding = envelopeDecision?.decision === 'deny' ? envelopeDecision : decision;
+    const source = deciding?.source ?? envelopeDecision?.source ?? decision?.source ?? 'unknown';
+    const reasonType =
+      deciding?.reasonType ?? envelopeDecision?.reasonType ?? decision?.reasonType ?? 'other';
     lines.push(`denied (source: ${source}, reason type: ${reasonType})`);
     const reason = decision?.reason;
-    if (reason !== undefined && reason !== '') lines.push(reason);
+    if (reason !== undefined && reason !== '') lines.push(stripControlSequences(reason));
   }
 
   if (envelope !== undefined) lines.push(...contentLines(envelope));
@@ -404,17 +492,24 @@ export function renderUserBlock(text: string): string {
  *
  * The header names the tool and the call; the result lines are indented under
  * it. The lines are capped, and the cap is **announced** rather than silent.
+ *
+ * Both the summary and the lines are **stripped**: they are caller-supplied,
+ * and the block is what the terminal shows.
+ *
+ * **Implementation choice.** The block's shape — the marker, the indent and the result
+ * marker — is this implementation's own.
  */
 export function renderToolBlock(
   toolName: string,
   summary: string,
   lines: string[],
 ): string {
-  const call = summary === '' ? toolName : `${toolName}(${summary})`;
+  const name = stripControlSequences(toolName);
+  const call = summary === '' ? name : `${name}(${stripControlSequences(summary)})`;
   const header = `${MESSAGE_MARKER} ${call}`;
   if (lines.length === 0) return header;
 
-  let shown = lines;
+  let shown = lines.map((line) => stripControlSequences(line));
   let truncated = false;
   if (shown.length > MAX_RESULT_LINES) {
     shown = shown.slice(0, MAX_RESULT_LINES);
@@ -437,7 +532,7 @@ export function renderToolBlock(
 /* The entries                                                                 */
 /* -------------------------------------------------------------------------- */
 
-/** One entry of the list: an assistant message, a tool call, or a user prompt. */
+/** One entry of the list: an assistant message, a tool call, a user prompt. */
 type Entry =
   | { kind: 'assistant'; text: string }
   | { kind: 'user'; text: string }
@@ -448,9 +543,29 @@ type Entry =
       input: unknown;
       envelope: ToolResultEnvelope | undefined;
       decision: PermissionDecision | undefined;
-      /** Whether a permission request has already been folded into this call. */
-      requested: boolean;
-    };
+    }
+  | { kind: 'unmatched'; toolUseId: string };
+
+/**
+ * The stricter of two decisions.
+ *
+ * A `deny` wins over everything, an `ask` wins over an `allow`, and two
+ * `allow`s are the first one. The rule is the permission layer's
+ * (`src/permissions/decision.ts`); it is repeated here because the renderer
+ * must not depend on the runtime it renders.
+ */
+function stricterDecision(
+  first: PermissionDecision | undefined,
+  second: PermissionDecision | undefined,
+): PermissionDecision | undefined {
+  if (first === undefined) return second;
+  if (second === undefined) return first;
+  if (first.behavior === 'deny') return first;
+  if (second.behavior === 'deny') return second;
+  if (first.behavior === 'ask') return first;
+  if (second.behavior === 'ask') return second;
+  return first;
+}
 
 /**
  * Fold the records into the entries of the list.
@@ -458,6 +573,10 @@ type Entry =
  * A `tool_result` answers the tool call whose id is the envelope's
  * `toolUseId`, and a `permission_request` belongs to the most recent tool call
  * of the same tool that has no decision yet.
+ *
+ * A call may be checked **twice**: the runtime checks the input, and checks it
+ * again when a hook rewrote it. The two requests are folded into the same
+ * call, and the **strictest** of the two decisions is the one that decided it.
  *
  * The **user's own prompts** are folded in only when the caller asks for them:
  * the plan's `renderMessages` is the list of what the **model** produced, and
@@ -487,7 +606,6 @@ function fold(events: SessionEvent[], includeUserMessages: boolean): Entry[] {
           input: event.input,
           envelope: undefined,
           decision: undefined,
-          requested: false,
         };
         entries.push(entry);
         byId.set(event.id, entry);
@@ -496,20 +614,25 @@ function fold(events: SessionEvent[], includeUserMessages: boolean): Entry[] {
       }
       case 'tool_result': {
         const entry = byId.get(event.envelope.toolUseId);
-        if (entry === undefined) break;
+        if (entry === undefined) {
+          // The pairing invariant is **checked**, not assumed: the audit
+          // records that the target reports the mismatch, so this implementation reports
+          // it too rather than dropping the result in silence.
+          entries.push({ kind: 'unmatched', toolUseId: event.envelope.toolUseId });
+          break;
+        }
         entry.envelope = event.envelope;
         break;
       }
       case 'permission_request': {
         // The most recent open call of the same tool: the prompt belongs to the
-        // call it was asked about.
+        // call it was asked about. A call that was checked twice collects both
+        // requests, and keeps the stricter decision.
         for (let index = openCalls.length - 1; index >= 0; index -= 1) {
           const candidate = openCalls[index];
           if (candidate === undefined) continue;
           if (candidate.name !== event.toolName) continue;
-          if (candidate.requested) continue;
-          candidate.requested = true;
-          candidate.decision = event.decision;
+          candidate.decision = stricterDecision(candidate.decision, event.decision);
           break;
         }
         break;
@@ -540,12 +663,17 @@ function fold(events: SessionEvent[], includeUserMessages: boolean): Entry[] {
  *   - **one block per tool call**, carrying the tool's result and, when the
  *     call was denied, the decision's source and reason type.
  *
+ * A tool result with **no** tool call is reported as a block of its own, so a
+ * pairing failure is visible rather than assumed away.
+ *
  * The user's own prompts are **not** blocks of this list: they are what the
  * input line shows. `renderConversation` is the app's fuller view, which shows
  * them too.
  */
 export function renderMessages(events: SessionEvent[]): string[] {
-  return renderEntries(events, false);
+  if (!Array.isArray(events)) return [];
+  const entries = fold(events, false);
+  return entries.map((entry) => renderEntry(entry));
 }
 
 /**
@@ -554,29 +682,53 @@ export function renderMessages(events: SessionEvent[]): string[] {
  * **Implementation choice.** The plan fixes `renderMessages` as the list of what the
  * model produced; the app also shows what the user said, in the order it was
  * said, so this is the view the app mounts.
+ *
+ * The conversation is built **on** the plan's contract: the model's blocks are
+ * `renderMessages`' own, so the shipped view and the plan's contract cannot
+ * drift apart. The fold runs twice — once for the order and once inside
+ * `renderMessages` — and it is the same pure fold both times.
  */
 export function renderConversation(events: SessionEvent[]): string[] {
-  return renderEntries(events, true);
-}
-
-/**
- * Render the entries into blocks.
- */
-function renderEntries(events: SessionEvent[], includeUserMessages: boolean): string[] {
   if (!Array.isArray(events)) return [];
+  const entries = fold(events, true);
+  const model = renderMessages(events);
+
   const blocks: string[] = [];
-  for (const entry of fold(events, includeUserMessages)) {
-    if (entry.kind === 'assistant') {
-      blocks.push(renderAssistantBlock(entry.text));
-      continue;
-    }
+  let index = 0;
+  for (const entry of entries) {
     if (entry.kind === 'user') {
       blocks.push(renderUserBlock(entry.text));
       continue;
     }
-    const summary = summarizeToolInput(entry.name, entry.input);
-    const lines = toolResultLines(entry.envelope, entry.decision);
-    blocks.push(renderToolBlock(entry.name, summary, lines));
+    const block = model[index];
+    index += 1;
+    if (block !== undefined) blocks.push(block);
   }
   return blocks;
+}
+
+/**
+ * Render one entry into a block.
+ */
+function renderEntry(entry: Entry): string {
+  if (entry.kind === 'assistant') return renderAssistantBlock(entry.text);
+  if (entry.kind === 'user') return renderUserBlock(entry.text);
+  if (entry.kind === 'unmatched') return renderUnmatchedResult(entry.toolUseId);
+  const summary = summarizeToolInput(entry.name, entry.input);
+  const lines = toolResultLines(entry.envelope, entry.decision);
+  return renderToolBlock(entry.name, summary, lines);
+}
+
+/**
+ * The block of a tool result that has no tool call.
+ *
+ * **Implementation choice.** The report's wording is this implementation's own; the audit
+ * records only that the target reports the mismatch.
+ */
+function renderUnmatchedResult(toolUseId: string): string {
+  const id = stripControlSequences(toolUseId);
+  return [
+    `${MESSAGE_MARKER} ${UNMATCHED_RESULT_LABEL}`,
+    `${RESULT_INDENT}${RESULT_MARKER} toolUseId: ${id}`,
+  ].join('\n');
 }

@@ -28,11 +28,21 @@
  * ## The choices
  *
  * The target's prompt offers three answers: yes, yes-and-do-not-ask-again, and
- * no. This implementation offers the same three, and the middle one names the **tool**:
- * the "don't ask again" affordance persists a rule per call that needs
- * approval, and computing that rule — and capping it at five — is the
- * **permission layer's** job (`src/permissions/decision.ts`), not this
- * module's. The prompt only says which tool the answer is about.
+ * no. This implementation offers the same three.
+ *
+ * The middle one does **not** promise a wider grant than the permission layer
+ * gives: the layer persists **one rule per sub-command that needs approval**,
+ * capped at five (`src/permissions/decision.ts`), so the label names **this**
+ * call and not "every command of this tool". It is not Bash-specific either:
+ * a `Write` is not a command.
+ *
+ * ## The numbering
+ *
+ * The prompt numbers its choices the way a terminal menu does, so the number a
+ * user types is the number the prompt shows. The list of the choices is the
+ * **only** place the numbering comes from: `choiceNumber` is the number of a
+ * choice and `choiceForNumber` is its inverse, and the app binds the keys
+ * through the latter.
  *
  * ## What is observed and what is a implementation choice
  *
@@ -45,6 +55,8 @@
  */
 
 import { describeReason, type PermissionDecision } from '../../permissions/decision.js';
+
+import { stripControlSequences } from './markdown.js';
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                               */
@@ -83,9 +95,45 @@ export function choiceNumber(choice: ApprovalChoice): number {
   return index < 0 ? 1 : index + 1;
 }
 
+/**
+ * The choice a number names.
+ *
+ * The inverse of `choiceNumber`, and the only way a typed digit becomes a
+ * choice: the list is closed, so a digit outside it names nothing.
+ */
+export function choiceForNumber(number: number): ApprovalChoice | undefined {
+  if (!Number.isInteger(number)) return undefined;
+  if (number < 1 || number > APPROVAL_CHOICES.length) return undefined;
+  return APPROVAL_CHOICES[number - 1];
+}
+
 /* -------------------------------------------------------------------------- */
 /* The prompt                                                                  */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * One choice of the prompt, as the prompt shows it.
+ */
+export interface ApprovalChoiceView {
+  /** The number the user types to pick it. */
+  readonly number: number;
+  /** The choice's label. */
+  readonly label: string;
+  /** The marker in front of the selected choice. */
+  readonly marker: string;
+}
+
+/**
+ * The pieces of an approval prompt.
+ */
+export interface ApprovalPromptParts {
+  /** The question, above the reason. */
+  readonly question: string;
+  /** The reason the decision carries. */
+  readonly reason: string;
+  /** The choices, in the order the prompt lists them; empty for a settled decision. */
+  readonly choices: readonly ApprovalChoiceView[];
+}
 
 /**
  * The reason a decision carries.
@@ -105,12 +153,58 @@ function reasonOf(decision: PermissionDecision, toolName: string): string {
  * **Implementation choice.** The wording is this implementation's own; the audit records no
  * prompt text.
  */
-function choiceLabels(toolName: string): string[] {
+function choiceLabels(toolName: string): readonly string[] {
+  const name = toolName === '' ? 'tool' : toolName;
   return [
     'Yes',
-    `Yes, and don't ask again for ${toolName} commands`,
+    `Yes, and don't ask again for this ${name} call`,
     'No, and tell the assistant what to do differently',
   ];
+}
+
+/**
+ * The choices, as the prompt shows them.
+ *
+ * **Implementation choice.** The wording is this implementation's own; the audit records no
+ * prompt text.
+ */
+export function approvalChoices(toolName: string): readonly ApprovalChoiceView[] {
+  const name = stripControlSequences(toolName);
+  const labels = choiceLabels(name);
+  return APPROVAL_CHOICES.map((choice, index) => ({
+    number: choiceNumber(choice),
+    label: labels[index] ?? '',
+    marker: index === 0 ? CHOICE_MARKER : ' ',
+  }));
+}
+
+/**
+ * The pieces of the prompt a decision gets.
+ *
+ * The tool's name and the reason are **stripped** of their control sequences:
+ * both reach the terminal, and the name is caller-supplied.
+ */
+export function approvalPromptParts(
+  decision: PermissionDecision,
+  toolName: string,
+): ApprovalPromptParts {
+  const name = stripControlSequences(toolName);
+  const shown = name === '' ? 'The tool' : name;
+  const reason = stripControlSequences(reasonOf(decision, shown));
+
+  if (decision.behavior === 'deny') {
+    return { question: `${shown} was denied.`, reason, choices: [] };
+  }
+
+  if (decision.behavior === 'allow') {
+    return { question: `${shown} was allowed.`, reason, choices: [] };
+  }
+
+  return {
+    question: `${shown} needs your approval.`,
+    reason,
+    choices: approvalChoices(name),
+  };
 }
 
 /**
@@ -125,23 +219,15 @@ function choiceLabels(toolName: string): string[] {
  * already settled.
  */
 export function renderApprovalPrompt(decision: PermissionDecision, toolName: string): string {
-  const name = toolName === '' ? 'The tool' : toolName;
-  const reason = reasonOf(decision, name);
+  const parts = approvalPromptParts(decision, toolName);
 
-  if (decision.behavior === 'deny') {
-    return [`${name} was denied.`, '', reason].join('\n');
+  if (parts.choices.length === 0) {
+    return [parts.question, '', parts.reason].join('\n');
   }
 
-  if (decision.behavior === 'allow') {
-    return [`${name} was allowed.`, '', reason].join('\n');
+  const lines = [parts.question, '', parts.reason, ''];
+  for (const choice of parts.choices) {
+    lines.push(`${choice.marker} ${choice.number}. ${choice.label}`);
   }
-
-  const labels = choiceLabels(name);
-  const lines = [`${name} wants to run this command.`, '', reason, ''];
-  labels.forEach((label, index) => {
-    const number = index + 1;
-    const marker = index === 0 ? CHOICE_MARKER : ' ';
-    lines.push(`${marker} ${number}. ${label}`);
-  });
   return lines.join('\n');
 }

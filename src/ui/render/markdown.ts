@@ -1,9 +1,10 @@
 /**
  * The markdown renderer.
  *
- * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.10 (The
- * command-line surface) and the `CC-015` milestone of
+ * Evidence: the `CC-015` milestone of
  * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
+ * The audit records **no** TUI drawing at all — §2.10 is the argument parser,
+ * not a terminal — so everything this module does is a **implementation choice**.
  *
  * ## What this module is
  *
@@ -58,6 +59,18 @@
  *
  * Nothing is **evaluated**: `markdansi` is a formatter over a parsed AST, and
  * the code segments never reach a parser at all.
+ *
+ * ## The shared stripper
+ *
+ * The stripper lives **here**, and it is exported, because this module owns the
+ * question *"what may a model's text contain on its way to a terminal?"* — and
+ * because the answer must be the **same** answer everywhere. The markdown
+ * renderer is only one of the paths a model-controlled string takes: a tool
+ * **result**, a tool **input summary**, an **approval prompt** and the **input
+ * echo** reach the terminal too, and a protection that lives in one path is a
+ * protection that a caller can route around. The message renderer, the prompt
+ * renderer and the app therefore import this **one** function, so there is
+ * exactly one scanner and exactly one set of rules.
  *
  * ## What is observed and what is a implementation choice
  *
@@ -237,6 +250,10 @@ function segment(source: string): Segment[] {
  * The stripper is a **scanner** and not a set of regular expressions: an
  * escape sequence's payload is defined by its terminator, and a regex that
  * guesses the terminator gets it wrong on exactly the inputs that matter.
+ *
+ * The stripper is the **shared** one: the message renderer, the prompt renderer
+ * and the app import it from here, so a tool result, a tool summary, an
+ * approval prompt and a typed line are all protected by the same rules.
  */
 export function stripControlSequences(text: string): string {
   let out = '';
@@ -249,14 +266,26 @@ export function stripControlSequences(text: string): string {
       index = skipEscapeSequence(text, index) + 1;
       continue;
     }
-    // The line feed and the tab survive; every other C0 control character and
-    // every C1 control character does not.
+    if (code >= 0x80 && code <= 0x9f) {
+      // A C1 control character can be an **introducer** as well. Dropping only
+      // the introducer would leave the sequence's **parameters** visible as
+      // ordinary text (`a\u009b2Jb` would read `a2Jb`), so the whole sequence goes.
+      const skipped = skipC1Sequence(text, index);
+      if (skipped !== undefined) {
+        index = skipped + 1;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+    // The line feed and the tab survive; every other C0 control character does
+    // not.
     if (code === 0x0a || code === 0x09) {
       out += text.charAt(index);
       index += 1;
       continue;
     }
-    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+    if (code < 0x20 || code === 0x7f) {
       index += 1;
       continue;
     }
@@ -264,6 +293,58 @@ export function stripControlSequences(text: string): string {
     index += 1;
   }
   return out;
+}
+
+/**
+ * Skip one C1 control sequence, and return the index of its last character.
+ *
+ * The C1 controls are the **8-bit** forms of the escape sequences: 0x9b is the
+ * CSI, 0x9d the OSC, 0x90 the DCS, 0x98 the SOS, 0x9e the PM and 0x9f the
+ * APC. A terminal that accepts them acts on their payload exactly as it acts
+ * on the 7-bit form, so the payload is dropped with the introducer.
+ *
+ * A C1 control that is **not** an introducer is dropped on its own, and
+ * `undefined` says so.
+ */
+function skipC1Sequence(text: string, start: number): number | undefined {
+  const code = text.charCodeAt(start);
+
+  if (code === 0x9b) {
+    // The CSI: parameters, then a final byte in 0x40–0x7e.
+    let index = start + 1;
+    while (index < text.length) {
+      const final = text.charCodeAt(index);
+      if (final >= 0x40 && final <= 0x7e) return index;
+      index += 1;
+    }
+    return text.length - 1;
+  }
+
+  if (code === 0x9d || code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+    // The string sequences: a string, terminated by BEL or ST.
+    return skipStringPayload(text, start + 1);
+  }
+
+  return undefined;
+}
+
+/**
+ * Skip a string sequence's payload, and return the index of its last
+ * character.
+ *
+ * The terminator is the bell (`BEL`) or the string terminator (`ST`), which is
+ * either the 8-bit `0x9c` or the 7-bit `ESC \`.
+ */
+function skipStringPayload(text: string, start: number): number {
+  let index = start;
+  while (index < text.length) {
+    const code = text.charCodeAt(index);
+    if (code === 0x07) return index;
+    if (code === 0x9c) return index;
+    if (code === 0x1b && text.charCodeAt(index + 1) === 0x5c) return index + 1;
+    index += 1;
+  }
+  return text.length - 1;
 }
 
 /**

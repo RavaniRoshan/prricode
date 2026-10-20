@@ -1,9 +1,10 @@
 /**
  * The interactive terminal UI.
  *
- * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.10 (The
- * command-line surface) and the `CC-015` milestone of
+ * Evidence: the `CC-015` milestone of
  * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
+ * The audit records **no** TUI drawing at all — §2.10 is the argument parser,
+ * not a terminal — so everything this module draws is a **implementation choice**.
  *
  * ## What this module is
  *
@@ -51,6 +52,18 @@
  * the labelled node rather than inside it: the label is announced
  * (`list: Conversation`), and the content is announced with it.
  *
+ * The **choices** of the approval prompt are **options**: a screen reader that
+ * hears "listbox: Approval required for Bash" and then a paragraph does not
+ * hear three answers, so each choice is its own `option` node.
+ *
+ * ## What the app shows
+ *
+ * The message list is the app's **conversation**: the user's own prompts and
+ * the model's blocks, in the order they happened. The conversation is built
+ * **on** the plan's `renderMessages` — the model's blocks in the shipped view
+ * are the plan's blocks, byte for byte — so the plan's contract and the
+ * shipped view cannot drift apart.
+ *
  * ## What is observed and what is a implementation choice
  *
  * The audit records the target's **input and output formats** and the fact that
@@ -67,8 +80,13 @@ import { Box, Text, render, useInput, type Instance, type RenderOptions } from '
 import type { PermissionDecision } from '../permissions/decision.js';
 import type { SessionEvent } from '../session/event.js';
 
+import { stripControlSequences } from './render/markdown.js';
 import { renderConversation } from './render/messages.js';
-import { APPROVAL_CHOICES, renderApprovalPrompt, type ApprovalChoice } from './render/prompts.js';
+import {
+  approvalPromptParts,
+  choiceForNumber,
+  type ApprovalChoice,
+} from './render/prompts.js';
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                               */
@@ -201,13 +219,26 @@ function region(role: AriaRole, label: string, content: ReactNode): ReactNode {
  *
  * The number is the one the prompt shows, and it is looked up in the closed
  * list of the choices — never in a plain object, because the key comes from
- * the keyboard.
+ * the keyboard. The list and its numbering live in the prompt renderer, so
+ * there is one source of truth for both.
  */
 function choiceFor(key: string): ApprovalChoice | undefined {
   if (key.length !== 1) return undefined;
   const digit = key.charCodeAt(0) - 0x30;
-  if (digit < 1 || digit > APPROVAL_CHOICES.length) return undefined;
-  return APPROVAL_CHOICES[digit - 1];
+  return choiceForNumber(digit);
+}
+
+/**
+ * The echo of the line the user is typing.
+ *
+ * The text is **stripped** of its control sequences: it is typed, and a
+ * terminal acts on an escape sequence, so a pasted escape sequence would
+ * rewrite the screen. The stripper is the shared one
+ * (`./render/markdown.ts`), the same one the renderers use.
+ */
+export function inputEcho(text: string): string {
+  const echoed = stripControlSequences(text);
+  return echoed === '' ? '' : `> ${echoed}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -221,6 +252,12 @@ function choiceFor(key: string): ApprovalChoice | undefined {
  * owns it, so the app never has two copies of the same text. It takes the
  * terminal over only when it is given something to report back — a caller
  * that only wants the rendering never turns the terminal into raw mode.
+ *
+ * The message list is the **conversation**: the user's own prompts and the
+ * model's blocks, in the order they happened. The conversation is built **on**
+ * the plan's `renderMessages` — the model's blocks in the shipped view are
+ * the plan's blocks, byte for byte — so the plan's contract and the shipped
+ * view cannot drift apart.
  */
 export function App(props: AppProps): ReactNode {
   const blocks = renderConversation(props.events);
@@ -267,23 +304,39 @@ export function App(props: AppProps): ReactNode {
     ),
   );
 
-  const approvalRegion =
-    approval === undefined
-      ? null
-      : region(
-          'listbox',
-          approvalLabel(approval.toolName),
-          createElement(
-            Text,
-            null,
-            renderApprovalPrompt(approval.decision, approval.toolName),
-          ),
-        );
+  // The approval prompt: the question and the reason, and the three choices
+  // as **options** — a screen reader that hears a paragraph after the
+  // listbox does not hear three answers.
+  const approvalRegion = (() => {
+    if (approval === undefined) return null;
+    const parts = approvalPromptParts(approval.decision, approval.toolName);
+    const choices = parts.choices.map((choice) =>
+      createElement(
+        Box,
+        {
+          key: `choice-${choice.number}`,
+          'aria-role': 'option',
+          'aria-label': `${choice.number}. ${choice.label}`,
+        },
+        createElement(Text, null, `${choice.marker} ${choice.number}. ${choice.label}`),
+      ),
+    );
+    return region(
+      'listbox',
+      approvalLabel(approval.toolName),
+      createElement(
+        Fragment,
+        null,
+        createElement(Text, null, `${parts.question}\n\n${parts.reason}`),
+        ...choices,
+      ),
+    );
+  })();
 
   const inputRegion = region(
     'textbox',
     ARIA_LABELS.input,
-    createElement(Text, null, input === '' ? '' : `> ${input}`),
+    createElement(Text, null, inputEcho(input)),
   );
 
   const statusRegion =
