@@ -77,14 +77,14 @@
  * are all the agent's commands, and the agent's API key is in the session's
  * environment.
  *
- * **The sandbox is not in the production path yet.** The CLI builds the tools'
- * dependencies from `loadSettings(...)` and does **not** pass the loaded sandbox
- * policy, so `deps.sandboxPolicy` is `undefined` in a real session and every
- * command takes the no-policy branch: it runs on the host, unconfined, with the
- * filtered environment. The wiring is **owed** in `src/cli/command.ts`: the
- * `BuiltinToolDeps` the session assembly builds must carry
- * `sandboxPolicy: settings.sandboxPolicy`. Until that line exists, the sandbox
- * protects nothing, and the no-policy branch is the one that has to be safe.
+ * **The sandbox is in the production path.** The CLI builds the tools'
+ * dependencies from `loadSettings(...)` and passes the loaded sandbox policy:
+ * the `BuiltinToolDeps` the session assembly builds carries
+ * `sandboxPolicy: settings.sandboxPolicy`, so a configured session's commands
+ * run inside the sandbox. A session that supplies **no** policy at all still
+ * takes the no-policy branch — it runs on the host, unconfined — and that
+ * branch filters the environment too, so it never exposes the agent's
+ * credentials either.
  *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *

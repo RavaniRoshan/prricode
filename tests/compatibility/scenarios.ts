@@ -1249,7 +1249,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(streamed).toMatchObject({ events: [{ type: 'tool_use', id: 'toolu_1' }] });
       return measured(
         'partial',
-        "The non-streaming body and the SSE stream parse into the same events, and the SDK's extended `agent.*` vocabulary is tolerated — the response parsing the audit now records as observed; the only residual is the per-resource `parseResponse` callee the feature matrix still records as unresolved.",
+        "The non-streaming body and the SSE stream parse into the same events, and the SDK's extended `agent.*` vocabulary is tolerated — the response parsing the audit records as observed; the only residual is the per-resource `parseResponse` callee, which the audit does not resolve.",
       );
     },
   },

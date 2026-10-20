@@ -1265,6 +1265,17 @@ interface CollectOptions {
 }
 
 /**
+ * The stdout without the launcher's readiness token.
+ *
+ * The token is written by the backend before the command's own output, and
+ * the caller never sees it: it is the launcher's channel, not the command's.
+ */
+function withoutReadinessToken(stdout: string, token?: string): string {
+  if (token === undefined) return stdout;
+  return stdout.startsWith(token) ? stdout.slice(token.length) : stdout;
+}
+
+/**
  * Collect the output of a child process.
  *
  * The readiness token is stripped from the standard output, so the caller sees
@@ -1349,13 +1360,20 @@ function collect(child: ChildProcess, options: CollectOptions = {}): SandboxProc
     pid: child.pid ?? -1,
     establishment,
     get output(): { readonly stdout: string; readonly stderr: string } {
-      return { stdout, stderr };
+      // The **readiness token** is the launcher's own, not the command's: it
+      // is stripped here exactly as `wait()` strips it, so a caller that reads
+      // the live output — a command stopped before it ended — never sees it.
+      return { stdout: withoutReadinessToken(stdout, options.readinessToken), stderr };
     },
     wait: async () => {
       const { exitCode, signal } = await exited;
-      const token = options.readinessToken;
-      const output = token !== undefined && stdout.startsWith(token) ? stdout.slice(token.length) : stdout;
-      return { exitCode, signal, stdout: output, stderr, truncated };
+      return {
+        exitCode,
+        signal,
+        stdout: withoutReadinessToken(stdout, options.readinessToken),
+        stderr,
+        truncated,
+      };
     },
     kill: () => {
       try {

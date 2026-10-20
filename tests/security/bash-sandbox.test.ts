@@ -39,6 +39,8 @@ import { loadSettings } from '../../src/config/loader.js';
 import { describeReason, type PermissionDecision, type ToolContext } from '../../src/permissions/decision.js';
 import type { RuleSet } from '../../src/permissions/rules.js';
 import {
+  MAX_COLLECTED_OUTPUT_CHARS,
+  launchSandbox,
   sandboxEnvironment,
   type SandboxBackend,
   type SandboxPlan,
@@ -1114,7 +1116,21 @@ describe('CC-008b step 6 — the header of the tool', () => {
     expect(header).toMatch(/never skips a permission rule/i);
     // The header's claim about the flag and the policy is the code's claim.
     expect(header).toMatch(/never overrides a policy error/i);
-    expect(header).toMatch(/sandboxPolicy: settings\.sandboxPolicy/);
+    // The sandbox is in the production path now, so the header says so —
+    // and the **code** is what carries it (the next test).
+    expect(header).toMatch(/in the production path/i);
+    expect(header).not.toMatch(/not in the production path/i);
+  });
+
+  it('carries the sandbox policy into the session the CLI builds', () => {
+    // The wiring the tool's header names: the `BuiltinToolDeps` the session
+    // assembly builds must carry the loaded sandbox policy, or every command
+    // takes the no-policy branch and the sandbox protects nothing.
+    const source = readFileSync(
+      new URL('../../src/cli/command.ts', import.meta.url),
+      'utf8',
+    );
+    expect(source).toContain('sandboxPolicy: settings.sandboxPolicy');
   });
 
   it('describes the code it claims to describe', () => {
@@ -1130,5 +1146,54 @@ describe('CC-008b step 6 — the header of the tool', () => {
     expect(source).toContain("readInputField(input, 'dangerouslyDisableSandbox')");
     // Every path filters the environment through the sandbox's own filter.
     expect(source).toContain("sandboxEnvironment(spec, 'unconfined')");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The launcher's own collection                                               */
+/* -------------------------------------------------------------------------- */
+
+describe('the launcher\'s collection', () => {
+  it('caps the output at the collection point, not after it', async () => {
+    const root = temporaryDirectory();
+    // A command that prints far more than the cap. The cap must bound what
+    // the process **holds**, not only what the caller is told.
+    const launched = await launchSandbox({
+      command: 'yes x | head -c 2000000',
+      cwd: root,
+      env: { PATH: process.env.PATH ?? '' },
+      policy: { ...DEFAULT_SANDBOX_POLICY },
+      platform: process.platform,
+      availability: 'available',
+    });
+
+    const result = await launched.wait();
+    await launched.cleanup();
+
+    expect(result.stdout.length).toBeLessThanOrEqual(MAX_COLLECTED_OUTPUT_CHARS);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('never reports the readiness token as the command\'s output', async () => {
+    const root = temporaryDirectory();
+    const launched = await launchSandbox({
+      command: 'printf PARTIAL-OUTPUT',
+      cwd: root,
+      env: { PATH: process.env.PATH ?? '' },
+      policy: { ...DEFAULT_SANDBOX_POLICY },
+      platform: process.platform,
+      availability: 'available',
+    });
+
+    // The live accessor — the one a caller reads when it stops the command
+    // before it ends — must not carry the launcher's own readiness token.
+    const live = launched.output;
+    const finished = await launched.wait();
+    await launched.cleanup();
+
+    // Whether the command's own output is in the live buffer yet depends on
+    // the timing, so the assertion is about the **token** only.
+    expect(live?.stdout ?? '').not.toMatch(/^[0-9a-f]{32}/);
+    expect(finished.stdout).toBe('PARTIAL-OUTPUT');
   });
 });
