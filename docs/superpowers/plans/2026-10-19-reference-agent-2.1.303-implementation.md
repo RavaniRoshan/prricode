@@ -1786,21 +1786,55 @@ Modify `docs/compatibility/tool-surface.md`.
 - Produces: the clone's renderer, matching the target's surfaces, strings, colours and
   keybindings.
 
-- [ ] **Step 1: Write the failing test** — for each surface in the specification, the
+- [x] **Step 1: Write the failing test** — for each surface in the specification, the
   clone's output must equal the target's: the same strings, the same order, the same
   colours, the same key handling.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement the surfaces** — the composer, the transcript, the approval
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement the surfaces** — the composer, the transcript, the approval
   prompt, the spinner, the status line, the welcome screen, the model picker, the
   permissions panel, the markdown rendering and the theme.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Update the conformance document** — `F-39` moves from `unknown` to
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Update the conformance document** — `F-39` moves from `unknown` to
   `match`, with the surfaces it now compares named.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
   ```bash
   git add src/ui src/cli/interactive.ts tests/contracts docs/compatibility/tool-surface.md
   git commit -m "feat(ui): the terminal UI is the target's"
   ```
+
+
+**Result:** the terminal UI is the target's. The specification was read from the target's
+own source — 1 305 lines, 197 table rows — and every surface it names is reproduced: the
+theme's **72 roles** with the target's `rgb(...)` literals, the glyphs with their platform
+deltas, the transcript's five renderings, the composer's prompt glyph, border and
+placeholder, the hint line, the approval dialog, the full keybinding table, the markdown
+rules, the spinner frames and the two gestures.
+
+**The product's own name is not reproduced.** The target's **data** is reproduced exactly
+— the colours, the layout, the strings, the keybindings — so the pixels are identical. The
+**name** is PRRICODE's own in the three places the target uses it: the approval dialog's
+third option, the assistant's screen-reader gutter, and the theme's role names. The
+divergence is recorded in the conformance document rather than papered over, and the
+target's environment variables, model ids, API hosts and the MCP proxy header keep the
+target's names, because those are the data the implementation has to speak to.
+
+**Left alone, and named.** The specification could not settle the `/permissions` panel's
+chrome, whether a bottom rule closes the composer's box, the transcript's empty state, the
+per-tool summary text, and the `/help` and `/diff` layouts. One of those is a
+**contradiction inside the specification** — the composer's border is quoted with
+`borderBottom: false` while the prose says the bottom rule was not established — and the
+closing section was followed, with the contradiction written down.
+
+**Deliberately not built.** A welcome screen, a model picker and a `/permissions` panel:
+the clone has none, the specification could not settle them, and a screen announcing the
+target's product and version would assert an identity this implementation does not have.
+The **shell-mode switch** is not built either — the glyph and the hint are reproduced, but
+the mode would run a shell command this implementation does not have.
+
+**Verified.** The suite is green at **1 981 tests** and `npx tsc --noEmit` is clean. Four
+mutations were injected to prove the new tests sensitive: the result marker's trailing
+spaces, the `permission` role of an unlabelled fence, the approval question's wording, and
+the composer's non-breaking space.
 
 **Note.** A surface the specification does **not** establish is left alone and named, not
 invented. The report says what was compared and what was not.
