@@ -45,13 +45,17 @@
  *     The prefix is still in the file. The boundary is located by the marker's
  *     **parent link** on the branch's parent chain, so a record that is not a
  *     message moves it with it.
- *   - **The content replacement** is applied on read, so the payload of an
- *     oversized tool result does not come back into the context. The
- *     transcript keeps the payload; only the context is stubbed. Every path
- *     that projects a transcript into a context applies it — the cross-turn
- *     projection (`resumeEvents`) and the between-turns load
- *     (`conversationFromEvents`, in `src/agent/context.ts`) — so the payload
- *     never reaches the model.
+ *   - **The content replacement** is applied wherever a transcript becomes a
+ *     context, so the payload of an oversized tool result does not come back
+ *     to the model. The transcript keeps the payload; only the context is
+ *     stubbed. **Three** paths apply it, and all three produce the same
+ *     stubbed content: the cross-turn projection (`resumeEvents` here), the
+ *     between-turns load (`conversationFromEvents`, in
+ *     `src/agent/context.ts`), and the **within-turn** push
+ *     (`src/agent/loop.ts`), which uses the store's own rule
+ *     (`contentReplacementStub`) and the store's own limit. The limit is the
+ *     **store's**, not a constant: a store built with a different
+ *     `maxToolResultBytes` stubs at that limit on every path.
  *   - **The tool-result content** is serialised into a **string** on the way
  *     out, because the observed shape of a `tool_result` block is
  *     `{tool_use_id, type:"tool_result", content:<string>}` (audit §2.4) and an

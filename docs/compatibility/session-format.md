@@ -92,7 +92,19 @@ Compaction is a **boundary marker, not a deletion**.
 
 ## The content replacement
 
-An oversized tool result is stored **verbatim** in the file, with a separate `content_replacement` record naming the target. The replacement is applied **on read**, so the transcript keeps the data and the **context** does not. The limit is 256 KiB serialized — a implementation choice.
+An oversized tool result is stored **verbatim** in the file, with a separate `content_replacement` record naming the target. The transcript keeps the data; the **context** does not.
+
+The replacement is applied on **every** path that turns a transcript into a context, and **all three produce the same stubbed content**:
+
+| Path | Where |
+|---|---|
+| the **within-turn** push | `src/agent/loop.ts` |
+| the **between-turns** load | `src/agent/context.ts` (`conversationFromEvents`) |
+| the **cross-turn** projection | `src/session/resume.ts` (`resumeEvents`) |
+
+There is exactly **one** rule — `contentReplacementStub`, exported from `src/session/store.ts` — and the limit is the **store's** `maxToolResultBytes`, not a constant. The default is 256 KiB serialized — a implementation choice. The **stub's wire form** is a implementation choice too: the audit pins that the payload does not come back into the context, and not what the stub looks like.
+
+At the boundary the rule is `bytes <= maxBytes` → the raw content; one byte over → the stub.
 
 ## The carried prompts
 
@@ -119,7 +131,9 @@ The store is append-only, the last row per id wins, and a prompt is not delivere
 | A torn final line is discarded; a complete final line is kept | implementation choice | same file — the two torn-line tests |
 | A corrupt line in the middle raises and names `path:line` | implementation choice | same file — "raises a format error for a corrupt line in the middle of the file" |
 | An unknown record version is refused, per record, naming both versions | implementation choice | same file — "refuses a record whose version it does not know, and names both versions", "sees a format change per record, not only on the first one" |
-| The oversized tool result is kept in the file and stubbed in the context | REA observed (the mechanism) + implementation choice (the limit) | same file and `tests/contracts/session-resume.test.ts` — the content-replacement tests |
+| The oversized tool result is kept in the file and stubbed in the context | REA observed (the mechanism) + implementation choice (the limit) | `tests/contracts/session-store.test.ts`, `tests/contracts/session-resume.test.ts`, `tests/contracts/tool-result-projection.test.ts`, `tests/contracts/tool-result-stub.test.ts` — the content-replacement tests |
+| All three paths that project a transcript into a context apply the replacement and produce the same stubbed content | implementation choice | `tests/contracts/tool-result-stub.test.ts` — the three-paths-agree tests |
+| The limit is the **store's** `maxToolResultBytes`, not a constant | implementation choice | same file — the store's own limit test |
 | A session id cannot escape the project directory | implementation choice | same file — the id-validation tests |
 | A title match is exact, an ambiguous title is an error listing the candidates, and an unknown title or id has the target's wording | REA observed | same file — the target-resolution tests |
 | The drop guard refuses a resume that would split a tool turn | REA observed (the mechanism) + implementation choice (the exact rule) | same file — the drop-guard tests |
