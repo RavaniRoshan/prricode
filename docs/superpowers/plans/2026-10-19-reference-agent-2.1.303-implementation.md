@@ -779,17 +779,17 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Protocol note — negotiate modern first.** The current MCP revision is `2026-07-28`, which is **stateless**: it retires the `initialize`/`initialized` handshake and the `Mcp-Session-Id` header, adds `server/discover` and `subscriptions/listen`, and carries protocol version, client identity, and capabilities in `_meta` on every request. This implementation must therefore **probe for the modern revision first** and fall back to the legacy `initialize` handshake only when the server does not support it — the target's own changelog records local stdio connections negotiating `2026-07-28` by default, with `MCP_PROTOCOL_NEGOTIATION=legacy` as the opt-out. This implementation provides the same opt-out. Two different version-error contracts must both be implemented: an invalid or missing `MCP-Protocol-Version` **header** on an HTTP transport is an HTTP `400 Bad Request` (server side), while an unsupported declared version is a JSON-RPC error `-32022` (`UnsupportedProtocolVersionError`) carrying a `supported` list, which the client then retries (client side). Neither may hang.
 
-- [ ] **Step 1: Write the failing manager test** — connecting a stdio server spawns the configured command with `shell: false`, pipes stdin/stdout, and marks the server `ready`; a server that exits during `tools/list` is marked `failed` with an error and does not block other servers.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement `src/extensions/mcp/client.ts`** and `manager.ts`.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing batching test** — connecting four local servers issues at most `LOCAL_CONNECT_BATCH_SIZE` (3) concurrent spawns; remote servers use `REMOTE_CONNECT_BATCH_SIZE` (20).
-- [ ] **Step 6: Implement the batch scheduler** in `manager.ts`.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing control test** — `dispatchControlRequest` handles each of the 23 host subtypes and rejects `can_use_tool` as a host-originated request; for `mcp_authenticate` with no `onMcpAuthenticate` registered it returns `{ subtype: 'error', error: 'mcp_authenticate is not supported in this context (callback not registered)' }`. Separately, `dispatchCanUseTool` with a `request_id` that is not a string drops the request with **no response**, because no response is possible.
-- [ ] **Step 9: Implement `src/extensions/mcp/control.ts`** with the closed subtype list and the callback-absence error text.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Commit.**
+- [x] **Step 1: Write the failing manager test** — connecting a stdio server spawns the configured command with `shell: false`, pipes stdin/stdout, and marks the server `ready`; a server that exits during `tools/list` is marked `failed` with an error and does not block other servers.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement `src/extensions/mcp/client.ts`** and `manager.ts`.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing batching test** — connecting four local servers issues at most `LOCAL_CONNECT_BATCH_SIZE` (3) concurrent spawns; remote servers use `REMOTE_CONNECT_BATCH_SIZE` (20).
+- [x] **Step 6: Implement the batch scheduler** in `manager.ts`.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing control test** — `dispatchControlRequest` handles each of the 23 host subtypes and rejects `can_use_tool` as a host-originated request; for `mcp_authenticate` with no `onMcpAuthenticate` registered it returns `{ subtype: 'error', error: 'mcp_authenticate is not supported in this context (callback not registered)' }`. Separately, `dispatchCanUseTool` with a `request_id` that is not a string drops the request with **no response**, because no response is possible.
+- [x] **Step 9: Implement `src/extensions/mcp/control.ts`** with the closed subtype list and the callback-absence error text.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Commit.**
   ```bash
   git add src/extensions/mcp tests/contracts/mcp-manager.test.ts tests/contracts/mcp-control.test.ts
   git commit -m "feat(mcp): server manager and control-request surface"
