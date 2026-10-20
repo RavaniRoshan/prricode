@@ -23,6 +23,17 @@
  * missing and `failIfUnavailable` is false, and what it does for an explicitly
  * excluded command.
  *
+ * **Only one of the four reasons refuses the command.** `deny` is the
+ * `failIfUnavailable` refusal — the user asked for a sandbox and none can be
+ * provided. The other three run the command **unconfined** and say so:
+ * `sandbox.enabledPlatforms excludes <platform>` means this platform has no
+ * sandbox, `sandbox.enabled is false` means the user turned the sandbox off, and
+ * `sandbox.failIfUnavailable is false (...)` means the backend is missing. The
+ * target's own documented default is that "a failed sandbox start **falls back to
+ * running unsandboxed**", and a setting that turned the sandbox off would be
+ * useless if it refused the command instead. Refusing on an unsupported platform
+ * would also make this implementation unusable everywhere its backend does not run.
+ *
  * Implementation choices (the audit does not pin them, so they are marked here):
  *
  *   - The **order** of the checks is: the platform exclusion, then `enabled`, then
@@ -210,10 +221,10 @@ export function evaluateSandbox(
   availability: SandboxAvailability,
 ): SandboxEvaluation {
   if (!policy.enabledPlatforms.includes(platform)) {
-    return { decision: 'deny', reason: SANDBOX_REASONS.platformExcluded(platform) };
+    return { decision: 'unconfined', reason: SANDBOX_REASONS.platformExcluded(platform) };
   }
   if (!policy.enabled) {
-    return { decision: 'deny', reason: SANDBOX_REASONS.disabled };
+    return { decision: 'unconfined', reason: SANDBOX_REASONS.disabled };
   }
   if (policy.allowUnsandboxedCommands) {
     const exemptions = matchingExclusions(command, policy.excludedCommands);

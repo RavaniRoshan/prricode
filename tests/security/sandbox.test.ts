@@ -237,22 +237,28 @@ function compareVersions(left: string, right: string): number {
 // --- step 1: the policy -------------------------------------------------------
 
 describe('CC-017 step 1 — the sandbox policy', () => {
-  it('denies with the reason naming the platform when enabledPlatforms excludes it', () => {
+  it('runs unconfined with the reason naming the platform when enabledPlatforms excludes it', () => {
     const result = evaluateSandbox(
       policy({ enabledPlatforms: ['darwin'] }),
       'linux',
       'ls -la',
       'available',
     );
-    expect(result.decision).toBe('deny');
+    expect(result.decision).toBe('unconfined');
     expect(result.reason).toBe('sandbox.enabledPlatforms excludes linux');
     expect(result.reason).toBe(SANDBOX_REASONS.platformExcluded('linux'));
   });
 
-  it('denies when the sandbox is disabled', () => {
+  it('runs unconfined when the sandbox is disabled', () => {
     const result = evaluateSandbox(policy({ enabled: false }), 'linux', 'ls -la', 'available');
-    expect(result.decision).toBe('deny');
+    expect(result.decision).toBe('unconfined');
     expect(result.reason).toBe('sandbox.enabled is false');
+  });
+
+  it('refuses only when the backend is missing and failIfUnavailable is true', () => {
+    const result = evaluateSandbox(policy({}), 'linux', 'ls -la', 'unavailable');
+    expect(result.decision).toBe('deny');
+    expect(result.reason).toBe(SANDBOX_REASONS.unavailableRefused);
   });
 
   it('runs the shell unconfined, and says so, when failIfUnavailable is false', () => {

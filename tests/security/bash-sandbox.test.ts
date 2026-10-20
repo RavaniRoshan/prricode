@@ -564,7 +564,7 @@ describe('CC-008b — the path of a session that has no sandbox policy', () => {
 // --- the flag and the policy --------------------------------------------------------
 
 describe('CC-008b — the sandbox-skip flag against the policy', () => {
-  it('refuses the command when the sandbox is switched off, even with the flag', async () => {
+  it('runs the command unconfined when the sandbox is switched off, even with the flag', async () => {
     const root = temporaryDirectory();
     const backend = recordingBackend();
     const tool = createBashTool(
@@ -577,13 +577,16 @@ describe('CC-008b — the sandbox-skip flag against the policy', () => {
     );
     const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
 
-    await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
-      'the sandbox refused to run the command: sandbox.enabled is false',
-    );
+    const result = await tool.execute(input, toolContext('Bash', input));
+    const output = result as { sandboxed: boolean; sandboxReason?: string; stdout: string };
+    expect(output.sandboxed).toBe(false);
+    expect(output.sandboxReason).toBe('sandbox.enabled is false');
+    expect(output.stdout).toContain('hello');
+    // The backend was never started: the policy did not sandbox the command.
     expect(backend.started).toBe(0);
   });
 
-  it('refuses the command when the platform is excluded, even with the flag', async () => {
+  it('runs the command unconfined when the platform is excluded, even with the flag', async () => {
     const root = temporaryDirectory();
     const backend = recordingBackend();
     const tool = createBashTool(
@@ -596,9 +599,11 @@ describe('CC-008b — the sandbox-skip flag against the policy', () => {
     );
     const input = { command: 'printf hello', dangerouslyDisableSandbox: true };
 
-    await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
-      `the sandbox refused to run the command: sandbox.enabledPlatforms excludes ${process.platform}`,
-    );
+    const result = await tool.execute(input, toolContext('Bash', input));
+    const output = result as { sandboxed: boolean; sandboxReason?: string; stdout: string };
+    expect(output.sandboxed).toBe(false);
+    expect(output.sandboxReason).toBe(`sandbox.enabledPlatforms excludes ${process.platform}`);
+    expect(output.stdout).toContain('hello');
     expect(backend.started).toBe(0);
   });
 
@@ -768,9 +773,10 @@ describe('CC-008b — the availability of the backend', () => {
     );
     const input = { command: 'printf hello' };
 
-    await expect(tool.execute(input, toolContext('Bash', input))).rejects.toThrow(
-      'the sandbox refused to run the command: sandbox.enabledPlatforms excludes darwin',
-    );
+    const result = await tool.execute(input, toolContext('Bash', input));
+    const output = result as { sandboxed: boolean; sandboxReason?: string };
+    expect(output.sandboxed).toBe(false);
+    expect(output.sandboxReason).toBe('sandbox.enabledPlatforms excludes darwin');
   });
 
   it('does not hand the timeout to the launcher, so the tool keeps the partial output', async () => {
@@ -985,8 +991,10 @@ describe('CC-008b step 5 — the safety of the sandboxed command', () => {
       builtinDeps({
         rules: ruleSet({ allow: ['Bash'], cwd: root }),
         cwd: root,
-        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, enabledPlatforms: [] },
-        sandboxBackend: recordingBackend(),
+        // A **refusal** is the missing backend with `failIfUnavailable` set:
+        // the user asked for a sandbox and none can be provided.
+        sandboxPolicy: { ...DEFAULT_SANDBOX_POLICY, failIfUnavailable: true },
+        sandboxBackend: unavailableBackend,
       }),
     );
     const registry = createToolRegistry();
@@ -1004,7 +1012,8 @@ describe('CC-008b step 5 — the safety of the sandboxed command', () => {
     expect(envelope.isError).toBe(true);
     const content = envelope.content as { type: string; message: string; errorCode: number };
     expect(content.type).toBe('error');
-    expect(content.message).toContain('sandbox.enabledPlatforms excludes');
+    expect(content.message).toContain('sandbox backend is unavailable');
+    expect(content.message).toContain('sandbox.failIfUnavailable is true');
     expect(content.errorCode).toBeGreaterThan(0);
     // The refusal is not reported as a command that ran and failed.
     expect(content.message).not.toMatch(/^The command exited/);
