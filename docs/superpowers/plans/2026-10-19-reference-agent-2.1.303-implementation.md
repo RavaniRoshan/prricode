@@ -326,6 +326,35 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   git commit -m "feat(provider): provider-owned model catalog"
   ```
 
+### CC-005b — The Bedrock+Mantle `anthropic.*` override
+
+**Why this task exists.** The target's `wd(model)` layers a per-model override on top of the route selector, and the rule has **two** halves (audit §2.1):
+
+- **(a)** *"with Bedrock and Mantle both enabled, an `anthropic.*` model resolves to `mantle`"* — **target-observed, and not implemented**;
+- **(b)** *"otherwise, if the catalog has no id for the selected route but has one for `mantle`, the model resolves to `mantle`"* — implemented in `CC-005`.
+
+**Ten of the target's 22 catalog rows are `anthropic.*` ones**, so half (a) is not a corner: with Bedrock+Mantle enabled, the target routes those ten to `mantle` and this implementation routes them to `bedrock`. The compatibility report measures the divergence and reports it as a `mismatch` on rows `F-07` and `F-08`.
+
+**Files:** Modify `src/provider/routes.ts`; Modify `src/provider/catalog.ts`; Modify `tests/contracts/provider-registry.test.ts`; Modify `tests/contracts/drivers.test.ts`.
+
+**Interfaces:**
+- Consumes: `src/provider/routes.ts` (`selectRoute`, `RouteSettings`, the route env vars).
+- Produces: an `enabledRoutes(env, settings): ReadonlySet<ProviderRoute>` in `src/provider/routes.ts`; `resolveRouteForModel(model, route, enabled?)` in `src/provider/catalog.ts`, where `enabled` is the set of routes the user turned on.
+
+- [ ] **Step 1: Write the failing test** — with **both** Bedrock and Mantle enabled, an `anthropic.*` model resolves to **`mantle`**, not to `bedrock`; and with only one of them enabled, the model resolves the ordinary way.
+- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the override is not implemented.
+- [ ] **Step 3: Implement `enabledRoutes`** in `src/provider/routes.ts` — the set of routes whose flag is on, derived from the same rules `selectRoute` uses. It must not read the environment twice or disagree with it.
+- [ ] **Step 4: Apply the override** in `resolveRouteForModel` — the `anthropic.*` → `mantle` redirect goes **before** the half-(b) fallback, and only when **both** routes are enabled. The existing three-argument callers must keep working, so the new argument is **optional** and the override is off when it is absent.
+- [ ] **Step 5: Update the module headers** in `src/provider/catalog.ts` and `src/provider/routes.ts` — half (a) is now implemented, and the header must say so.
+- [ ] **Step 6: Run it to verify it passes** — expected: PASS.
+- [ ] **Step 7: Commit.**
+  ```bash
+  git add src/provider tests/contracts
+  git commit -m "fix(provider): the Bedrock+Mantle anthropic.* override"
+  ```
+
+**Note.** The compatibility harness's `F-07`/`F-08` probes **derive** their outcome from the measurement, so once this lands the harness will report `match` and `tests/compatibility/results.test.ts` will fail until the two report cells and the totals are updated. **The orchestrator owns `docs/compatibility/` and the harness** — this task must not edit them, and must report the new totals.
+
 ### CC-006 — Protocol drivers
 
 **Files:** Create `src/provider/drivers/types.ts`, `src/provider/drivers/anthropic.ts`, `src/provider/drivers/bedrock.ts`, `src/provider/drivers/vertex.ts`, `src/provider/drivers/foundry.ts`, `src/provider/drivers/gateway.ts`, `src/provider/drivers/mantle.ts`, `src/provider/drivers/anthropicAws.ts`, `src/provider/drivers/anthropicGoogleCloud.ts`; Create `src/provider/drivers/index.ts`; Create `tests/contracts/drivers.test.ts`.
@@ -1112,7 +1141,9 @@ export interface PreToolUseHookApproval {
 ---
 
 
-**Result (fix round 1):** The measured totals are **20 `match`**, **15 `partial`**, **4 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. The four `mismatch` rows are `F-18` (this implementation's permission-feedback member names), `F-34` (no native sandbox helper), `F-35` (no seccomp-notify listener) and `F-38` (the pure boolean-flag set). The three `unknown` rows are `F-36` (no whole-image native inventory), `F-37` (the target's sandbox routing is unobserved) and `F-39` (the target's terminal UI is unobserved). Every "What was measured" cell is the harness's own `detail` string and the results test compares the two; a probe that observes nothing of this implementation, or that asserts a constant, fails the suite.
+**Result (fix round 2):** The measured totals are **18 `match`**, **13 `partial`**, **8 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. The eight `mismatch` rows are `F-07` and `F-08` (the target's observed Bedrock+Mantle routing of the `anthropic.*` models, which this implementation does not reproduce), `F-18` (this implementation's permission-feedback member names), `F-21` (this implementation's seventh permission reason kind), `F-24` (the target's observed `transcriptSource` marker), `F-34` (no native sandbox helper), `F-35` (no seccomp-notify listener) and `F-38` (the pure boolean-flag set). The three `unknown` rows are `F-36` (no whole-image native inventory), `F-37` (the target's sandbox routing is unobserved) and `F-39` (the target's terminal UI is unobserved).
+
+**One rule, applied to every row:** a **difference of any kind** from the target's *observed* behavior — including a member the target has and this implementation does not — is a `mismatch`. Every "What was measured" cell is the harness's own `detail` string and the results test compares the two. A probe that observes nothing this implementation produced, that compares a value with itself, or that asserts a constant, fails the suite, and a stale total fails it too.
 
 ## Execution handoff
 
