@@ -170,6 +170,30 @@ Two carry a documented default. `tool.call` is given a `tool_use_id` when the ca
 
 ## Plugins
 
+### The manifest schema
+
+A plugin's manifest declares its content in two groups of keys:
+
+| Group | Keys |
+|---|---|
+| **directory** | `commands`, `agents`, `skills`, `outputStyles`, `themes`, `workflows`, `monitors` |
+| **file** | `mcpServers`, `lspServers`, `hooks` |
+
+Each key may be declared at the **top level** or under **`experimental`**, and a value may be a **single path string** or an **array of path strings**. `commands` may additionally be an **object** whose entries carry a `source` path. A manifest that is not a JSON object is `broken` with the reason *"it is not a JSON object"*. A plugin can present **several manifest candidates** (for example `.claude-plugin/plugin.json`). A plugin is `ok` when a **`SKILL.md` exists at the plugin root**.
+
+### The command discovery rules
+
+A plugin's `commandsPaths` are loaded in two shapes:
+
+- a **directory** — its `.md` files are the commands; a directory with neither `.md` files nor `SKILL.md` in subdirectories is a **warning**, not an error: *"Warning: No commands found in plugin `<name>` custom directory: `<path>`. Expected .md files or SKILL.md in subdirectories."*;
+- a **file** — it must end in `.md`; a file that exceeds the command **byte limit** is skipped with *"Skipping plugin command `<path>`: exceeds `<N>` byte limit"*.
+
+A command's **name** is `<plugin>:<basename without the .md>`, unless a `commandsMetadata` entry declares a `source` that resolves to the same path, in which case the name is `<plugin>:<metadata key>`. A `commandsMetadata` entry with `content` but **no** `source` is an **inline** command: its name is `<plugin>:<key>` and its path is the pseudo-path `<inline:<plugin>:<key>>`.
+
+The frontmatter is parsed with **key normalization**, and the parse reports the frontmatter **as written** alongside a **problem** describing what was wrong with it — so a malformed frontmatter is surfaced rather than silently dropped. The skill body is **interned**, so identical skill contents are stored once.
+
+The skill telemetry events observed are `tengu_propose_skills`, `tengu_propose_skills_read_check` and `tengu_propose_skills_kept_lines`, plus a `skills_load_ms` timing event. The `propose_skills` path has its own read check — it refuses a proposal whose file it cannot `stat` or read.
+
 ### The marketplace install flow
 
 The result of `installPluginFromMarketplace` carries `{ success, message, depNote, installedDisabled, installedDisabledByDefault, enableHint, otherProjectsNote }`.
@@ -204,3 +228,8 @@ The result of `installPluginFromMarketplace` carries `{ success, message, depNot
 | The marketplace install reports the disable reason, the enable hint, and distinguishes refused from failed | REA observed | same file |
 | The extension-point registry is the fixed set above, with `tool.call`'s generated `tool_use_id` and `telemetry.log`'s default destination | REA observed | same file |
 | The skill frontmatter must carry a text description, and the target's exact error text is used | REA observed | same file |
+| The plugin manifest's directory keys and file keys, the top-level/`experimental` split, and the single-string/array value shapes | REA observed | same file |
+| A plugin is `ok` when a `SKILL.md` exists at its root, and a non-object manifest is `broken` | REA observed | same file |
+| A command's name is `<plugin>:<basename>`, or `<plugin>:<metadata key>` when a `source` resolves to the same path | REA observed | same file |
+| A directory with no `.md` files and no `SKILL.md` in subdirectories is a warning, not an error | REA observed | same file |
+| A command file over the byte limit is skipped with the target's wording | REA observed | same file |
