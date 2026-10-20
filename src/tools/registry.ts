@@ -131,10 +131,62 @@ export interface ToolDefinition<I = unknown, O = unknown> {
 export interface ToolRegistry {
   /** Register a tool. A name that is already registered is replaced. */
   register(tool: ToolDefinition): void;
-  /** The tool with that name, or `undefined` when there is none. */
+  /**
+   * The tool with that name, or `undefined` when there is none.
+   *
+   * **An alias resolves to its canonical tool.** The target resolves its tool list
+   * "including aliases", so a call that names a legacy name reaches the tool the
+   * alias stands for.
+   */
   get(name: string): ToolDefinition | undefined;
   /** The registered tools, in registration order. */
   list(): readonly ToolDefinition[];
+}
+
+/**
+ * The target's **alias table**: a legacy tool name and the canonical name it
+ * stands for.
+ *
+ * The target keeps it in one place and maps a legacy name to the canonical one
+ * (`chunk-y3kmvs94.js:663`, read out of the pinned build):
+ *
+ * ```js
+ * {Task:"Agent", KillShell:"TaskStop", KillBash:"TaskStop", ListPeers:"ListAgents",
+ *  Brief:"SendUserMessage", ListMcpResources:"ListMcpResourcesTool",
+ *  ReadMcpResource:"ReadMcpResourceTool", ReadMcpResourceDir:"ReadMcpResourceDirTool"}
+ * ```
+ *
+ * The table is **data**, so the lookup is an **own-property** check: a tool named
+ * `constructor` must not resolve to an inherited member of the table.
+ */
+export const TOOL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  Task: 'Agent',
+  KillShell: 'TaskStop',
+  KillBash: 'TaskStop',
+  ListPeers: 'ListAgents',
+  Brief: 'SendUserMessage',
+  ListMcpResources: 'ListMcpResourcesTool',
+  ReadMcpResource: 'ReadMcpResourceTool',
+  ReadMcpResourceDir: 'ReadMcpResourceDirTool',
+});
+
+/**
+ * The canonical name of a tool name.
+ *
+ * A name that is not an alias is its own canonical name.
+ */
+export function resolveToolName(name: string): string {
+  if (Object.hasOwn(TOOL_ALIASES, name)) {
+    return TOOL_ALIASES[name] ?? name;
+  }
+  return name;
+}
+
+/**
+ * Whether a name is one of the target's aliases.
+ */
+export function isToolAlias(name: string): boolean {
+  return Object.hasOwn(TOOL_ALIASES, name);
 }
 
 /**
@@ -249,6 +301,12 @@ export const TOOL_ERROR_CODES = {
   approvalRequired: 18,
   /** The task runner is not available. */
   taskUnavailable: 19,
+  /** The capability the tool needs is not present in this session. */
+  capabilityUnavailable: 20,
+  /** The thing the call named does not exist. */
+  notFound: 21,
+  /** The thing the call named exists but is not in a state the call may act on. */
+  invalidState: 22,
 } as const;
 
 /** One of the error codes. */
@@ -277,6 +335,10 @@ export class ToolExecutionError extends Error {
  * The registry is a `Map`, so a caller-supplied tool name never resolves to an
  * inherited member of `Object.prototype`: `get('constructor')` and `get('__proto__')`
  * both return `undefined`.
+ *
+ * **An alias resolves to its canonical tool.** A name that is registered exactly
+ * wins — a session that registers a tool called `Task` gets that tool — and a name
+ * that is not registered falls back to the canonical name of the alias table.
  */
 export function createToolRegistry(): ToolRegistry {
   const tools = new Map<string, ToolDefinition>();
@@ -286,7 +348,11 @@ export function createToolRegistry(): ToolRegistry {
       tools.set(tool.name, tool);
     },
     get(name: string): ToolDefinition | undefined {
-      return tools.get(name);
+      const exact = tools.get(name);
+      if (exact !== undefined) return exact;
+      const canonical = resolveToolName(name);
+      if (canonical === name) return undefined;
+      return tools.get(canonical);
     },
     list(): readonly ToolDefinition[] {
       return [...tools.values()];

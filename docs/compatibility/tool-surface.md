@@ -1,8 +1,8 @@
 # Tool surface conformance
 
 **Target:** the pinned reference build `2.1.303`, Linux x86-64, SHA-256 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`.
-**Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.4 ("Agent loop and tool dispatch") and §2.5 ("Permissions").
-**Owning task:** `CC-008` in [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md); the terminal-UI surfaces below were closed by `CC-022`.
+**Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.4 ("Agent loop and tool dispatch") and §2.5 ("Permissions"), and — for the inventory itself — [`docs/reverse-engineering/SURFACE-INVENTORY.md`](../reverse-engineering/SURFACE-INVENTORY.md) ("The tool registry"), which the repository's own verifier re-derives from the target's source.
+**Owning task:** `CC-008` in [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md); the terminal-UI surfaces below were closed by `CC-022`; the **tool inventory** was closed by `CC-027`.
 **Matrix rows:** F-17, F-18 in [`feature-matrix.md`](feature-matrix.md), and F-39 (the interactive terminal UI) below.
 
 Every row names its **evidence class**: `REA observed`, `Documented only`, or `implementation choice`.
@@ -24,13 +24,177 @@ interface ToolDefinition<I, O> {
 
 `recheckPermission` re-runs the **whole** permission check against a rewritten input. It may only **restrict** the call — the stricter of the two verdicts wins — and the re-check's own hook keeps its **denial** but loses its **approval** and its **rewrite**, because the approval was given for the original call. This is a **implementation choice** with no target counterpart, and it exists because a hook that rewrites the input would otherwise be a permission bypass.
 
-## The ten built-in tools
+## The tool inventory (CC-027)
 
-`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `TodoWrite`, `NotebookEdit`, `Task`.
+The target's registry names **88** tools. The verifier re-derives the list from the
+target's own source and writes it to
+[`SURFACE-INVENTORY.md`](../reverse-engineering/SURFACE-INVENTORY.md) under
+**"The tool registry"**; this implementation now holds **44** of those names —
+**43** canonical tools plus the `Task` alias — and **one** tool of its own
+(`TodoRead`).
 
-**The set is a implementation choice.** The audit records the **file-mutating** set exactly — `Edit`, `Write`, `NotebookEdit` — and records `respondToPermissionRequest` and `can_use_tool` as the target's tool-facing surfaces, but it does not pin the whole tool surface. The plan's ten are therefore a plan-level decision.
+**The names and the aliases are the target's.** The target keeps one alias table
+and maps a legacy name to the canonical one (`chunk-y3kmvs94.js:663`, read out of
+the pinned build):
 
-The rule engine's path-field and read-tool tables must name only tools this implementation can run. They once carried an `LS` row for a tool that is not shipped, which made a user's `LS(...)` rule half-live; the tables and the built-in set now move together, and a regression test pins it.
+| legacy name | canonical name |
+|---|---|
+| `Task` | `Agent` |
+| `KillShell` | `TaskStop` |
+| `KillBash` | `TaskStop` |
+| `ListPeers` | `ListAgents` |
+| `Brief` | `SendUserMessage` |
+| `ListMcpResources` | `ListMcpResourcesTool` |
+| `ReadMcpResource` | `ReadMcpResourceTool` |
+| `ReadMcpResourceDir` | `ReadMcpResourceDirTool` |
+
+The registry resolves an alias to the canonical tool, so a call that names
+`Task` reaches the `Agent` tool and the tool's **own** name is what the rule
+engine sees.
+
+**The rule engine's tool tables follow the inventory.** A rule that names a tool
+the inventory has reaches it: `WebSearch(...)` matches the **query**, `Cd(...)`
+matches the **path**, `Edit(...)` matches a **`MultiEdit`** call (the target's own
+rule validation says the `Edit` rules cover every file-editing tool), and the
+`Read(...)` rules reach `NotebookRead`, `Glob`, `Grep` and the other read tools
+through their path fields.
+
+**A tool whose capability is absent is not faked.** The target's inventory names
+subsystems this implementation does not have: a browser, a language server, an
+agent team, a scheduler, a worktree manager, an MCP channel, a self-hosted
+runner, the account's plugin and skill catalogue, the artifact surface. A tool
+that drives one of them keeps its **name**, its **input schema**, its **alias**
+and its **permission behaviour**, and it **refuses** with a typed failure
+(`capabilityUnavailable`) that names the missing capability. A stub that
+returned a plausible answer would be worse than a refusal, because the model
+would act on it.
+
+### The tools this implementation ships
+
+The **Tier** column is the order the plan gives: **Tier 1** is the set a coding
+session needs and this implementation did not have; **Tier 2** is the rest, in
+the inventory's own order.
+
+| tool | the target's own one-line statement of what it is for | what this implementation's version does | tier |
+|---|---|---|---|
+| `Agent` | delegate work to a subagent | Delegates through the session's `delegate` seam and reports what the sub-agent said. `Task` is its alias. | 1 |
+| `AskUserQuestion` | prompt the user with a multiple-choice question | Asks the session's dialog, one to four questions of two to four options each, and reports the answers. | 1 |
+| `Bash` | execute shell commands | Runs through `/bin/sh -c` inside the sandbox, with the filtered environment. Unchanged. | 2 |
+| `Cd` | — (the target's inventory names it; the target's own search hint was not read) | Resolves the path, refuses a path that is not a directory, and moves the session through the `changeDirectory` seam. | 2 |
+| `Edit` | modify file contents in place | Replaces a string in a file, exactly, and re-resolves the path before the write. Unchanged. | 2 |
+| `EndConversation` | end the conversation — only for sustained user abuse, or when the user explicitly asks to see it demonstrated | Ends the session through the `endConversation` seam. | 2 |
+| `EnterPlanMode` | switch to plan mode to design an approach before coding | Switches the session's permission mode through the `setPermissionMode` seam. | 2 |
+| `ExitPlanMode` | present plan for approval and start coding (plan mode only) | Refuses outside plan mode with the target's own message; in plan mode it presents the plan through the session's dialog. | 1 |
+| `GetTask` | check on a background shell command by task ID | Reads the session's background-task registry and reports the task's state and output. | 2 |
+| `Glob` | find files by name pattern or wildcard | Finds the files, filtered through the `Read(...)` deny rules. Unchanged. | 2 |
+| `Grep` | search file contents with regex (ripgrep) | Searches the files, filtered through the `Read(...)` deny rules. Unchanged. | 2 |
+| `LSP` | code intelligence (definitions, references, symbols, hover) | Performs one of the target's own nine operations through the session's language server. | 2 |
+| `ListAgents` | list agents you can SendMessage to | Lists the agents the session's team exposes. `ListPeers` is its alias. | 2 |
+| `ListMcpResourcesTool` | list resources from connected MCP servers | Lists the resources the session's MCP servers expose. `ListMcpResources` is its alias. | 1 |
+| `MultiEdit` | — (the target's inventory names it; the target's own search hint was not read) | Applies the edits in order and writes the file **once**; a failed edit writes nothing. | 1 |
+| `Monitor` | watch, monitor, or keep an eye on a process/log/command or WebSocket — stream each stdout line as a live notification | Starts a monitored task through the session's monitor and reports its task id. | 2 |
+| `NotebookEdit` | edit Jupyter notebook cells (.ipynb) | Edits the cell. Unchanged. | 2 |
+| `NotebookRead` | — (the target's inventory names it; the target's own search hint was not read) | Reads the notebook's cells and reports them in the target's own cell shape. | 1 |
+| `PowerShell` | execute Windows PowerShell commands | Runs `powershell.exe` with the filtered environment; **refuses** on any other platform. | 2 |
+| `ProposeGoal` | propose a session goal condition for the user to approve with one keypress | Puts the condition to the session's dialog and reports whether the user was asked. | 2 |
+| `Read` | read files, images, PDFs, notebooks | Reads the file. Unchanged. | 2 |
+| `ReadMcpResourceDirTool` | list the children of an MCP directory resource | Lists the children through the session's MCP servers. `ReadMcpResourceDir` is its alias. | 1 |
+| `ReadMcpResourceTool` | read a specific MCP resource by URI | Reads the resource through the session's MCP servers. `ReadMcpResource` is its alias. | 1 |
+| `ReportFindings` | report code-review findings as a structured list | Reports the findings in the target's own finding shape, at most thirty-two of them. | 2 |
+| `SendMessage` | send messages to agent teammates | Sends the message through the session's team. | 2 |
+| `SendUserMessage` | send a message to the user — your primary visible output channel | Delivers the message through the session's channel. `Brief` is its alias. | 1 |
+| `Skill` | invoke a slash-command skill | Resolves the skill through the session's catalogue and returns its instructions; a leading `/` is stripped and an unknown skill is refused with the target's own wording. | 1 |
+| `StructuredOutput` | return the final response as structured JSON | Checks that the value is a JSON object and returns it as the session's structured output. | 2 |
+| `SubagentHandback` | deliver your final report to the agent that spawned you | Delivers the report through the session's team; an empty report is refused with the target's own wording. | 2 |
+| `TaskCreate` | create a task in the task list | Creates the task and answers with `{ task: { id, subject } }`, the target's own shape. | 1 |
+| `TaskGet` | retrieve a task by ID | Answers with the task, or with a **null** task when there is none — the target's own shape. | 1 |
+| `TaskList` | list all tasks | Lists the tasks; a dependency that is completed is not reported as a blocker, as the target does. | 1 |
+| `TaskStop` | kill a running background task | Stops the task through the session's background-task registry. `KillShell` and `KillBash` are its aliases. | 1 |
+| `TaskUpdate` | update a task | Changes the named fields and reports the fields it changed. | 1 |
+| `TodoRead` | — (**not a target tool**; this implementation's own) | Reports the session's task checklist — the same list `TodoWrite` writes. **Labelled as an extension.** | 1 |
+| `TodoWrite` | manage the session task checklist | Records the list in the session's store and reports the list it replaced; the list is cleared when every item is completed, as the target does. | 2 |
+| `ToolSearch` | — (the target's own search hint is absent; the target's own wording is "Query to find deferred tools") | Searches the session's tool catalogue by keyword, or by name for a `select:<name>` query. | 1 |
+| `WebFetch` | fetch and extract content from a URL | Fetches the URL under a byte cap. Unchanged. | 2 |
+| `WebSearch` | search the web for current information | Searches through the session's web-search backend and reports the hits. | 1 |
+| `Write` | create or overwrite files | Writes the file. Unchanged. | 2 |
+| `memory_list` | list the memory stores and the documents in them | Lists the stores, or the documents of one store, through the session's memory surface. | 2 |
+| `memory_read` | read a document from a memory store | Reads the document through the session's memory surface. | 2 |
+| `memory_write` | save a document to a memory store | Writes the document through the session's memory surface. | 2 |
+
+### The tools this implementation does **not** ship
+
+Each one is **named** here with the capability it needs. A tool that cannot be
+implemented honestly is omitted and named — never faked.
+
+| tool | the capability it needs | why it is not here |
+|---|---|---|
+| `AppifactRepl` | the account's artifact SDK | The artifact surface is the account's own; this implementation has no account and no artifact runtime. |
+| `ClaudeDesign` | the account's design projects | The design surface lives in the account; there is nothing here to work with. |
+| `CronCreate` | a scheduler | A schedule is a long-lived timer the session owns; the CLI has no scheduler, and a cron entry that never fires would be worse than none. |
+| `CronDelete` | a scheduler | The same. |
+| `CronList` | a scheduler | The same. |
+| `DesignSync` | the account's design projects | The same as `ClaudeDesign`. |
+| `EnterWorktree` | a worktree manager | The session's working directory is fixed for the life of a session here, so a worktree the session cannot switch into would be a directory nothing uses. |
+| `ExitWorktree` | a worktree manager | The same. |
+| `FetchInboxMessage` | the inter-session relay | The relay is the account's own; a session here has no inbox to read. |
+| `JavaScript` | a JavaScript runtime in the tool loop | The tool loop runs tools, not arbitrary JavaScript, and running model-supplied code outside the sandbox would be a hole. |
+| `ListConnectors` | the connector registry | The registry is the account's marketplace. |
+| `ListPlugins` | the account's plugin catalogue | The catalogue is the account's own. |
+| `ListSkills` | the account's skill catalogue | The catalogue is the account's own. |
+| `ObserverReport` | the harness's observation channel | The harness that produced it is not part of this implementation. |
+| `OfferChromeSetup` | a browser | The browser is the product's own extension; there is none here to set up. |
+| `Poll` | the harness event queue | The queue is the harness's own. |
+| `Projects` | the account's project surface | The project lives in the account. |
+| `PublishPlugin` | the account's plugin library | The library is the account's own. |
+| `PushNotification` | a mobile push channel | There is no phone here to push to. |
+| `REPL` | an interactive REPL in the tool loop | The tool loop is not a REPL. |
+| `ReadNotifications` | the webhook and trigger queue | The queue is fed by the account's own webhooks. |
+| `RefreshMcpTools` | live MCP channels | The extension layer manages the MCP connections; this implementation's MCP seam exposes the **resources** only. |
+| `RemoteTrigger` | the cloud agent runtime | The cloud runtime is the product's own. |
+| `ScheduleWakeup` | the dynamic `/loop` scheduler | The same scheduler the cron tools need. |
+| `SearchMcpRegistry` | the connector registry | The registry is the account's marketplace. |
+| `SendFeedback` | the feedback queue | The queue is the account's own. |
+| `SendFile` | the inter-session relay | The relay is the account's own. |
+| `SendUserFile` | the account's file delivery | The delivery is the account's own. |
+| `ShareOnboardingGuide` | the account's guide library | The library is the account's own. |
+| `ShowOnboardingRolePicker` | the account's onboarding | The onboarding is the account's own. |
+| `SuggestConnectors` | the connector registry | The registry is the account's marketplace. |
+| `SuggestPluginInstall` | the plugin marketplace | The marketplace is the account's own. |
+| `SuggestSkills` | the account's skill catalogue | The catalogue is the account's own. |
+| `SearchPlugins` | the account's plugin catalogue | The catalogue is the account's own. |
+| `SearchSkills` | the account's skill catalogue | The catalogue is the account's own. |
+| `TestingPermission` | the product's own test harness | The tool is the product's own permission probe; this implementation's permission engine is tested by its contract tests instead. |
+| `WaitForMcpServers` | live MCP channels | The same as `RefreshMcpTools`. |
+| `Workflow` | a deterministic-JavaScript sub-agent orchestrator | The orchestrator runs model-supplied JavaScript; the sub-agent seam is the `Agent` tool's `delegate`. |
+| `propose_skills` | the account's skill catalogue | The catalogue is the account's own. |
+| `self_hosted_runner_get_pool` | a self-hosted runner | The runner is the product's own deployment surface. |
+| `self_hosted_runner_list_runners` | a self-hosted runner | The same. |
+| `self_hosted_runner_list_secrets` | a self-hosted runner | The same. |
+| `self_hosted_runner_list_sessions` | a self-hosted runner | The same. |
+| `self_hosted_runner_read_health` | a self-hosted runner | The same. |
+| `self_hosted_runner_read_metrics` | a self-hosted runner | The same. |
+| `self_hosted_runner_requeue_session` | a self-hosted runner | The same. |
+| `self_hosted_runner_spawn_local` | a self-hosted runner | The same. |
+| `self_hosted_runner_tail_log` | a self-hosted runner | The same. |
+
+**Two names in the inventory are not tools.** `latest` and `mcp` are the
+verifier's scan picking up two entries of the target's tool-set arrays that are
+not tool definitions. They are listed here so that the inventory and this
+document agree, and they are not tools.
+
+**One name the sweep derives is not in the record, and it is not a tool
+either.** The verifier's sweep of the target's tool factory derives a name
+`worker_state` that the generated record does not carry; `worker_state` is a
+**worker event subtype** of the target's worker protocol, not a tool
+definition. `scripts/verify-rea.ts` reports that gap at `HEAD` as well, before
+this task, and the generated record is not this task's to regenerate — so the gap
+is **named** here rather than papered over.
+
+**The inventory and the registry are checked against each other.** The contract
+test reads the generated inventory and asserts that **every** name in it is
+either a tool this implementation registers (directly or through an alias) or a
+name this document lists — so a tool that is added to one and not the other
+fails the suite.
 
 ## The runner's order and its failure envelopes
 
@@ -71,9 +235,29 @@ The command runs **inside the sandbox** when the session carries a sandbox polic
 
 **A Bash rule matches command text, not program identity.** `Bash(curl *)` does not stop `/usr/bin/curl` or `sh -c 'curl …'`. This implementation matches text and says so rather than implying a stronger guarantee.
 
-## The `Task` tool
+## The `Agent` tool
 
-Delegates through a `deps.delegate` seam and reports a typed `taskUnavailable` failure when there is no delegate. The **delegation scheduler is not observed** in the audit, so this implementation does not invent one; `CC-010` owns the runtime.
+The target's canonical name for the sub-agent tool is **`Agent`**, and `Task` is
+its alias: the target's alias table maps `Task` to `Agent` and the tool itself
+declares `aliases: ["Task"]`. This implementation therefore names the tool
+`Agent`, and the registry resolves `Task` to it.
+
+It delegates through a `deps.delegate` seam and reports a typed `taskUnavailable` failure when there is no delegate. The **delegation scheduler is not observed** in the audit, so this implementation does not invent one; `CC-010` owns the runtime.
+
+## The capability seams
+
+The tools the target's inventory names need subsystems this implementation does
+not have. Those subsystems are **seams**: `BuiltinToolDeps.capabilities` carries
+the browser, the language server, the agent team, the scheduler, the MCP
+resource surface, the memory surface, the background-task registry, the worktree
+manager, the monitor, the skill catalogue, the web-search backend, the channel to
+the user, the dialog that asks the user a question, and the session's own
+permission mode and working directory.
+
+**A tool whose capability is absent refuses.** It does not pretend: the refusal
+is a typed failure (`capabilityUnavailable`) whose message names the tool and
+the capability. The seams are this implementation's own design — the target holds
+the subsystems directly — and they are labelled as such in the code.
 
 ## Unpinned surfaces (implementation choices, labelled in the code)
 
@@ -180,6 +364,15 @@ These are the places where the clone differs from the target *by choice*, each o
 | A Bash rule matches command text, not program identity | Documented only | F-20 | same file |
 | The malformed-call path reaches the audit's `errorCode: 7` / `3` end-to-end | REA observed | F-20 | `tests/contracts/tool-registry.test.ts` — the end-to-end malformed cases |
 | The rule engine's tool tables name only shipped tools | implementation choice | F-20 | `tests/security/permission-rules.test.ts` — "the rule engine's tool tables" |
+| The registry carries the target's **alias table**, and an alias resolves to its canonical tool | REA observed | F-17 | `tests/contracts/tool-registry.test.ts` — "carries the target's alias table" and "resolves an alias to the canonical tool" |
+| The sub-agent tool is the target's **`Agent`**, and `Task` is its alias | REA observed | F-17 | same file — "the Agent tool" — "is the target’s `Task` alias" |
+| A tool whose capability is absent **refuses** with a typed failure that names the capability | implementation choice (deliberate) | F-17 | same file — "the tools the target’s inventory names" |
+| The `WebSearch` tool searches through the session's backend and refuses a call that names both domain lists | REA observed (the bounds are the target's; the backend seam is this implementation's) | F-17 | same file — "searches the web through the backend the session supplies" |
+| The `ExitPlanMode` tool refuses outside plan mode with the target's own message | REA observed | F-17 | same file — "refuses to leave plan mode outside plan mode" |
+| The `AskUserQuestion` tool refuses a question with fewer than two options | REA observed | F-17 | same file — "refuses a question with fewer than two options" |
+| An `Edit(...)` rule governs a `MultiEdit` call | REA observed | F-20 | same file — "lets an Edit rule govern a MultiEdit call, as the target says" |
+| A `MultiEdit` that fails one edit writes **nothing** | implementation choice | F-18 | same file — "writes nothing when an edit of a MultiEdit fails" |
+| The `Skill` tool invokes a skill the extension layer's registry discovered | REA observed (the registry is the target's; the seam is this implementation's) | F-17 | `tests/contracts/extensions.test.ts` — "the Skill tool and the skill registry" |
 | The terminal UI's **theme** is the target's, value for value, and the role→colour rule is the target's | REA observed | F-39 | `tests/contracts/ui-render.test.ts` — "the theme — the target's colours and the role rule" |
 | The terminal UI's **glyphs** carry the target's platform deltas | REA observed | F-39 | same file — "the glyphs — the target's platform deltas" |
 | The terminal UI's **transcript** rows carry the target's markers, order and colours | REA observed | F-39 | same file — "the transcript — the target's rows" |

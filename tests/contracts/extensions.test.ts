@@ -53,7 +53,7 @@
  *     segment — empty, `.`, `..`, `/`, `\` and NUL are all refused.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -95,6 +95,7 @@ import {
   type SkillContribution,
   type SkillRoot,
 } from '../../src/extensions/skills/registry.js';
+import { createSkillTool } from '../../src/tools/builtins/skill.js';
 import {
   createSubagentRegistry,
   isValidSubagentName,
@@ -3171,5 +3172,86 @@ describe('the IDE bridge', () => {
     await expect(
       transport.send(integration('vscode'), { ide: 'vscode', action: '../../admin' }),
     ).rejects.toThrow(/single path segment/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Skill tool and the skill registry
+// ---------------------------------------------------------------------------
+
+/**
+ * The `Skill` tool and the extension layer's skill registry.
+ *
+ * The tool reaches the skills through the `capabilities.skills` seam, so the
+ * extension layer owns the catalogue and the tool owns the invocation. The two
+ * are wired together here, so a skill the registry discovered is a skill the
+ * tool can invoke.
+ */
+describe('the Skill tool and the skill registry', () => {
+  function skillDeps(registry: ReturnType<typeof createSkillRegistry>) {
+    return {
+      rules: { allow: ['Skill'], deny: [], ask: [], cwd: '/work' },
+      mode: 'default' as const,
+      capabilities: {
+        skills: {
+          resolve: (name: string) => {
+            const skill = registry.resolve(name);
+            if (skill === undefined) return undefined;
+            return {
+              name: skill.name,
+              source: skill.source,
+              description: skill.description,
+              instructions: readFileSync(skill.path, 'utf8'),
+            };
+          },
+          list: () =>
+            registry.list().map((skill) => ({
+              name: skill.name,
+              source: skill.source,
+              description: skill.description,
+              instructions: readFileSync(skill.path, 'utf8'),
+            })),
+        },
+      },
+    };
+  }
+
+  it('invokes a skill the registry discovered', async () => {
+    const cwd = tempDir();
+    const configDir = tempDir();
+    writeSkill(path.join(cwd, '.claude', 'skills'), 'project-skill');
+
+    const registry = createSkillRegistry({ cwd, configDir });
+    const tool = createSkillTool(skillDeps(registry) as never);
+    const ctx = {
+      toolName: 'Skill',
+      input: { skill: 'project-skill' },
+      toolUseId: 'toolu_01',
+      sessionId: 'session-01',
+    };
+
+    const output = await tool.execute({ skill: 'project-skill' }, ctx as never);
+
+    expect(output.commandName).toBe('project-skill');
+    expect(output.text).toContain('The body of project-skill.');
+  });
+
+  it('refuses a skill the registry does not hold', async () => {
+    const cwd = tempDir();
+    const configDir = tempDir();
+
+    const registry = createSkillRegistry({ cwd, configDir });
+    const tool = createSkillTool(skillDeps(registry) as never);
+    const ctx = {
+      toolName: 'Skill',
+      input: { skill: 'nope' },
+      toolUseId: 'toolu_01',
+      sessionId: 'session-01',
+    };
+
+    await expect(tool.execute({ skill: 'nope' }, ctx as never)).rejects.toMatchObject({
+      errorCode: 21,
+      message: 'Unknown skill: nope',
+    });
   });
 });

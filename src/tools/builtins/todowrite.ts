@@ -33,19 +33,9 @@ import {
   rejectUnknownFields,
   type BuiltinToolDeps,
 } from './shared.js';
+import { TodoStore, type Todo, type TodoStatus } from './todostore.js';
 
-/** The status of a todo item. */
-export type TodoStatus = 'pending' | 'in_progress' | 'completed';
-
-/** One item of the todo list. */
-export interface Todo {
-  /** What the item is. */
-  content: string;
-  /** Where the item stands. */
-  status: TodoStatus;
-  /** The present continuous form of the item. */
-  activeForm: string;
-}
+export type { Todo, TodoStatus } from './todostore.js';
 
 /** The input of the `TodoWrite` tool. */
 export interface TodoWriteInput {
@@ -60,6 +50,8 @@ export interface TodoWriteOutput {
   text: string;
   /** The list that was recorded. */
   todos: Todo[];
+  /** The list that was replaced. */
+  oldTodos: Todo[];
 }
 
 /** The input schema of the `TodoWrite` tool. */
@@ -94,10 +86,15 @@ const TODO_STATUSES: ReadonlySet<string> = new Set<TodoStatus>([
 
 /**
  * Create the `TodoWrite` tool.
+ *
+ * The list is **session state**: the tool writes it into the session's store and
+ * reports the list it replaced, exactly as the target does.
  */
 export function createTodoWriteTool(
   deps: BuiltinToolDeps,
 ): ToolDefinition<TodoWriteInput, TodoWriteOutput> {
+  const store = deps.stores?.todos ?? new TodoStore();
+
   return {
     name: 'TodoWrite',
     description: 'Record the list of the tasks that are being worked on.',
@@ -181,15 +178,12 @@ export function createTodoWriteTool(
     },
 
     async execute(input) {
-      const todos = input.todos.map((todo) => ({
-        content: todo.content,
-        status: todo.status,
-        activeForm: todo.activeForm,
-      }));
+      const { oldTodos, newTodos } = store.set(input.todos);
       return {
         type: 'text' as const,
-        text: `Recorded ${todos.length} todo${todos.length === 1 ? '' : 's'}.`,
-        todos,
+        text: `Recorded ${newTodos.length} todo${newTodos.length === 1 ? '' : 's'}.`,
+        todos: newTodos,
+        oldTodos,
       };
     },
   };

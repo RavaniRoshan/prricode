@@ -46,16 +46,34 @@ import {
   createBuiltinTools,
   registerBuiltinTools,
 } from '../../src/tools/builtins/index.js';
+import { createAgentTool } from '../../src/tools/builtins/agent.js';
+import { createAskUserQuestionTool } from '../../src/tools/builtins/askuserquestion.js';
 import { createBashTool, resolveBashTimeout, DEFAULT_BASH_TIMEOUT_MS, MAX_BASH_TIMEOUT_MS } from '../../src/tools/builtins/bash.js';
 import { createEditTool } from '../../src/tools/builtins/edit.js';
+import { createExitPlanModeTool } from '../../src/tools/builtins/exitplanmode.js';
 import { createGlobTool, MAX_GLOB_RESULTS } from '../../src/tools/builtins/glob.js';
 import { createGrepTool, MAX_GREP_FILES } from '../../src/tools/builtins/grep.js';
+import { createListMcpResourcesTool } from '../../src/tools/builtins/listmcpresources.js';
+import { createMultiEditTool } from '../../src/tools/builtins/multiedit.js';
 import { createNotebookEditTool } from '../../src/tools/builtins/notebookedit.js';
+import { createNotebookReadTool } from '../../src/tools/builtins/notebookread.js';
+import { createReadMcpResourceTool } from '../../src/tools/builtins/readmcpresource.js';
+import { createReadMcpResourceDirTool } from '../../src/tools/builtins/readmcpresourcedir.js';
 import { createReadTool } from '../../src/tools/builtins/read.js';
-import { createTaskTool } from '../../src/tools/builtins/task.js';
+import { createReportFindingsTool } from '../../src/tools/builtins/reportfindings.js';
+import { createSendUserMessageTool } from '../../src/tools/builtins/sendusermessage.js';
+import { createSkillTool } from '../../src/tools/builtins/skill.js';
+import { createTaskCreateTool } from '../../src/tools/builtins/taskcreate.js';
+import { createTaskGetTool } from '../../src/tools/builtins/taskget.js';
+import { createTaskListTool } from '../../src/tools/builtins/tasklist.js';
+import { createTaskStopTool } from '../../src/tools/builtins/taskstop.js';
+import { createTaskUpdateTool } from '../../src/tools/builtins/taskupdate.js';
+import { createTodoReadTool } from '../../src/tools/builtins/todoread.js';
 import { createTodoWriteTool } from '../../src/tools/builtins/todowrite.js';
 import type { TodoWriteInput } from '../../src/tools/builtins/todowrite.js';
+import { createToolSearchTool } from '../../src/tools/builtins/toolsearch.js';
 import { createWebFetchTool, MAX_WEBFETCH_BYTES } from '../../src/tools/builtins/webfetch.js';
+import { createWebSearchTool } from '../../src/tools/builtins/websearch.js';
 import { createWriteTool } from '../../src/tools/builtins/write.js';
 import { PathSnapshot, type BuiltinToolDeps } from '../../src/tools/builtins/shared.js';
 import { buildApprovalPrompt } from '../../src/permissions/prompts.js';
@@ -65,6 +83,7 @@ import {
   type RuleSet,
 } from '../../src/permissions/rules.js';
 import { evaluateRules, type PermissionDecision, type ToolContext } from '../../src/permissions/decision.js';
+import { TOOL_ALIASES, resolveToolName } from '../../src/tools/registry.js';
 
 const WORKDIR = '/work';
 
@@ -222,22 +241,113 @@ describe('the tool registry', () => {
     expect(FILE_MUTATING_TOOLS).not.toBe(FILE_MUTATING_TOOL_NAMES);
   });
 
-  it('registers the ten built-in tools', () => {
+  it('registers the built-in tools', () => {
     const registry = createToolRegistry();
     registerBuiltinTools(registry, builtinDeps());
 
     expect(registry.list().map((tool) => tool.name)).toEqual([...BUILTIN_TOOL_NAMES]);
-    expect(BUILTIN_TOOL_NAMES).toHaveLength(10);
-    for (const name of ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebFetch', 'TodoWrite', 'NotebookEdit', 'Task']) {
+    expect(BUILTIN_TOOL_NAMES.length).toBeGreaterThanOrEqual(41);
+    for (const name of [
+      'Read',
+      'Write',
+      'Edit',
+      'MultiEdit',
+      'Bash',
+      'Glob',
+      'Grep',
+      'WebFetch',
+      'WebSearch',
+      'TodoWrite',
+      'TodoRead',
+      'NotebookEdit',
+      'NotebookRead',
+      'Agent',
+      'AskUserQuestion',
+      'ExitPlanMode',
+      'Skill',
+      'ToolSearch',
+      'SendUserMessage',
+      'TaskCreate',
+      'TaskGet',
+      'TaskList',
+      'TaskUpdate',
+      'TaskStop',
+      'ListMcpResourcesTool',
+      'ReadMcpResourceTool',
+      'ReadMcpResourceDirTool',
+    ]) {
       expect(registry.get(name)).toBeDefined();
     }
   });
 
-  it('marks exactly the three file-mutating built-ins as mutating', () => {
+  it('marks the file-mutating built-ins as mutating', () => {
     const tools = createBuiltinTools(builtinDeps());
     const mutating = tools.filter((tool) => tool.mutatesFiles).map((tool) => tool.name);
 
-    expect(mutating.sort()).toEqual(['Edit', 'NotebookEdit', 'Write']);
+    // The **pinned** file-mutating set is the permission module's, and it stays
+    // exactly as the audit records it. `MultiEdit` writes a file, so it declares
+    // that it mutates files and the runner re-resolves its path around the check.
+    expect([...FILE_MUTATING_TOOL_NAMES].sort()).toEqual(['Edit', 'NotebookEdit', 'Write']);
+    expect(mutating.sort()).toEqual(['Edit', 'MultiEdit', 'NotebookEdit', 'Write']);
+  });
+
+  it("carries the target's alias table", () => {
+    expect(TOOL_ALIASES).toEqual({
+      Task: 'Agent',
+      KillShell: 'TaskStop',
+      KillBash: 'TaskStop',
+      ListPeers: 'ListAgents',
+      Brief: 'SendUserMessage',
+      ListMcpResources: 'ListMcpResourcesTool',
+      ReadMcpResource: 'ReadMcpResourceTool',
+      ReadMcpResourceDir: 'ReadMcpResourceDirTool',
+    });
+    expect(resolveToolName('Task')).toBe('Agent');
+    expect(resolveToolName('KillShell')).toBe('TaskStop');
+    expect(resolveToolName('Read')).toBe('Read');
+  });
+
+  it('accounts for every name in the target\'s tool inventory', () => {
+    // The generated inventory is the source of truth: every name in it must be
+    // either a tool this implementation registers or a name the conformance
+    // document lists. A tool added to one and not the other fails here.
+    const root = path.resolve(__dirname, '..', '..');
+    const inventory = readFileSync(
+      path.join(root, 'docs', 'reverse-engineering', 'SURFACE-INVENTORY.md'),
+      'utf8',
+    );
+    const section = inventory.slice(
+      inventory.indexOf('## The tool registry'),
+      inventory.indexOf('## The telemetry vocabulary'),
+    );
+    const names = [...section.matchAll(/^\| `([^`]+)` \|$/gm)].map((match) => match[1] ?? '');
+    expect(names.length).toBeGreaterThan(0);
+
+    const conformance = readFileSync(
+      path.join(root, 'docs', 'compatibility', 'tool-surface.md'),
+      'utf8',
+    );
+    const registry = createToolRegistry();
+    registerBuiltinTools(registry, builtinDeps());
+
+    for (const name of names) {
+      const shipped = registry.get(name) !== undefined;
+      const named = conformance.includes('`' + name + '`');
+      expect([name, shipped || named]).toEqual([name, true]);
+    }
+  });
+
+  it('resolves an alias to the canonical tool', () => {
+    const registry = createToolRegistry();
+    registerBuiltinTools(registry, builtinDeps());
+
+    expect(registry.get('Task')?.name).toBe('Agent');
+    expect(registry.get('KillShell')?.name).toBe('TaskStop');
+    expect(registry.get('Brief')?.name).toBe('SendUserMessage');
+    expect(registry.get('ListMcpResources')?.name).toBe('ListMcpResourcesTool');
+    expect(registry.get('ReadMcpResource')?.name).toBe('ReadMcpResourceTool');
+    expect(registry.get('ReadMcpResourceDir')?.name).toBe('ReadMcpResourceDirTool');
+    expect(registry.get('ListPeers')?.name).toBe('ListAgents');
   });
 });
 
@@ -2471,13 +2581,13 @@ describe('the NotebookEdit tool', () => {
   });
 });
 
-describe('the Task tool', () => {
+describe('the Agent tool', () => {
   it('rejects a call without a prompt', async () => {
-    const tool = createTaskTool(builtinDeps());
+    const tool = createAgentTool(builtinDeps());
 
     const validation = await tool.validateInput(
       raw({ description: 'do the thing' }),
-      toolContext('Task', { description: 'do the thing' }),
+      toolContext('Agent', { description: 'do the thing' }),
     );
 
     expect(validation.ok).toBe(false);
@@ -2486,9 +2596,9 @@ describe('the Task tool', () => {
 
   it('delegates the work to the runner the session supplies', async () => {
     const seen: unknown[] = [];
-    const tool = createTaskTool(
+    const tool = createAgentTool(
       builtinDeps({
-        rules: ruleSet({ allow: ['Task'] }),
+        rules: ruleSet({ allow: ['Agent'] }),
         delegate: async (input) => {
           seen.push(input);
           return 'the sub-agent finished';
@@ -2496,7 +2606,7 @@ describe('the Task tool', () => {
       }),
     );
     const input = { description: 'do the thing', prompt: 'do the thing' };
-    const ctx = toolContext('Task', input);
+    const ctx = toolContext('Agent', input);
 
     const decision = await tool.checkPermissions(input, ctx);
     expect(decision?.behavior).toBe('allow');
@@ -2508,9 +2618,9 @@ describe('the Task tool', () => {
 
   it('hands the kind of sub-agent to the delegate', async () => {
     const seen: unknown[] = [];
-    const tool = createTaskTool(
+    const tool = createAgentTool(
       builtinDeps({
-        rules: ruleSet({ allow: ['Task'] }),
+        rules: ruleSet({ allow: ['Agent'] }),
         delegate: async (input) => {
           seen.push(input);
           return 'done';
@@ -2523,19 +2633,26 @@ describe('the Task tool', () => {
       subagent_type: 'explore',
     };
 
-    await tool.execute(input, toolContext('Task', input));
+    await tool.execute(input, toolContext('Agent', input));
 
     expect(seen).toEqual([input]);
     expect((seen[0] as { subagent_type?: string }).subagent_type).toBe('explore');
   });
 
   it('reports a typed failure when no task runner is available', async () => {
-    const tool = createTaskTool(builtinDeps({ rules: ruleSet({ allow: ['Task'] }) }));
+    const tool = createAgentTool(builtinDeps({ rules: ruleSet({ allow: ['Agent'] }) }));
     const input = { description: 'do the thing', prompt: 'do the thing' };
 
-    await expect(tool.execute(input, toolContext('Task', input))).rejects.toMatchObject({
+    await expect(tool.execute(input, toolContext('Agent', input))).rejects.toMatchObject({
       errorCode: TOOL_ERROR_CODES.taskUnavailable,
     });
+  });
+
+  it('is the target’s `Task` alias', () => {
+    const tool = createAgentTool(builtinDeps());
+
+    expect(tool.name).toBe('Agent');
+    expect(resolveToolName('Task')).toBe('Agent');
   });
 });
 
@@ -2969,7 +3086,8 @@ describe('the concurrency-safety flag', () => {
 
     // `NotebookEdit` is this implementation's notebook tool, and it **mutates**
     // a file: the target's notebook **read** tool is the concurrency-safe one.
-    for (const name of ['Edit', 'Write', 'NotebookEdit', 'Task', 'TodoWrite']) {
+    // The sub-agent tool is the target's `Agent` — `Task` is its alias.
+    for (const name of ['Edit', 'Write', 'NotebookEdit', 'Agent', 'TodoWrite']) {
       expect([name, isToolConcurrencySafe(byName.get(name), {})]).toEqual([name, false]);
     }
   });
@@ -2983,5 +3101,456 @@ describe('the concurrency-safety flag', () => {
     expect(isToolConcurrencySafe(tool, { command: 'echo hello > out.txt' })).toBe(false);
     // A command the tool cannot read is not read-only.
     expect(isToolConcurrencySafe(tool, { command: 42 })).toBe(false);
+  });
+});
+
+// --- the target's tool inventory -------------------------------------------------
+
+/**
+ * The tools the target's inventory names and this implementation did not have.
+ *
+ * Every one of them must be **real**: it must do what its `searchHint` says, and
+ * a tool whose capability is absent must **refuse** with a typed failure that
+ * names the capability — never pretend.
+ */
+describe('the tools the target’s inventory names', () => {
+  it('searches the web through the backend the session supplies', async () => {
+    const seen: { query: string; options: { allowedDomains?: string[] } }[] = [];
+    const tool = createWebSearchTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['WebSearch'] }),
+        capabilities: {
+          webSearch: async (query, options) => {
+            seen.push({ query, options });
+            return [{ title: 'A page', url: 'https://example.com/a' }];
+          },
+        },
+      }),
+    );
+    const input = { query: 'typescript tutorial', allowed_domains: ['example.com'] };
+    const ctx = toolContext('WebSearch', input);
+
+    const decision = await tool.checkPermissions(input, ctx);
+    expect(decision?.behavior).toBe('allow');
+
+    const output = await tool.execute(input, ctx);
+    expect(output.results).toEqual([{ title: 'A page', url: 'https://example.com/a' }]);
+    expect(seen[0]?.query).toBe('typescript tutorial');
+    expect(seen[0]?.options.allowedDomains).toEqual(['example.com']);
+  });
+
+  it('refuses a web search when the session has no backend', async () => {
+    const tool = createWebSearchTool(builtinDeps({ rules: ruleSet({ allow: ['WebSearch'] }) }));
+    const input = { query: 'typescript tutorial' };
+
+    await expect(tool.execute(input, toolContext('WebSearch', input))).rejects.toMatchObject({
+      errorCode: TOOL_ERROR_CODES.capabilityUnavailable,
+    });
+  });
+
+  it('refuses a web search that names both an allow list and a block list', async () => {
+    const tool = createWebSearchTool(builtinDeps());
+
+    const validation = await tool.validateInput(
+      raw({ query: 'a query', allowed_domains: ['a.com'], blocked_domains: ['b.com'] }),
+      toolContext('WebSearch', {}),
+    );
+
+    expect(validation.ok).toBe(false);
+  });
+
+  it('reads the cells of a notebook', async () => {
+    const root = makeDirectory();
+    const notebook = path.join(root, 'book.ipynb');
+    writeFileSync(
+      notebook,
+      JSON.stringify({
+        cells: [
+          { cell_type: 'markdown', source: ['# Title\n'], metadata: {} },
+          { cell_type: 'code', source: 'print(1)', execution_count: 1, metadata: { language: 'python' } },
+        ],
+      }),
+    );
+
+    const tool = createNotebookReadTool(
+      builtinDeps({ rules: ruleSet({ allow: ['NotebookRead'] }), cwd: root }),
+    );
+    const input = { notebook_path: notebook };
+
+    const output = await tool.execute(input, toolContext('NotebookRead', input));
+    expect(output.cells).toHaveLength(2);
+    expect(output.cells[0]?.cellType).toBe('markdown');
+    expect(output.cells[0]?.source).toBe('# Title\n');
+    expect(output.cells[1]?.language).toBe('python');
+    expect(output.cells[1]?.execution_count).toBe(1);
+  });
+
+  it('refuses a file that is not a notebook', async () => {
+    const root = makeDirectory();
+    const file = path.join(root, 'a.txt');
+    writeFileSync(file, 'not a notebook');
+
+    const tool = createNotebookReadTool(
+      builtinDeps({ rules: ruleSet({ allow: ['NotebookRead'] }), cwd: root }),
+    );
+    const input = { notebook_path: file };
+
+    await expect(tool.execute(input, toolContext('NotebookRead', input))).rejects.toMatchObject({
+      errorCode: TOOL_ERROR_CODES.invalidNotebook,
+    });
+  });
+
+  it('asks the user the questions it was given', async () => {
+    const asked: string[] = [];
+    const tool = createAskUserQuestionTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['AskUserQuestion'] }),
+        capabilities: {
+          askUser: async (question) => {
+            asked.push(question.question);
+            return { answer: 'the first option' };
+          },
+        },
+      }),
+    );
+    const input = {
+      questions: [
+        {
+          question: 'Which one?',
+          options: [{ label: 'a' }, { label: 'b' }],
+        },
+      ],
+    };
+
+    const output = await tool.execute(input, toolContext('AskUserQuestion', input));
+    expect(asked).toEqual(['Which one?']);
+    expect(output.answers).toEqual({ 'Which one?': 'the first option' });
+  });
+
+  it('refuses a question with fewer than two options', async () => {
+    const tool = createAskUserQuestionTool(builtinDeps());
+
+    const validation = await tool.validateInput(
+      raw({ questions: [{ question: 'Which one?', options: [{ label: 'a' }] }] }),
+      toolContext('AskUserQuestion', {}),
+    );
+
+    expect(validation.ok).toBe(false);
+    expect(validation.ok ? '' : validation.message).toContain('fewer than 2 options');
+  });
+
+  it('refuses to leave plan mode outside plan mode', async () => {
+    const tool = createExitPlanModeTool(builtinDeps({ mode: 'default' }));
+
+    await expect(
+      tool.execute({ plan: 'a plan' }, toolContext('ExitPlanMode', { plan: 'a plan' })),
+    ).rejects.toMatchObject({
+      errorCode: TOOL_ERROR_CODES.invalidState,
+      message: expect.stringContaining('You are not in plan mode'),
+    });
+  });
+
+  it('presents the plan in plan mode and reports the approval', async () => {
+    const asked: string[] = [];
+    const tool = createExitPlanModeTool(
+      builtinDeps({
+        mode: 'plan',
+        rules: ruleSet({ allow: ['ExitPlanMode'] }),
+        capabilities: {
+          askUser: async (question) => {
+            asked.push(question.question);
+            return { answer: 'Yes' };
+          },
+        },
+      }),
+    );
+    const input = { plan: 'the plan' };
+
+    const output = await tool.execute(input, toolContext('ExitPlanMode', input));
+    expect(asked[0]).toContain('the plan');
+    expect(output.plan).toBe('the plan');
+  });
+
+  it('invokes a skill the catalogue holds and refuses one it does not', async () => {
+    const tool = createSkillTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Skill'] }),
+        capabilities: {
+          skills: {
+            resolve: (name) =>
+              name === 'known' ? { name: 'known', instructions: 'the instructions' } : undefined,
+            list: () => [],
+          },
+        },
+      }),
+    );
+
+    const output = await tool.execute(
+      { skill: '/known' },
+      toolContext('Skill', { skill: '/known' }),
+    );
+    expect(output.text).toBe('the instructions');
+    expect(output.commandName).toBe('known');
+
+    await expect(
+      tool.execute({ skill: 'unknown' }, toolContext('Skill', { skill: 'unknown' })),
+    ).rejects.toMatchObject({ errorCode: TOOL_ERROR_CODES.notFound });
+  });
+
+  it('applies the edits of a MultiEdit in order and writes the file once', async () => {
+    const root = makeDirectory();
+    const file = path.join(root, 'a.txt');
+    writeFileSync(file, 'one two three');
+
+    const tool = createMultiEditTool(
+      builtinDeps({ rules: ruleSet({ allow: ['MultiEdit'] }), cwd: root }),
+    );
+    const input = {
+      file_path: file,
+      edits: [
+        { old_string: 'one', new_string: 'ONE' },
+        { old_string: 'three', new_string: 'THREE' },
+      ],
+    };
+
+    const output = await tool.execute(input, toolContext('MultiEdit', input));
+    expect(output.replacements).toBe(2);
+    expect(readFileSync(file, 'utf8')).toBe('ONE two THREE');
+  });
+
+  it('lets an Edit rule govern a MultiEdit call, as the target says', async () => {
+    const root = makeDirectory();
+    const file = path.join(root, 'a.txt');
+    writeFileSync(file, 'x');
+
+    const tool = createMultiEditTool(
+      builtinDeps({ rules: ruleSet({ deny: ['Edit(a.txt)'], cwd: root }), cwd: root }),
+    );
+    const input = { file_path: file, edits: [{ old_string: 'x', new_string: 'y' }] };
+
+    const decision = await tool.checkPermissions(input, toolContext('MultiEdit', input));
+    expect(decision?.behavior).toBe('deny');
+  });
+
+  it('writes nothing when an edit of a MultiEdit fails', async () => {
+    const root = makeDirectory();
+    const file = path.join(root, 'a.txt');
+    writeFileSync(file, 'one two');
+
+    const tool = createMultiEditTool(
+      builtinDeps({ rules: ruleSet({ allow: ['MultiEdit'] }), cwd: root }),
+    );
+    const input = {
+      file_path: file,
+      edits: [
+        { old_string: 'one', new_string: 'ONE' },
+        { old_string: 'missing', new_string: 'x' },
+      ],
+    };
+
+    await expect(tool.execute(input, toolContext('MultiEdit', input))).rejects.toMatchObject({
+      errorCode: TOOL_ERROR_CODES.stringNotFound,
+    });
+    expect(readFileSync(file, 'utf8')).toBe('one two');
+  });
+
+  it('reads the todo list the TodoWrite tool wrote', async () => {
+    const deps = builtinDeps({ rules: ruleSet({ allow: ['TodoWrite', 'TodoRead'] }) });
+    const registry = createToolRegistry();
+    registerBuiltinTools(registry, deps);
+
+    const todos: TodoWriteInput = {
+      todos: [
+        { content: 'write the tests', status: 'in_progress', activeForm: 'Writing the tests' },
+      ],
+    };
+    await registry.get('TodoWrite')?.execute(todos, toolContext('TodoWrite', todos));
+
+    const read = registry.get('TodoRead');
+    const output = await read?.execute({}, toolContext('TodoRead', {}));
+    expect((output as { todos: unknown[] }).todos).toHaveLength(1);
+  });
+
+  it('creates, reads, lists and updates the tasks of the task list', async () => {
+    const deps = builtinDeps({
+      rules: ruleSet({ allow: ['TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate'] }),
+    });
+    const registry = createToolRegistry();
+    registerBuiltinTools(registry, deps);
+
+    const created = (await registry.get('TaskCreate')?.execute(
+      { subject: 'do the thing', description: 'the description' },
+      toolContext('TaskCreate', {}),
+    )) as { task: { id: string; subject: string } };
+    expect(created.task.subject).toBe('do the thing');
+
+    const fetched = (await registry.get('TaskGet')?.execute(
+      { taskId: created.task.id },
+      toolContext('TaskGet', {}),
+    )) as { task: { description: string } | null };
+    expect(fetched.task?.description).toBe('the description');
+
+    const updated = (await registry.get('TaskUpdate')?.execute(
+      { taskId: created.task.id, status: 'completed' },
+      toolContext('TaskUpdate', {}),
+    )) as { success: boolean; updatedFields: string[] };
+    expect(updated.success).toBe(true);
+    expect(updated.updatedFields).toContain('status');
+
+    const listed = (await registry.get('TaskList')?.execute(
+      {},
+      toolContext('TaskList', {}),
+    )) as { tasks: { id: string; status: string }[] };
+    expect(listed.tasks).toHaveLength(1);
+    expect(listed.tasks[0]?.status).toBe('completed');
+  });
+
+  it('answers a TaskGet for a task that does not exist with a null task', async () => {
+    const tool = createTaskGetTool(builtinDeps());
+
+    const output = await tool.execute({ taskId: '999' }, toolContext('TaskGet', {}));
+    expect(output.task).toBeNull();
+  });
+
+  it('stops a background task and refuses when there is no registry', async () => {
+    const stopped: string[] = [];
+    const tool = createTaskStopTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['TaskStop'] }),
+        capabilities: {
+          backgroundTasks: {
+            get: (id) => ({ id, state: 'running', command: 'sleep 1' }),
+            list: () => [],
+            stop: async (id) => {
+              stopped.push(id);
+              return true;
+            },
+          },
+        },
+      }),
+    );
+
+    const output = await tool.execute({ task_id: 't1' }, toolContext('TaskStop', {}));
+    expect(stopped).toEqual(['t1']);
+    expect(output.task_id).toBe('t1');
+
+    const without = createTaskStopTool(builtinDeps());
+    await expect(without.execute({ task_id: 't1' }, toolContext('TaskStop', {}))).rejects.toMatchObject({
+      errorCode: TOOL_ERROR_CODES.capabilityUnavailable,
+    });
+  });
+
+  it('finds a tool by keyword and by name', async () => {
+    const registry = createToolRegistry();
+    registerBuiltinTools(registry, builtinDeps());
+    const tool = createToolSearchTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['ToolSearch'] }),
+        capabilities: { toolCatalogue: () => registry.list() },
+      }),
+    );
+
+    const byKeyword = await tool.execute({ query: 'notebook' }, toolContext('ToolSearch', {}));
+    expect(byKeyword.matches).toContain('NotebookRead');
+
+    const byName = await tool.execute(
+      { query: 'select:NotebookEdit' },
+      toolContext('ToolSearch', {}),
+    );
+    expect(byName.matches).toEqual(['NotebookEdit']);
+  });
+
+  it('delivers a message to the user and refuses when there is no channel', async () => {
+    const delivered: string[] = [];
+    const tool = createSendUserMessageTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['SendUserMessage'] }),
+        capabilities: {
+          sendUserMessage: async (message) => {
+            delivered.push(message);
+          },
+        },
+      }),
+    );
+
+    await tool.execute({ message: 'hello' }, toolContext('SendUserMessage', {}));
+    expect(delivered).toEqual(['hello']);
+
+    const without = createSendUserMessageTool(builtinDeps());
+    await expect(
+      without.execute({ message: 'hello' }, toolContext('SendUserMessage', {})),
+    ).rejects.toMatchObject({ errorCode: TOOL_ERROR_CODES.capabilityUnavailable });
+  });
+
+  it('lists, reads and walks the MCP resources of the connected servers', async () => {
+    const provider = {
+      listResources: async () => [
+        { uri: 'file:///a.txt', name: 'a.txt', server: 'files' },
+      ],
+      readResource: async () => [{ uri: 'file:///a.txt', text: 'the content' }],
+      readResourceDir: async () => [{ uri: 'file:///dir/', name: 'dir', server: 'files' }],
+    };
+    const deps = builtinDeps({
+      rules: ruleSet({ allow: ['ListMcpResourcesTool', 'ReadMcpResourceTool', 'ReadMcpResourceDirTool'] }),
+      capabilities: { mcp: provider },
+    });
+
+    const listed = await createListMcpResourcesTool(deps).execute(
+      {},
+      toolContext('ListMcpResourcesTool', {}),
+    );
+    expect(listed.resources).toHaveLength(1);
+
+    const read = await createReadMcpResourceTool(deps).execute(
+      { server: 'files', uri: 'file:///a.txt' },
+      toolContext('ReadMcpResourceTool', {}),
+    );
+    expect(read.contents[0]?.text).toBe('the content');
+
+    const dir = await createReadMcpResourceDirTool(deps).execute(
+      { server: 'files', uri: 'file:///dir/' },
+      toolContext('ReadMcpResourceDirTool', {}),
+    );
+    expect(dir.resources).toHaveLength(1);
+  });
+
+  it('refuses the MCP resource tools when no server is connected', async () => {
+    const deps = builtinDeps();
+
+    await expect(
+      createListMcpResourcesTool(deps).execute({}, toolContext('ListMcpResourcesTool', {})),
+    ).rejects.toMatchObject({ errorCode: TOOL_ERROR_CODES.capabilityUnavailable });
+    await expect(
+      createReadMcpResourceTool(deps).execute(
+        { server: 'files', uri: 'file:///a.txt' },
+        toolContext('ReadMcpResourceTool', {}),
+      ),
+    ).rejects.toMatchObject({ errorCode: TOOL_ERROR_CODES.capabilityUnavailable });
+    await expect(
+      createReadMcpResourceDirTool(deps).execute(
+        { server: 'files', uri: 'file:///dir/' },
+        toolContext('ReadMcpResourceDirTool', {}),
+      ),
+    ).rejects.toMatchObject({ errorCode: TOOL_ERROR_CODES.capabilityUnavailable });
+  });
+
+  it('reports the code-review findings it was given', async () => {
+    const tool = createReportFindingsTool(
+      builtinDeps({ rules: ruleSet({ allow: ['ReportFindings'] }) }),
+    );
+    const input = {
+      level: 'medium',
+      findings: [
+        {
+          file: 'src/a.ts',
+          summary: 'the guard is missing',
+          failure_scenario: 'a null value reaches the dereference',
+        },
+      ],
+    };
+
+    const output = await tool.execute(input, toolContext('ReportFindings', input));
+    expect(output.count).toBe(1);
+    expect(output.findings[0]?.file).toBe('src/a.ts');
   });
 });

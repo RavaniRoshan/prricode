@@ -128,7 +128,12 @@ import { type RuleSet } from '../../permissions/rules.js';
 import type { SandboxBackend } from '../../platform/sandbox/launcher.js';
 import type { SandboxPolicy } from '../../platform/sandbox/policy.js';
 
-import { TOOL_ERROR_CODES, type ToolRecheck } from '../registry.js';
+import { TOOL_ERROR_CODES, ToolExecutionError, type ToolRecheck } from '../registry.js';
+import type { ToolCapabilities } from './capabilities.js';
+import type { TaskStore } from './taskstore.js';
+import type { TodoStore } from './todostore.js';
+
+export type { ToolCapabilities } from './capabilities.js';
 
 /** The dependencies every built-in tool is built with. */
 export interface BuiltinToolDeps {
@@ -209,6 +214,33 @@ export interface BuiltinToolDeps {
   classifier?: (ctx: ToolContext) => Promise<AutoModeVerdict | undefined>;
   /** The delegate the `Task` tool runs a sub-agent through. */
   delegate?: (input: unknown, ctx: ToolContext) => Promise<string>;
+  /**
+   * The capabilities the newer tools need.
+   *
+   * **A capability is a seam, not a constant.** The browser, the language server,
+   * the agent team, the scheduler, the MCP channel and the worktree manager are
+   * subsystems this implementation does not have; the session supplies them when
+   * it has them, and a tool whose capability is absent **refuses** rather than
+   * pretending. See `src/tools/builtins/capabilities.ts`.
+   */
+  capabilities?: ToolCapabilities;
+  /**
+   * The **stores** the stateful tools read and write.
+   *
+   * The todo list and the task list are **session state**, not files and not
+   * capabilities: they exist whether or not the session has a browser or a
+   * scheduler. `createBuiltinTools` builds a pair of stores when the session
+   * supplies none, so the tools that read and write the same list share it.
+   */
+  stores?: ToolStores;
+}
+
+/** The stores the stateful tools share. */
+export interface ToolStores {
+  /** The session's task checklist. */
+  todos?: TodoStore;
+  /** The session's task list. */
+  tasks?: TaskStore;
 }
 
 /** The result of a tool's own input validation. */
@@ -377,6 +409,38 @@ export function fileToolSafetyCheck(
     }
     return safetyCheckForTool(ctx);
   };
+}
+
+/**
+ * The refusal a tool gives when the capability it needs is not in the session.
+ *
+ * The refusal is **typed** and it **names the capability**, so the model — and the
+ * user — learn what is missing instead of being handed a plausible answer.
+ */
+export function capabilityRefusal(toolName: string, capability: string): ToolExecutionError {
+  return new ToolExecutionError(
+    `The '${toolName}' tool needs the ${capability}, which this session does not have, so the call was refused.`,
+    TOOL_ERROR_CODES.capabilityUnavailable,
+  );
+}
+
+/**
+ * The capability a tool needs, or the refusal that says it is missing.
+ *
+ * The tool's own name is the first argument, so the refusal says which tool
+ * refused and what it needed.
+ */
+export function requireCapability<T>(
+  deps: BuiltinToolDeps,
+  toolName: string,
+  capability: string,
+  pick: (capabilities: ToolCapabilities) => T | undefined,
+): T {
+  const value = pick(deps.capabilities ?? {});
+  if (value === undefined) {
+    throw capabilityRefusal(toolName, capability);
+  }
+  return value;
 }
 
 /**

@@ -149,23 +149,74 @@ const PRIMARY_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
   Bash: ['command'],
   Edit: ['file_path'],
   Write: ['file_path'],
+  MultiEdit: ['file_path'],
   NotebookEdit: ['notebook_path', 'file_path'],
+  NotebookRead: ['notebook_path', 'file_path'],
   Read: ['file_path'],
   Glob: ['path'],
   Grep: ['path'],
   WebFetch: ['url'],
+  WebSearch: ['query'],
+  Cd: ['path'],
+  Skill: ['skill'],
+  TaskStop: ['task_id', 'shell_id'],
+  GetTask: ['taskId'],
+  ListMcpResourcesTool: ['server'],
+  ReadMcpResourceTool: ['uri'],
+  ReadMcpResourceDirTool: ['uri'],
+  LSP: ['filePath'],
+  memory_read: ['path'],
+  memory_write: ['path'],
 };
 
 const PATH_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
   Edit: ['file_path'],
   Write: ['file_path'],
+  MultiEdit: ['file_path'],
   NotebookEdit: ['notebook_path', 'file_path'],
+  NotebookRead: ['notebook_path', 'file_path'],
   Read: ['file_path'],
   Glob: ['path'],
   Grep: ['path'],
+  Cd: ['path'],
+  LSP: ['filePath'],
+  memory_read: ['path'],
+  memory_write: ['path'],
 };
 
 const DEFAULT_PATH_FIELDS: readonly string[] = ['file_path', 'notebook_path', 'path'];
+
+/**
+ * The rule groups the target uses.
+ *
+ * The target's own rule validation says that a `MultiEdit(path)` rule "is not
+ * matched by file permission checks — only `Edit(path)` rules are", because the
+ * `Edit` rules cover every file-editing tool
+ * (`chunk-c9s0jh80.js:236134`, read out of the pinned build). This
+ * implementation therefore matches an `Edit` rule against a `MultiEdit` call.
+ *
+ * **The group is additive and narrow.** It adds the `MultiEdit` case the target
+ * names and nothing else: the `Read` group — which covers `Grep` and `Glob` —
+ * is **not** widened here, because the read tools already apply the `Read(...)`
+ * rules to their results (the read deny filter), and widening the rule match
+ * would change what an `allow` rule approves.
+ */
+const RULE_GROUPS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  Edit: ['MultiEdit'],
+});
+
+/**
+ * Whether a rule that names one tool governs a call to another.
+ *
+ * The tool names are caller-supplied data, so the lookup is an **own-property**
+ * check.
+ */
+function ruleCoversTool(ruleToolName: string, toolName: string): boolean {
+  if (ruleToolName === toolName) return true;
+  if (!Object.hasOwn(RULE_GROUPS, ruleToolName)) return false;
+  const group = RULE_GROUPS[ruleToolName];
+  return group !== undefined && group.includes(toolName);
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -352,7 +403,7 @@ function matchRule(parsed: ParsedRule, context: MatchContext): MatchResult {
   const { tool } = context;
   if (parsed.malformed) return NO_MATCH;
 
-  const sameTool = parsed.toolName === tool.toolName;
+  const sameTool = ruleCoversTool(parsed.toolName, tool.toolName);
 
   // The parameter form `Tool(param:value)`.
   if (parsed.param !== undefined) {
@@ -601,7 +652,7 @@ export function evaluateRuleList(
  */
 function isPrimaryContentRule(parsed: ParsedRule, tool: ToolContext): boolean {
   if (parsed.param === undefined) return false;
-  if (parsed.toolName !== tool.toolName) return false;
+  if (!ruleCoversTool(parsed.toolName, tool.toolName)) return false;
   return primaryFieldsFor(tool.toolName).includes(parsed.param);
 }
 
@@ -703,7 +754,7 @@ export function collectRuleWarnings(rules: RuleSet, tool: ToolContext): string[]
         continue;
       }
       if (parsed.param === undefined) continue;
-      if (parsed.toolName !== tool.toolName) continue;
+      if (!ruleCoversTool(parsed.toolName, tool.toolName)) continue;
       if (!primary.includes(parsed.param)) continue;
       warnings.push(
         kind === 'deny'
