@@ -44,7 +44,7 @@
  * - `--outdir` — the directory the executable is written into. Default `dist`.
  *   A **relative** directory is resolved against the directory the command
  *   runs in, and not against the repository's root.
- * - `--name` — the name of the executable. Default `claude`.
+ * - `--name` — the name of the executable. Default `agent`.
  * - `--target` — the Bun target the executable is compiled for. Default: the
  *   host platform.
  */
