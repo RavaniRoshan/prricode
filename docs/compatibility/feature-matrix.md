@@ -22,8 +22,8 @@
 
 | ID | Group | Requirement | Status | Evidence class | Evidence / source | Implementation status | Owning task | Test ref |
 |---|---|---|---|---|---|---|---|---|
-| F-01 | CLI | CLI entry, flags, subcommands | partial | REA observed | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`, `ev_55449a84611a36ea464f40e34521dc3eda4ed244d6ff37baa2fc163d64070fe5` | not started | CC-014 | `tests/contracts/cli-surface.test.ts` |
-| F-02 | CLI | Headless (`--print`) and output formats | partial | REA observed | same as F-01 | not started | CC-014 | `tests/contracts/cli-surface.test.ts` |
+| F-01 | CLI | CLI entry, flags, subcommands | partial | REA observed | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`, `ev_55449a84611a36ea464f40e34521dc3eda4ed244d6ff37baa2fc163d64070fe5` |  implemented | CC-014 | `tests/contracts/cli-surface.test.ts` |
+| F-02 | CLI | Headless (`--print`) and output formats | partial | REA observed | same as F-01 |  implemented | CC-014 | `tests/contracts/cli-surface.test.ts` |
 | F-03 | Configuration | Configuration file tiers | observed | REA observed | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`; tier constants `C7s`, `Ble`, `D_`, `VD` | implemented | CC-003 | `tests/contracts/settings-precedence.test.ts` |
 | F-04 | Configuration | Configuration precedence algorithm | partial | REA observed | same as F-03 | implemented | CC-003 | `tests/contracts/settings-precedence.test.ts` |
 | F-05 | Configuration | Settings scope isolation and suppression | observed | REA observed | `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` suppression of `projectSettings`/`localSettings`; project tier skipped when it resolves to the user settings path; `machine_admin` read mode for `policySettings` | implemented | CC-003 | `tests/contracts/settings-precedence.test.ts` |
