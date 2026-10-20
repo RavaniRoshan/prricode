@@ -170,6 +170,32 @@
  * continues, so the answer is carried in the transcript and reaches the model
  * in the session's next request.
  *
+ * ## An oversized tool result is stubbed too
+ *
+ * The content-replacement mechanism exists so that an oversized tool result
+ * does not come back into the **context**. The store writes the payload
+ * **verbatim** and a content-replacement record beside it, and the two
+ * **projection** paths — the between-turns load (`conversationFromEvents`) and
+ * the cross-turn projection (`resumeEvents`) — apply the replacement when they
+ * project the transcript.
+ *
+ * The **within-turn** push applies it as well. The turn the tool ran is the
+ * turn an oversized payload matters most in: it is the turn that would blow up.
+ * So the block the runtime pushes into its next request carries the **stub**
+ * when the content is over the limit, and the content as it is when it is not.
+ *
+ * The **rule** is the store's own — `contentReplacementStub`, reached by
+ * import — and the **limit** is the store's own limit, read from
+ * `SessionStore.maxToolResultBytes`. There is therefore one rule, and the
+ * within-turn block, the between-turns load and the cross-turn projection
+ * carry the same content for the same transcript.
+ *
+ * The stub's **wire form** — the stub's own JSON,
+ * `{"type":"tool_result_stub", …}` — is a **implementation choice**: the audit pins that
+ * the oversized payload does not come back into the context, and not what the
+ * stub looks like on the wire. The same label sits on the stub's type in
+ * `src/session/event.ts` and on the rule in `src/session/store.ts`.
+ *
  * ## Implementation choices
  *
  * The audit does not pin these, so they are marked here:
@@ -184,7 +210,9 @@
  *     to the provider as an error result (the audit records the target's
  *     `<tool_use_error>` for a validation failure, and the tool runner owns the
  *     content of that result), while a call that was **refused** is answered
- *     with a `<tool_use_error>` wrapper of its own.
+ *     with a `<tool_use_error>` wrapper of its own;
+ *   - the **stub's wire form**, and the fact that the within-turn push applies
+ *     the store's stub rule — see the section above.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -203,7 +231,12 @@ import type {
   StopReason,
 } from '../provider/drivers/types.js';
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../session/event.js';
-import type { SessionHandle, SessionStore } from '../session/store.js';
+import {
+  DEFAULT_MAX_TOOL_RESULT_BYTES,
+  contentReplacementStub,
+  type SessionHandle,
+  type SessionStore,
+} from '../session/store.js';
 import type { ToolDefinition, ToolRegistry, ToolRecheck } from '../tools/registry.js';
 import { runTool, type ToolResultEnvelope } from '../tools/runner.js';
 
@@ -582,7 +615,22 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
           // refusal — the `<tool_use_error>` wrapper the target produces.
           const answer = outcome.kind === 'refused' ? refusalEnvelope(envelope) : envelope;
           await append({ ...base(), t: 'tool_result', envelope: answer });
-          resultBlocks.push(toolResultBlock(call.id, answer.content, answer.isError));
+
+          // The **within-turn** push is stubbed too. The content-replacement
+          // mechanism exists so that an oversized tool result does not come
+          // back into the **context**, and the turn the tool ran is the turn it
+          // matters most in: the payload is in the transcript, and the model
+          // sees the stub.
+          //
+          // The rule is the store's own — `contentReplacementStub`, reached by
+          // import — and the limit is the store's own limit, so the within-turn
+          // block, the between-turns load and the cross-turn projection carry
+          // the same content for the same transcript.
+          const stub = contentReplacementStub(
+            answer.content,
+            deps.store.maxToolResultBytes ?? DEFAULT_MAX_TOOL_RESULT_BYTES,
+          );
+          resultBlocks.push(toolResultBlock(call.id, stub ?? answer.content, answer.isError));
 
           if (outcome.kind === 'refused') {
             // The call did not run. It is answered with the refusal, and the

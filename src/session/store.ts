@@ -73,7 +73,10 @@
  *     and a content-replacement entry, but not the threshold. The limit bounds
  *     what the **context** carries: the transcript keeps the payload, and the
  *     replacement is applied when the session is **resumed** — by
- *     `resumeEvents`, not by this store's reader.
+ *     `resumeEvents`, not by this store's reader — and in the **turn the tool
+ *     ran**, by the within-turn push in `src/agent/loop.ts`. The rule itself
+ *     is `contentReplacementStub`, exported from here, and it is the **one**
+ *     rule: the store's own append and the within-turn push both reach it.
  *   - The **carried-prompt file** is `<configDir>/carried-prompts.jsonl`. The
  *     audit records that the target "reads a file, parses prompts, filters out
  *     prompts marked `perhapsDelivered`" but not where the file lives.
@@ -239,6 +242,20 @@ export interface SessionSummary {
 
 /** The store's contract. */
 export interface SessionStore {
+  /**
+   * The largest tool-result content, in bytes, that is kept **in the context**.
+   *
+   * The store **owns** the limit, so a consumer that has to decide whether a
+   * tool result is oversized — the **within-turn** push in `src/agent/loop.ts` —
+   * reads it here rather than keeping a second rule of its own.
+   *
+   * It is **optional**: a store that does not name one uses the default limit,
+   * and the test doubles that stand in for a store keep compiling. A store that
+   * *does* name one must publish the resolved limit here, or the within-turn
+   * path falls back to the default while the store's own content-replacement
+   * record uses the store's limit — and the two would disagree.
+   */
+  readonly maxToolResultBytes?: number;
   /** Create a session — or open an existing one, when the id is given. */
   create(opts: { cwd: string; sessionId?: string }): Promise<SessionHandle>;
   /** Append one record. The transcript is never rewritten. */
@@ -258,9 +275,11 @@ export interface SessionStoreOptions {
    *
    * A larger content is stored verbatim in the transcript, and a
    * content-replacement record is appended beside it. The replacement is
-   * applied when the session is **resumed** — by `resumeEvents` in
-   * `src/session/resume.ts`, not by this store's reader — so the payload does
-   * not come back into the context.
+   * applied wherever a transcript is turned into a context — when the session
+   * is **resumed** (by `resumeEvents` in `src/session/resume.ts`), when a turn
+   * loads the conversation between turns (by `conversationFromEvents`), and in
+   * the **turn the tool ran** (by the within-turn push in
+   * `src/agent/loop.ts`) — so the payload does not come back into the context.
    */
   maxToolResultBytes?: number;
   /** The clock. */
@@ -306,6 +325,44 @@ export function serializedSize(value: unknown): number {
   } catch {
     return Number.POSITIVE_INFINITY;
   }
+}
+
+/**
+ * The stub that stands in for an oversized tool result.
+ *
+ * **This is the one stub rule.** The store owns the limit, so the rule lives
+ * here and every path that has to decide whether a tool result is oversized
+ * reaches this function:
+ *
+ *   - the store's own append, which writes the **content-replacement record**
+ *     beside the verbatim payload (`recordsFor`, below); and
+ *   - the **within-turn** push in `src/agent/loop.ts`, which decides what the
+ *     model sees in the **turn the tool ran** — the turn an oversized payload
+ *     matters most in, because that is the turn it would blow up.
+ *
+ * A content at or under the limit has **no** stub: the function returns
+ * `undefined`, and the caller carries the content as it is. A content over the
+ * limit is replaced by the stub, and the payload stays in the transcript.
+ *
+ * **The stub's wire form** — the stub's own JSON, `{"type":"tool_result_stub",
+ * …}` — is a **implementation choice**: the audit pins that the oversized payload does
+ * not come back into the context, and not what the stub looks like on the
+ * wire. The same label sits on the stub's type in `src/session/event.ts`.
+ *
+ * @param content the tool result's content.
+ * @param maxBytes the limit, in bytes. The default is the store's default.
+ */
+export function contentReplacementStub(
+  content: unknown,
+  maxBytes: number = DEFAULT_MAX_TOOL_RESULT_BYTES,
+): ToolResultStub | undefined {
+  const bytes = serializedSize(content);
+  if (bytes <= maxBytes) return undefined;
+  return {
+    type: 'tool_result_stub',
+    originalBytes: Number.isFinite(bytes) ? bytes : 0,
+    message: `The tool result was ${Number.isFinite(bytes) ? bytes : 'of an unknown size'} bytes and was replaced by a stub; the full output is not part of the context.`,
+  };
 }
 
 /**
@@ -415,22 +472,22 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
    * **verbatim**, and a **content-replacement record** is appended beside it:
    * the record says which record's content is oversized and what stub stands
    * in for it. The payload stays in the transcript — the data is not lost —
-   * and the replacement is applied when the session is **resumed** (by
-   * `resumeEvents`), not by this store's reader, so the payload does not come
-   * back into the context.
+   * and the replacement is applied wherever a transcript is turned into a
+   * context: when the session is **resumed** (by `resumeEvents`), when a turn
+   * loads the conversation between turns (by `conversationFromEvents`), and in
+   * the **turn the tool ran** (by the within-turn push in
+   * `src/agent/loop.ts`). This store's reader never applies it, so the payload
+   * does not come back into the context.
    */
   function recordsFor(event: SessionEvent): SessionEvent[] {
     if (event.t !== 'tool_result') return [event];
     const envelope: ToolResultEnvelope | undefined = event.envelope;
     if (envelope === undefined) return [event];
-    const bytes = serializedSize(envelope.content);
-    if (bytes <= maxToolResultBytes) return [event];
+    // The **one** stub rule: the store's own rule, reached by import, so the
+    // content-replacement record and the within-turn push cannot disagree.
+    const stub = contentReplacementStub(envelope.content, maxToolResultBytes);
+    if (stub === undefined) return [event];
 
-    const stub: ToolResultStub = {
-      type: 'tool_result_stub',
-      originalBytes: Number.isFinite(bytes) ? bytes : 0,
-      message: `The tool result was ${Number.isFinite(bytes) ? bytes : 'of an unknown size'} bytes and was replaced by a stub; the full output is not part of the context.`,
-    };
     const replacement: SessionEvent = {
       v: SESSION_SCHEMA_VERSION,
       t: 'content_replacement',
@@ -471,6 +528,10 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
   }
 
   return {
+    // The limit the store owns, published so that the **within-turn** push
+    // applies the same rule the store's own content-replacement record does.
+    maxToolResultBytes,
+
     async create(opts: { cwd: string; sessionId?: string }): Promise<SessionHandle> {
       const sessionId = assertValidSessionId(opts.sessionId ?? randomUUID());
       const filePath = sessionFilePath(configDir, opts.cwd, sessionId);

@@ -130,6 +130,14 @@ export const SESSION_SCHEMA_VERSION = 1;
  *
  * This implementation stores a **stub** instead of the payload so that a large file read
  * cannot blow the context window when the session is resumed.
+ *
+ * **The stub's wire form is a implementation choice.** The audit pins that the
+ * oversized payload does not come back into the context, and not what the stub
+ * looks like on the wire: the discriminator, the byte count and the notice are
+ * this implementation's own. The stub reaches the model on **every** path that puts a
+ * tool result into a context — the **within-turn** push of a running turn
+ * (`src/agent/loop.ts`), the **between-turns** load and the **cross-turn**
+ * projection — and all of them carry this same shape.
  */
 export interface ToolResultStub {
   /** The discriminator of a stub. */
