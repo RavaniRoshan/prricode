@@ -956,10 +956,46 @@ safe — the target's own default, and it is what the read is wrapped in:
 
 `Bash`'s flag is `isConcurrencySafe(e){return this.isReadOnly?.(e)??!1}`, so it needs a
 **read-only classifier**. The target has one, and it also reports a reason when a call is
-**not** read-only (`notReadOnlyReason`), and it refuses to call anything read-only when
-the session runs its shell commands only in its cloud environment. The classifier's rule
-is not established by this milestone and must be read from the source before the
-classifier is written.
+**not** read-only (`notReadOnlyReason`).
+
+**The classifier's rule is established** — it was read from the source, and the record is
+`/home/shiva/opt/reference-agent-rea/analysis/findings-read-only-classifier.md`. A shell
+command is read-only when it **parses simply** and **every** command in it is either a
+known read-only command or a write command invoked in a read-only way.
+
+The target's decision sequence, in order:
+
+1. too long → not read-only;
+2. the command does not parse simply → not read-only;
+3. it contains a **subshell** or a **compound statement** → not read-only;
+4. it contains a **`&`** (backgrounding) → not read-only;
+5. it makes a **bare assignment** to an environment variable that is not allowlisted → not read-only;
+6. it contains an **unquoted variable expansion** → not read-only;
+7. it contains a **Windows UNC path** → the target *asks* rather than deciding;
+8. it is a compound `cd`+`git` command, or a git command that would need extra checks → not read-only;
+9. every command in it passes the per-command test → **read-only**.
+
+The **per-command test**: no writing redirect, no `/dev/tcp` or `/dev/udp` redirect, no
+UNC path among the arguments, no environment variable outside the allowlist, no
+dangerous argument, and the command itself is read-only.
+
+The **read-only command tables** the target uses:
+
+- `read` — `cd`, `ls`, `find`, `cat`, `head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `paste`, `column`, `tr`, `file`, `stat`, `diff`, `awk`, `gawk`, `mawk`, `nawk`, `strings`, `hexdump`, `od`, `base64`, `nl`, `tac`, `man`, `rev`, `fold`, `expand`, `unexpand`, `fmt`, `comm`, `cmp`, `pr`, `numfmt`, `tsort`, `grep`, `egrep`, `fgrep`, `rg`, `git`, `jq`, `sha256sum`, `sha1sum`, `md5sum`;
+- `create` — `mkdir`, `touch`;
+- `write` — `rm`, `rmdir`, `mv`, `cp`, `sed`, `tee`;
+- a **glob-safe** set — `ls`, `cat`, `head`, `tail`, `wc`, `stat`, `grep`, `egrep`, `fgrep`, `diff`, `du`, `df`, `echo`, `strings`, `hexdump`, `od`, `nl`, `cut`, `column`, `tr`, `tac`, `rev`, `cmp`, `basename`, `dirname`, `realpath`, `readlink`, `sha256sum`, `sha1sum`, `md5sum`, `cd`;
+- a **pattern** set — `echo`, `claude -h`, `claude --help`, `uniq`, `pwd`, `whoami`, `node -v`, `node --version`, `python --version`, `python3 --version`, `history`, `alias`, `arch`, `ip addr`, `ifconfig`, and `jq` **unless** it is given a flag that writes or runs code.
+
+The per-command argument rules the target applies: `ls` is read-only outright; `cd` only
+with **at most one** argument; `find` is read-only **unless** an argument is `-delete`,
+`-rm`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint0?`, `-fls`, `-fprintf` or
+`-files0-from`; `git` is **not** read-only when the text contains ` -c ` or ` --exec-path=`;
+`history`, `arch` and `ifconfig` only with their allowed argument shapes.
+
+**This implementation already has the machinery**: `src/permissions/shell.ts` is the
+shell lexer — the sub-commands, their redirections and their invocations — and the
+classifier is built on it.
 
 This implementation runs every tool call of a message **sequentially, in message
 order**, and says so in its module header. That was recorded as an implementation
