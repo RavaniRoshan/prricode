@@ -11,12 +11,30 @@
  * input is never executed. The rule engine lives in `src/permissions/rules.ts` and
  * never rewrites anything.
  *
- * **The `PreToolUse` seam goes through the same path.** `createPreToolUseHook` maps
- * the hooks module's `PreToolUse` approval into the permission decision vocabulary
- * and runs the tool's validator and the safety check against the **effective**
- * input, exactly as the `PermissionRequest` seam does. The mapping lives here, in
- * the permission layer, because the approval the hooks module produces carries a
- * `decision.behavior` and nothing else.
+ * **The `PreToolUse` seam maps the hooks module's approval into the permission
+ * decision vocabulary.** The mapping lives here, in the permission layer, because
+ * the approval the hooks module produces carries a `decision.behavior` and nothing
+ * else. The mapping is **pure**: the tool's own validator and the safety check
+ * are the **permission layer's** job (`checkPermission` in `src/permissions/
+ * decision.ts`), because they judge the input the tool would act on and they run
+ * there **once** per call, against the **effective** input. A seam that ran them
+ * itself would run them twice over a rewritten call — once for the original and
+ * once for the re-check of the rewrite — and a caller-supplied check that is not
+ * idempotent would see four invocations per tool call.
+ *
+ * **The `PermissionRequest` seam keeps its own rewrite check.** The function
+ * `applyPermissionRequestHook` runs the tool's validator and the safety check
+ * against the rewritten input, and that behaviour is pinned by
+ * `tests/contracts/permission-decision.test.ts`: a rewritten input the tool
+ * rejects denies the call, and a refusal is a `safetyCheck`, never a user denial.
+ *
+ * **The hooks module's decision vocabulary is imported type-only.** The
+ * `PreToolUse` seam understands `allow`, `ask`, `defer` and `deny`, and the
+ * permission layer's own vocabulary has three of them. The four-value type comes
+ * from the hooks module (`HookDecisionValue`) through a **type-only** import,
+ * which is erased at compile time: the permission layer does not depend on the
+ * hooks module at runtime, so the import cannot close a cycle — the hooks module
+ * imports the permission layer, never the other way round.
  *
  * **A safety check is independent of the rule engine.** A `PermissionRequest` hook
  * may approve a WebFetch whose approved arguments the tool cannot verify; the fetch
@@ -66,7 +84,14 @@
 
 import path from 'node:path';
 
-import { describeReason, type PermissionDecision, type ToolContext } from './decision.js';
+import type { HookDecisionValue } from '../extensions/hooks/runner.js';
+
+import {
+  describeReason,
+  type PermissionDecision,
+  type ToolContext,
+  type ToolInputValidator,
+} from './decision.js';
 import {
   extractPrimaryValue,
   extractToolPath,
@@ -75,6 +100,15 @@ import {
   shellSubCommandParts,
   shellSubCommandMutatesFiles,
 } from './rules.js';
+
+/**
+ * The tool's own input validation.
+ *
+ * The type lives in the decision module, because the permission layer runs the
+ * validator against the **effective** input; it is re-exported here so that a
+ * caller of this module still finds it where it always was.
+ */
+export type { ToolInputValidator };
 
 /** The result of validating a tool's arguments. */
 export type ToolInputVerification = { ok: true } | { ok: false; message: string };
@@ -156,40 +190,29 @@ export function safetyCheckForTool(ctx: ToolContext): PermissionDecision | undef
   };
 }
 
-/** A `PermissionRequest` hook's approval. */
-export interface PermissionRequestHookApproval {
-  /** The hook event name; only `PermissionRequest` is an approval. */
-  hookEventName?: string;
-  /** The hook's decision. */
-  decision?: { behavior: 'allow' | 'deny'; reason?: string };
-  /** The rewritten tool input. */
-  updatedInput?: unknown;
-  /**
-   * Whether a classifier may turn this approval into an allow.
-   *
-   * `false` marks an approval that must not be laundered by the auto-mode review.
-   */
-  classifierApprovable?: boolean;
-}
-
 /**
  * The behaviors a hook's approval can carry.
+ *
+ * This is the **hooks module's** decision vocabulary, imported **type-only**.
+ * The import is erased at compile time, so the permission layer does not depend
+ * on the hooks module at runtime and the import cannot close a cycle: the hooks
+ * module imports the permission layer, never the other way round.
  *
  * The `PermissionRequest` seam only ever sees `allow` and `deny` — the audit names
  * those two for a permission-request decision. The `PreToolUse` seam also
  * understands `ask` and `defer`.
  */
-export type HookApprovalBehavior = 'allow' | 'deny' | 'ask' | 'defer';
+export type HookApprovalBehavior = HookDecisionValue;
 
 /**
  * A hook's approval, in the shape the permission layer maps into a decision.
  *
- * The hooks module's approval (`PermissionRequestHookApproval`) is a **narrower**
- * shape of this one, so it is assignable to it: the seam is reused rather than
- * duplicated.
+ * The hooks module's `PermissionRequest` approval (`PermissionRequestHookApproval`)
+ * is a **narrower** shape of this one, so it is assignable to it: the seam is
+ * reused rather than duplicated.
  */
 export interface HookApproval {
-  /** The hook event name. */
+  /** The hook event name; it names the hook in the reason text. */
   hookEventName?: string;
   /** The hook's decision. */
   decision?: { behavior: HookApprovalBehavior; reason?: string };
@@ -203,11 +226,16 @@ export interface HookApproval {
   classifierApprovable?: boolean;
 }
 
-/** A tool's own input validation. */
-export type ToolInputValidator = (
-  input: unknown,
-  ctx: ToolContext,
-) => { ok: true } | { ok: false; message: string; errorCode?: number };
+/**
+ * A `PermissionRequest` hook's approval.
+ *
+ * It is the **narrowing** of `HookApproval`: the `PermissionRequest` seam only
+ * ever sees `allow` and `deny`, so its decision carries no `ask` and no `defer`.
+ */
+export interface PermissionRequestHookApproval extends HookApproval {
+  /** The hook's decision. */
+  decision?: { behavior: 'allow' | 'deny'; reason?: string };
+}
 
 /** The options the hook approval path runs with. */
 export interface HookApprovalOptions {
@@ -291,7 +319,8 @@ export function applyPermissionRequestHook(
 ): PermissionDecision | undefined {
   if (!hook) return undefined;
 
-  const hookName = opts.hookName ?? 'PermissionRequest';
+  // The hook's own event name names it in the reason; the option overrides it.
+  const hookName = opts.hookName ?? hook.hookEventName ?? 'PermissionRequest';
   const behavior = hook.decision?.behavior;
   if (behavior === 'deny') {
     return {
@@ -332,9 +361,12 @@ export function applyPermissionRequestHook(
  * A caller written against the plan therefore still works, and the hooks module's
  * `createPreToolUseApproval` plugs straight in.
  *
- * **The rewrite goes through the same path as the `PermissionRequest` seam**: the
- * tool's own validator and the safety check run against the **effective** input,
- * so a rewritten input the tool rejects denies the call.
+ * **The mapping is pure.** The tool's own validator and the safety check are the
+ * **permission layer's** job: they judge the input the tool would act on, and
+ * they run there **once** per call, against the **effective** input. A seam that
+ * ran them itself would run them twice — once for the original call and once for
+ * the re-check of the rewritten one — and a caller-supplied check that is not
+ * idempotent would see four invocations per tool call.
  *
  * **An `ask` is the pending question** and **a `defer` is no opinion** — the
  * implementation's pick, pinned by `tests/contracts/permission-hook.test.ts`:
@@ -350,10 +382,6 @@ export function applyPermissionRequestHook(
 export function createPreToolUseHook(opts: {
   /** The hook's own approval, or `undefined` when the hook did not decide. */
   approval: (ctx: ToolContext) => HookApproval | undefined | Promise<HookApproval | undefined>;
-  /** The safety check, run against the rewritten input. */
-  safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
-  /** The tool's own validator, run against the rewritten input. */
-  validate?: ToolInputValidator;
 }): (ctx: ToolContext) => Promise<PermissionDecision | undefined> {
   return async (ctx: ToolContext) => {
     const approval = await opts.approval(ctx);
@@ -365,10 +393,10 @@ export function createPreToolUseHook(opts: {
     // A deferral is no opinion: the normal permission path decides.
     if (behavior === 'defer') return undefined;
 
-    if (behavior === 'ask') {
-      const checked = checkRewrittenInput(approval, ctx, opts);
-      if (!checked.ok) return checked.decision;
+    // The hook's own event name names it in the reason.
+    const hookName = approval.hookEventName ?? 'PreToolUse';
 
+    if (behavior === 'ask') {
       const reason =
         approval.decision?.reason ?? 'A PreToolUse hook asked for this call to be approved.';
       const decision: PermissionDecision = {
@@ -383,12 +411,24 @@ export function createPreToolUseHook(opts: {
       return decision;
     }
 
-    // `allow` and `deny` go through the same path as the `PermissionRequest` seam.
-    return applyPermissionRequestHook(approval, ctx, {
-      safetyCheck: opts.safetyCheck,
-      validate: opts.validate,
-      hookName: 'PreToolUse',
-    });
+    if (behavior === 'deny') {
+      return {
+        behavior: 'deny',
+        source: 'hook',
+        reasonType: 'other',
+        reason: approval.decision?.reason ?? `A ${hookName} hook denied this call.`,
+      };
+    }
+
+    const decision: PermissionDecision = {
+      behavior: 'allow',
+      source: 'hook',
+      reasonType: 'other',
+      reason: `A ${hookName} hook approved this call.`,
+    };
+    if (approval.updatedInput !== undefined) decision.updatedInput = approval.updatedInput;
+    if (approval.classifierApprovable === false) decision.classifierApprovable = false;
+    return decision;
   };
 }
 

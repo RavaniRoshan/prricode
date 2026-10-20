@@ -11,12 +11,15 @@
  * It also pins the merge of the two hook seams (the stricter wins, and the two can
  * never cancel each other), the meaning of an `ask` and a `defer` coming from a
  * `PreToolUse` hook, and the rewrite path (the whole check runs again against the
- * effective input, and a rewritten input the tool's validator rejects denies the
- * call).
+ * effective input, a rewritten input the tool's validator rejects denies the
+ * call, the rewrite survives the prompt, and the validator and the safety check
+ * run **once** each).
  */
 
 import { describe, expect, it, vi } from 'vitest';
 
+import type { HookDecisionValue } from '../../src/extensions/hooks/runner.js';
+import { createPreToolUseApproval } from '../../src/extensions/hooks/runner.js';
 import {
   PERMISSION_STRICTNESS,
   checkPermission,
@@ -29,10 +32,13 @@ import {
   type ToolContext,
 } from '../../src/permissions/decision.js';
 import {
+  applyPermissionRequestHook,
   createPreToolUseHook,
   effectiveInput,
   safetyCheckForTool,
   type HookApproval,
+  type HookApprovalBehavior,
+  type PermissionRequestHookApproval,
 } from '../../src/permissions/prompts.js';
 
 const WORKDIR = '/work';
@@ -87,12 +93,25 @@ function hookDecision(
  *
  * The plan names the member as
  * `(ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>`,
- * so a caller written against the plan must still compile.
+ * so a caller written against the plan must still compile — and the option must
+ * be **exactly** that: a widened option would still accept the plan's caller.
+ *
+ * The member is optional, so its type is the plan's signature **or undefined**,
+ * and the pin is an **equality**: widening the option — to accept `null`, say —
+ * breaks the compile.
  */
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : false;
 const PLAN_SIGNED_PRE_TOOL_USE_HOOK: CheckPermissionOptions['preToolUseHook'] = async () => {
   const decision: PermissionDecision | undefined = undefined;
   return decision;
 };
+const PRE_TOOL_USE_HOOK_IS_EXACTLY_THE_PLAN_SIGNATURE: Equal<
+  CheckPermissionOptions['preToolUseHook'],
+  | ((ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>)
+  | undefined
+> = true;
 
 /**
  * A compile-time pin on the behavior vocabulary.
@@ -100,11 +119,53 @@ const PLAN_SIGNED_PRE_TOOL_USE_HOOK: CheckPermissionOptions['preToolUseHook'] = 
  * The vocabulary is closed and has **no** `defer`: a hook that defers has no word
  * in the permission decision, so it cannot be anything but an absence of opinion.
  */
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+type PermissionBehaviorIsClosed = Equal<PermissionBehavior, 'allow' | 'deny' | 'ask'>;
+const BEHAVIOR_VOCABULARY_HAS_NO_DEFER: PermissionBehaviorIsClosed = true;
+
+/**
+ * A compile-time pin on the hooks module's decision vocabulary.
+ *
+ * The permission layer's `HookApprovalBehavior` **is** the hooks module's
+ * `HookDecisionValue`: the four values are imported type-only, so the copy that
+ * could drift is gone.
+ */
+const HOOK_APPROVAL_BEHAVIOR_IS_THE_HOOKS_VOCABULARY: Equal<
+  HookApprovalBehavior,
+  HookDecisionValue
+> = true;
+
+/**
+ * A compile-time pin on the approval shapes.
+ *
+ * The `PermissionRequest` approval is a **narrowing** of the general one, so the
+ * two are one concept and not two copies of it.
+ */
+const PERMISSION_REQUEST_APPROVAL_IS_A_HOOK_APPROVAL: PermissionRequestHookApproval extends HookApproval
   ? true
-  : false;
-const BEHAVIOR_VOCABULARY_HAS_NO_DEFER: Equal<PermissionBehavior, 'allow' | 'deny' | 'ask'> =
-  true;
+  : false = true;
+
+/**
+ * A compile-time pin on the narrowing itself.
+ *
+ * The `PermissionRequest` seam only ever sees `allow` and `deny`; the general
+ * approval also knows the `PreToolUse` seam's `ask` and `defer`.
+ */
+const PERMISSION_REQUEST_BEHAVIOR_IS_THE_NARROWING: Equal<
+  NonNullable<PermissionRequestHookApproval['decision']>['behavior'],
+  'allow' | 'deny'
+> = true;
+
+/**
+ * A compile-time pin that the seam is **ready to be wired**.
+ *
+ * The hooks module's `createPreToolUseApproval` is the approval callback of the
+ * `PreToolUse` seam, and it plugs straight in: the seam's `approval` option
+ * takes it unchanged. The production call site is the tool runner's
+ * (`src/tools/builtins/shared.ts`), which is the next milestone's work.
+ */
+const HOOKS_MODULE_APPROVAL_FITS_THE_SEAM: (
+  ctx: ToolContext,
+) => HookApproval | undefined | Promise<HookApproval | undefined> = createPreToolUseApproval([]);
 
 describe('the PreToolUse seam — the precedence', () => {
   it('does not let a PreToolUse approval override a deny rule', async () => {
@@ -253,9 +314,18 @@ describe('the merge of the two hook seams', () => {
   it('ranks the behaviors allow below ask below deny', () => {
     expect(permissionStrictness('allow')).toBeLessThan(permissionStrictness('ask'));
     expect(permissionStrictness('ask')).toBeLessThan(permissionStrictness('deny'));
-    expect(PERMISSION_STRICTNESS.allow).toBe(1);
-    expect(PERMISSION_STRICTNESS.ask).toBe(2);
-    expect(PERMISSION_STRICTNESS.deny).toBe(3);
+    expect(PERMISSION_STRICTNESS.get('allow')).toBe(1);
+    expect(PERMISSION_STRICTNESS.get('ask')).toBe(2);
+    expect(PERMISSION_STRICTNESS.get('deny')).toBe(3);
+  });
+
+  it('fails closed on a behavior outside the closed vocabulary', () => {
+    // The table is a `Map`: a lookup with a key of the caller's own making
+    // reaches `undefined` and never `Object.prototype`.
+    expect(PERMISSION_STRICTNESS.get('nonsense' as PermissionBehavior)).toBeUndefined();
+    expect(permissionStrictness('nonsense' as PermissionBehavior)).toBe(
+      PERMISSION_STRICTNESS.get('deny'),
+    );
   });
 });
 
@@ -273,6 +343,27 @@ describe('the meaning of a PreToolUse question and a PreToolUse deferral', () =>
     expect(decision.behavior).toBe('ask');
     // The question reaches the prompt: the hook asked for a human decision.
     expect(canUseTool).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the hook's reason and source into the pending question", async () => {
+    const canUseTool = vi.fn(async (_ctx: ToolContext, _decision: PermissionDecision) => undefined);
+
+    const decision = await checkPermission(tool(), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook: async () =>
+        hookDecision('ask', { reason: 'This call touches the production database.' }),
+      canUseTool,
+    });
+
+    expect(decision.behavior).toBe('ask');
+    // The question the user is asked is the hook's question, not the generic one.
+    expect(decision.reason).toBe('This call touches the production database.');
+    expect(decision.source).toBe('hook');
+    // The prompt is asked with that question.
+    const [, prompted] = canUseTool.mock.calls[0] ?? [];
+    expect(prompted?.reason).toBe('This call touches the production database.');
+    expect(prompted?.source).toBe('hook');
   });
 
   it('does not let a PreToolUse question override a deny rule', async () => {
@@ -358,6 +449,30 @@ describe('the meaning of a PreToolUse question and a PreToolUse deferral', () =>
     expect(decision.behavior).toBe('ask');
     expect(decision.source).not.toBe('hook');
   });
+
+  it('takes an ask from the hooks module as the pending question', async () => {
+    // The hooks module's `PreToolUse` decision vocabulary has four values; the
+    // permission layer takes the `ask` as the question the prompt asks.
+    const preToolUseHook = createPreToolUseHook({
+      approval: async () => ({
+        hookEventName: 'PreToolUse',
+        decision: { behavior: 'ask', reason: 'The hook wants a human to look at this.' },
+      }),
+    });
+
+    const canUseTool = vi.fn(async () => undefined);
+    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook,
+      canUseTool,
+    });
+
+    expect(decision.behavior).toBe('ask');
+    expect(decision.source).toBe('hook');
+    expect(decision.reason).toBe('The hook wants a human to look at this.');
+    expect(canUseTool).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('the PreToolUse rewrite', () => {
@@ -398,12 +513,130 @@ describe('the PreToolUse rewrite', () => {
     expect(effectiveInput(decision, { command: 'ls -l' })).toEqual({ command: 'ls /var' });
   });
 
+  it('does not downgrade a hook approval to an ask because the hook rewrote the input', async () => {
+    const preToolUseHook = createPreToolUseHook({
+      approval: async () => ({
+        decision: { behavior: 'allow' },
+        updatedInput: { command: 'ls /var' },
+      }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook,
+    });
+
+    // The hook approved the call and produced the rewrite, so its approval
+    // covers the input it produced: the rewrite alone does not escalate the
+    // call to a prompt.
+    expect(decision.behavior).toBe('allow');
+    expect(decision.source).toBe('hook');
+    expect(decision.updatedInput).toEqual({ command: 'ls /var' });
+  });
+
+  it('keeps the rewrite when the prompt resolves the call', async () => {
+    const preToolUseHook = createPreToolUseHook({
+      approval: async () => ({
+        decision: { behavior: 'allow' },
+        updatedInput: { command: 'ls /var' },
+      }),
+    });
+    const canUseTool = vi.fn(
+      async (_ctx: ToolContext, _decision: PermissionDecision) =>
+        ({
+          behavior: 'allow' as const,
+          source: 'user_temporary' as const,
+          reasonType: 'other' as const,
+        }) as PermissionDecision,
+    );
+
+    const decision = await checkPermission(
+      tool({ input: { command: 'git push origin main' } }),
+      {
+        rules: rules({ ask: ['Bash(git push *)'] }),
+        mode: 'default',
+        preToolUseHook,
+        canUseTool,
+      },
+    );
+
+    // The prompt showed the call that will really run.
+    expect(canUseTool).toHaveBeenCalledTimes(1);
+    const [prompted] = canUseTool.mock.calls[0] ?? [];
+    expect(prompted?.input).toEqual({ command: 'ls /var' });
+
+    // The user's answer is a decision about that input, so the rewrite rides
+    // along with it: the input the tool receives is the rewritten one.
+    expect(decision.behavior).toBe('allow');
+    expect(decision.updatedInput).toEqual({ command: 'ls /var' });
+    expect(effectiveInput(decision, { command: 'git push origin main' })).toEqual({
+      command: 'ls /var',
+    });
+  });
+
+  it('keeps the rewrite when the prompt resolves a hook question', async () => {
+    const preToolUseHook = createPreToolUseHook({
+      approval: async () => ({
+        decision: { behavior: 'ask', reason: 'A human has to look at this.' },
+        updatedInput: { command: 'ls /var' },
+      }),
+    });
+    const canUseTool = vi.fn(
+      async (_ctx: ToolContext, _decision: PermissionDecision) =>
+        ({
+          behavior: 'allow' as const,
+          source: 'user_temporary' as const,
+          reasonType: 'other' as const,
+        }) as PermissionDecision,
+    );
+
+    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook,
+      canUseTool,
+    });
+
+    expect(canUseTool).toHaveBeenCalledTimes(1);
+    const [prompted] = canUseTool.mock.calls[0] ?? [];
+    expect(prompted?.input).toEqual({ command: 'ls /var' });
+    expect(decision.behavior).toBe('allow');
+    expect(decision.updatedInput).toEqual({ command: 'ls /var' });
+  });
+
+  it('keeps the rewrite on an ask that no prompt resolved', async () => {
+    const preToolUseHook = createPreToolUseHook({
+      approval: async () => ({
+        decision: { behavior: 'ask', reason: 'A human has to look at this.' },
+        updatedInput: { command: 'ls /var' },
+      }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook,
+    });
+
+    // A rewrite is never lost: the decision records the effective input even
+    // when the call is still a question.
+    expect(decision.behavior).toBe('ask');
+    expect(decision.updatedInput).toEqual({ command: 'ls /var' });
+  });
+
   it('denies the call when the rewritten input is rejected by the tool validator', async () => {
     const preToolUseHook = createPreToolUseHook({
       approval: async () => ({
         decision: { behavior: 'allow' },
         updatedInput: { command: '' },
       }),
+    });
+
+    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook,
       validate: (input) => {
         const command =
           typeof input === 'object' && input !== null
@@ -416,12 +649,6 @@ describe('the PreToolUse rewrite', () => {
       },
     });
 
-    const decision = await checkPermission(tool({ input: { command: 'ls -l' } }), {
-      rules: rules(),
-      mode: 'default',
-      preToolUseHook,
-    });
-
     expect(decision.behavior).toBe('deny');
     expect(decision.reason).toContain('the command argument is missing');
   });
@@ -432,7 +659,6 @@ describe('the PreToolUse rewrite', () => {
         decision: { behavior: 'allow' },
         updatedInput: { url: 'not-a-url' },
       }),
-      safetyCheck: safetyCheckForTool,
     });
 
     const decision = await checkPermission(
@@ -441,6 +667,7 @@ describe('the PreToolUse rewrite', () => {
         rules: rules(),
         mode: 'default',
         preToolUseHook,
+        safetyCheck: safetyCheckForTool,
       },
     );
 
@@ -449,11 +676,44 @@ describe('the PreToolUse rewrite', () => {
     expect(decision.source).toBe('hook');
   });
 
+  it('runs the safety check and the validator once each, on the effective input', async () => {
+    const preToolUseHook = createPreToolUseHook({
+      approval: async () => ({
+        decision: { behavior: 'allow' },
+        updatedInput: { command: 'ls /var' },
+      }),
+    });
+
+    const seen: unknown[] = [];
+    const safetyCheck = vi.fn((ctx: ToolContext) => {
+      seen.push(ctx.input);
+      return undefined;
+    });
+    const validate = vi.fn((input: unknown) => {
+      seen.push(input);
+      return { ok: true as const };
+    });
+
+    await checkPermission(tool({ input: { command: 'ls -l' } }), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook,
+      safetyCheck,
+      validate,
+    });
+
+    // A caller-supplied check that is not idempotent sees one invocation per
+    // call, and it sees the input the tool would act on.
+    expect(safetyCheck).toHaveBeenCalledTimes(1);
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([{ command: 'ls /var' }, { command: 'ls /var' }]);
+  });
+
   it('keeps the denial of the hook when the check runs again against the effective input', async () => {
     const preToolUseHook = createPreToolUseHook({
       approval: async (ctx) => {
         const command =
-          typeof ctx.input === 'object' && ctx.input !== null
+          typeof ctx.input === 'object' && ctx !== null && ctx.input !== null
             ? (ctx.input as Record<string, unknown>)['command']
             : undefined;
         if (command === 'ls /var') {
@@ -479,6 +739,53 @@ describe('the PreToolUse rewrite', () => {
   });
 });
 
+describe('a hook that fails', () => {
+  it('denies the call when the PreToolUse hook throws', async () => {
+    const decision = await checkPermission(tool(), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook: async () => {
+        throw new Error('the hook crashed');
+      },
+    });
+
+    // A hook failure is neither a crash nor a bypass: the call is refused.
+    expect(decision.behavior).toBe('deny');
+    expect(decision.source).toBe('hook');
+    expect(decision.reason).toContain('the hook crashed');
+  });
+
+  it('denies the call when the PermissionRequest hook throws', async () => {
+    const decision = await checkPermission(tool(), {
+      rules: rules(),
+      mode: 'default',
+      hook: async () => {
+        throw new Error('the hook crashed');
+      },
+    });
+
+    expect(decision.behavior).toBe('deny');
+    expect(decision.source).toBe('hook');
+    expect(decision.reason).toContain('the hook crashed');
+  });
+
+  it('gives a hook denial without a reason a reason', async () => {
+    const decision = await checkPermission(tool(), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook: async () => ({
+        behavior: 'deny',
+        source: 'hook',
+        reasonType: 'other',
+      }),
+    });
+
+    expect(decision.behavior).toBe('deny');
+    expect(decision.reason).toBeTypeOf('string');
+    expect(decision.reason?.length).toBeGreaterThan(0);
+  });
+});
+
 describe('the PreToolUse seam and the plan-shaped option', () => {
   it('accepts a caller written against the plan', async () => {
     const decision = await checkPermission(tool(), {
@@ -489,6 +796,11 @@ describe('the PreToolUse seam and the plan-shaped option', () => {
 
     expect(decision.behavior).toBe('ask');
     expect(BEHAVIOR_VOCABULARY_HAS_NO_DEFER).toBe(true);
+    expect(PRE_TOOL_USE_HOOK_IS_EXACTLY_THE_PLAN_SIGNATURE).toBe(true);
+    expect(HOOK_APPROVAL_BEHAVIOR_IS_THE_HOOKS_VOCABULARY).toBe(true);
+    expect(PERMISSION_REQUEST_APPROVAL_IS_A_HOOK_APPROVAL).toBe(true);
+    expect(PERMISSION_REQUEST_BEHAVIOR_IS_THE_NARROWING).toBe(true);
+    expect(HOOKS_MODULE_APPROVAL_FITS_THE_SEAM).toBeTypeOf('function');
   });
 
   it('takes the hook approval form the hooks module produces', async () => {
@@ -509,5 +821,34 @@ describe('the PreToolUse seam and the plan-shaped option', () => {
 
     expect(decision.behavior).toBe('allow');
     expect(decision.source).toBe('hook');
+  });
+
+  it('names the hook event in the reason', async () => {
+    const preToolUseHook = createPreToolUseHook({
+      approval: async () => ({
+        hookEventName: 'CustomGuard',
+        decision: { behavior: 'deny' },
+      }),
+    });
+
+    const decision = await checkPermission(tool(), {
+      rules: rules(),
+      mode: 'default',
+      preToolUseHook,
+    });
+
+    expect(decision.behavior).toBe('deny');
+    // The hook's own event name names it in the reason.
+    expect(decision.reason).toContain('CustomGuard');
+  });
+
+  it("names the hook event of a PermissionRequest denial in the reason", () => {
+    const decision = applyPermissionRequestHook(
+      { hookEventName: 'CustomGuard', decision: { behavior: 'deny' } },
+      tool(),
+    );
+
+    expect(decision?.behavior).toBe('deny');
+    expect(decision?.reason).toContain('CustomGuard');
   });
 });
