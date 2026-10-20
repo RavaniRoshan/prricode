@@ -11,9 +11,12 @@
  * refusal is a `safetyCheck`, not a user denial — the source is the hook, never
  * `user_reject` — and the reason states that nothing was fetched.
  *
- * **The safety check runs before the rule engine**, because it is independent of
- * it and holds in every mode, including `bypassPermissions`. The tool's own check
- * is `safetyCheckForTool`, which refuses a URL that is not an http(s) URL.
+ * **The safety check runs after the hook seams, on the effective input**, because
+ * it is independent of the rule engine and holds in every mode, including
+ * `bypassPermissions`. The input a hook rewrote is not known before the hook
+ * seams have run, and the check judges the URL that will really be fetched, so
+ * it runs once, on that input. The tool's own check is `safetyCheckForTool`,
+ * which refuses a URL that is not an http(s) URL.
  *
  * **The body is read under a byte cap.** The response is consumed as a stream and
  * the reading stops at the cap, so a body of any size costs at most the cap: a

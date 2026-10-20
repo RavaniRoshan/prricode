@@ -13,9 +13,19 @@
  * No built-in tool hard-codes an allow: a tool that always allowed would make the
  * rule engine advisory.
  *
- * **The safety check runs before the rule engine.** `checkPermission` runs the
- * safety check first, and it holds in every mode — including `bypassPermissions`.
+ * **The safety check runs after the hook seams, on the effective input.**
+ * `checkPermission` runs the hook seams first — the `PreToolUse` seam and the
+ * `PermissionRequest` seam — because the input the tool will act on is not known
+ * before them, and the safety check judges **that** input. It holds in every
+ * mode, including `bypassPermissions`, and it still precedes the mode dispatch.
  * The tool's own `safetyCheckForTool` refuses arguments the tool cannot verify.
+ *
+ * **Both hook seams are consulted.** The `PreToolUse` seam is the seam the hooks
+ * module's `createPreToolUseApproval` plugs into: it may deny the call, ask for
+ * the user's decision, approve it and rewrite the tool input. Its **allow never
+ * overrides a deny rule or an ask rule**, and its **deny holds in every mode**,
+ * `bypassPermissions` included — this implementation's pick of the stricter of the
+ * target's two behaviours.
  *
  * **A rewritten input is checked again, in full.** A **hook** may rewrite the
  * input, and the rewritten input is what the tool receives. The check evaluated
@@ -89,6 +99,23 @@ export interface BuiltinToolDeps {
   hook?: (
     ctx: ToolContext,
   ) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
+  /**
+   * The `PreToolUse` hook.
+   *
+   * It is the seam the hooks module's `createPreToolUseApproval` plugs into: the
+   * hook may deny the call, ask the user for a decision, approve it and rewrite
+   * the tool input.
+   *
+   * The **precedence is the permission layer's**, not the hook's: the seam runs
+   * after the deny list and the ask list and before the mode's semantics, so an
+   * **allow never overrides a deny rule or an ask rule**, and a **deny holds in
+   * every mode**, `bypassPermissions` included. That is this implementation's pick of the
+   * stricter of the target's two behaviours, and it is recorded in the module
+   * headers of both layers.
+   */
+  preToolUseHook?: (
+    ctx: ToolContext,
+  ) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>;
   /** The safety check. The tool's own check runs when this one does not. */
   safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
   /** The auto-mode classifier. */
@@ -122,7 +149,7 @@ export async function checkToolPermissions(
     safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined;
   } = {},
 ): Promise<PermissionDecision> {
-  return runToolCheck(ctx, deps, options, deps.hook);
+  return runToolCheck(ctx, deps, options, deps.hook, deps.preToolUseHook);
 }
 
 /**
@@ -133,7 +160,7 @@ export async function checkToolPermissions(
  * the **effective** (rewritten) input, so a hook rewrite cannot escape the ask
  * list, the allow scope or the mode dispatch.
  *
- * The **hook** is the one difference: see `recheckHook`.
+ * The **hooks** are the one difference: see `recheckHook`.
  */
 export async function recheckToolPermissions(
   ctx: ToolContext,
@@ -153,7 +180,10 @@ export async function recheckToolPermissions(
     pathField?: string;
   } = {},
 ): Promise<ToolRecheck> {
-  const decision = await runToolCheck(ctx, deps, options, recheckHook(deps));
+  // The re-check consults **both** seams through the one stricter hook, so the
+  // `PreToolUse` seam is not consulted a second time on its own.
+  const stricter = recheckHook(deps);
+  const decision = await runToolCheck(ctx, deps, options, stricter, undefined);
   const approvedPath =
     options.pathField === undefined ? undefined : inputPath(ctx.input, options.pathField);
   return { decision, approvedPath };
@@ -174,6 +204,7 @@ async function runToolCheck(
   deps: BuiltinToolDeps,
   options: { safetyCheck?: (ctx: ToolContext) => PermissionDecision | undefined },
   hook: ToolHook | undefined,
+  preToolUseHook: ToolHook | undefined,
 ): Promise<PermissionDecision> {
   const fallback = options.safetyCheck ?? safetyCheckForTool;
   return checkPermission(ctx, {
@@ -183,6 +214,7 @@ async function runToolCheck(
     additionalDirs: deps.additionalDirs,
     canUseTool: deps.canUseTool,
     hook,
+    preToolUseHook,
     safetyCheck: (candidate) => deps.safetyCheck?.(candidate) ?? fallback(candidate),
     classifier: deps.classifier,
   });
@@ -198,14 +230,40 @@ async function runToolCheck(
  * a path must not be bypassed by a rewrite onto that path — and the hook's
  * rewrite is dropped, because the rewrite has already been applied and a second
  * one would need a third check, and so on.
+ *
+ * **Both seams are consulted, and only a denial is kept.** The `PermissionRequest`
+ * seam speaks first — it is the later event — and a denial of either seam is
+ * final, so a denial there ends the consultation. The `PreToolUse` seam speaks
+ * too: its denial is a denial as well.
+ *
+ * The re-check is the tool layer's **second line of defence** and it owns the
+ * write path, so it is deliberately **stricter** than the permission layer's own
+ * rule: the permission layer keeps a hook's approval when it re-checks a
+ * rewritten input, and the tool layer does not.
  */
 function recheckHook(deps: BuiltinToolDeps): ToolHook {
   return async (ctx: ToolContext) => {
-    const decision = await deps.hook?.(ctx);
-    if (decision === undefined) return undefined;
-    if (decision.behavior === 'deny') return decision;
-    return undefined;
+    const denied = await denialFrom(ctx, deps.hook);
+    if (denied !== undefined) return denied;
+    return denialFrom(ctx, deps.preToolUseHook);
   };
+}
+
+/**
+ * The **denial** a seam makes about a call, and nothing else.
+ *
+ * An approval is dropped: it was given for the original call, and the re-check
+ * evaluates the rewritten one. A seam that says nothing is nothing at all.
+ */
+async function denialFrom(
+  ctx: ToolContext,
+  seam: ToolHook | undefined,
+): Promise<PermissionDecision | undefined> {
+  if (seam === undefined) return undefined;
+  const decision = await seam(ctx);
+  if (decision === undefined) return undefined;
+  if (decision.behavior !== 'deny') return undefined;
+  return decision;
 }
 
 /**

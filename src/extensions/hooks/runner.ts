@@ -81,6 +81,25 @@
  *     release without a deprecation warning; this implementation picks the stricter
  *     reading and applies it to both the `PreToolUse` and the
  *     `PermissionRequest` seam.
+ *   - **The `PreToolUse` approval is its own shape, and it is wider than the
+ *     permission-request approval.** The `PreToolUse` seam knows **four**
+ *     decision values — `allow`, `ask`, `defer` and `deny` — while the
+ *     permission-request approval only ever sees `allow` and `deny`. A
+ *     **`defer` is no opinion** — the permission layer's normal path decides,
+ *     so nothing at all is carried — and an **`ask` is carried**, because the
+ *     permission vocabulary has an exact word for it and the call becomes the
+ *     question the prompt asks.
+ *   - **The creator of the `PreToolUse` approval is generic in the shape it
+ *     produces.** The `PreToolUse` approval cannot be assignable to the
+ *     narrower permission-request approval — it knows two values the narrower
+ *     one does not — so the creator is generic in its approval shape, with the
+ *     `PreToolUse` shape as the default. A caller with no context gets the
+ *     `PreToolUse` shape, and a caller that hands the creator to the
+ *     permission-request adapter gets the shape that adapter accepts, so
+ *     **both** adapters take it unchanged. The shape produced at run time is
+ *     always the `PreToolUse` one, and the permission-request adapter treats an
+ *     `ask` and a `defer` as **no opinion** — the way it treats every decision
+ *     it does not know.
  */
 
 import { spawn } from 'node:child_process';
@@ -91,7 +110,7 @@ import {
   type PermissionMode,
   type ToolContext,
 } from '../../permissions/decision.js';
-import type { PermissionRequestHookApproval } from '../../permissions/prompts.js';
+import type { HookApproval, PermissionRequestHookApproval } from '../../permissions/prompts.js';
 
 import { matchToolName } from './matcher.js';
 import type { HookEvent, HookHandlerType, HookSeverity, HookSpec } from './registry.js';
@@ -1028,13 +1047,56 @@ export function mergePermissionRequestApproval(
 /**
  * The approval a group of `PreToolUse` hook results carries.
  *
- * The shape is the same as the permission-request approval: the seam is
- * **reused** rather than duplicated.
+ * The `PreToolUse` seam knows **four** decision values — `allow`, `ask`, `defer`
+ * and `deny` — so its approval is **not** the permission-request approval, which
+ * only ever sees `allow` and `deny`.
+ *
+ * The shape is the permission layer's `HookApproval` with a **required** event
+ * name and a decision that carries the four-value vocabulary, so it is
+ * **assignable** to `HookApproval` and plugs straight into the permission
+ * layer's `PreToolUse` seam (`createPreToolUseHook` in
+ * `src/permissions/prompts.ts`).
+ */
+export interface PreToolUseHookApproval {
+  /** The event the hooks ran for. */
+  hookEventName: 'PreToolUse';
+  /** The hook's decision. */
+  decision: { behavior: HookDecisionValue; reason?: string };
+  /** The rewritten tool input. */
+  updatedInput?: unknown;
+}
+
+/**
+ * The approval a group of `PreToolUse` hook results carries.
+ *
+ * A **`defer` is no opinion**: the permission layer's normal path decides, so
+ * nothing is carried — not the decision and not the rewrite. An **`ask` is
+ * carried**: the permission vocabulary has an exact word for it, and the call
+ * becomes the question the prompt asks.
  */
 export function mergePreToolUseApproval(
   results: readonly HookResult[],
-): PermissionRequestHookApproval | undefined {
-  return mergeHookApproval(results, 'PreToolUse');
+): PreToolUseHookApproval | undefined {
+  const merged = mergeHookResults(results);
+  if (!merged) return undefined;
+  const decision = effectiveDecision(merged);
+  if (decision === undefined) return undefined;
+  // A deferral is **no opinion**: the normal permission path decides, so nothing
+  // is carried.
+  if (decision.value === 'defer') return undefined;
+
+  const approval: PreToolUseHookApproval = {
+    hookEventName: 'PreToolUse',
+    decision: {
+      behavior: decision.value,
+      ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+    },
+  };
+  // The rewrite is the input the tool would act on, so it rides along on every
+  // decision the call can still end up with — an `ask` included, because the
+  // question the user is asked is about the rewritten call.
+  if (merged.updatedInput !== undefined) approval.updatedInput = merged.updatedInput;
+  return approval;
 }
 
 /** The approval a group of hook results carries, for one event. */
@@ -1091,10 +1153,9 @@ export function createHookApproval(
 /**
  * The approval callback of the `PreToolUse` seam.
  *
- * The returned callback is the `approval` option of
- * `createPermissionRequestHook` in `src/permissions/prompts.ts`: it runs the
- * `PreToolUse` hooks for the tool call and returns the strictest decision they
- * made.
+ * The returned callback is the `approval` option of `createPreToolUseHook` in
+ * `src/permissions/prompts.ts`: it runs the `PreToolUse` hooks for the tool
+ * call and returns the strictest decision they made.
  *
  * The precedence of the decision is the **permission layer's**, not this
  * module's: the seam is wired into `checkPermission` **after the deny list**
@@ -1102,12 +1163,19 @@ export function createHookApproval(
  * a deny rule or an ask rule, and a `PreToolUse` hook's `deny` holds in every
  * mode, `bypassPermissions` included. This implementation picks the stricter of the
  * target's two behaviours and documents the choice.
+ *
+ * **The creator is generic in the approval shape it produces.** The
+ * `PreToolUse` approval knows `ask` and `defer`, so it cannot be assignable to
+ * the narrower permission-request approval; the type parameter says which
+ * adapter takes the result, and the default is the `PreToolUse` shape. The
+ * shape produced at run time is always the `PreToolUse` one, and the
+ * permission-request adapter treats an `ask` and a `defer` as no opinion.
  */
-export function createPreToolUseApproval(
+export function createPreToolUseApproval<T extends HookApproval = PreToolUseHookApproval>(
   specs: readonly HookSpec[],
   options: RunHooksOptions = {},
-): (ctx: ToolContext) => Promise<PermissionRequestHookApproval | undefined> {
-  return async (ctx: ToolContext): Promise<PermissionRequestHookApproval | undefined> => {
+): (ctx: ToolContext) => Promise<T | undefined> {
+  return async (ctx: ToolContext): Promise<T | undefined> => {
     const results = await runHooks(
       specs,
       'PreToolUse',
@@ -1120,7 +1188,11 @@ export function createPreToolUseApproval(
       undefined,
       options,
     );
-    return mergePreToolUseApproval(results);
+    const approval = mergePreToolUseApproval(results);
+    if (approval === undefined) return undefined;
+    // The shape produced at run time is always the `PreToolUse` one; the type
+    // parameter only says which adapter takes the result.
+    return approval as T;
   };
 }
 
