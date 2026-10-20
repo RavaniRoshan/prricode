@@ -128,13 +128,13 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Interfaces:** Consumes: the retained Evidence records under `/home/shiva/opt/reference-agent-rea/evidence/` and the per-module records under `/home/shiva/opt/reference-agent-rea/analysis/modules/`. Produces: a per-group gate state in the audit that other milestones cite.
 
-- [ ] **Step 1: Re-run the five transfer-budget-limited modules** at a per-file ceiling that fits (tiered 60000 → 30000 → 20000 → 12000), using `/home/shiva/opt/reference-agent-rea/analysis/run-js-module-tiered.sh`. Verify: each record reports `truncated: false`.
-- [ ] **Step 2: Trace the Messages `parseResponse` callee** in the completed SDK graph with `seeds.py` + `trace_javascript_semantics` seeded at a call-site node id. Verify: the trace result names a resolved callee, and the audit's "response parsing" row moves to `observed`.
-- [ ] **Step 3: Trace the agent turn and tool dispatch** in the completed `chunk-6bp7hdav.js` graph. Verify: the audit's "agent loop and tool dispatch" row records the observed scheduling order and the point at which the next model request is issued.
-- [ ] **Step 4: Trace the session resume algorithm** in the same graph: `--resume` / `--continue` selection, the session index, and transcript replay. Verify: the audit's "session resumption" row moves to `observed`.
-- [ ] **Step 5: Targeted Ghidra pass over the seccomp supervisor's switch cases** to decode the per-record metadata and the per-syscall action at the table `0x6c749c0`. Verify: a new Evidence record names the action for at least the 27 filesystem syscalls.
-- [ ] **Step 6: Re-run the audit and record the gate decision** per group. Verify: every group is `observed` or an explicitly accepted partial with a named reason.
-- [ ] **Step 7: Commit.**
+- [x] **Step 1: Re-run the five transfer-budget-limited modules** at a per-file ceiling that fits (tiered 60000 → 30000 → 20000 → 12000), using `/home/shiva/opt/reference-agent-rea/analysis/run-js-module-tiered.sh`. Verify: each record reports `truncated: false`.
+- [x] **Step 2: Trace the Messages `parseResponse` callee** in the completed SDK graph with `seeds.py` + `trace_javascript_semantics` seeded at a call-site node id. Verify: the trace result names a resolved callee, and the audit's "response parsing" row moves to `observed`.
+- [x] **Step 3: Trace the agent turn and tool dispatch** in the completed `chunk-6bp7hdav.js` graph. Verify: the audit's "agent loop and tool dispatch" row records the observed scheduling order and the point at which the next model request is issued.
+- [x] **Step 4: Trace the session resume algorithm** in the same graph: `--resume` / `--continue` selection, the session index, and transcript replay. Verify: the audit's "session resumption" row moves to `observed`.
+- [x] **Step 5: Targeted Ghidra pass over the seccomp supervisor's switch cases** to decode the per-record metadata and the per-syscall action at the table `0x6c749c0`. Verify: a new Evidence record names the action for at least the 27 filesystem syscalls.
+- [x] **Step 6: Re-run the audit and record the gate decision** per group. Verify: every group is `observed` or an explicitly accepted partial with a named reason.
+- [x] **Step 7: Commit.**
   ```bash
   git add docs/reverse-engineering/ docs/PROGRESS.md
   git commit -m "docs(rea): close coverage audit"
@@ -148,12 +148,12 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Interfaces:** Consumes: `COVERAGE-AUDIT.md` §3. Produces: a row per requirement with columns `id | group | requirement | evidence-class | evidence-id | target-observed? | implementation-status | test-ref`. Every later task's `test-ref` points at a row here.
 
-- [ ] **Step 1: Write the matrix generator test** — assert that every audit row appears exactly once and that every row has a non-empty `evidence-class` from the closed set.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, matrix file missing.
-- [ ] **Step 3: Create `docs/compatibility/feature-matrix.md`** with one row per audit requirement, seeded from the audit's own table.
-- [ ] **Step 4: Run the test to verify it passes** — expected: PASS.
-- [ ] **Step 5: Add the `results.md` vocabulary** — `match | partial | mismatch | not-tested | unknown` with the rule that a row is `unknown` rather than `match` when the target evidence is `unknown`.
-- [ ] **Step 6: Commit.**
+- [x] **Step 1: Write the matrix generator test** — assert that every audit row appears exactly once and that every row has a non-empty `evidence-class` from the closed set.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, matrix file missing.
+- [x] **Step 3: Create `docs/compatibility/feature-matrix.md`** with one row per audit requirement, seeded from the audit's own table.
+- [x] **Step 4: Run the test to verify it passes** — expected: PASS.
+- [x] **Step 5: Add the `results.md` vocabulary** — `match | partial | mismatch | not-tested | unknown` with the rule that a row is `unknown` rather than `match` when the target evidence is `unknown`.
+- [x] **Step 6: Commit.**
 
 **Gate:** An incoming agent can find the next task and the evidence state from repository files alone.
 
