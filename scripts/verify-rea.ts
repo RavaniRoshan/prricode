@@ -330,6 +330,44 @@ function main(): number {
     return 0;
   }
 
+  if (process.argv.includes('--write-matrix')) {
+    // The matrix's own **totals** are derived from its rows, so they cannot
+    // miscount. A row that moves from `partial` to `observed` moves the table
+    // with it.
+    const matrixPath = path.join(REPOSITORY, 'docs/compatibility/feature-matrix.md');
+    const matrix = readFileSync(matrixPath, 'utf8');
+    const counts = new Map<string, number>();
+    for (const match of matrix.matchAll(/^\| (F-[0-9a-z]+) \|[^|]*\|[^|]*\| ([^|]*)\|/gm)) {
+      const status = (match[2] ?? '').trim();
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+    const order = [
+      'observed',
+      'partial',
+      'unknown',
+      'inferred',
+      'implementation choice',
+      'not applicable (project requirement)',
+      'project requirement',
+    ];
+    const table = order
+      .filter((status) => counts.has(status))
+      .map((status) => `| ${status} | ${counts.get(status) ?? 0} |`)
+      .join('\n');
+    const rewritten = matrix.replace(
+      /(\| Status \| Count \|\n\|---\|---\|\n)(?:\|[^\n]*\n)*/,
+      `$1${table}\n`,
+    );
+    writeFileSync(matrixPath, rewritten, 'utf8');
+    process.stdout.write(
+      `wrote the matrix's totals: ${order
+        .filter((status) => counts.has(status))
+        .map((status) => `${counts.get(status)} ${status}`)
+        .join(', ')}\n`,
+    );
+    return 0;
+  }
+
   if (deriveOnly) {
     process.stdout.write(
       `tools ${tools.names.size}\ntelemetry ${telemetry.size}\nenvironment ${environment.size}\n`,
