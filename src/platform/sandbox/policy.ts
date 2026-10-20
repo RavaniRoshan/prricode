@@ -37,11 +37,19 @@
  *     `git status` is excluded. The target's own compound handling splits a command
  *     and matches every part independently, and the strictest reading is the
  *     fail-safe one.
- *   - An exclusion entry matches a sub-command when the sub-command **equals** the
- *     entry, **starts with** the entry followed by whitespace (`git` matches `git
- *     status`), or — when the entry carries a `*` — matches the whole sub-command
- *     as a glob. The shell wrappers the target strips (`timeout`, `nice`, `nohup`,
- *     …) are stripped before the comparison.
+ *   - An exclusion entry must cover the **whole** sub-command. The sub-command is
+ *     stripped of the shell wrappers the target strips (`timeout`, `nice`,
+ *     `nohup`, …) and of its redirections, and the entry must then match it
+ *     **entirely**: the entry `git status` matches `git status` and `git status >
+ *     out.txt`, and it does **not** match `git status --short`. An entry that
+ *     carries a `*` is a glob over the whole sub-command, so `git *` matches
+ *     `git status --short`.
+ *   - A sub-command that carries a **command substitution** is never excluded.
+ *     `$( … )` and the backtick form are evaluated by the shell *before* the
+ *     command runs, so `git status "$(rm -rf /tmp/x)"` would run the `rm` on the
+ *     host while the command itself is exempt. A part that carries a substitution
+ *     is rejected outright, which is the fail-safe reading: the command is then
+ *     sandboxed like any other.
  *   - `enabledPlatforms` is a **whitelist**: a platform that is not in the list is
  *     excluded. An unset list takes the default (`['linux']`, the only platform the
  *     implementation's backend implements); an explicitly empty list excludes every platform.
@@ -50,6 +58,14 @@
  *     other four reasons exactly, and this one says the same thing in the same
  *     shape.
  *
+ * **The defaults are this implementation's, and they are not the target's.** The target's
+ * documented default is that a failed sandbox start **falls back to running
+ * unsandboxed**; this implementation's `failIfUnavailable` default is the opposite — it
+ * fails closed. This implementation's `enabled` default is `true` (the sandbox is on unless
+ * a settings document turns it off), and its `enabledPlatforms` default is
+ * `['linux']`, the only platform this implementation's backend implements. A caller that
+ * wants the target's behaviour sets `failIfUnavailable: false` explicitly.
+ *
  * **The residual risk.** The policy decides what the sandbox *does*; it is not
  * itself a boundary. Every layer of the sandbox shares one kernel, so a kernel
  * privilege escalation reachable from the sandbox defeats all of them, and
@@ -57,16 +73,38 @@
  * the boundary below the kernel.
  */
 
-import { splitShellCommand, stripWrappers } from '../../permissions/shell.js';
+import { splitShellCommand, stripRedirections, stripWrappers } from '../../permissions/shell.js';
 
 /** The platforms this implementation's sandbox backend implements. */
 export const SANDBOX_SUPPORTED_PLATFORMS: readonly string[] = ['linux'];
 
 /**
+ * The filesystem policy of the `sandbox.filesystem` block.
+ *
+ * The block is the target's: the audit names `allowRead`, `allowWrite`,
+ * `denyRead`, `denyWrite` and `credentials` as the lists it carries. The
+ * launcher maps the block onto the mount plan: the allow lists become binds,
+ * and the deny lists and the credential list become masked paths.
+ */
+export interface SandboxFilesystemPolicy {
+  /** The paths the sandbox may read. */
+  readonly allowRead?: readonly string[];
+  /** The paths the sandbox may read and write. */
+  readonly allowWrite?: readonly string[];
+  /** The paths the sandbox may not read. */
+  readonly denyRead?: readonly string[];
+  /** The paths the sandbox may not write. */
+  readonly denyWrite?: readonly string[];
+  /** The credential files the sandbox may not see. */
+  readonly credentials?: readonly string[];
+}
+
+/**
  * The sandbox policy.
  *
  * The five members are the target's `sandbox` block, in the order the audit names
- * them.
+ * them. The sixth member, `filesystem`, is the target's `sandbox.filesystem`
+ * sub-block: it is optional, and a document without one leaves it unset.
  */
 export interface SandboxPolicy {
   /** Whether the sandbox is switched on at all. */
@@ -79,22 +117,18 @@ export interface SandboxPolicy {
   readonly allowUnsandboxedCommands: boolean;
   /** The commands that may run outside the sandbox. */
   readonly excludedCommands: readonly string[];
+  /** The filesystem policy of the `sandbox.filesystem` block. */
+  readonly filesystem?: SandboxFilesystemPolicy;
 }
-
-/** The policy type under the name the plan uses. */
-export type sandboxPolicy = SandboxPolicy;
 
 /** The policy this implementation uses when a settings document says nothing. */
 export const DEFAULT_SANDBOX_POLICY: SandboxPolicy = Object.freeze({
   enabled: true,
-  enabledPlatforms: Object.freeze(['linux']) as readonly string[],
+  enabledPlatforms: Object.freeze([...SANDBOX_SUPPORTED_PLATFORMS]) as readonly string[],
   failIfUnavailable: true,
   allowUnsandboxedCommands: false,
   excludedCommands: Object.freeze([]) as readonly string[],
 });
-
-/** The default policy, under the name the plan uses. */
-export const sandboxPolicy: SandboxPolicy = DEFAULT_SANDBOX_POLICY;
 
 /**
  * The reason strings.
@@ -134,27 +168,22 @@ export interface SandboxEvaluation {
 export type SandboxAvailability = 'available' | 'unavailable';
 
 /**
- * The availability the policy assumes for a platform.
- *
- * This implementation's backend is Linux-only, so another platform has no backend. The
- * launcher passes the **host's** real availability instead.
- */
-function assumedAvailability(platform: string): SandboxAvailability {
-  return SANDBOX_SUPPORTED_PLATFORMS.includes(platform) ? 'available' : 'unavailable';
-}
-
-/**
  * Decide what to do with a command.
  *
  * The decision is `deny` when the platform is excluded or the sandbox is switched
  * off, `unconfined` when the command is exempt or the backend is missing and the
  * policy tolerates that, and `allow` otherwise.
+ *
+ * The **availability is an argument, never a guess**: the caller says whether the
+ * backend can run on this host. The three-argument form of the plan's signature
+ * would have to fabricate it from the platform name, and a fabricated `available`
+ * silently returns `allow` on a host that has no backend at all.
  */
 export function evaluateSandbox(
   policy: SandboxPolicy,
   platform: string,
   command: string,
-  availability: SandboxAvailability = assumedAvailability(platform),
+  availability: SandboxAvailability,
 ): SandboxEvaluation {
   if (!policy.enabledPlatforms.includes(platform)) {
     return { decision: 'deny', reason: SANDBOX_REASONS.platformExcluded(platform) };
@@ -185,17 +214,21 @@ export function evaluateSandbox(
  * The `excludedCommands` entries that exempt a command.
  *
  * Every part of a compound command must match an entry; otherwise the command is
- * not exempt at all and the result is empty.
+ * not exempt at all and the result is empty. A part that carries a command
+ * substitution is never exempt: the shell evaluates the substitution before the
+ * command runs, so an exempt part that carries one would run the substituted
+ * command on the host.
  */
 export function matchingExclusions(command: string, entries: readonly string[]): string[] {
   if (entries.length === 0) return [];
   const parts = splitShellCommand(command)
-    .map((part) => stripWrappers(part).trim())
+    .map((part) => stripWrappers(stripRedirections(part)).trim())
     .filter((part) => part.length > 0);
   if (parts.length === 0) return [];
 
   const matched = new Set<string>();
   for (const part of parts) {
+    if (carriesCommandSubstitution(part)) return [];
     const entry = entries.find((candidate) => exclusionMatches(candidate, part));
     if (entry === undefined) return [];
     matched.add(entry);
@@ -204,17 +237,29 @@ export function matchingExclusions(command: string, entries: readonly string[]):
 }
 
 /**
+ * Whether a sub-command carries a command substitution.
+ *
+ * Both spellings are refused: `$( … )` and the backtick form. The shell expands
+ * them before the command runs, so a sub-command that carries one is not the
+ * command the exclusion entry names.
+ */
+function carriesCommandSubstitution(part: string): boolean {
+  return part.includes('$(') || part.includes('`');
+}
+
+/**
  * Whether an exclusion entry covers a sub-command.
  *
  * An entry with a `*` is a glob over the whole sub-command. An entry without one
- * covers the sub-command when it equals it or when it is a prefix followed by
- * whitespace.
+ * covers the sub-command only when it is the sub-command: the entry must cover
+ * the **whole** sub-command, so `git status` does not cover `git status
+ * --short` and, above all, does not cover `git status "$(rm -rf /tmp/x)"`.
  */
 function exclusionMatches(entry: string, part: string): boolean {
   const trimmed = entry.trim();
   if (trimmed.length === 0) return false;
   if (trimmed.includes('*')) return globMatches(trimmed, part);
-  return part === trimmed || part.startsWith(`${trimmed} `);
+  return part === trimmed;
 }
 
 /** Whether a glob pattern covers a whole string. */
@@ -248,6 +293,7 @@ export function readSandboxPolicy(settings: unknown): SandboxPolicy {
  */
 export function parseSandboxPolicy(block: unknown): SandboxPolicy {
   if (!isRecord(block)) return DEFAULT_SANDBOX_POLICY;
+  const filesystem = readFilesystemPolicy(block['filesystem']);
   return {
     enabled: readBoolean(block, 'enabled') ?? DEFAULT_SANDBOX_POLICY.enabled,
     enabledPlatforms:
@@ -259,6 +305,40 @@ export function parseSandboxPolicy(block: unknown): SandboxPolicy {
       DEFAULT_SANDBOX_POLICY.allowUnsandboxedCommands,
     excludedCommands:
       readStringArray(block, 'excludedCommands') ?? DEFAULT_SANDBOX_POLICY.excludedCommands,
+    ...(filesystem === undefined ? {} : { filesystem }),
+  };
+}
+
+/**
+ * Read the `sandbox.filesystem` block.
+ *
+ * A block with the wrong type is ignored rather than trusted: the settings file
+ * is caller-supplied data, and a malformed block must not become a malformed
+ * policy. A list that is not an array of strings is dropped, and the rest of the
+ * block is kept.
+ */
+function readFilesystemPolicy(block: unknown): SandboxFilesystemPolicy | undefined {
+  if (!isRecord(block)) return undefined;
+  const allowRead = readStringArray(block, 'allowRead');
+  const allowWrite = readStringArray(block, 'allowWrite');
+  const denyRead = readStringArray(block, 'denyRead');
+  const denyWrite = readStringArray(block, 'denyWrite');
+  const credentials = readStringArray(block, 'credentials');
+  if (
+    allowRead === undefined &&
+    allowWrite === undefined &&
+    denyRead === undefined &&
+    denyWrite === undefined &&
+    credentials === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(allowRead === undefined ? {} : { allowRead }),
+    ...(allowWrite === undefined ? {} : { allowWrite }),
+    ...(denyRead === undefined ? {} : { denyRead }),
+    ...(denyWrite === undefined ? {} : { denyWrite }),
+    ...(credentials === undefined ? {} : { credentials }),
   };
 }
 

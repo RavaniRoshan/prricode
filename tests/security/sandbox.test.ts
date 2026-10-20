@@ -10,26 +10,32 @@
  *
  *   - step 1 — the policy: the decisions and the target's exact reason strings;
  *   - step 5 — the launcher: the refusal when the sandbox is required and missing,
- *     and the tmpfs mask over a protected path that does not exist at startup
- *     (the CVE-2026-25725 class);
+ *     and the masks over the protected configuration paths (the CVE-2026-25725
+ *     class);
  *   - step 8 — Landlock: the rule that is bound to an object rather than to a name,
  *     and the reduced protection the launcher reports when the ABI is too low;
  *   - step 11 — the supervisor: the `SECCOMP_IOCTL_NOTIF_ID_VALID` re-check and the
  *     refusal to authorize a path that layers 1–3 would deny;
  *   - step 13 — the proxy: the refusal of loopback, link-local and cloud-metadata
  *     addresses, and of a host that is not in the allowlist.
+ *
+ * **The review round.** Every test below is named after the finding it pins, so a
+ * regression names the defect it breaks.
  */
 
 import {
+  chmodSync,
   existsSync,
   fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
+  readFileSync,
   readlinkSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -39,6 +45,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import * as policyModule from '../../src/platform/sandbox/policy.js';
 import {
   DEFAULT_SANDBOX_POLICY,
   SANDBOX_REASONS,
@@ -66,6 +73,7 @@ import {
   LANDLOCK_ACCESS_FS_READ_FILE,
   LANDLOCK_ACCESS_FS_WRITE_FILE,
   buildLandlockRuleset,
+  defaultLandlockSyscalls,
   detectLandlock,
   type LandlockSyscalls,
 } from '../../src/platform/sandbox/landlock.js';
@@ -76,12 +84,17 @@ import {
   isBlockedAddress,
 } from '../../src/platform/sandbox/proxy.js';
 import {
+  BUBBLEWRAP_MINIMUM_VERSION,
   SANDBOX_PROXY_SOCKET_PATH,
   SANDBOX_PROXY_SOCKET_VARIABLE,
   SandboxRefusedError,
   buildSandboxPlan,
   launchSandbox,
+  planFilesystemPolicy,
   planSupervisor,
+  probeEnforcementBinary,
+  probeUserNamespace,
+  sandboxEnvironment,
   type SandboxBackend,
   type SandboxProcess,
 } from '../../src/platform/sandbox/launcher.js';
@@ -121,24 +134,45 @@ const unavailableBackend: SandboxBackend = {
   },
 };
 
+/** Compare two dotted version numbers, the way the launcher does. */
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = right.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
 // --- step 1: the policy -------------------------------------------------------
 
 describe('CC-017 step 1 — the sandbox policy', () => {
   it('denies with the reason naming the platform when enabledPlatforms excludes it', () => {
-    const result = evaluateSandbox(policy({ enabledPlatforms: ['darwin'] }), 'linux', 'ls -la');
+    const result = evaluateSandbox(
+      policy({ enabledPlatforms: ['darwin'] }),
+      'linux',
+      'ls -la',
+      'available',
+    );
     expect(result.decision).toBe('deny');
     expect(result.reason).toBe('sandbox.enabledPlatforms excludes linux');
     expect(result.reason).toBe(SANDBOX_REASONS.platformExcluded('linux'));
   });
 
   it('denies when the sandbox is disabled', () => {
-    const result = evaluateSandbox(policy({ enabled: false }), 'linux', 'ls -la');
+    const result = evaluateSandbox(policy({ enabled: false }), 'linux', 'ls -la', 'available');
     expect(result.decision).toBe('deny');
     expect(result.reason).toBe('sandbox.enabled is false');
   });
 
   it('runs the shell unconfined, and says so, when failIfUnavailable is false', () => {
-    const result = evaluateSandbox(policy({ failIfUnavailable: false }), 'linux', 'ls -la', 'unavailable');
+    const result = evaluateSandbox(
+      policy({ failIfUnavailable: false }),
+      'linux',
+      'ls -la',
+      'unavailable',
+    );
     expect(result.decision).toBe('unconfined');
     expect(result.reason).toBe(
       'sandbox.failIfUnavailable is false (a missing backend would run the shell unconfined)',
@@ -146,7 +180,12 @@ describe('CC-017 step 1 — the sandbox policy', () => {
   });
 
   it('denies when the backend is missing and failIfUnavailable is true', () => {
-    const result = evaluateSandbox(policy({ failIfUnavailable: true }), 'linux', 'ls -la', 'unavailable');
+    const result = evaluateSandbox(
+      policy({ failIfUnavailable: true }),
+      'linux',
+      'ls -la',
+      'unavailable',
+    );
     expect(result.decision).toBe('deny');
     expect(result.reason).toMatch(/failIfUnavailable/);
   });
@@ -156,6 +195,7 @@ describe('CC-017 step 1 — the sandbox policy', () => {
       policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] }),
       'linux',
       'git status',
+      'available',
     );
     expect(result.decision).toBe('unconfined');
     expect(result.reason).toBe('sandbox.allowUnsandboxedCommands is true');
@@ -167,6 +207,7 @@ describe('CC-017 step 1 — the sandbox policy', () => {
       policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] }),
       'linux',
       'ls -la',
+      'available',
     );
     expect(result.decision).toBe('allow');
     expect(result.reason).toBeUndefined();
@@ -177,6 +218,7 @@ describe('CC-017 step 1 — the sandbox policy', () => {
       policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] }),
       'linux',
       'git status && rm -rf /tmp/whatever',
+      'available',
     );
     expect(result.decision).toBe('allow');
   });
@@ -218,6 +260,89 @@ describe('CC-017 step 1 — the sandbox policy', () => {
       DEFAULT_SANDBOX_POLICY,
     );
   });
+
+  // --- review finding 3: the exclusion exemption is bypassable with a substitution ---
+
+  it('never exempts a sub-command that carries a command substitution', () => {
+    const excluded = policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] });
+
+    const substitution = evaluateSandbox(
+      excluded,
+      'linux',
+      'git status "$(rm -rf /tmp/x)"',
+      'available',
+    );
+    expect(substitution.decision).toBe('allow');
+    expect(substitution.exemptions).toBeUndefined();
+
+    const backtick = evaluateSandbox(
+      excluded,
+      'linux',
+      'git status `rm -rf /tmp/x`',
+      'available',
+    );
+    expect(backtick.decision).toBe('allow');
+    expect(backtick.exemptions).toBeUndefined();
+
+    // A glob entry covers the whole sub-command, substitution and all: the
+    // substitution is what the entry must not be allowed to cover.
+    const globbed = evaluateSandbox(
+      policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status *'] }),
+      'linux',
+      'git status "$(rm -rf /tmp/x)"',
+      'available',
+    );
+    expect(globbed.decision).toBe('allow');
+    expect(globbed.exemptions).toBeUndefined();
+  });
+
+  it('still exempts the plain command the exclusion names', () => {
+    const result = evaluateSandbox(
+      policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] }),
+      'linux',
+      'git status',
+      'available',
+    );
+    expect(result.decision).toBe('unconfined');
+    expect(result.exemptions).toEqual(['git status']);
+  });
+
+  it('requires an exclusion entry to cover the whole sub-command', () => {
+    // The entry is the whole sub-command: an argument is not part of the entry.
+    expect(matchingExclusions('git status --short', ['git status'])).toEqual([]);
+    // A glob still covers the whole sub-command.
+    expect(matchingExclusions('git status --short', ['git *'])).toEqual(['git *']);
+    // A redirection is stripped before the comparison.
+    expect(matchingExclusions('git status > out.txt', ['git status'])).toEqual(['git status']);
+  });
+
+  // --- review finding 18: the policy is exported three ways ---
+
+  it('exports the policy under one name', () => {
+    expect(Object.keys(policyModule)).not.toContain('sandboxPolicy');
+    expect(Object.keys(policyModule)).toContain('DEFAULT_SANDBOX_POLICY');
+  });
+
+  // --- review finding 12: the sandbox.filesystem block is not inert ---
+
+  it('reads the sandbox.filesystem block out of a settings document', () => {
+    const read = readSandboxPolicy({
+      sandbox: {
+        filesystem: {
+          allowRead: ['/tmp/readable'],
+          allowWrite: ['/tmp/writable'],
+          denyRead: ['/tmp/secret'],
+          denyWrite: ['/tmp/locked'],
+          credentials: ['/tmp/token'],
+        },
+      },
+    });
+    expect(read.filesystem?.allowRead).toEqual(['/tmp/readable']);
+    expect(read.filesystem?.allowWrite).toEqual(['/tmp/writable']);
+    expect(read.filesystem?.denyRead).toEqual(['/tmp/secret']);
+    expect(read.filesystem?.denyWrite).toEqual(['/tmp/locked']);
+    expect(read.filesystem?.credentials).toEqual(['/tmp/token']);
+  });
 });
 
 // --- step 5: the launcher -----------------------------------------------------
@@ -253,42 +378,44 @@ describe('CC-017 step 5 — the launcher', () => {
     await launched.cleanup();
   });
 
-  it('masks a protected path with a tmpfs rather than a read-only bind', () => {
+  // --- review finding 11: the unit mask assertion is vacuous ---
+
+  it('masks a protected path with exactly one tmpfs, on the directory that holds it', () => {
     const cwd = temporaryDirectory();
-    const protectedPath = path.join(cwd, 'settings.json');
+    const configDirectory = path.join(cwd, '.claude');
+    mkdirSync(configDirectory);
+    const protectedPath = path.join(configDirectory, 'settings.json');
+    writeFileSync(protectedPath, '{}');
+
     const plan = buildSandboxPlan({ command: 'true', cwd, protectedPaths: [protectedPath] });
 
-    // The mask occupies the protected path, or the directory that holds it, so the
-    // sandbox can neither read it nor create it.
-    const masks = plan.mounts.filter((mount) => mount.kind === 'tmpfs');
-    const covered = masks.some(
-      (mount) =>
-        mount.target === protectedPath ||
-        mount.target === path.dirname(protectedPath) ||
-        protectedPath.startsWith(`${mount.target}/`),
-    );
-    expect(covered).toBe(true);
-    expect(plan.mounts.some((mount) => mount.target === protectedPath && mount.kind === 'ro-bind')).toBe(
-      false,
-    );
+    // The exact mask: one mask, on the parent directory, never on the file.
+    expect(plan.masks).toHaveLength(1);
+    expect(plan.masks[0]?.path).toBe(protectedPath);
+    expect(plan.masks[0]?.target).toBe(configDirectory);
+    expect(plan.masks[0]?.kind).toBe('tmpfs');
+
+    // The exact number of tmpfs mounts: the scratch one and the mask.
+    const tmpfs = plan.mounts.filter((mount) => mount.kind === 'tmpfs');
+    expect(tmpfs.map((mount) => mount.target)).toEqual(['/tmp', configDirectory]);
+    expect(plan.mounts.some((mount) => mount.target === protectedPath)).toBe(false);
     expect(plan.protectedPaths).toContain(protectedPath);
   });
 
   it('masks a protected path that does not exist with a tmpfs as well', () => {
     const cwd = temporaryDirectory();
-    const protectedPath = path.join(cwd, 'config', 'settings.json');
+    const configDirectory = path.join(cwd, '.claude');
+    mkdirSync(configDirectory);
+    const protectedPath = path.join(configDirectory, 'settings.json');
     expect(existsSync(protectedPath)).toBe(false);
+
     const plan = buildSandboxPlan({ command: 'true', cwd, protectedPaths: [protectedPath] });
 
-    const masks = plan.mounts.filter((mount) => mount.kind === 'tmpfs');
-    const covered = masks.some(
-      (mount) =>
-        mount.target === protectedPath ||
-        mount.target === path.dirname(protectedPath) ||
-        protectedPath.startsWith(`${mount.target}/`),
-    );
-    expect(covered).toBe(true);
+    expect(plan.masks).toHaveLength(1);
     expect(plan.masks[0]?.path).toBe(protectedPath);
+    expect(plan.masks[0]?.target).toBe(configDirectory);
+    const tmpfs = plan.mounts.filter((mount) => mount.kind === 'tmpfs');
+    expect(tmpfs.map((mount) => mount.target)).toEqual(['/tmp', configDirectory]);
   });
 
   it('denies the syscall surface the plan requires, including io_uring_setup', () => {
@@ -357,6 +484,48 @@ describe('CC-017 step 5 — the launcher', () => {
       // is not blocked answers normally.
       expect(blockedResult.stdout).toContain('4294967295');
       expect(allowedResult.stdout).not.toContain('4294967295');
+    },
+  );
+
+  // --- review finding 10: io_uring_setup is never proven refused end to end ---
+
+  it.skipIf(!bubblewrapAvailable)(
+    'makes the kernel refuse io_uring_setup, which the denylist names',
+    async () => {
+      const root = temporaryDirectory();
+      const script = path.join(root, 'io_uring.py');
+      writeFileSync(
+        script,
+        [
+          'import ctypes, os',
+          'libc = ctypes.CDLL("libc.so.6", use_errno=True)',
+          'ctypes.set_errno(0)',
+          'libc.syscall(425, 8, None)',
+          'print("errno", ctypes.get_errno())',
+        ].join('\n'),
+      );
+
+      const blocked = await launchSandbox({
+        command: `python3 ${JSON.stringify(script)}`,
+        cwd: root,
+      });
+      const blockedResult = await blocked.wait();
+      await blocked.cleanup();
+
+      // The filter refuses the call with EPERM: the kernel, not this implementation.
+      expect(blockedResult.stdout).toContain('errno 1');
+
+      // The control: the same call without the denylist reaches the kernel, which
+      // answers with its own errno.
+      const control = await launchSandbox({
+        command: `python3 ${JSON.stringify(script)}`,
+        cwd: root,
+        deniedSyscalls: [],
+      });
+      const controlResult = await control.wait();
+      await control.cleanup();
+      const controlErrno = /errno (\d+)/.exec(controlResult.stdout)?.[1];
+      expect(controlErrno).not.toBe('1');
     },
   );
 
@@ -450,6 +619,399 @@ describe('CC-017 step 5 — the launcher', () => {
       expect(existsSync(protectedPath)).toBe(true);
     },
   );
+
+  // --- review finding 1: the tmpfs mask kills the sandbox for an existing file ---
+
+  it.skipIf(!bubblewrapAvailable)(
+    'comes up when the protected path is an existing file, and the file is unreadable',
+    async () => {
+      const root = temporaryDirectory();
+      const configDirectory = path.join(root, '.claude');
+      mkdirSync(configDirectory);
+      const protectedPath = path.join(configDirectory, 'settings.json');
+      writeFileSync(protectedPath, '{"token":"s3cret"}');
+
+      const launched = await launchSandbox({
+        command: `cat ${JSON.stringify(protectedPath)}; echo "rc=$?"`,
+        cwd: root,
+        protectedPaths: [protectedPath],
+      });
+
+      // The sandbox came up: the mask is a tmpfs on a directory, never on the file.
+      expect(launched.status.sandboxed).toBe(true);
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain('s3cret');
+      expect(result.stdout).toContain('rc=1');
+      expect(result.stderr).not.toMatch(/Not a directory/);
+    },
+  );
+
+  it.skipIf(!bubblewrapAvailable)(
+    'binds an empty file over a protected file whose parent cannot carry a mask',
+    async () => {
+      const root = temporaryDirectory();
+      // The parent is the root of the working-tree bind, so it cannot carry a
+      // tmpfs without replacing the whole working tree.
+      const protectedPath = path.join(root, 'settings.json');
+      writeFileSync(protectedPath, '{"token":"s3cret"}');
+
+      const plan = buildSandboxPlan({ command: 'true', cwd: root, protectedPaths: [protectedPath] });
+      expect(plan.masks[0]?.kind).toBe('empty-file');
+      expect(plan.masks[0]?.target).toBe(protectedPath);
+
+      const launched = await launchSandbox({
+        command: `cat ${JSON.stringify(protectedPath)}; echo "rc=$?"`,
+        cwd: root,
+        protectedPaths: [protectedPath],
+      });
+      expect(launched.status.sandboxed).toBe(true);
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain('s3cret');
+      expect(result.stdout).toContain('rc=0');
+    },
+  );
+
+  // --- review finding 2: the "mask the parent" rule masks the whole working tree ---
+
+  it.skipIf(!bubblewrapAvailable)(
+    'keeps the working tree visible when a path inside it is masked',
+    async () => {
+      const root = temporaryDirectory();
+      writeFileSync(path.join(root, 'README.md'), 'visible');
+      const configDirectory = path.join(root, '.claude');
+      mkdirSync(configDirectory);
+      writeFileSync(path.join(configDirectory, 'settings.json'), '{}');
+
+      const launched = await launchSandbox({
+        command: 'cat README.md',
+        cwd: root,
+        protectedPaths: [path.join(configDirectory, 'settings.json')],
+      });
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('visible');
+    },
+  );
+
+  it.skipIf(!bubblewrapAvailable)(
+    'never creates the missing parent of a protected path on the host',
+    async () => {
+      const root = temporaryDirectory();
+      const protectedPath = path.join(root, 'config', 'settings.json');
+      const parent = path.dirname(protectedPath);
+      expect(existsSync(parent)).toBe(false);
+
+      const launched = await launchSandbox({
+        command: 'echo RAN',
+        cwd: root,
+        protectedPaths: [protectedPath],
+      });
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('RAN');
+      // The parent is never created on the host.
+      expect(existsSync(parent)).toBe(false);
+    },
+  );
+
+  it('refuses the launch with a named reason when a protected path cannot be masked', async () => {
+    const root = temporaryDirectory();
+    const protectedPath = path.join(root, 'config', 'settings.json');
+    const parent = path.dirname(protectedPath);
+    expect(existsSync(parent)).toBe(false);
+
+    await expect(
+      launchSandbox({
+        command: 'echo RAN',
+        cwd: root,
+        // A read-write bind: masking the missing parent would create it on the host.
+        readWritePaths: [root],
+        protectedPaths: [protectedPath],
+      }),
+    ).rejects.toBeInstanceOf(SandboxRefusedError);
+    expect(existsSync(parent)).toBe(false);
+  });
+
+  it('names the reason a protected path cannot be masked', () => {
+    const root = temporaryDirectory();
+    const protectedPath = path.join(root, 'config', 'settings.json');
+    const plan = buildSandboxPlan({
+      command: 'true',
+      cwd: root,
+      readWritePaths: [root],
+      protectedPaths: [protectedPath],
+    });
+    expect(plan.refusals).toHaveLength(1);
+    expect(plan.refusals[0]).toContain(protectedPath);
+    expect(plan.refusals[0]).toMatch(/would create that directory on the host/);
+  });
+
+  // --- review finding 5: the status claims layers that are not in force ---
+
+  it.skipIf(!bubblewrapAvailable)('reports only the layers the backend establishes', async () => {
+    const root = temporaryDirectory();
+    const launched = await launchSandbox({ command: 'echo layers', cwd: root });
+
+    expect(launched.status.layers.filesystem).toBe(true);
+    expect(launched.status.layers.seccomp).toBe(true);
+    expect(launched.status.layers.network).toBe(true);
+    // No Landlock ruleset is ever applied, and no USER_NOTIF filter is installed.
+    expect(launched.status.layers.pathPolicy).toBe(false);
+    expect(launched.status.layers.supervisor).toBe(false);
+    expect(launched.status.notes.join(' ')).toMatch(/no Landlock ruleset is applied/);
+    expect(launched.status.notes.join(' ')).toMatch(/supervisor is not attached/);
+
+    await launched.cleanup();
+  });
+
+  it('reports that the sandbox never came up', async () => {
+    const root = temporaryDirectory();
+    const brokenBackend: SandboxBackend = {
+      name: 'test-broken',
+      async isAvailable() {
+        return { available: true };
+      },
+      async start(): Promise<SandboxProcess> {
+        return {
+          pid: 4242,
+          establishment: Promise.resolve({
+            established: false,
+            layers: {
+              filesystem: false,
+              seccomp: false,
+              pathPolicy: false,
+              network: false,
+              supervisor: false,
+            },
+            reason: 'the sandbox never came up: bwrap: Cannot create the sandbox',
+          }),
+          async wait() {
+            return { exitCode: 1, signal: null, stdout: '', stderr: 'bwrap: Cannot create' };
+          },
+          kill() {
+            // The process is already gone.
+          },
+        };
+      },
+    };
+
+    const launched = await launchSandbox({ command: 'echo never', cwd: root, backend: brokenBackend });
+
+    // The caller can tell "the command failed" from "the sandbox never came up".
+    expect(launched.status.sandboxed).toBe(false);
+    expect(launched.status.layers.filesystem).toBe(false);
+    expect(launched.status.reason).toMatch(/never came up/);
+    await launched.cleanup();
+  });
+
+  it('never claims a supervisor layer when a supervisor object is supplied', async () => {
+    const root = temporaryDirectory();
+    const channel: NotifierChannel = {
+      receive: () => null,
+      respond: () => undefined,
+      isIdValid: () => true,
+      readMemory: () => null,
+      resolveTargetPath: () => undefined,
+    };
+    const supervisor = createSeccompSupervisor({ channel });
+
+    const launched = await launchSandbox({ command: 'echo supervisor', cwd: root, supervisor });
+    expect(launched.status.layers.supervisor).toBe(false);
+    expect(launched.status.notes.join(' ')).toMatch(/supervisor is not attached/);
+    expect(launched.status.notes.join(' ')).toMatch(/no USER_NOTIF filter/);
+    await launched.cleanup();
+  });
+
+  // --- review finding 7: the environment is passed through unfiltered ---
+
+  it.skipIf(!bubblewrapAvailable)(
+    'keeps the caller’s environment out of the sandbox and out of the status',
+    async () => {
+      const root = temporaryDirectory();
+      const launched = await launchSandbox({
+        command: 'echo "key=$ANTHROPIC_API_KEY"',
+        cwd: root,
+        env: { PATH: '/usr/bin:/bin', ANTHROPIC_API_KEY: 'sk-s3cret', LANG: 'C' },
+      });
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      expect(result.stdout).toContain('key=');
+      expect(result.stdout).not.toContain('sk-s3cret');
+      // The status does not echo the environment either.
+      expect(JSON.stringify(launched.status)).not.toContain('sk-s3cret');
+    },
+  );
+
+  it('filters the environment against the allowlist', () => {
+    const environment = sandboxEnvironment({
+      command: 'true',
+      cwd: '/tmp',
+      env: { PATH: '/opt/bin', LANG: 'C', ANTHROPIC_API_KEY: 'sk-s3cret', HOME: '/home/user' },
+    });
+    expect(environment['PATH']).toBe('/opt/bin');
+    expect(environment['LANG']).toBe('C');
+    expect(environment['HOME']).toBe('/home/user');
+    expect(environment['ANTHROPIC_API_KEY']).toBeUndefined();
+  });
+
+  // --- review finding 8: the bubblewrap version and the setuid bit ---
+
+  it.skipIf(!bubblewrapAvailable)('reports the bubblewrap version and the setuid bit', async () => {
+    const root = temporaryDirectory();
+    const launched = await launchSandbox({ command: 'echo version', cwd: root });
+
+    const enforcement = launched.status.enforcement;
+    expect(enforcement?.binary).toBe('/usr/bin/bwrap');
+    expect(enforcement?.setuid).toBe(false);
+    expect(enforcement?.version).toMatch(/^\d+\.\d+/);
+
+    // A version below the fixed one is a warning, and it names the advisory.
+    const version = enforcement?.version ?? '0.0.0';
+    const warnings = enforcement?.warnings.join(' ') ?? '';
+    if (compareVersions(version, BUBBLEWRAP_MINIMUM_VERSION) < 0) {
+      expect(warnings).toMatch(/CVE-2026-87766/);
+    } else {
+      expect(warnings).not.toMatch(/CVE-2026-87766/);
+    }
+
+    await launched.cleanup();
+  });
+
+  it('refuses a setuid bubblewrap', () => {
+    const root = temporaryDirectory();
+    const fake = path.join(root, 'bwrap');
+    writeFileSync(fake, '#!/bin/sh\nexit 0\n');
+    chmodSync(fake, 0o4755);
+
+    const enforcement = probeEnforcementBinary(fake);
+    expect(enforcement.setuid).toBe(true);
+    expect(enforcement.problems.join(' ')).toMatch(/setuid/);
+  });
+
+  it('warns about a bubblewrap below the version that carries the fix', () => {
+    const root = temporaryDirectory();
+    const fake = path.join(root, 'bwrap');
+    writeFileSync(fake, '#!/bin/sh\necho "bubblewrap 0.9.0"\n');
+    chmodSync(fake, 0o755);
+
+    const enforcement = probeEnforcementBinary(fake);
+    expect(enforcement.version).toBe('0.9.0');
+    expect(enforcement.setuid).toBe(false);
+    expect(enforcement.warnings.join(' ')).toMatch(/CVE-2026-87766/);
+  });
+
+  // --- review finding 15: the exemptions are computed but never reported ---
+
+  it('reports the excludedCommands exemptions in the status', async () => {
+    const root = temporaryDirectory();
+    const launched = await launchSandbox({
+      command: 'git status',
+      cwd: root,
+      policy: policy({ allowUnsandboxedCommands: true, excludedCommands: ['git status'] }),
+    });
+    expect(launched.status.sandboxed).toBe(false);
+    expect(launched.status.exemptions).toEqual(['git status']);
+    await launched.cleanup();
+  });
+
+  // --- review finding 19: the misleading diagnostics ---
+
+  it('raises a SandboxRefusedError when the working directory does not exist', async () => {
+    const missing = path.join(temporaryDirectory(), 'does-not-exist');
+    await expect(launchSandbox({ command: 'echo hello', cwd: missing })).rejects.toBeInstanceOf(
+      SandboxRefusedError,
+    );
+  });
+
+  // --- review finding 20: --chdir is given a path that may not be bound ---
+
+  it.skipIf(!bubblewrapAvailable)(
+    'runs the command in the sandbox root when the working directory is the root',
+    async () => {
+      const launched = await launchSandbox({ command: 'pwd', cwd: '/' });
+      const result = await launched.wait();
+      await launched.cleanup();
+
+      // The root is not bound — a bind of it would shadow the whole sandbox — so
+      // the sandboxed process sees the sandbox's own root.
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('/');
+      expect(launched.status.plan.workingDirectory).toBe('/');
+    },
+  );
+
+  it('distinguishes a missing unshare binary from a refused user namespace', () => {
+    const missing = probeUserNamespace(() => ({ status: null, failed: true }));
+    expect(missing.available).toBe(true);
+    expect(missing.warning).toMatch(/unshare/);
+    expect(missing.reason).toBeUndefined();
+
+    const refused = probeUserNamespace(() => ({ status: 1 }));
+    expect(refused.available).toBe(false);
+    expect(refused.reason).toMatch(/does not allow an unprivileged user namespace/);
+    expect(refused.warning).toBeUndefined();
+  });
+
+  // --- review finding 12: the sandbox.filesystem block reaches the mount plan ---
+
+  it('maps the sandbox.filesystem block onto the mount plan', () => {
+    const root = temporaryDirectory();
+    const readable = path.join(root, 'readable');
+    const writable = path.join(root, 'writable');
+    const secret = path.join(root, 'secret.txt');
+    const token = path.join(root, 'token');
+    mkdirSync(readable);
+    mkdirSync(writable);
+    writeFileSync(secret, 'secret');
+    writeFileSync(token, 'token');
+
+    const plan = buildSandboxPlan({
+      command: 'true',
+      cwd: root,
+      filesystem: {
+        allowRead: [readable],
+        allowWrite: [writable],
+        denyRead: [secret],
+        denyWrite: [],
+        credentials: [token],
+      },
+    });
+
+    expect(plan.mounts.some((mount) => mount.kind === 'ro-bind' && mount.target === readable)).toBe(
+      true,
+    );
+    expect(plan.mounts.some((mount) => mount.kind === 'bind' && mount.target === writable)).toBe(
+      true,
+    );
+    expect(plan.protectedPaths).toContain(secret);
+    expect(plan.protectedPaths).toContain(token);
+    expect(plan.masks.some((mask) => mask.path === secret)).toBe(true);
+    expect(plan.masks.some((mask) => mask.path === token)).toBe(true);
+  });
+
+  it('maps the filesystem policy onto the read-only, read-write and masked lists', () => {
+    const mapped = planFilesystemPolicy({
+      allowRead: ['/a'],
+      allowWrite: ['/b'],
+      denyRead: ['/c'],
+      denyWrite: ['/d'],
+      credentials: ['/e'],
+    });
+    expect(mapped.readOnlyPaths).toEqual(['/a']);
+    expect(mapped.readWritePaths).toEqual(['/b']);
+    expect(mapped.protectedPaths).toEqual(['/c', '/d', '/e']);
+  });
 });
 
 // --- step 8: Landlock ---------------------------------------------------------
@@ -545,6 +1107,23 @@ describe('CC-017 step 8 — the Landlock layer', () => {
     expect(status.abi).toBe(0);
     expect(status.reason).toMatch(/ENOSYS/);
     expect(status.reducedProtection.length).toBeGreaterThan(0);
+    // The seam really asked the kernel, so the kernel is the one that said no.
+    expect(status.seamImplemented).toBe(true);
+    expect(status.kernelSupported).toBe(false);
+  });
+
+  // --- review finding 6: the status blames the kernel for a reimplementation-side stub ---
+
+  it('does not blame the kernel when the seam is a stub', () => {
+    const status = detectLandlock(defaultLandlockSyscalls());
+    expect(status.available).toBe(false);
+    expect(status.seamImplemented).toBe(false);
+    // The kernel was never asked, so this implementation claims nothing about it.
+    expect(status.kernelSupported).toBeUndefined();
+    expect(status.reason).toMatch(/seam is not implemented/);
+    expect(status.reason).not.toMatch(/kernel does not implement/);
+    expect(status.reducedProtection.join(' ')).not.toMatch(/not available on this host/);
+    expect(status.reducedProtection.join(' ')).toMatch(/was not probed/);
   });
 
   it('degrades gracefully in the launcher status', async () => {
@@ -728,6 +1307,19 @@ describe('CC-017 step 11 — the seccomp supervisor', () => {
     expect(immediates).toContain(0xc000003e);
   });
 
+  // --- review finding 16: the errno option applies only to the architecture ---
+
+  it('makes the errno option apply to every blocked syscall', () => {
+    const filter = buildSeccompFilter({ errno: 13 });
+    const returns: number[] = [];
+    for (let offset = 0; offset + 8 <= filter.length; offset += 8) {
+      if (filter.readUInt16LE(offset) === 0x06) returns.push(filter.readUInt32LE(offset + 4));
+    }
+    // Every refusal carries the errno the option names, and not the default one.
+    expect(returns).toContain(0x00050000 | 13);
+    expect(returns).not.toContain(0x00050000 | 1);
+  });
+
   it('never authorizes a path the plan masks', () => {
     const cwd = temporaryDirectory();
     const protectedPath = path.join(cwd, 'settings.json');
@@ -736,6 +1328,29 @@ describe('CC-017 step 11 — the seccomp supervisor', () => {
     const channel = fakeChannel({ path: protectedPath });
     const supervisor = planSupervisor(plan, channel);
     supervisor.handle({ id: 11n, pid: 4242, nr: 257, args: [0n, 0n] });
+
+    const continued = channel.responses.filter(
+      (response) => (response.flags & SECCOMP_USER_NOTIF_FLAG_CONTINUE) !== 0,
+    );
+    expect(continued).toHaveLength(0);
+  });
+
+  // --- review finding 4: the supervisor authorizes paths that layer 1 denies ---
+
+  it('never authorizes a sibling under the directory the plan masks', () => {
+    const cwd = temporaryDirectory();
+    const configDirectory = path.join(cwd, '.claude');
+    mkdirSync(configDirectory);
+    const protectedPath = path.join(configDirectory, 'settings.json');
+    writeFileSync(protectedPath, '{}');
+    const plan = buildSandboxPlan({ command: 'true', cwd, protectedPaths: [protectedPath] });
+
+    // The mask covers the whole directory, so a sibling under it is refused too.
+    expect(plan.masks[0]?.target).toBe(configDirectory);
+
+    const channel = fakeChannel({ path: path.join(configDirectory, 'other.json') });
+    const supervisor = planSupervisor(plan, channel);
+    supervisor.handle({ id: 12n, pid: 4242, nr: 257, args: [0n, 0n] });
 
     const continued = channel.responses.filter(
       (response) => (response.flags & SECCOMP_USER_NOTIF_FLAG_CONTINUE) !== 0,
@@ -757,6 +1372,17 @@ describe('CC-017 step 13 — the network proxy', () => {
     expect(classifyAddress('100.100.100.200')).toBe('cloud-metadata');
     expect(classifyAddress('fd00:ec2::254')).toBe('cloud-metadata');
     expect(classifyAddress('93.184.216.34')).toBe('public');
+  });
+
+  // --- review finding 9: the expanded IPv4-mapped loopback is classified public ---
+
+  it('classifies an IPv4-mapped address by the IPv4 address it carries', () => {
+    expect(classifyAddress('0:0:0:0:0:ffff:7f00:1')).toBe('loopback');
+    expect(classifyAddress('::ffff:127.0.0.1')).toBe('loopback');
+    expect(classifyAddress('::ffff:7f00:1')).toBe('loopback');
+    expect(classifyAddress('::ffff:a9fe:a9fe')).toBe('link-local');
+    expect(isBlockedAddress('0:0:0:0:0:ffff:7f00:1')).toBe(true);
+    expect(isBlockedAddress('::ffff:127.0.0.1')).toBe(true);
   });
 
   it('blocks the loopback, link-local and cloud-metadata addresses', () => {
@@ -840,6 +1466,84 @@ describe('CC-017 step 13 — the network proxy', () => {
       expect(response.body).toMatch(/refus/i);
     } finally {
       await proxy.close();
+    }
+  });
+
+  // --- review finding 17: the socket lives in a world-writable directory ---
+
+  it('puts the proxy socket in a private directory', async () => {
+    const proxy = await createSandboxProxy({ policy: { allowedDomains: ['*'] } });
+    try {
+      const directory = path.dirname(proxy.socketPath);
+      expect(statSync(directory).mode & 0o777).toBe(0o700);
+      expect(statSync(proxy.socketPath).mode & 0o777).toBe(0o600);
+    } finally {
+      await proxy.close();
+    }
+  });
+});
+
+// --- the documentation the review pins ----------------------------------------
+
+/** The source of a module of the sandbox. */
+function moduleSource(name: string): string {
+  return readFileSync(new URL(`../../src/platform/sandbox/${name}.ts`, import.meta.url), 'utf8');
+}
+
+/** The header of a module of the sandbox, with the comment markers stripped. */
+function moduleHeader(name: string): string {
+  const source = moduleSource(name);
+  return source.slice(0, source.indexOf('*/')).replace(/^\s*\*\s?/gm, '');
+}
+
+describe('CC-017 — the documented shape of the sandbox', () => {
+  it('states the residual risk in every module header', () => {
+    for (const name of ['policy', 'launcher', 'landlock', 'seccomp', 'proxy']) {
+      const header = moduleHeader(name);
+      expect(header).toMatch(/residual risk/i);
+      expect(header).toMatch(/microVM/);
+    }
+  });
+
+  // --- review finding 13: the policy defaults diverge from the target ---
+
+  it('labels the policy defaults that diverge from the target', () => {
+    const header = moduleHeader('policy');
+    expect(header).toMatch(/falls back to running\s+unsandboxed/);
+    expect(header).toMatch(/failIfUnavailable/);
+    expect(header).toMatch(/enabledPlatforms/);
+  });
+
+  // --- review finding 12: the read-only working tree is a implementation choice ---
+
+  it('labels the read-only working tree as a implementation choice', () => {
+    const header = moduleHeader('launcher');
+    expect(header).toMatch(/Implementation choices/);
+    expect(header).toMatch(/working tree is bound read-only/);
+  });
+
+  // --- review finding 14: the observation line diverges from the target's ---
+
+  it('labels the extra member of the observation line', () => {
+    const source = moduleSource('seccomp');
+    const documentation = source.slice(source.indexOf('Format an observation'));
+    expect(documentation).toMatch(/secondPath/);
+    expect(documentation).toMatch(/divergence/i);
+  });
+
+  // --- review finding 6: the seam and the kernel are different facts ---
+
+  it('distinguishes the unimplemented seam from a kernel without Landlock', () => {
+    const header = moduleHeader('landlock');
+    expect(header).toMatch(/stub/);
+    expect(header).toMatch(/never claims a host fact/i);
+  });
+
+  // --- review finding 20: the JSDoc block and the export share a line ---
+
+  it('keeps the JSDoc block of an export on its own line', () => {
+    for (const name of ['policy', 'launcher', 'landlock', 'seccomp', 'proxy']) {
+      expect(moduleSource(name)).not.toContain('}export');
     }
   });
 });

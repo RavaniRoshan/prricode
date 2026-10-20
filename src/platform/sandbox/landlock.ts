@@ -23,9 +23,15 @@
  * **The native seam.** `landlock_create_ruleset(2)`, `landlock_add_rule(2)` and
  * `landlock_restrict_self(2)` are raw syscalls, and a Node process cannot issue
  * them. The layer is therefore written against the `LandlockSyscalls` seam. This
- * build ships no native helper, so the default seam reports that Landlock is
- * unavailable and the launcher records the reduced protection: the path policy is
- * then enforced by the **mount namespace** instead, which is kernel-enforced too.
+ * build ships no native helper, so the default seam is a **stub**: it says it is
+ * not implemented, and the status reports that the kernel was never asked. The
+ * launcher records the reduced protection — the path policy is then enforced by
+ * the **mount namespace** instead, which is kernel-enforced too.
+ *
+ * **This implementation never claims a host fact it has not observed.** A stub seam that
+ * answers `ENOSYS` says nothing about the kernel: `ENOSYS` from a stub is the
+ * implementation's own answer, not the kernel's. Only a seam that really issued the
+ * syscall may report that the kernel does not implement Landlock.
  *
  * **The residual risk.** Landlock is an LSM on the same kernel as everything else
  * in the sandbox. A kernel privilege escalation reachable from the sandbox defeats
@@ -130,8 +136,20 @@ export function filesystemRightsForAbi(abi: number): bigint {
   return rights;
 }
 
-/** The syscall seam the layer needs. */
+/** The syscall seam the layer needs.
+ *
+ * The `implemented` member says whether the seam can issue the raw syscalls at
+ * all. A seam that cannot is a **stub**, and a stub says nothing about the
+ * kernel: this implementation must never report a host fact it has not observed.
+ */
 export interface LandlockSyscalls {
+  /**
+   * Whether the seam can issue the raw syscalls.
+   *
+   * `false` means the seam is a stub — a build that ships no native helper. A
+   * stub that answers `ENOSYS` has not asked the kernel anything.
+   */
+  readonly implemented?: boolean;
   /**
    * `landlock_create_ruleset(2)`.
    *
@@ -158,12 +176,14 @@ export interface LandlockSyscalls {
  * The seam this build ships.
  *
  * The three calls are raw syscalls, and a Node process cannot issue them, so the
- * default seam reports `ENOSYS`. A build that ships a native helper replaces this
- * with the real calls.
+ * default seam is a **stub**: it reports `ENOSYS` and says that it is not
+ * implemented. A build that ships a native helper replaces this with the real
+ * calls.
  */
 export function defaultLandlockSyscalls(): LandlockSyscalls {
   const unavailable = (): number => -38; // ENOSYS
   return {
+    implemented: false,
     createRuleset: unavailable,
     addRule: unavailable,
     restrictSelf: unavailable,
@@ -174,7 +194,7 @@ export function defaultLandlockSyscalls(): LandlockSyscalls {
 export interface LandlockStatus {
   /** Whether the kernel implements Landlock at all. */
   available: boolean;
-  /** The ABI the kernel reports; `0` when Landlock is missing. */
+  /** The ABI the kernel reports; `0` when Landlock is missing or unprobed. */
   abi: number;
   /** The ABI this implementation wants. */
   requiredAbi: number;
@@ -188,6 +208,20 @@ export interface LandlockStatus {
   scopeRights: boolean;
   /** Why Landlock is missing or reduced. */
   reason?: string;
+  /**
+   * Whether the seam could ask the kernel anything.
+   *
+   * `false` means this implementation shipped no native helper, so the kernel's Landlock
+   * support was never observed: the status says nothing about the host.
+   */
+  seamImplemented: boolean;
+  /**
+   * Whether the kernel implements Landlock.
+   *
+   * `undefined` when the kernel was never asked — an unprobed host is not a host
+   * without Landlock.
+   */
+  kernelSupported?: boolean;
 }
 
 /**
@@ -195,9 +229,17 @@ export interface LandlockStatus {
  *
  * The kernel is asked which ABI it implements; nothing is assumed. A kernel that
  * does not implement Landlock, or one whose ABI is below the level this implementation
- * wants, yields a status that says so.
+ * wants, yields a status that says so. A **stub** seam yields a status that says
+ * the kernel was never asked: this implementation does not claim a host fact it has not
+ * observed.
  */
 export function detectLandlock(syscalls: LandlockSyscalls = defaultLandlockSyscalls()): LandlockStatus {
+  if (syscalls.implemented === false) {
+    return unprobedStatus(
+      'the Landlock seam is not implemented in this build, so the kernel was never asked whether it implements Landlock',
+    );
+  }
+
   let result: number;
   try {
     result = syscalls.createRuleset(null, 0, LANDLOCK_CREATE_RULESET_VERSION);
@@ -244,10 +286,12 @@ export function detectLandlock(syscalls: LandlockSyscalls = defaultLandlockSysca
     networkRights: abi >= 4,
     ioctlDevRights: abi >= 5,
     scopeRights: abi >= 6,
+    seamImplemented: true,
+    kernelSupported: true,
   };
 }
 
-/** A status for a host without Landlock. */
+/** A status for a host whose kernel does not implement Landlock. */
 function unavailableStatus(reason: string): LandlockStatus {
   return {
     available: false,
@@ -260,6 +304,31 @@ function unavailableStatus(reason: string): LandlockStatus {
     ioctlDevRights: false,
     scopeRights: false,
     reason,
+    seamImplemented: true,
+    kernelSupported: false,
+  };
+}
+
+/**
+ * A status for a build whose seam never asked the kernel.
+ *
+ * The protection is reduced for a reason this implementation knows: it ships no native
+ * helper. The status does **not** say that the host lacks Landlock, because the
+ * implementation has not observed that.
+ */
+function unprobedStatus(reason: string): LandlockStatus {
+  return {
+    available: false,
+    abi: 0,
+    requiredAbi: LANDLOCK_REQUIRED_ABI,
+    reducedProtection: [
+      'Landlock was not probed: this build ships no native helper that can issue the raw syscalls, so the path policy is enforced by the mount namespace instead.',
+    ],
+    networkRights: false,
+    ioctlDevRights: false,
+    scopeRights: false,
+    reason,
+    seamImplemented: false,
   };
 }
 

@@ -29,6 +29,10 @@
  *     an empty whitelist means "nothing is allowed".
  *   - The proxy speaks the HTTP proxy protocol over the Unix socket: `CONNECT` for
  *     a tunnelled request and an absolute-URI request for a plain one.
+ *   - The socket lives in a **private directory** of its own (mode `0700`), never
+ *     directly in the world-writable temporary directory: a socket another local
+ *     user can reach is a way into the sandbox, and a predictable name in a
+ *     world-writable directory can be pre-created to break the launch.
  *
  * **The residual risk.** The proxy is a policy point, not a boundary: the sandbox
  * reaches it over a bind-mounted Unix socket, and the socket is the only way out
@@ -38,6 +42,7 @@
  */
 
 import { lookup } from 'node:dns/promises';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
@@ -74,6 +79,11 @@ export const CLOUD_METADATA_HOSTNAMES: readonly string[] = Object.freeze([
  * The classes the proxy refuses are the loopback, the link-local and the
  * cloud-metadata ranges; the private and the unique-local ranges are refused too
  * unless the policy says otherwise.
+ *
+ * An **IPv4-mapped IPv6 address** is classified by the IPv4 address it carries:
+ * `0:0:0:0:0:ffff:7f00:1` and `::ffff:127.0.0.1` are the same address, and both
+ * are the loopback. The IPv4-compatible form (`::127.0.0.1`) is classified the
+ * same way.
  */
 export function classifyAddress(address: string): AddressClass {
   const normalized = address.trim().toLowerCase().replace(/^\[|\]$/g, '');
@@ -81,26 +91,48 @@ export function classifyAddress(address: string): AddressClass {
 
   const ipv4 = parseIpv4(normalized);
   if (ipv4 !== undefined) {
-    const [a = 0, b = 0] = ipv4;
-    if (a === 127) return 'loopback';
-    if (a === 169 && b === 254) return 'link-local';
-    if (a === 10) return 'private';
-    if (a === 172 && b >= 16 && b <= 31) return 'private';
-    if (a === 192 && b === 168) return 'private';
-    if (a === 0) return 'invalid';
-    return 'public';
+    return classifyIpv4(ipv4);
   }
 
   const ipv6 = parseIpv6(normalized);
   if (ipv6 !== undefined) {
-    if (ipv6.every((part) => part === 0)) return 'invalid';
-    if (ipv6.slice(0, 7).every((part) => part === 0) && ipv6[7] === 1) return 'loopback';
-    if (((ipv6[0] ?? 0) & 0xffc0) === 0xfe80) return 'link-local';
-    if (((ipv6[0] ?? 0) & 0xfe00) === 0xfc00) return 'unique-local';
-    return 'public';
+    return classifyIpv6(ipv6);
   }
 
   return 'invalid';
+}
+
+/** Classify a dotted-quad IPv4 address. */
+function classifyIpv4(ipv4: readonly number[]): AddressClass {
+  const [a = 0, b = 0] = ipv4;
+  if (a === 127) return 'loopback';
+  if (a === 169 && b === 254) return 'link-local';
+  if (a === 10) return 'private';
+  if (a === 172 && b >= 16 && b <= 31) return 'private';
+  if (a === 192 && b === 168) return 'private';
+  if (a === 0) return 'invalid';
+  return 'public';
+}
+
+/** Classify the eight groups of an IPv6 address. */
+function classifyIpv6(ipv6: readonly number[]): AddressClass {
+  if (ipv6.every((part) => part === 0)) return 'invalid';
+  if (ipv6.slice(0, 7).every((part) => part === 0) && ipv6[7] === 1) return 'loopback';
+
+  // An IPv4-mapped address (`::ffff:a.b.c.d`) carries an IPv4 address in its
+  // last two groups: it is classified by that address, never as a public one.
+  if (ipv6.slice(0, 5).every((part) => part === 0) && ipv6[5] === 0xffff) {
+    return classifyIpv4([(ipv6[6] ?? 0) >> 8, (ipv6[6] ?? 0) & 0xff, (ipv6[7] ?? 0) >> 8, (ipv6[7] ?? 0) & 0xff]);
+  }
+
+  // The IPv4-compatible form (`::a.b.c.d`) carries one the same way.
+  if (ipv6.slice(0, 6).every((part) => part === 0)) {
+    return classifyIpv4([(ipv6[6] ?? 0) >> 8, (ipv6[6] ?? 0) & 0xff, (ipv6[7] ?? 0) >> 8, (ipv6[7] ?? 0) & 0xff]);
+  }
+
+  if (((ipv6[0] ?? 0) & 0xffc0) === 0xfe80) return 'link-local';
+  if (((ipv6[0] ?? 0) & 0xfe00) === 0xfc00) return 'unique-local';
+  return 'public';
 }
 
 /** Whether an address is in one of the ranges the proxy always refuses. */
@@ -130,23 +162,39 @@ function parseIpv4(address: string): number[] | undefined {
 /** Parse an IPv6 address into its eight 16-bit groups. */
 function parseIpv6(address: string): number[] | undefined {
   if (!address.includes(':')) return undefined;
-  const [head = '', tail] = address.split('::');
-  const headGroups = head.length > 0 ? head.split(':') : [];
-  const tailGroups = tail === undefined ? [] : tail.split(':');
-  if (tail !== undefined && headGroups.length + tailGroups.length > 7) return undefined;
-  if (tail === undefined && headGroups.length !== 8) return undefined;
 
+  // The IPv4-compatible and the IPv4-mapped forms may spell their last four
+  // bytes as a dotted quad (`::ffff:127.0.0.1`).
+  let text = address;
+  let tailGroups: number[] = [];
+  const lastColon = text.lastIndexOf(':');
+  if (lastColon !== -1 && text.slice(lastColon + 1).includes('.')) {
+    const embedded = parseIpv4(text.slice(lastColon + 1));
+    if (embedded === undefined) return undefined;
+    text = text.slice(0, lastColon + 1);
+    tailGroups = [(embedded[0] ?? 0) << 8 | (embedded[1] ?? 0), (embedded[2] ?? 0) << 8 | (embedded[3] ?? 0)];
+  }
+
+  const [head = '', tail] = text.split('::');
+  const headGroups = head.length > 0 ? head.split(':').filter((part) => part.length > 0) : [];
+  const tailParts = tail === undefined ? [] : tail.split(':').filter((part) => part.length > 0);
   const groups: number[] = [];
   for (const group of headGroups) {
     if (!/^[0-9a-f]{1,4}$/.test(group)) return undefined;
     groups.push(Number.parseInt(group, 16));
   }
-  const missing = 8 - groups.length - tailGroups.length;
+  const missing = 8 - groups.length - tailParts.length - tailGroups.length;
+  if (tail === undefined) {
+    if (missing !== 0) return undefined;
+  } else if (missing < 1) {
+    return undefined;
+  }
   for (let index = 0; index < missing; index += 1) groups.push(0);
-  for (const group of tailGroups) {
+  for (const group of tailParts) {
     if (!/^[0-9a-f]{1,4}$/.test(group)) return undefined;
     groups.push(Number.parseInt(group, 16));
   }
+  groups.push(...tailGroups);
   return groups.length === 8 ? groups : undefined;
 }
 
@@ -319,12 +367,23 @@ let socketCounter = 0;
  * The proxy listens on a Unix socket. The launcher bind-mounts that socket into the
  * sandbox, so the sandboxed process reaches the proxy over the filesystem and not
  * over the network.
+ *
+ * The socket lives in a **private directory** (mode `0700`) of its own: a socket
+ * in a world-writable directory can be connected to by another local user, and
+ * its predictable name can be pre-created to break the launch. A caller that
+ * names its own socket path gets that path unchanged.
  */
 export async function createSandboxProxy(options: SandboxProxyOptions): Promise<SandboxProxy> {
   socketCounter += 1;
-  const socketPath =
-    options.socketPath ??
-    path.join(tmpdir(), `agent-sandbox-proxy-${process.pid}-${socketCounter}.sock`);
+  let directory: string | undefined;
+  let socketPath: string;
+  if (options.socketPath !== undefined) {
+    socketPath = options.socketPath;
+  } else {
+    directory = mkdtempSync(path.join(tmpdir(), 'agent-sandbox-proxy-'));
+    chmodSync(directory, 0o700);
+    socketPath = path.join(directory, `proxy-${process.pid}-${socketCounter}.sock`);
+  }
   const resolveHost = options.resolve ?? defaultResolve;
   const requests: ProxyRequestRecord[] = [];
 
@@ -341,11 +400,19 @@ export async function createSandboxProxy(options: SandboxProxyOptions): Promise<
     });
   });
 
+  // The socket itself is only reachable by its owner.
+  try {
+    chmodSync(socketPath, 0o600);
+  } catch {
+    // The socket is already gone; nothing to protect.
+  }
+
   return {
     socketPath,
     requests,
     close: async () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (directory !== undefined) rmSync(directory, { recursive: true, force: true });
     },
   };
 }

@@ -153,9 +153,6 @@ const SECCOMP_RET_ALLOW = 0x7fff0000;
 /** `SECCOMP_RET_ERRNO`. */
 const SECCOMP_RET_ERRNO = 0x00050000;
 
-/** `SECCOMP_RET_ERRNO(EPERM)`. */
-const SECCOMP_RET_ERRNO_EPERM = SECCOMP_RET_ERRNO | 1;
-
 /**
  * The metadata of one dispatch record.
  *
@@ -253,7 +250,7 @@ export function buildSeccompFilter(options: SeccompFilterOptions = {}): Buffer {
     const nr = syscallNumber(name);
     if (nr === undefined) continue;
     instructions.push([BPF_JEQ_K, 0, 1, nr]);
-    instructions.push([BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO_EPERM]);
+    instructions.push([BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | (errno & 0xffff)]);
   }
   instructions.push([BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW]);
 
@@ -274,7 +271,12 @@ export interface SeccompFilterOptions {
   denied?: readonly string[];
   /** The architecture the filter is compiled for. */
   architecture?: number;
-  /** The errno a blocked syscall returns. */
+  /**
+   * The errno a blocked syscall returns.
+   *
+   * The option applies to **every** call the filter refuses: the denied
+   * syscalls and the foreign-architecture branch alike. The default is `EPERM`.
+   */
   errno?: number;
 }
 
@@ -487,6 +489,11 @@ export function createSeccompSupervisor(options: SeccompSupervisorOptions): Secc
  * The target emits `{"nr":%d,"syscall":"%s","pid":%d,"path":"%s"}`, with the same
  * added `encodedCommand` member when an encoded command is present, and with `\`
  * and `"` backslash-escaped and the control bytes rendered as `\uXXXX`.
+ *
+ * **This implementation's divergence.** This implementation adds a `secondPath` member when the
+ * intercepted call carries a second path — `rename`, `link`, `renameat`,
+ * `linkat` and `renameat2` do. The target's line carries only the four members
+ * above, so the extra member is a implementation choice and is marked here.
  */
 export function formatObservation(observation: SyscallObservation): string {
   const members: string[] = [
