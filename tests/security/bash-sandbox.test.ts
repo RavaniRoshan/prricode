@@ -28,7 +28,7 @@
  * change to a reason is a change to a compatibility claim.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -40,6 +40,7 @@ import { describeReason, type PermissionDecision, type ToolContext } from '../..
 import type { RuleSet } from '../../src/permissions/rules.js';
 import {
   MAX_COLLECTED_OUTPUT_CHARS,
+  bubblewrapBackend,
   launchSandbox,
   sandboxEnvironment,
   type SandboxBackend,
@@ -63,6 +64,12 @@ import { createToolRegistry } from '../../src/tools/registry.js';
 import { runTool } from '../../src/tools/runner.js';
 
 // --- the fixtures -----------------------------------------------------------------
+
+/** The host's process table, as one string. */
+function psOutput(): string {
+  const result = spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' });
+  return result.stdout ?? '';
+}
 
 /** The temporary directories a test creates, removed when the test ends. */
 const temporaryDirectories: string[] = [];
@@ -491,8 +498,8 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
 
     const output = await tool.execute(input, toolContext('Bash', input));
 
-    // The cap bites **after** the timeout message is appended, so the reported
-    // standard error never exceeds the cap.
+    // The timeout message is **reserved room for**, so the reported standard
+    // error never exceeds the cap and the notice is never truncated away.
     expect(output.stderr.length).toBe(MAX_BASH_OUTPUT_CHARS);
     expect(output.stderr.length).toBeLessThanOrEqual(MAX_BASH_OUTPUT_CHARS);
     // The message is **reserved room for**, so a standard error that is
@@ -500,6 +507,62 @@ describe('CC-008b step 1 — the Bash tool runs through the sandbox', () => {
     // report, and the report has to survive the cap.
     expect(output.stderr.endsWith('The command was stopped because it ran past its timeout.')).toBe(true);
   });
+
+  it('reserves room for the timeout notice on the unconfined path too', async () => {
+    const root = temporaryDirectory();
+    const tool = createBashTool(
+      builtinDeps({
+        rules: ruleSet({ allow: ['Bash'], cwd: root }),
+        cwd: root,
+        // No policy at all: the command runs on the host, unconfined.
+        sandboxBackend: recordingBackend(),
+      }),
+    );
+    const input = {
+      command: "head -c 300000 /dev/zero | tr '\\0' 'x' >&2; sleep 30",
+      timeout: 500,
+    };
+
+    const output = await tool.execute(input, toolContext('Bash', input));
+
+    // The same reservation as the sandboxed path: the notice is part of the
+    // report, and the report has to survive the cap.
+    expect(output.stderr.length).toBe(MAX_BASH_OUTPUT_CHARS);
+    expect(output.stderr.endsWith('The command was stopped because it ran past its timeout.')).toBe(true);
+  });
+
+  it.skipIf(!bubblewrapAvailable)(
+    'stops the sandboxed command it reports as stopped',
+    async () => {
+      const root = temporaryDirectory();
+      const tool = createBashTool(
+        builtinDeps({
+          rules: ruleSet({ allow: ['Bash'], cwd: root }),
+          cwd: root,
+          sandboxPolicy: DEFAULT_SANDBOX_POLICY,
+          sandboxBackend: bubblewrapBackend(),
+        }),
+      );
+      // A **distinctive** command line, so the running process can be found in
+      // the host's process table. A file the command would create cannot be
+      // observed: the sandboxed process writes into the sandbox's own root, not
+      // the host's. Two commands, so the shell does **not** exec them away —
+      // a single command is exec'd, which would drop the marker from the
+      // process's arguments.
+      const marker = 'claude008b-still-running-marker';
+      const input = { command: `echo started; sleep 30 # ${marker}`, timeout: 300 };
+
+      const output = await tool.execute(input, toolContext('Bash', input));
+
+      expect(output.exitCode).toBe(124);
+      expect(output.timedOut).toBe(true);
+
+      // The report says the command was stopped. It must **be** stopped: the
+      // host's process table must not still carry it.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(psOutput()).not.toContain(marker);
+    },
+  );
 
   it('does not report a sandboxed run that failed as a command that succeeded', async () => {
     const root = temporaryDirectory();
@@ -1126,7 +1189,10 @@ describe('CC-008b step 6 — the header of the tool', () => {
     expect(header).not.toMatch(/not in the production path/i);
   });
 
-  it('carries the sandbox policy into the session the CLI builds', () => {
+  it('names the wiring the session assembly carries', () => {
+    // A **tripwire**, not a guard: it says the wiring is *named* in the
+    // session assembly. The guard is the behavioural test below, which builds
+    // a real session and checks the policy reached the model.
     // The wiring the tool's header names: the `BuiltinToolDeps` the session
     // assembly builds must carry the loaded sandbox policy, or every command
     // takes the no-policy branch and the sandbox protects nothing.

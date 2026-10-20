@@ -539,29 +539,39 @@ type SandboxOutcome =
 /**
  * The output a stopped command had produced.
  *
- * The launcher hands the output over when the process ends, and a command that
- * was stopped never ends on its own — so the tool stops it and then asks the
- * launcher for what it collected, with a **bounded** grace period: the timeout is
- * reported at once, and a process that does not die is never waited for.
+ * The launcher keeps the output it has collected so far, so a command that
+ * was stopped before it ends still yields what it had already printed. A
+ * backend that does **not** collect is the fallback: the tool waits for the
+ * result with a **bounded** grace period, so the timeout is reported at once
+ * and a process that does not die is never waited for.
+ *
+ * The caller has already **stopped** the command — see {@link stopSandbox} —
+ * so this never kills anything itself.
  */
 async function partialOutputOf(
   launched: LaunchedSandbox,
 ): Promise<{ stdout: string; stderr: string }> {
-  // The launcher keeps the output it has collected so far, so a command that
-  // is stopped before it ends still yields what it had already printed. The
-  // grace period is the fallback for a backend that does not collect.
   const collected = launched.output;
   if (collected !== undefined) {
     return { stdout: collected.stdout, stderr: collected.stderr };
   }
   const outcome = await Promise.race([
-    (async () => {
-      await launched.cleanup();
-      return launched.wait();
-    })(),
+    launched.wait(),
     delay(SANDBOX_OUTPUT_GRACE_MS).then(() => undefined),
   ]).catch(() => undefined);
   return { stdout: outcome?.stdout ?? '', stderr: outcome?.stderr ?? '' };
+}
+
+/**
+ * Stop a sandboxed command that ran past its timeout.
+ *
+ * The kill is **not** awaited: the timeout must be reported at once, and a
+ * process that does not die must not hold the report. `cleanup` kills
+ * synchronously and only then waits for the process, so the kill happens
+ * immediately whatever the report does.
+ */
+function stopSandbox(launched: LaunchedSandbox): void {
+  void launched.cleanup().catch(() => undefined);
 }
 
 /**
@@ -586,6 +596,10 @@ function waitForSandbox(launched: LaunchedSandbox, timeoutMs: number): Promise<S
       // The flag is set **before** the command is stopped: a command that ends
       // because the timeout stopped it is a timeout, not a command that ran.
       timedOut = true;
+      // The command is **stopped**, not merely reported as stopped: the
+      // sandboxed process would otherwise keep running after the call
+      // returned.
+      stopSandbox(launched);
       void (async () => {
         const partial = await partialOutputOf(launched);
         finish({ kind: 'timeout', stdout: partial.stdout, stderr: partial.stderr });
