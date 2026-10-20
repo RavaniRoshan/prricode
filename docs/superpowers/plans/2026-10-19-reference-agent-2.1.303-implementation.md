@@ -694,14 +694,14 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Interfaces:** Consumes: `src/session/event.ts` (`SessionEvent`), `src/session/store.ts`; `src/agent/context.ts` (`conversationFromEvents`). Produces: a projected `tool_result` block whose `content` is always a **string**.
 
-- [ ] **Step 1: Write the failing test** — a transcript with a tool call whose result is an **error** envelope is projected into provider messages, and the `tool_result` block's content is a **string** — not the object.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the content is the object.
-- [ ] **Step 3: Fix the projection** in `src/session/resume.ts` so the content is serialised the way the live path serialises it. The two paths must agree — **reuse** the live path's serialisation rather than writing a second one, so they cannot drift.
-- [ ] **Step 4: Run it to verify it fails** — expected: PASS.
-- [ ] **Step 5: Write the failing cross-path test** — the same transcript projected through `src/agent/context.ts`'s `conversationFromEvents` and through `src/session/resume.ts` must produce the **same** `tool_result` content. A serialization that differs between the two paths is the bug this task exists to remove.
-- [ ] **Step 6: Implement the shared serialisation** and confirm the two paths agree.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Commit.**
+- [x] **Step 1: Write the failing test** — a transcript with a tool call whose result is an **error** envelope is projected into provider messages, and the `tool_result` block's content is a **string** — not the object.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the content is the object.
+- [x] **Step 3: Fix the projection** in `src/session/resume.ts` so the content is serialised the way the live path serialises it. The two paths must agree — **reuse** the live path's serialisation rather than writing a second one, so they cannot drift.
+- [x] **Step 4: Run it to verify it fails** — expected: PASS.
+- [x] **Step 5: Write the failing cross-path test** — the same transcript projected through `src/agent/context.ts`'s `conversationFromEvents` and through `src/session/resume.ts` must produce the **same** `tool_result` content. A serialization that differs between the two paths is the bug this task exists to remove.
+- [x] **Step 6: Implement the shared serialisation** and confirm the two paths agree.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Commit.**
   ```bash
   git add src/session src/agent tests/contracts/tool-result-projection.test.ts
   git commit -m "fix(session): the projected tool-result content is always a string"
