@@ -1098,18 +1098,21 @@ export interface PreToolUseHookApproval {
 
 **Interfaces:** Consumes: every earlier task's public surface plus the target contract rows in `docs/compatibility/feature-matrix.md`. Produces: a measured row per contract: `match | partial | mismatch | not-tested | unknown`, with the evidence class and the test that produced it.
 
-- [ ] **Step 1: Write the failing results test** — every feature-matrix row has exactly one results row, and every result row with `match` has a linked passing test. A row whose target evidence class is `unknown` may not be reported as `match`.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement the compatibility scenario harness** that runs each scenario against this implementation and records the outcome.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Populate `docs/compatibility/results.md`** with the measured values and the command used to reproduce each.
-- [ ] **Step 6: Commit.**
+- [x] **Step 1: Write the failing results test** — every feature-matrix row has exactly one results row, and every result row with `match` has a linked passing test. A row whose target evidence class is `unknown` may not be reported as `match`.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement the compatibility scenario harness** that runs each scenario against this implementation and records the outcome.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Populate `docs/compatibility/results.md`** with the measured values and the command used to reproduce each.
+- [x] **Step 6: Commit.**
   ```bash
   git add tests/compatibility docs/compatibility
   git commit -m "docs(compat): measured compatibility results"
   ```
 
 ---
+
+
+**Result (fix round 1):** The measured totals are **20 `match`**, **15 `partial`**, **4 `mismatch`**, **0 `not-tested`** and **3 `unknown`** over the 42 matrix rows. The four `mismatch` rows are `F-18` (this implementation's permission-feedback member names), `F-34` (no native sandbox helper), `F-35` (no seccomp-notify listener) and `F-38` (the pure boolean-flag set). The three `unknown` rows are `F-36` (no whole-image native inventory), `F-37` (the target's sandbox routing is unobserved) and `F-39` (the target's terminal UI is unobserved). Every "What was measured" cell is the harness's own `detail` string and the results test compares the two; a probe that observes nothing of this implementation, or that asserts a constant, fails the suite.
 
 ## Execution handoff
 
