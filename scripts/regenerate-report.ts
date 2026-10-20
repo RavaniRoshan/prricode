@@ -40,16 +40,26 @@ function indexOf(lines: readonly string[], prefix: string, from = 0): number {
 }
 
 /** The rows of the table at or after `start`, up to the first blank line. */
-function tableRows(lines: readonly string[], start: number): string[] {
+function tableRows(lines: readonly string[], start: number, end = lines.length): string[] {
   let at = start;
-  while (at < lines.length && !(lines[at] ?? '').startsWith('|')) at += 1;
+  while (at < end && !(lines[at] ?? '').startsWith('|')) at += 1;
   const rows: string[] = [];
-  for (let index = at; index < lines.length; index += 1) {
+  for (let index = at; index < end; index += 1) {
     const line = lines[index] ?? '';
     if (line.trim() === '') break;
     rows.push(line);
   }
   return rows;
+}
+
+/** The index of the next heading of the same or a higher level, or `end`. */
+function nextHeading(lines: readonly string[], start: number, end: number): number {
+  for (let index = start; index < end; index += 1) {
+    if ((lines[index] ?? '').startsWith('### ') || (lines[index] ?? '').startsWith('## ')) {
+      return index;
+    }
+  }
+  return end;
 }
 
 /** Run every scenario and collect what it measured. */
@@ -114,19 +124,23 @@ export function regenerateReport(source: string, measured: readonly Measured[]):
     const heading = `### \`${outcome}\` —`;
     const at = indexOf(lines, heading);
     if (at === -1) continue;
-    const rows = tableRows(lines, at + 1);
+    const sectionEnd = nextHeading(lines, at + 1, lines.length);
+    const rows = tableRows(lines, at + 1, sectionEnd);
     const body = measured
       .filter((row) => row.outcome === outcome)
       .map((row) => `| \`${row.rowId}\` | ${row.detail} |`);
-    // The heading, the blank line, the table, and the blank line after it.
+    // The table starts at the first `|`-bearing line after the heading; the
+    // section's prose sits between them and is left alone.
     let tableStart = at + 1;
-    while ((lines[tableStart] ?? '').trim() === '') tableStart += 1;
+    while (tableStart < sectionEnd && !(lines[tableStart] ?? '').startsWith('|')) {
+      tableStart += 1;
+    }
+    if (tableStart >= sectionEnd) continue;
     const end = tableStart + rows.length;
-    const keep = rows.length > 0 ? rows : [];
     lines = [
       ...lines.slice(0, tableStart),
-      ...keep,
-      ...(keep.length > 0 ? [''] : []),
+      ...(body.length > 0 ? body : []),
+      ...(body.length > 0 ? [''] : []),
       ...lines.slice(end + (rows.length > 0 ? 1 : 0)),
     ];
   }
