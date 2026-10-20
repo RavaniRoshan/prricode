@@ -658,11 +658,13 @@ async function runSandboxed(
   }
 
   if (outcome.kind === 'timeout') {
-    // The cap bites **after** the timeout message is appended, so the reported
-    // standard error never exceeds the cap.
+    // The timeout message is **reserved room for**, so it is never truncated
+    // away by a standard error that is already at the cap: the message is
+    // part of the report, and the report has to survive the cap.
     const stdout = capOutput(outcome.stdout);
+    const timeoutNotice = '\nThe command was stopped because it ran past its timeout.';
     const stderr = capOutput(
-      `${outcome.stderr}\nThe command was stopped because it ran past its timeout.`,
+      `${outcome.stderr.slice(0, Math.max(0, MAX_BASH_OUTPUT_CHARS - timeoutNotice.length))}${timeoutNotice}`,
     );
     return {
       type: 'text',
