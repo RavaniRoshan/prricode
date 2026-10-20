@@ -640,9 +640,9 @@ Status vocabulary: **observed** (directly present in the pinned artifact's stati
 
 | # | Requirement group | Status | Evidence | Notes |
 |---|---|---|---|---|
-| 1 | CLI entry, flags, subcommands | partial | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`, `ev_55449a84611a36ea464f40e34521dc3eda4ed244d6ff37baa2fc163d64070fe5` | CLI/config modules parsed; the full flag surface was not enumerated. `--version` is the only command ever executed. |
+| 1 | CLI entry, flags, subcommands | partial | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b`, `ev_55449a84611a36ea464f40e34521dc3eda4ed244d6ff37baa2fc163d64070fe5` | The parser's structure and the validation messages are observed, and the **complete flag list** and the ~60 subcommands are now enumerated (§8) — but this implementation's own surface is still a subset of the target's, which the report records. `--version` is the only command ever executed. |
 | 2 | Configuration file tiers | observed | `ev_832ea3e8e470482e2ec3bbd279dd59e9e16762fa2aeba40f34e61bcb90bdcf2b` | Five named tiers; four distinct orderings observed as literals. |
-| 3 | Configuration precedence algorithm | partial (materially advanced) | same | Two distinct orderings (`C7s`, `Ble`) plus a whole-block override rule and tier degradation/suppression. Per-key merge for ordinary keys still not derived. |
+| 3 | Configuration precedence algorithm | observed | same | Two distinct orderings (`C7s`, `Ble`), a whole-block override rule, tier degradation and suppression, and the **per-top-level-key merge** with its per-key value rule, all established by source reading (§2.7). |
 | 4 | Provider adapters (8 routes) | observed | `ev_bdec53e06db82d41c30a893877f3506acd62d206c7a9e75c06d1f9b54ecc8012` | gateway, bedrock, foundry, anthropicAws, anthropicGoogleCloud, mantle, vertex, firstParty. |
 | 5 | Model catalog (provider-owned) | observed | `chunk-w4f5s3e0.js` (in `ev_9ba468...`) | `provider_ids` per model across 8 providers; `null` where unsupported. |
 | 6 | Route selection | observed | same | `xe()` / `wd(model)`; one active route; env-flag driven. |
@@ -652,8 +652,8 @@ Status vocabulary: **observed** (directly present in the pinned artifact's stati
 | 10 | Headers, auth, retry, timeout | observed | same | `anthropic-version: 2023-06-01`; `X-Stainless-*`; 408/409/429/5xx + 401 refresh. |
 | 11 | Response parsing | observed | same | The default `parseResponse` (`ai`) is read in full: streaming → `SSEParser.fromSSEResponse`; 204 → `null`; JSON → `buildMessage(await response.json(), response)` attaching non-enumerable `_request_id` and `_workspace_id`; otherwise `response.text()`. The SDK's SSE parser accepts an extended event vocabulary (`agent.*`, `session.*`, `span.*`, `user.*`) that the public API does not document. |
 | 12 | Local gateway | observed | `ev_8b10e4a2e8a586c2e4ee4b54674a00faf8c80d3db28aec8195c3c669e1beefef` | `cc-gateway/2.1.303`; `workspace_id` rejection; SSE re-framing. |
-| 13 | Agent turn loop | observed (request side) / partial (loop) | `chunk-4jsg44k7.js` | Streaming `beta.messages.create`; compaction/fallback ordering not resolved. |
-| 14 | Tool dispatch | partial | `ev_7086b60cc22e775b79b659c1f081a8e2eba74f7004c2ed8aeea288e6cec9003e` | tool_use→tool_result shaping observed; scheduling not resolved. |
+| 13 | Agent turn loop | observed | `chunk-4jsg44k7.js` | Streaming `beta.messages.create`. The **scheduling** of the tool calls of one message is established (§2.4); the compaction and fallback ordering remains open (§4). |
+| 14 | Tool dispatch | observed | `ev_7086b60cc22e775b79b659c1f081a8e2eba74f7004c2ed8aeea288e6cec9003e` | tool_use→tool_result shaping observed, and the **scheduling** is established (§2.4). The **tool registry** is now enumerated too (§8). |
 | 15 | Permission decisions | observed | `ev_bdec53e06db82d41c30a893877f3506acd62d206c7a9e75c06d1f9b54ecc8012`, `ev_9b2fbff46f81bf00e4937bf22c035b7f51aebb8ce323369480e28854298c3d80` | Decision shape, rule tiers, safety checks, host gates. |
 | 16 | Permission transport (remote) | observed | `ev_9b2fbff46f81bf00e4937bf22c035b7f51aebb8ce323369480e28854298c3d80` | `TransportPermissionDispatcher`; dedup; malformed → deny. |
 | 17 | Hooks | observed (event matrix) | `ev_da3ebe58a838f10c641ef6ce892283c7db5ee8d8444b7f27159efaeada6531d3` | 30+ events, per-event classification, decision shapes, matchers, MCP-tool hooks. |
@@ -662,10 +662,10 @@ Status vocabulary: **observed** (directly present in the pinned artifact's stati
 | 20 | Cross-restart prompt carry-over | observed | `chunk-6bp7hdav.js` | Outcome vocabulary and age/binding policy observed. |
 | 21 | MCP control surface | observed | `ev_592745079e22b1a97e0aaad8b97eabf04fe71d9d71f275007cf6e77f7528e5b7` | 23 subtypes enumerated; MCP callbacks and their absence error. |
 | 22 | MCP transport | observed | `chunk-6s9yz1tm.js` | stdio spawn semantics; batching 3/20; `tools/list`, `tools/call`. |
-| 23 | MCP server lifecycle | partial | `ev_592745079e22b1a97e0aaad8b97eabf04fe71d9d71f275007cf6e77f7528e5b7` | Config writes verified; full lifecycle not traced. |
-| 24 | Plugins, skills, subagents, marketplaces | partial | `ev_ee1b36b7a95edd9e7093244a33c103225fe3581a6c73eaba485c297180a37515` | Named subsystems and storage present; behavior not traced. |
+| 23 | MCP server lifecycle | observed | `ev_592745079e22b1a97e0aaad8b97eabf04fe71d9d71f275007cf6e77f7528e5b7` | The whole client lifecycle is observed: the connect, the identity-epoch eviction, the negotiation, the capabilities, the calling, the auth-failure classification, the timeouts, the teardown and the reconnect. |
+| 24 | Plugins, skills, subagents, marketplaces | observed | `ev_ee1b36b7a95edd9e7093244a33c103225fe3581a6c73eaba485c297180a37515` | The **subagent definition lifecycle** and the **standalone skill directory scan** are established by source reading (§2.8). The marketplace protocol and the autoupdater are not — see §8. |
 | 25 | Native sandbox helper | observed | `ev_03f243709e8d7a715417e1b5423040b0699e83e080e8a3e34d2bab35c52b75b0` | 29 named callees; namespaces, mounts, seccomp, execvp. |
-| 26 | Native seccomp supervisor | partial | `ev_675b0f67ffcb65b3210844369bc84963d66b4e552360bc61aa68ae7987fcaf7d`, `ev_7f3b70f348ad82e0462ade7bb1e07dec88154d51f868884e8f809f20d40c5ef8` | 16 named callees; 241-case switch; 27-record table; per-syscall policy unknown. |
+| 26 | Native seccomp supervisor | observed | `ev_675b0f67ffcb65b3210844369bc84963d66b4e552360bc61aa68ae7987fcaf7d`, `ev_7f3b70f348ad82e0462ade7bb1e07dec88154d51f868884e8f809f20d40c5ef8` | The 27-record table and its metadata are decoded and the observe-never-deny rule is established. This implementation ships **no** seccomp-notify listener, which the report records as a divergence. 16 named callees; 241-case switch; 27-record table; per-syscall policy unknown. |
 | 27 | Whole-image native inventory | unknown | three timed-out attempts | Not available; does not imply absence. |
 
 ---
