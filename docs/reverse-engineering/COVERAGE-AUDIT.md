@@ -454,7 +454,26 @@ A skill's **override mode** is one of exactly four:
 
 The override for a skill is resolved by searching, in order: the **merged settings** `skillOverrides`, then the **session's** `skillOverrides`, and then the `skillOverrides` of the `policySettings` and `flagSettings` tiers. The first source that defines the skill wins. The lookup is **null-safe** (a missing source or skill yields no override), and the target itself **guards against `__proto__`** as a skill name — the same prototype-key hazard this implementation's permission engine had to be hardened against.
 
-**Partial:** the skills **discovery** registry — where a skill's directory is found and its `SKILL.md` is parsed — and the subagent definition lifecycle were not traced to resolved relations. Their names and storage are observed; their behavior was not.
+**The extension-point registry is observed.** The target exposes a fixed set of extension points, and a plugin or SDK host registers a handler for each:
+
+```
+tool.call        tool.check         tool.describe      command.run      command.describe
+config.set       config.describe    telemetry.log      telemetry.mark   prompt.submit
+prompt.fill      prompt.edit        prompt.change      prompt.autocomplete
+prompt.suggest   prompt.section     prompt.context     prompt.attachment
+prompt.mention   prompt.compose     agent.offer        agent.spawn      skill.prompt
+attribution.text session.start     session.receive    session.append   session.send
+session.compact  session.attach     session.detach     session.measure  session.end
+turn.start       turn.step          turn.complete      ui.scroll        ui.focus
+```
+
+Two of them carry a documented default. `tool.call` is given a `tool_use_id` when the caller did not supply one, of the form `toolu_<uuid without dashes>`. `telemetry.log` is given a destination of `anthropic` unless the caller asked for `collector`.
+
+**The skill frontmatter rule is observed.** A skill's frontmatter must carry a **text** description. The `skill.prompt` extension point validates it: it finds the first of `source`, `pluginName`, `path`, or `frontmatterProblem` whose value is not a string, and throws `$.skill.prompt: called with a frontmatter that <that> is no text`; when the frontmatter is itself a plain string it throws `$.skill.prompt: called with a frontmatter that is no text`. The resolved skill then carries a `source`, defaulting to `built-in`.
+
+**The hook pipeline shape is observed.** A hook event runs two paths — a "classic hooks" path and a "managed hooks" path — and the results are merged: a `block` result is preserved, and a synthetic result is appended for each blocked command so the caller sees one entry per blocked command.
+
+**Partial:** the skills **discovery** registry — where a skill's directory is found and its `SKILL.md` is discovered on disk — and the subagent definition lifecycle were not traced to resolved relations. Their names and storage are observed; their behavior was not.
 
 ### 2.9 Native and platform sandbox
 
