@@ -222,7 +222,16 @@ The result of `installPluginFromMarketplace` carries `{ success, message, depNot
 | A tool description change is surfaced (the target does not do this) | implementation choice | same file — the rug-pull test |
 | A caller-supplied server name is data, never an inherited member | implementation choice | same file — the prototype-key test |
 | The hook decision merge is strictest-wins, and the context lists concatenate | REA observed | `tests/contracts/hooks.test.ts` (the `CC-012` task) |
-| The matcher is an exact string in the simple case and an unanchored regex otherwise | REA observed | same file |
+| The matcher is an exact string in the simple case and an unanchored regex otherwise | REA observed (the two-mode rule) + **implementation choice** (the supported regex subset) | same file |
+| There are exactly 33 hook events, and `StatusLine`/`FileSuggestion` are display handlers outside that set | REA observed | same file |
+| The exit-code contract is `0` applies, `2` blocks a blockable event, anything else is a non-blocking error | REA observed | same file |
+| The blockable-event set is the audit's 11 decision-capable events plus `PermissionRequest` | REA observed (the 11) + **implementation choice** (the addition) | same file |
+| The handler types are `command`, `http`, `mcp_tool`, `prompt`, `agent`; only `command` and `mcp_tool` are dispatched | REA observed (the vocabulary) + **implementation choice** (the non-dispatch) | same file |
+| The hook payload carries `session_id`, `prompt_id`, `transcript_path`, `cwd`, `scratchpad_dir`, `permission_mode`, `effort.level`, `hook_event_name`, and `agent_id`/`agent_type` for subagents | REA observed | same file |
+| A caller-supplied event, server name, hook id or matcher never resolves to an inherited member | implementation choice | same file |
+| A command hook runs through `/bin/sh -c` with the payload on stdin and a 60 s timeout | **implementation choice** | same file |
+| A malformed matcher matches nothing rather than being treated as a literal | **implementation choice** | same file |
+| `updatedPermissions` accepts both a map and a list of typed updates | **implementation choice** | same file |
 | The skill override modes are exactly four, and the resolution order is settings → session → policy/flag | REA observed | `tests/contracts/extensions.test.ts` (the `CC-013` task) |
 | The skill-save protocol selects its mode by the target's rule and uses the target's wording | REA observed | same file |
 | The marketplace install reports the disable reason, the enable hint, and distinguishes refused from failed | REA observed | same file |
