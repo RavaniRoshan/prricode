@@ -802,7 +802,7 @@ function isNetworkPathRead(ctx: ToolContext): boolean {
   return isNetworkPath(value);
 }
 
-const READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep', 'LS']);
+const READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep']);
 
 function isNetworkPath(value: string): boolean {
   if (value.startsWith('//')) return true;

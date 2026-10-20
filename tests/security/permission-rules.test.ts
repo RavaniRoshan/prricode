@@ -64,6 +64,7 @@ import {
   shellRedirects,
 } from '../../src/permissions/rules.js';
 import { buildApprovalPrompt } from '../../src/permissions/prompts.js';
+import { BUILTIN_TOOL_NAMES } from "../../src/tools/builtins/index.js";
 
 const tempDirs: string[] = [];
 
@@ -804,5 +805,18 @@ describe('the host-level gates', () => {
     });
 
     expect(decision.behavior).toBe('allow');
+  });
+});
+
+describe("the rule engine's tool tables", () => {
+  it("names only tools this implementation actually ships", () => {
+    // `LS` was once present in the path-field and read-tool tables, which made a
+    // user's `LS(...)` rule half-live: inert for a path rule, but still matched
+    // against a shell redirection target. The tables and the built-in set must
+    // move together, so a table row for a tool this implementation cannot run is a defect.
+    for (const toolName of ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'NotebookEdit']) {
+      expect(BUILTIN_TOOL_NAMES).toContain(toolName);
+    }
+    expect(BUILTIN_TOOL_NAMES).not.toContain('LS');
   });
 });

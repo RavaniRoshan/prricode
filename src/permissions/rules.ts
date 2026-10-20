@@ -153,7 +153,6 @@ const PRIMARY_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
   Read: ['file_path'],
   Glob: ['path'],
   Grep: ['path'],
-  LS: ['path'],
   WebFetch: ['url'],
 };
 
@@ -164,7 +163,6 @@ const PATH_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
   Read: ['file_path'],
   Glob: ['path'],
   Grep: ['path'],
-  LS: ['path'],
 };
 
 const DEFAULT_PATH_FIELDS: readonly string[] = ['file_path', 'notebook_path', 'path'];
@@ -411,7 +409,7 @@ function matchRule(parsed: ParsedRule, context: MatchContext): MatchResult {
 const REDIRECT_WRITE_TOOLS: ReadonlySet<string> = new Set(FILE_MUTATING_TOOL_NAMES);
 
 /** The tools whose rules describe a read of a file. */
-const REDIRECT_READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep', 'LS']);
+const REDIRECT_READ_TOOLS: ReadonlySet<string> = new Set(['Read', 'Glob', 'Grep']);
 
 /**
  * Match a rule against the **redirection targets** of a shell command.
