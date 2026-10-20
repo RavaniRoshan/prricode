@@ -29,6 +29,8 @@ interface Measured {
   rowId: string;
   outcome: Outcome;
   detail: string;
+  /** The evidence class the **matrix** carries for the row. */
+  evidence?: string;
 }
 
 /** The index of the first line that starts with `prefix`, or -1. */
@@ -64,6 +66,16 @@ function nextHeading(lines: readonly string[], start: number, end: number): numb
 
 /** Run every scenario and collect what it measured. */
 export async function measureAll(): Promise<Measured[]> {
+  // The **evidence class** comes from the matrix, so the report and the matrix
+  // cannot disagree about what kind of claim a row is.
+  const matrix = await readFile(
+    path.resolve(process.cwd(), 'docs/compatibility/feature-matrix.md'),
+    'utf8',
+  );
+  const evidenceOf = new Map<string, string>();
+  for (const match of matrix.matchAll(/^\| (F-[0-9a-z]+) \|[^|]*\|[^|]*\|[^|]*\| ([^|]*)\|/gm)) {
+    evidenceOf.set(match[1] ?? '', (match[2] ?? '').trim());
+  }
   const measured: Measured[] = [];
   for (const scenario of SCENARIOS) {
     const result = await measure(scenario);
@@ -71,6 +83,7 @@ export async function measureAll(): Promise<Measured[]> {
       rowId: scenario.rowId,
       outcome: result.outcome as Outcome,
       detail: result.detail,
+      evidence: evidenceOf.get(scenario.rowId),
     });
   }
   return measured;
@@ -99,7 +112,9 @@ export function regenerateReport(source: string, measured: readonly Measured[]):
     if (index === 0 || index === 1) return row;
     if (index === totalRow) return `| **Total** | **${measured.length}** |`;
     const outcome = /\| `([a-z-]+)` \|/.exec(row)?.[1];
-    if (outcome === undefined) return row;
+    if (outcome === undefined) {
+      throw new Error(`the totals table has a row this script cannot read: ${row}`);
+    }
     return `| \`${outcome}\` | ${counts.get(outcome as Outcome) ?? 0} |`;
   });
   const totalsTableAt = totalsAt + (totalsRows.length > 0 ? lines.slice(totalsAt).indexOf(totalsRows[0] ?? '') : 0);
@@ -114,10 +129,48 @@ export function regenerateReport(source: string, measured: readonly Measured[]):
     const at = indexOf(lines, `| ${row.rowId} |`);
     if (at === -1) throw new Error(`the report has no row for ${row.rowId}`);
     const cells = (lines[at] ?? '').split(' | ');
+    // The **evidence class** comes from the matrix, so the two documents cannot
+    // disagree about what kind of claim a row is.
+    if (row.evidence !== undefined && row.evidence !== '') cells[3] = row.evidence;
     cells[4] = row.outcome;
     cells[5] = row.detail;
     lines[at] = cells.join(' | ');
   }
+
+  // --- the counts the prose carries --------------------------------------
+  // The rule section names the `mismatch` rows, and the mismatch section
+  // counts them. Both are derived, so neither can go stale.
+  const mismatches = measured.filter((row) => row.outcome === 'mismatch');
+  const names = mismatches.map((row) => `\`${row.rowId}\``);
+  const listed = names.length === 0
+    ? 'no row is'
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  const words = [
+    'no',
+    'one',
+    'two',
+    'three',
+    'four',
+    'five',
+    'six',
+    'seven',
+    'eight',
+    'nine',
+    'ten',
+  ] as const;
+  const word: string = words[Math.min(mismatches.length, words.length - 1)] ?? 'no';
+  const capital = word.charAt(0).toUpperCase() + word.slice(1);
+  lines = lines.map((line) => {
+    if (!line.startsWith('- A **divergence from an observed behaviour**')) return line;
+    return line.replace(
+      /\*\*[A-Za-z]+\*\* rows are `mismatch` for that reason: .*$/,
+      `**${capital}** rows are \`mismatch\` for that reason: ${listed}`,
+    );
+  });
+  lines = lines.map((line) => {
+    if (!/rows are$/.test(line)) return line;
+    return line.replace(/([A-Za-z]+) rows are$/, `${capital} rows are`);
+  });
 
   // --- the honest gaps ---------------------------------------------------
   for (const outcome of OUTCOMES) {
@@ -137,11 +190,15 @@ export function regenerateReport(source: string, measured: readonly Measured[]):
     }
     if (tableStart >= sectionEnd) continue;
     const end = tableStart + rows.length;
+    // The blank line after the table is dropped only when there **is** one:
+    // taking it unconditionally would eat the next heading.
+    const afterTable = lines[end];
+    const blank = afterTable !== undefined && afterTable.trim() === '' ? 1 : 0;
     lines = [
       ...lines.slice(0, tableStart),
       ...(body.length > 0 ? body : []),
       ...(body.length > 0 ? [''] : []),
-      ...lines.slice(end + (rows.length > 0 ? 1 : 0)),
+      ...lines.slice(end + blank),
     ];
   }
 
@@ -163,4 +220,8 @@ async function main(): Promise<void> {
   );
 }
 
-await main();
+// The script **writes the report** when it is run, and **must not** when it
+// is imported: the results test imports it to regenerate the report in memory
+// and compare, and an import that rewrote the file would silently undo every
+// check that test makes.
+if (import.meta.main) await main();

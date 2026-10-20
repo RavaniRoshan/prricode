@@ -173,6 +173,7 @@ import {
   isReservedSkillName,
 } from '../../src/extensions/skills/registry.js';
 import {
+  createSubagentRegistry,
   isValidSubagentName,
 } from '../../src/extensions/subagents/registry.js';
 import { createStdioTransport } from '../../src/extensions/mcp/transport.js';
@@ -389,6 +390,7 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   SESSION_SCHEMA_VERSION,
   // The tools.
   createSkillRegistry,
+  createSubagentRegistry,
   createToolRegistry,
   // The extensions.
   DECISION_EVENTS,
@@ -615,9 +617,16 @@ export function observe<T>(label: string, value: T): T {
   return value;
 }
 
-/** Make a directory, and every directory above it. */
+/**
+ * Make a directory, and every directory above it.
+ *
+ * The name carries a **unique** suffix: the test files run in parallel and
+ * each runs the scenarios, so two of them would otherwise write into the same
+ * directory and read each other's half-written files.
+ */
 async function makeDirectory(relative: string): Promise<string> {
-  const target = path.join(tmpdir(), 'prricode-compat', relative);
+  const unique = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+  const target = path.join(tmpdir(), 'prricode-compat', `${relative}-${unique}`);
   await mkdir(target, { recursive: true });
   return target;
 }
@@ -1277,7 +1286,7 @@ export const SCENARIOS: readonly Scenario[] = [
         expect(fallback).toBe('mantle');
         return measured(
           'mismatch',
-          "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown. One difference remains: the target's fallback predicate is provider_ids[route] === null, and an omitted key is not null, so the target does not treat that row as unserved by gateway and resolves it to gateway — this implementation's not-served test is an absent key, a superset, so it falls back to mantle instead.",
+        "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown. One difference remains: the target's fallback predicate is provider_ids[route] === null, and an omitted key is not null, so the target does not treat that row as unserved by gateway and resolves it to gateway — this implementation's not-served test is an absent key, a superset, so it falls back to mantle instead. The omitted key is this implementation's own transcription of the target's literal; the predicate is the audit's.",
         );
       }
       return measured(
@@ -1562,8 +1571,8 @@ export const SCENARIOS: readonly Scenario[] = [
       const classified = await observeCall('the classified error', classifyErrorStatus, [500, {}]);
       expect(classified).toMatchObject({ retryable: true });
       return measured(
-        'match',
-        "The retry set, the 600000 ms fallback and the error classification are the target's observed rules.",
+        'partial',
+        "The retry set, the 600000 ms fallback and the error classification are the target's observed rules. Measured: the retry set, the fallback and the classification. The 401 cache invalidation and the x-should-retry header are established by the audit and implemented here, but this probe does not compare them.",
       );
     },
   },
@@ -1598,7 +1607,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(streamed).toMatchObject({ events: [{ type: 'tool_use', id: 'toolu_1' }] });
       return measured(
         'partial',
-        "The non-streaming body and the SSE stream parse into the same events, and the SDK\u0027s extended agent.* vocabulary is tolerated. Measured: the non-streaming body, one SSE frame, and the extended vocabulary. The audit also records the 204 and binary paths, the content-length branch, the text() helper and the non-enumerable request and workspace members, which are implemented but not compared here.",
+        "The non-streaming body and the SSE stream parse into the same events, and the SDK's extended agent.* vocabulary is tolerated. Measured: the non-streaming body, one SSE frame, and the extended vocabulary. The audit also records the 204 and binary paths, the content-length branch, the text() helper and the non-enumerable request and workspace members, which are implemented but not compared here.",
       );
     },
   },
@@ -1667,7 +1676,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(mantle).toBe('20240101/us-east-1/bedrock-mantle/aws4_request');
       return measured(
         'match',
-        "The two SigV4 service names and the signing scope are the target's observed values.",
+        "The two SigV4 service names and the region are the target's observed values. The signing scope string this implementation builds is the standard AWS form, not an observed value: the audit observes the service names and the region, not the scope's shape.",
       );
     },
   },
@@ -1716,8 +1725,8 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(answered.content).toContain('source: hook');
       expect(answered.content).toContain('reason type: rule');
       return measured(
-        'match',
-        "A refused call is answered with the target's observed `<tool_use_error>…</tool_use_error>` wrapper and `is_error: true`, and the wrapper carries the decision and its reason type; the wording inside the wrapper is this implementation's.",
+        'partial',
+        "A refused call is answered with the target's observed <tool_use_error> wrapper and is_error: true, and the wrapper carries the decision and its reason type; the wording inside the wrapper is this implementation's. Measured: the refusal envelope. The turn request and the continuation are established by the audit and implemented here, but this probe does not compare them.",
       );
     },
   },
@@ -1907,7 +1916,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(envelopeMembers).not.toContain('user_feedback');
       return measured(
         'mismatch',
-        "The permission feedback rides along in the tool result, but this implementation names the members `permissionDecision {decision, source, reasonType}` and `nonExecutionKind` where the target's observed metadata names `permission_decision {decision, source, reason_type}` and `non_execution_kind`; this implementation's envelope carries a `remedy` member and no `user_feedback` member.",
+        "The permission feedback rides along in the tool result, but this implementation names the members permissionDecision {decision, source, reasonType} and nonExecutionKind, where the target names permission_decision {decision, source, reason_type}, non_execution_kind, user_feedback and remedy. Three differences: the members are renamed, the target's user_feedback has no counterpart here, and the target's id is this implementation's toolUseId. The wording of the decision and its reason type are the target's.",
       );
     },
   },
@@ -2039,7 +2048,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(asked).toMatchObject({ behavior: 'ask' });
       return measured(
         'partial',
-        "Deny wins over allow, and a deny blocks in every mode, the five the audit names; the precedence between the ask and allow lists — deny, then ask, then allow — is this implementation\u0027s own, because the audit records that rule as unknown.",
+        "Deny wins over allow, and a deny blocks in every mode this implementation has, the five the audit names and a sixth of its own. The precedence between the ask and allow lists — deny, then ask, then allow — is this implementation's own, because the audit records that rule as unknown.",
       );
     },
   },
@@ -2177,8 +2186,8 @@ export const SCENARIOS: readonly Scenario[] = [
       });
       expect(dropped.response).toBeUndefined();
       return measured(
-        'match',
-        "The transport dispatcher's shape, its dropped non-string request id and its direction rules are reproduced.",
+        'partial',
+        "The transport dispatcher's shape, its dropped non-string request id and its direction rules are reproduced. Measured: the dispatcher's shape, the dropped request id and the direction rules. The malformed-deny classification, the in-flight de-duplication and the trust and folder validation are established by the audit and implemented here, but this probe does not compare them.",
       );
     },
   },
@@ -2392,7 +2401,7 @@ export const SCENARIOS: readonly Scenario[] = [
 
       return measured(
         'mismatch',
-        "The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; so are the lookup's ordering — the file's modification time, then its creation time — and its skip rules, where a /loop session is skipped and a print session is not. One difference remains: a candidate that is live in the background is reported and the lookup continues with nothing, where the target drops it and carries on with the next candidate.",
+        "The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; so are the lookup's ordering — the file's modification time, then its creation time — and its skip rules, where a /loop session is skipped and a print session is not. One difference remains: a candidate that is live in the background is reported and the lookup continues with nothing, where the target drops such a candidate and carries on with the next one; the target's report-and-stop case is the different candidate that was continued into a live session.",
       );
     },
   },
@@ -2667,7 +2676,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(states[2]?.error).toBeDefined();
       return measured(
         'partial',
-        "This implementation\u0027s batched connect returns one state per configuration, in the order the configurations were given, and a failed server is a state and not a crash. The audit observes the target\u0027s client lifecycle — the connect, the identity-epoch eviction, the negotiation, the capabilities, the timeouts, the teardown and the reconnect — and those are implemented, but the batched state list is this implementation\u0027s own shape and is not compared here.",
+        "This implementation's batched connect returns one state per configuration, in the order the configurations were given, and a failed server is a state and not a crash. The audit observes the target's client lifecycle — the connect, the identity-epoch eviction, the negotiation, the capabilities, the timeouts, the teardown and the reconnect — and those are implemented, but the batched state list is this implementation's own shape and is not compared here.",
       );
     },
   },
@@ -2702,8 +2711,8 @@ export const SCENARIOS: readonly Scenario[] = [
       registry.register({ event: 'PreToolUse', command: 'echo', matcher: 'Bash' });
       expect(registry.for('PreToolUse')).toHaveLength(1);
       return measured(
-        'match',
-        'The 33 events, the two display handlers outside that set and the per-event classification are reproduced.',
+        'partial',
+        "The 33 events, the two display handlers outside that set and the per-event classification are reproduced. Measured: the event set, the display handlers and the per-event classification. The mcp_tool hook type and the per-model severity thresholds are established by the audit and implemented here, but this probe does not compare them.",
       );
     },
   },
@@ -2775,9 +2784,30 @@ export const SCENARIOS: readonly Scenario[] = [
       ]);
       const found = observe('the discovered skills', registry.discover());
       expect(found.map((item) => item.name)).toEqual(['found']);
+
+      // The subagent catalogue, **run**: the name comes from the
+      // **frontmatter**, not from the file's name, and a definition without a
+      // description is refused by name.
+      const agentRoot = path.join(scanBase, '.claude', 'agents');
+      await mkdir(agentRoot, { recursive: true });
+      await writeFile(
+        path.join(agentRoot, 'the-file-name-is-not-the-agent-name.md'),
+        '---\nname: reviewer\ndescription: Reviews the change.\n---\n\nThe system prompt.\n',
+        'utf8',
+      );
+      await writeFile(
+        path.join(agentRoot, 'no-description.md'),
+        '---\nname: undescribed\n---\n\nThe system prompt.\n',
+        'utf8',
+      );
+      const agents = await observeCall('the subagent registry', createSubagentRegistry, [
+        { cwd: scanBase, configDir: await makeDirectory('agent-config') },
+      ]);
+      const discovered = observe('the discovered subagents', agents.discover());
+      expect(discovered.map((item) => item.name)).toEqual(['reviewer']);
       return measured(
         'match',
-        "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the scan reads a root one level deep and takes the fixed file name SKILL.md, the byte limit is a million, the reserved names are refused, and the name of a subagent comes from its frontmatter and is validated the way the target validates it.",
+        "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the scan reads a root one level deep and takes the fixed file name SKILL.md, the byte limit is a million, the reserved names are refused, a subagent definition\u0027s name comes from its frontmatter rather than its file name, a definition without a description is refused, and the name is validated the way the target validates it.",
       );
     },
   },
@@ -2970,7 +3000,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(reasons.disabled).toBe('sandbox.enabled is false');
       return measured(
         'unknown',
-        "The target\u0027s routing is unobserved: the audit records the sandboxOverride reason kind, and this implementation\u0027s routing is its own. The dangerouslyDisableSandbox flag is this implementation\u0027s, not the audit\u0027s.",
+        "The target's routing is unobserved: the audit records the sandboxOverride reason kind, and this implementation's routing is its own. The dangerouslyDisableSandbox flag is this implementation's, not the audit's.",
       );
     },
   },
@@ -3006,7 +3036,7 @@ export const SCENARIOS: readonly Scenario[] = [
       );
       return measured(
         'mismatch',
-        "The parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the patterns and the validation messages are reproduced; the rest of the boolean set is deliberately kept pure, which diverges from the audit's observed rule that a boolean consumes the next token when it does not look like a flag.",
+        "The parser's structure, the three flag sets, the repeatable set, the optional-value boolean, the short-flag-cluster rule, the command tokens, the pattern and the validation messages are reproduced. One difference remains: the target's boolean flags consume the next token when it does not look like a flag — so -r/--resume takes an optional value — while this implementation keeps its boolean set pure and gives the token to the positionals. The audit does not enumerate the boolean set's members, so the difference is stated for the rule; the flag this implementation treats as boolean is --continue.",
       );
     },
   },
