@@ -177,7 +177,6 @@ Options:
       --output-format <fmt>   text (the default), json or stream-json
       --input-format <fmt>    text (the default) or stream-json
       --model <id>            the model the run uses
-      --name <name>           the name of the session
       --session-id <id>       the id of the session
       --permission-mode <mode>
                               default, manual, acceptEdits, bypassPermissions,
@@ -189,8 +188,6 @@ Options:
       --add-dir <dir…>        the directories the session may write in
       --settings <file>       a settings file to load over the tiered ones
       --init-only             set the session up and stop
-      --no-session-persistence
-                              do not persist the session
       --fork-session          load a copy of the session that is resumed
       --dangerously-skip-permissions
                               start in bypassPermissions mode
@@ -435,7 +432,13 @@ async function runManagerCommand(
   const configDir = options.configDir ?? defaultConfigDir();
   const statePath = join(configDir, 'providers.json');
   const { registry, catalogs } = await loadManagerState(statePath);
-  const result = await providerManagerCommand(parsed.args, registry, {
+  // The surface the **parser** named is the surface that runs: the parser
+  // consumed the `--provider` / `--catalog` token, so the command word has to
+  // be put back for the manager's own dispatcher to see it. The **form** is
+  // put back too, because the flag form's output is machine-readable and the
+  // word form's is text.
+  const lead = parsed.form === 'flag' ? `--${parsed.command}` : parsed.command;
+  const result = await providerManagerCommand([lead, ...parsed.args], registry, {
     catalogs,
     statePath,
     env: options.env ?? process.env,
@@ -488,6 +491,10 @@ const UNIMPLEMENTED_OPTIONS: ReadonlyMap<string, string> = new Map([
   [
     '--no-session-persistence',
     'it keeps the session off the disk, and this implementation always writes the transcript',
+  ],
+  [
+    '--forward-home-settings',
+    "it says whether this machine's settings go into a cloud session, and this implementation has no cloud session",
   ],
 ]);
 

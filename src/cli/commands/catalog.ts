@@ -63,6 +63,7 @@ import {
   failure,
   flagValue,
   flagValues,
+  padToWidth,
   parseInvocation,
   readProviderStateFile,
   updateProviderStateFile,
@@ -439,7 +440,7 @@ async function listCommand(
       for (const route of ROUTE_NAMES) {
         const id = providerIdFor(model, route);
         const marker = route === connection.value.route ? ' *' : '';
-        lines.push(`${`    ${route}${marker}`.padEnd(26)} ${id ?? 'unavailable'}`);
+        lines.push(`${padToWidth(`    ${route}${marker}`, 26)} ${id ?? 'unavailable'}`);
       }
     }
     lines.push('');
@@ -500,7 +501,7 @@ async function showCommand(
   for (const route of ROUTE_NAMES) {
     const id = providerIdFor(model, route);
     const marker = route === connection.value.route ? ' *' : '';
-    lines.push(`${`  ${route}${marker}`.padEnd(24)} ${id ?? 'unavailable'}`);
+    lines.push(`${padToWidth(`  ${route}${marker}`, 24)} ${id ?? 'unavailable'}`);
   }
   if (model.capabilities.length > 0) {
     lines.push(`  capabilities  ${model.capabilities.join(', ')}`);

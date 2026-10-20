@@ -5,10 +5,13 @@
  * browser (`src/cli/commands/catalog.ts`) are two commands over one product
  * surface. They used to carry their own copies of the same five helpers and
  * their own copy of the argument parser, which is how two commands drift: the
- * parser in particular is a **generic** piece of argument handling, and the
- * plan puts argument handling in `src/cli/args.ts` — a module this milestone
- * does not own. Until that module can take the parser, the parser lives here,
- * **once**, and both commands import it.
+ * parser in particular is a **generic** piece of argument handling. It lives
+ * here, **once**, and both commands import it.
+ *
+ * The manager's parser is not the CLI's parser: `src/cli/args.ts` parses the
+ * **command line** — the flags, the modes and the subcommands of the reference build — and
+ * hands the manager a *manager invocation*, whose verbs, flags and output
+ * formats are the manager's own business.
  *
  * ## What is in here
  *

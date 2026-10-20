@@ -1055,12 +1055,24 @@ function credentialRefOf(
     if (envName.trim() === '') {
       return { error: 'Error: the credential reference needs a non-empty environment variable name.' };
     }
+    // The reference is printed in the CREDENTIAL column, so a whitespace or a
+    // control character in it would split the row.
+    if (hasWhitespaceOrControl(envName)) {
+      return {
+        error: `Error: the credential reference ${JSON.stringify(envName)} may not carry a whitespace or a control character.`,
+      };
+    }
     return { ref: { kind: 'env', name: envName } };
   }
 
   if (filePath !== undefined) {
     if (filePath.trim() === '') {
       return { error: 'Error: the credential reference needs a non-empty file path.' };
+    }
+    if (hasWhitespaceOrControl(filePath)) {
+      return {
+        error: `Error: the credential reference ${JSON.stringify(filePath)} may not carry a whitespace or a control character.`,
+      };
     }
     return { ref: { kind: 'file', path: filePath, format: 'raw' } };
   }
@@ -1071,6 +1083,11 @@ function credentialRefOf(
     return {
       error:
         'Error: the credential reference needs an OS credential-store entry as <service>/<account>.',
+    };
+  }
+  if (hasWhitespaceOrControl(entry)) {
+    return {
+      error: `Error: the credential reference ${JSON.stringify(entry)} may not carry a whitespace or a control character.`,
     };
   }
   return {

@@ -561,6 +561,15 @@ export interface ParsedManagerArgs {
   kind: 'manager';
   /** Which manager surface the arguments name. */
   command: 'provider' | 'catalog';
+  /**
+   * Which form the user wrote.
+   *
+   * The **flag** form (`--provider list`) is the non-interactive one and its
+   * output is **machine-readable**; the **word** form (`provider list`) is the
+   * interactive one and its output is text. The manager needs to know which,
+   * because the parser consumed the token.
+   */
+  form: 'flag' | 'word';
   /** The arguments the manager parses itself. */
   args: string[];
 }
@@ -638,9 +647,20 @@ export function parseArgs(argv: string[], options: ParseOptions = {}): ParsedArg
     // prompt that merely mentions "catalog" is not. Everything from the token
     // on is the manager's own.
     if (token === '--provider' || token === '--catalog') {
+      // The manager is a **command**, so it cannot be combined with a prompt:
+      // silently discarding the prompt would be a surprise. A prompt or a mode
+      // already seen is a conflict, and the conflict is named.
+      if (mode !== undefined || positionals.length > 0) {
+        return {
+          kind: 'error',
+          message: `Error: the '${token}' command cannot be combined with a prompt.`,
+          exitCode: 2,
+        };
+      }
       return {
         kind: 'manager',
         command: token === '--catalog' ? 'catalog' : 'provider',
+        form: 'flag',
         args: queue.slice(cursor),
       };
     }
@@ -650,7 +670,7 @@ export function parseArgs(argv: string[], options: ParseOptions = {}): ParsedArg
       mode === undefined &&
       (token === 'provider' || token === 'catalog')
     ) {
-      return { kind: 'manager', command: token, args: queue.slice(cursor) };
+      return { kind: 'manager', command: token, form: 'word', args: queue.slice(cursor) };
     }
 
     // `--` ends the flag parsing: everything after it is a positional.

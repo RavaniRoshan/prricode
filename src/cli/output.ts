@@ -46,9 +46,10 @@
  *     parsing the exit code.
  *   - `stream-json` — **one JSON object per event**, one per line.
  *
- * The `json` document is written **after** the run, and the `stream-json`
- * objects are written **as the events arrive**: that is the difference between
- * the two formats, and it is the whole reason the target has both.
+ * The `json` document is written **after** the run. The `stream-json` objects
+ * are written **as the events arrive** in the target — that is the difference
+ * between the two formats, and it is the whole reason the target has both.
+ * This implementation's own behavior is the **one-batch** limitation stated below.
  *
  * **A limitation, stated rather than hidden**: the runtime returns the turn's
  * records **when the turn is over**, so the events are produced in **one

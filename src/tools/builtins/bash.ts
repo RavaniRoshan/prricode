@@ -345,7 +345,7 @@ function delay(ms: number): Promise<void> {
 }
 
 /** What a command produced. */
-interface CommandResult {
+interface BashCommandResult {
   /** The standard output. */
   stdout: string;
   /** The standard error. */
@@ -369,7 +369,7 @@ function runCommand(
   cwd: string,
   timeoutMs: number,
   env: NodeJS.ProcessEnv,
-): Promise<CommandResult> {
+): Promise<BashCommandResult> {
   return new Promise((resolve) => {
     const child = spawn('/bin/sh', ['-c', command], {
       cwd,

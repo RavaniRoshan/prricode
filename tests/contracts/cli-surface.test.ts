@@ -70,6 +70,8 @@ import {
   type OutputSink,
 } from '../../src/cli/output.js';
 import { CLI_VERSION, createCommandSession, runCommand } from '../../src/cli/command.js';
+import { providerManagerCommand } from '../../src/cli/commands/manager.js';
+import { createProviderRegistry } from '../../src/provider/registry.js';
 import type { CommandSession } from '../../src/cli/command.js';
 import { createSessionStore, sessionFilePath } from '../../src/session/store.js';
 import { TURN_SOURCE } from '../../src/agent/context.js';
@@ -939,6 +941,75 @@ describe('the command', () => {
 
     expect(code).toBe(EXIT_USAGE);
     expect(stderr.text).toContain('not-a-verb');
+  });
+
+  it('runs the catalog surface when the parser named the catalog', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+
+    const code = await runCommand(parseArgs(['--catalog', 'list']), {
+      stdout,
+      stderr,
+      configDir: makeDirectory(),
+    });
+
+    // The **catalog** surface, not the provider one. The parser already
+    // consumed the `--catalog` token, so the command word has to be put back
+    // for the manager's own dispatcher; without that the surface falls
+    // through to the provider one and the two outputs differ.
+    const direct = await providerManagerCommand(['catalog', 'list'], createProviderRegistry());
+    expect(stdout.text + stderr.text).toBe(direct.stdout + direct.stderr);
+    expect(stdout.text + stderr.text).not.toBe(
+      (await providerManagerCommand(['provider', 'list'], createProviderRegistry())).stdout,
+    );
+    expect(code).toBe(direct.exitCode);
+  });
+
+  it('refuses the manager command when a prompt was given', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+
+    const code = await runCommand(parseArgs(['--print', 'hello', '--provider', 'list']), {
+      stdout,
+      stderr,
+    });
+
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr.text).toContain("the '--provider' command cannot be combined with a prompt");
+    expect(stdout.text).toBe('');
+  });
+
+  it('writes machine-readable output for the manager\'s flag form', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+
+    const code = await runCommand(parseArgs(['--provider', 'list']), {
+      stdout,
+      stderr,
+      configDir: makeDirectory(),
+    });
+
+    expect(code).toBe(EXIT_SUCCESS);
+    // The **flag** form is the non-interactive one, so its output is JSON.
+    const document = JSON.parse(stdout.text) as { extension?: string };
+    expect(document.extension).toMatch(/project extension/i);
+  });
+
+  it('refuses --forward-home-settings without a cloud target, with the target\'s message', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+
+    // The **parser** refuses it first, with the target's own message: the
+    // option says whether this machine's settings go into a *cloud* session.
+    const code = await runCommand(parseArgs(['--print', 'hello', '--forward-home-settings', 'true']), {
+      stdout,
+      stderr,
+    });
+
+    expect(code).toBe(EXIT_USAGE);
+    expect(stderr.text).toContain(
+      'Error: --forward-home-settings says whether this machine\'s settings go into a cloud session',
+    );
   });
 
   it('writes the version and returns 0', async () => {
