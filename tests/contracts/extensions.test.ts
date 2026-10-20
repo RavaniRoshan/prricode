@@ -53,7 +53,7 @@
  *     segment — empty, `.`, `..`, `/`, `\` and NUL are all refused.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -85,7 +85,11 @@ import {
 } from '../../src/extensions/skills/save.js';
 import {
   createSkillRegistry,
+  isReservedSkillName,
+  RESERVED_SKILL_DIRECTORY_NAME,
+  RESERVED_SKILL_NAMES,
   SKILL_FILE_BYTE_LIMIT,
+  SKILL_FILE_NAME,
   type DiscoverySource,
   type Skill,
   type SkillContribution,
@@ -93,7 +97,11 @@ import {
 } from '../../src/extensions/skills/registry.js';
 import {
   createSubagentRegistry,
+  isValidSubagentName,
+  subagentUnavailableMessage,
   SUBAGENT_FILE_BYTE_LIMIT,
+  SUBAGENT_NAME_MAX_LENGTH,
+  SUBAGENT_TIER_PRECEDENCE,
 } from '../../src/extensions/subagents/registry.js';
 import {
   EXTENSION_POINTS,
@@ -319,7 +327,7 @@ describe('skill discovery', () => {
     expect(winner(0, [mcp])).toBe('mcp');
   });
 
-  it('surfaces a skill file over the byte limit rather than reading it', () => {
+  it('skips a skill file over the byte limit', () => {
     const root = tempDir();
     const skillDir = path.join(root, 'huge');
     mkdirSync(skillDir, { recursive: true });
@@ -328,9 +336,14 @@ describe('skill discovery', () => {
     const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
     const skill = registry.resolve('huge');
 
-    expect(skill).toBeDefined();
-    expect(skill?.problem).toBe('the skill file is over the byte limit');
-    expect(skill?.description).toBeUndefined();
+    // REA observed: a `SKILL.md` over 1 000 000 bytes is **skipped** — the
+    // target never reads it — and the skip is reported.
+    expect(skill).toBeUndefined();
+    const refusal = registry.refusals().find((entry) => entry.name === 'huge');
+    expect(refusal?.level).toBe('warn');
+    expect(refusal?.reason).toContain(
+      `[skills] skipping ${path.join(skillDir, 'SKILL.md')}: ${SKILL_FILE_BYTE_LIMIT + 1} bytes exceeds ${SKILL_FILE_BYTE_LIMIT} byte limit`,
+    );
   });
 
   it('reports a skill name two plugins provide, instead of dropping one silently', () => {
@@ -354,6 +367,257 @@ describe('skill discovery', () => {
     const skill = registry.resolve('shared');
     expect(skill?.provider).toBe('first');
     expect(skill?.collidesWith).toEqual(['second']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The standalone skill directory scan
+// ---------------------------------------------------------------------------
+
+describe('the standalone skill directory scan', () => {
+  /** A skills root that holds one skill per name. */
+  function skillsRoot(names: readonly string[]): string {
+    const root = tempDir();
+    for (const name of names) writeSkill(root, name);
+    return root;
+  }
+
+  it('scans a root one level deep, and takes the fixed file name SKILL.md', () => {
+    const root = tempDir();
+    writeSkill(root, 'alpha');
+    // A nested definition is not found: the scan is **one level deep**.
+    writeFile(
+      path.join(root, 'alpha', 'nested', 'SKILL.md'),
+      '---\nname: nested\ndescription: N.\n---\n\nBody.\n',
+    );
+    // The file name is fixed, with that exact case.
+    writeFile(
+      path.join(root, 'beta', 'skill.md'),
+      '---\nname: beta\ndescription: B.\n---\n\nBody.\n',
+    );
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((skill) => skill.name)).toEqual(['alpha']);
+    expect(registry.resolve('nested')).toBeUndefined();
+    expect(registry.resolve('beta')).toBeUndefined();
+    expect(SKILL_FILE_NAME).toBe('SKILL.md');
+  });
+
+  it('skips an entry that is not a directory or a symlink', () => {
+    const root = tempDir();
+    // A file beside the skill folders is not a skill.
+    writeFile(path.join(root, 'notes.md'), 'not a skill');
+    writeSkill(root, 'alpha');
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((skill) => skill.name)).toEqual(['alpha']);
+  });
+
+  it('follows a symlinked skill directory', () => {
+    const root = tempDir();
+    const elsewhere = tempDir();
+    writeSkill(elsewhere, 'alpha');
+    symlinkSync(path.join(elsewhere, 'alpha'), path.join(root, 'alpha'), 'dir');
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.resolve('alpha')?.path).toBe(path.join(root, 'alpha', 'SKILL.md'));
+  });
+
+  it('skips the reserved entry name "synced"', () => {
+    const root = tempDir();
+    writeSkill(root, 'synced');
+    writeSkill(root, 'alpha');
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((skill) => skill.name)).toEqual(['alpha']);
+    const refusal = registry.refusals().find((entry) => entry.name === 'synced');
+    expect(refusal?.level).toBe('warn');
+    expect(refusal?.reason).toContain(
+      `[skills] skipping reserved dir name 'synced' under ${root}: 'synced' is the sync-owned root`,
+    );
+    expect(RESERVED_SKILL_DIRECTORY_NAME).toBe('synced');
+  });
+
+  it('skips an entry whose name contains ":" in the synced scan', () => {
+    const root = tempDir();
+    writeSkill(root, 'a:b');
+    writeSkill(root, 'alpha');
+
+    // The synced scan skips the entry with a colon …
+    const synced = createSkillRegistry({
+      roots: [{ path: root, source: 'user', tier: 'syncedSkills' }],
+    });
+    expect(synced.list().map((skill) => skill.name)).toEqual(['alpha']);
+    const refusal = synced.refusals().find((entry) => entry.name === 'a:b');
+    expect(refusal?.reason).toContain(
+      `[skills] skipping 'a:b' under ${root}: its name contains ':', which the sync never writes, so it is not a synced skill`,
+    );
+
+    // … and a plain scan does not.
+    const plain = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+    expect(plain.list().map((skill) => skill.name).sort()).toEqual(['a:b', 'alpha']);
+  });
+
+  it('skips an entry whose plugin is disabled', () => {
+    const root = tempDir();
+    const owned = path.join(root, 'owned');
+    writeFile(path.join(owned, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'demo' }));
+    writeFile(
+      path.join(owned, 'SKILL.md'),
+      '---\nname: owned\ndescription: Owned by a plugin.\n---\n\nBody.\n',
+    );
+    writeSkill(root, 'alpha');
+
+    // The plugin that owns the entry is disabled: the entry is skipped.
+    const disabled = createSkillRegistry({
+      roots: [{ path: root, source: 'project' }],
+      disabledPlugins: ['demo'],
+    });
+    expect(disabled.list().map((skill) => skill.name)).toEqual(['alpha']);
+    const refusal = disabled.refusals().find((entry) => entry.name === 'owned');
+    expect(refusal?.reason).toContain("the plugin that owns it, 'demo', is disabled");
+
+    // Another plugin is disabled: the entry is offered.
+    const other = createSkillRegistry({
+      roots: [{ path: root, source: 'project' }],
+      disabledPlugins: ['another'],
+    });
+    expect(other.list().map((skill) => skill.name).sort()).toEqual(['alpha', 'owned']);
+  });
+
+  it('skips a SKILL.md that is not a regular file', () => {
+    const root = tempDir();
+    // The definition file is a directory, not a file.
+    mkdirSync(path.join(root, 'alpha', 'SKILL.md'), { recursive: true });
+    writeSkill(root, 'beta');
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((skill) => skill.name)).toEqual(['beta']);
+    const refusal = registry.refusals().find((entry) => entry.name === 'alpha');
+    expect(refusal?.level).toBe('warn');
+    expect(refusal?.reason).toContain(
+      `[skills] skipping ${path.join(root, 'alpha', 'SKILL.md')}: not a regular file`,
+    );
+  });
+
+  it('skips a skill whose own name is reserved', () => {
+    const root = tempDir();
+    // The folder is named after the reserved name …
+    writeSkill(root, 'anthropic-skills');
+    // … and so is this one's frontmatter.
+    writeFile(
+      path.join(root, 'beta', 'SKILL.md'),
+      '---\nname: anthropic-skills\ndescription: Reserved.\n---\n\nBody.\n',
+    );
+    writeSkill(root, 'alpha');
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((skill) => skill.name)).toEqual(['alpha']);
+    const refusal = registry.refusals().find((entry) => entry.name === 'anthropic-skills');
+    expect(refusal?.level).toBe('warn');
+    expect(refusal?.reason).toContain(
+      'that name uses "anthropic-skills", a name reserved for the skills synced from your claude.ai account',
+    );
+    expect(RESERVED_SKILL_NAMES).toEqual(['anthropic-skills']);
+    expect(isReservedSkillName('anthropic-skills')).toBe(true);
+    expect(isReservedSkillName('anthropic-skills:inner')).toBe(true);
+    expect(isReservedSkillName('alpha')).toBe(false);
+  });
+
+  it('loads a skill whose frontmatter does not parse, ignoring the frontmatter', () => {
+    const root = tempDir();
+    writeFile(
+      path.join(root, 'broken', 'SKILL.md'),
+      '---\ndescription A skill.\n---\n\nThe body.\n',
+    );
+
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+    const skill = registry.resolve('broken');
+
+    // A frontmatter that does not parse is **not** a skip: the skill still
+    // loads, without its frontmatter.
+    expect(skill).toBeDefined();
+    expect(skill?.description).toBeUndefined();
+    const refusal = registry.refusals().find((entry) => entry.path.endsWith('SKILL.md'));
+    expect(refusal?.level).toBe('error');
+    expect(refusal?.reason).toContain('failed to parse and was ignored');
+  });
+
+  it('reports a skills directory it cannot read, and scans the other roots', () => {
+    const unreadable = tempDir();
+    const readable = skillsRoot(['alpha']);
+    chmodSync(unreadable, 0o000);
+
+    try {
+      const registry = createSkillRegistry({
+        roots: [
+          { path: unreadable, source: 'project' },
+          { path: readable, source: 'project' },
+        ],
+      });
+
+      // The directory that cannot be read yields nothing, and the scan goes on.
+      expect(registry.list().map((skill) => skill.name)).toEqual(['alpha']);
+      const refusal = registry.refusals().find((entry) => entry.path === unreadable);
+      expect(refusal?.level).toBe('error');
+      expect(refusal?.reason).toContain(`Failed to read skills directory ${unreadable}`);
+    } finally {
+      chmodSync(unreadable, 0o700);
+    }
+  });
+
+  it('keeps the standalone skills and the plugin skills apart, and merges the standalone first', () => {
+    const root = skillsRoot(['alpha']);
+
+    const registry = createSkillRegistry({
+      roots: [{ path: root, source: 'project' }],
+      contributions: [
+        {
+          name: 'beta',
+          source: 'plugin',
+          path: '/plugins/demo/skills/beta/SKILL.md',
+          provider: 'demo',
+        },
+      ],
+    });
+
+    // The two lists stay apart …
+    expect(registry.roots().map((entry) => entry.path)).toEqual([root]);
+    expect(registry.contributions().map((entry) => entry.name)).toEqual(['beta']);
+    // … and the standalone skills come **first** in the merge.
+    expect(registry.list().map((skill) => skill.name)).toEqual(['alpha', 'beta']);
+  });
+
+  it('caches the scan, and re-reads it after a reload', () => {
+    const root = skillsRoot(['alpha']);
+    const registry = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((skill) => skill.name)).toEqual(['alpha']);
+
+    writeSkill(root, 'beta');
+    // The catalogue is cached, as the target's is.
+    expect(registry.list().map((skill) => skill.name)).toEqual(['alpha']);
+
+    registry.reload();
+    expect(registry.list().map((skill) => skill.name).sort()).toEqual(['alpha', 'beta']);
+  });
+
+  it('re-reads the skills across a restart', () => {
+    const root = skillsRoot(['alpha']);
+    const first = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+    expect(first.list()).toHaveLength(1);
+
+    writeSkill(root, 'beta');
+
+    // A new process: a new registry, with a cold cache.
+    const second = createSkillRegistry({ roots: [{ path: root, source: 'project' }] });
+    expect(second.list().map((skill) => skill.name).sort()).toEqual(['alpha', 'beta']);
   });
 });
 
@@ -2443,7 +2707,7 @@ describe('the subagent registry', () => {
     expect(applied[0]).toMatchObject({ invocable: true, autoInvocable: true });
   });
 
-  it('surfaces a subagent file over the byte limit rather than reading it', () => {
+  it('skips a subagent file over the byte limit', () => {
     const cwd = tempDir();
     const configDir = tempDir();
     const agents = path.join(cwd, '.claude', 'agents');
@@ -2453,9 +2717,14 @@ describe('the subagent registry', () => {
     const registry = createSubagentRegistry({ cwd, configDir });
     const definition = registry.resolve('huge');
 
-    expect(definition).toBeDefined();
-    expect(definition?.problem).toBe('the subagent file is over the byte limit');
-    expect(definition?.body).toBe('');
+    // REA observed: the markdown scan skips a file that is not a regular file
+    // or that is over the byte limit, and it never reads it.
+    expect(definition).toBeUndefined();
+    const refusal = registry.refusals().find((entry) => entry.path.endsWith('huge.md'));
+    expect(refusal?.level).toBe('warn');
+    expect(refusal?.reason).toContain(
+      `loadMarkdownFilesFromDir: skipping ${path.join(agents, 'huge.md')}: not a regular file or exceeds ${SUBAGENT_FILE_BYTE_LIMIT} byte limit`,
+    );
   });
 
   it('reports a subagent name two plugins provide, instead of dropping one silently', () => {
@@ -2479,6 +2748,233 @@ describe('the subagent registry', () => {
     const definition = registry.resolve('planner');
     expect(definition?.provider).toBe('first');
     expect(definition?.collidesWith).toEqual(['second']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The subagent definition lifecycle
+// ---------------------------------------------------------------------------
+
+describe('the subagent definition lifecycle', () => {
+  /** A definition file: the frontmatter carries the name and the description. */
+  function definition(name: string, description = 'Does the work.'): string {
+    return `---\nname: ${name}\ndescription: ${description}\n---\n\nThe body of ${name}.\n`;
+  }
+
+  /** An agents root that holds one definition per name. */
+  function agentsRoot(names: readonly string[]): string {
+    const root = tempDir();
+    for (const name of names) {
+      writeFile(path.join(root, `${name}.md`), definition(name));
+    }
+    return root;
+  }
+
+  it('takes the agent name from the frontmatter, not from the file name', () => {
+    const root = tempDir();
+    // The file name is free-form.
+    writeFile(path.join(root, 'anything-at-all.md'), definition('reviewer'));
+
+    const registry = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((agent) => agent.name)).toEqual(['reviewer']);
+    expect(registry.resolve('reviewer')?.description).toBe('Does the work.');
+    expect(registry.resolve('anything-at-all')).toBeUndefined();
+  });
+
+  it('scans an agents directory recursively, for markdown files only', () => {
+    const root = tempDir();
+    writeFile(path.join(root, 'reviewer.md'), definition('reviewer'));
+    writeFile(path.join(root, 'nested', 'deeper', 'planner.md'), definition('planner'));
+    // A file that is not markdown is not a definition.
+    writeFile(path.join(root, 'notes.txt'), 'not a definition');
+
+    const registry = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((agent) => agent.name).sort()).toEqual(['planner', 'reviewer']);
+  });
+
+  it('refuses a definition without a description, by name', () => {
+    const root = tempDir();
+    writeFile(path.join(root, 'reviewer.md'), '---\nname: reviewer\n---\n\nReview it.\n');
+
+    const registry = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    // The description is required, so the definition is refused — and the
+    // refusal names it.
+    expect(registry.resolve('reviewer')).toBeUndefined();
+    const refusal = registry.refusals().find((entry) => entry.name === 'reviewer');
+    expect(refusal?.level).toBe('warn');
+    expect(refusal?.reason).toContain(
+      `Agent file ${path.join(root, 'reviewer.md')} is missing required 'description' in frontmatter`,
+    );
+  });
+
+  it('refuses a definition whose name the target refuses', () => {
+    const root = tempDir();
+    writeFile(path.join(root, 'leading-dash.md'), definition('-reviewer'));
+    writeFile(path.join(root, 'colon.md'), definition('review:er'));
+    writeFile(path.join(root, 'long.md'), definition('x'.repeat(SUBAGENT_NAME_MAX_LENGTH + 1)));
+
+    const registry = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list()).toEqual([]);
+    const reasons = registry.refusals().map((entry) => entry.reason).join('\n');
+    expect(reasons).toContain("names must not start with '-'");
+    expect(reasons).toContain(
+      "names must not contain ':' (reserved for plugin namespacing)",
+    );
+    expect(reasons).toContain(`names must be at most ${SUBAGENT_NAME_MAX_LENGTH} characters`);
+    expect(isValidSubagentName('-reviewer')).toBe(false);
+    expect(isValidSubagentName('reviewer')).toBe(true);
+  });
+
+  it('reads the frontmatter fields the target\'s definition carries', () => {
+    const root = tempDir();
+    writeFile(
+      path.join(root, 'reviewer.md'),
+      [
+        '---',
+        'name: reviewer',
+        'description: Reviews code.',
+        'model: opus',
+        'tools: Read, Grep',
+        'disallowedTools: Write',
+        'skills: review, audit',
+        'initialPrompt: Start here.',
+        'permissionMode: plan',
+        'maxTurns: 12',
+        '---',
+        '',
+        'Review it.',
+        '',
+      ].join('\n'),
+    );
+
+    const registry = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+    const definition = registry.resolve('reviewer');
+
+    expect(definition).toMatchObject({
+      name: 'reviewer',
+      description: 'Reviews code.',
+      model: 'opus',
+      tools: ['Read', 'Grep'],
+      disallowedTools: ['Write'],
+      skills: ['review', 'audit'],
+      initialPrompt: 'Start here.',
+      permissionMode: 'plan',
+      maxTurns: 12,
+    });
+    expect(definition?.body.trim()).toBe('Review it.');
+  });
+
+  it('resolves a name two sources define by the target\'s precedence', () => {
+    const base = tempDir();
+    const pluginRoot = path.join(base, 'plugin');
+    const userRoot = path.join(base, 'user');
+    const projectRoot = path.join(base, 'project');
+    writeFile(path.join(pluginRoot, 'shared.md'), definition('shared'));
+    writeFile(path.join(userRoot, 'shared.md'), definition('shared'));
+    writeFile(path.join(projectRoot, 'shared.md'), definition('shared'));
+
+    // The target's order: built-in, plugin, user settings, project settings,
+    // feature flags, machine policy — the later wins.
+    const registry = createSubagentRegistry({
+      roots: [
+        { path: pluginRoot, source: 'plugin' },
+        { path: userRoot, source: 'user' },
+        { path: projectRoot, source: 'project' },
+      ],
+    });
+
+    expect(registry.resolve('shared')?.source).toBe('project');
+
+    // The order of the roots does not change the outcome.
+    const reordered = createSubagentRegistry({
+      roots: [
+        { path: projectRoot, source: 'project' },
+        { path: userRoot, source: 'user' },
+        { path: pluginRoot, source: 'plugin' },
+      ],
+    });
+    expect(reordered.resolve('shared')?.source).toBe('project');
+    expect(SUBAGENT_TIER_PRECEDENCE).toEqual([
+      'built-in',
+      'plugin',
+      'userSettings',
+      'local',
+      'projectSettings',
+      'flagSettings',
+      'policySettings',
+    ]);
+  });
+
+  it('lets a runtime registration beat a project definition', () => {
+    const projectRoot = agentsRoot(['shared']);
+    const registry = createSubagentRegistry({
+      roots: [{ path: projectRoot, source: 'project' }],
+      contributions: [
+        {
+          name: 'shared',
+          source: 'mcp',
+          path: 'mcp://memory/shared',
+          body: 'The body.',
+        },
+      ],
+    });
+
+    // A runtime registration is the target's flag tier, which is above the
+    // project's.
+    expect(registry.resolve('shared')?.source).toBe('mcp');
+  });
+
+  it('caches the catalogue, and re-reads it after a reload', () => {
+    const root = agentsRoot(['reviewer']);
+    const registry = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    expect(registry.list().map((agent) => agent.name)).toEqual(['reviewer']);
+
+    writeFile(path.join(root, 'planner.md'), definition('planner'));
+    // The catalogue is cached, as the target's is.
+    expect(registry.list().map((agent) => agent.name)).toEqual(['reviewer']);
+
+    registry.reload();
+    expect(registry.list().map((agent) => agent.name).sort()).toEqual(['planner', 'reviewer']);
+  });
+
+  it('re-reads the catalogue across a restart', () => {
+    const root = agentsRoot(['reviewer']);
+    const first = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+    expect(first.list()).toHaveLength(1);
+
+    writeFile(path.join(root, 'planner.md'), definition('planner'));
+
+    // A new process: a new registry, with a cold cache.
+    const second = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+    expect(second.list().map((agent) => agent.name).sort()).toEqual(['planner', 'reviewer']);
+  });
+
+  it('reconstructs an agent by name against the freshly read catalogue', () => {
+    const root = agentsRoot(['reviewer']);
+    const registry = createSubagentRegistry({ roots: [{ path: root, source: 'project' }] });
+
+    const reconstruction = registry.reconstruct('reviewer');
+
+    expect(reconstruction.available).toBe(true);
+    expect(reconstruction.name).toBe('reviewer');
+    expect(reconstruction.definition?.name).toBe('reviewer');
+    expect(reconstruction.message).toBeUndefined();
+  });
+
+  it('says so when the agent is no longer available', () => {
+    const registry = createSubagentRegistry({ roots: [] });
+
+    const reconstruction = registry.reconstruct('gone');
+
+    expect(reconstruction.available).toBe(false);
+    expect(reconstruction.definition).toBeUndefined();
+    expect(reconstruction.message).toContain('gone');
+    expect(reconstruction.message).toBe(subagentUnavailableMessage('gone'));
   });
 });
 

@@ -2,10 +2,12 @@
 
 **Target:** the pinned reference build `2.1.303`, Linux x86-64, SHA-256 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`.
 **Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.8 "MCP, plugins, and hooks".
-**Owning tasks:** `CC-011` (MCP and the control surface), `CC-012` (hooks), `CC-013` (skills, subagents, plugins, marketplaces, IDE).
+**Owning tasks:** `CC-011` (MCP and the control surface), `CC-012` (hooks), `CC-013` (skills, subagents, plugins, marketplaces, IDE), `CC-011b` (the subagent definition lifecycle and the standalone skill scan).
 **Matrix rows:** F-28 … F-33 in [`feature-matrix.md`](feature-matrix.md).
 
 Every row names its **evidence class**: `REA observed`, `Documented only`, or `implementation choice`.
+
+The `CC-011b` milestone closed the residual the audit had left: the **subagent definition lifecycle** and the **standalone (non-plugin) skill directory scan** were *"not traced to resolved relations"*, and the residual was then closed by **reading the target's own source**. The rules of both surfaces are therefore **REA observed** below, and the sections that used to call them *"entirely a implementation choice"* now say which part of each rule is the target's and which part is this implementation's.
 
 ## The host control-request surface
 
@@ -227,9 +229,50 @@ A manifest-declared path is used only when it is inside the plugin root — **le
 
 The five **origins** — `project`, `local`, `user`, `plugin`, `mcp` — are the plan's. The **order** they take precedence in (`project > local > user > plugin > mcp`) and the meaning of `local` are this implementation's.
 
-The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdirectory, the frontmatter `description`, the `own` flag, the precedence and the byte limit — is this implementation's: §2.8 marks that scan *"not traced to resolved relations"*.
+The **standalone (non-plugin) skill directory scan** is **REA observed** — the rules are in the section below.
 
 **Pinned by:** `tests/contracts/extensions.test.ts` — the precedence and override tests.
+
+## The standalone skill directory scan
+
+**REA observed** (the residual was closed by reading the target's own source).
+
+### The sources, and the merge
+
+The target reads its skill roots **separately** and **merges them later**: the **managed** directory, the **user** directory (`~/.claude/skills`), the **synced** subtree beneath it, the **host catalog**, every **project** ancestor's `.claude/skills`, each **additional working directory**'s `.claude/skills`, and the **plugin** skills. The **standalone** list and the **plugin** list stay **two separate lists**, and the standalone skills come **first** in the merge.
+
+This implementation reads the **standalone** roots (the caller names them, and each names the tier it stands for) and the **contributions** (the plugin and MCP skills) as two separate lists, and merges them with the standalone first. The **host catalog** is a source this implementation does not have — it is not a filesystem directory, and the merged list is the one place it would have entered.
+
+### The scan of one root
+
+- the scan is a **single `readdir`** — **depth 1, not recursive**;
+- each entry must be a **directory or a symlink**;
+- the skill file is the **fixed name `SKILL.md`**, with that exact case, **directly** inside the entry.
+
+### The skips
+
+| The entry | The target's rule |
+|---|---|
+| not a directory or a symlink | dropped |
+| the reserved entry name `synced` | skipped with a warning |
+| a name that contains `:` — in the **synced** scan only | skipped with a warning |
+| an entry whose **plugin is disabled** | skipped |
+| a `SKILL.md` that is **not a regular file** | skipped with a warning |
+| a `SKILL.md` over **1 000 000 bytes** | skipped with a warning |
+| a skill whose **own name is reserved** (`anthropic-skills`) | skipped with a warning |
+| a directory that cannot be read | the root yields nothing, with an error |
+
+The **reserved entry name** is compared after the target's fold — the case is folded and the trailing dots and spaces are stripped — so `Synced` and `synced.` are the same name. The **reserved skill name** is `anthropic-skills`, the name "reserved for the skills synced from your claude.ai account"; the refusal says so.
+
+### The frontmatter
+
+**A frontmatter parse failure is not a skip.** It is reported at **error** level and the frontmatter is **ignored** — the skill still loads, without its frontmatter. Any *other* failure while building a skill skips **that one skill**, and the scan continues.
+
+### The cache
+
+The result is **cached per process** and invalidated by the same reload path the agent catalogue uses. This implementation has no file watcher, so the single invalidation point is the explicit **`reload()`** on each registry — the host makes the call on both at once, so the two catalogues are invalidated together. A **new** registry — a new process — reads the disk again.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the standalone-scan tests.
 
 ## Plugins — the command byte limit
 
@@ -257,9 +300,29 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 
 ## Subagents
 
-**Entirely a implementation choice.** §2.8 records the subagent definition lifecycle as *"Partial … not traced"*: the names and the storage are observed, the behavior is not. This implementation models the registry on the skill registry and says so.
+**REA observed** (the residual was closed by reading the target's own source), with the exceptions the section below names.
 
-**Pinned by:** `tests/contracts/extensions.test.ts` — the subagent registry tests.
+### The lifecycle
+
+- a subagent is a **markdown file with YAML frontmatter** inside an **`agents/` directory**. The **file name is free-form**: the agent's name comes from the **frontmatter**;
+- discovery is a **recursive `*.md` scan** of each `agents/` directory, with a **bounded timeout**, **following symlinks** and **skipping a directory it has already visited**;
+- parsing requires a `name` **and** a `description`; a file without the description is **refused by name**;
+- a name that starts with a dash, is longer than **256** characters, or contains a colon is refused too;
+- **nothing is persisted.** The raw scan and the parsed catalogue live in an **in-memory cache**, and both are dropped on a file-watch event, on the `/agents` command and on a plugin reload. Across a **restart** everything is re-read from disk, and a resumed session's main-thread agent is **reconstructed by name** against the freshly read catalogue;
+- when two sources define the same name, the later one wins, in the order **built-in, plugin, user settings, project settings, feature flags, machine policy**.
+
+### What is this implementation's
+
+- the **within-tier** rule: two definitions of the **same** tier are won by the **first** declared. The target's own rule is a last-writer one, which would change the plugin-collision report the `CC-013b` milestone pinned;
+- the **message** the reconstruction reports when the agent is no longer available — the target says so, but the REA findings do not carry its wording;
+- the **extra frontmatter fields** this implementation reads are the target's, but only the subset the audit names;
+- the **local** origin, which the target does not have, sits between the user's and the project's.
+
+### The rule that cannot fire on its own
+
+The **reconstruction by name** needs the main-thread agent's **name**. This implementation's transcript vocabulary has **no record that carries it**, so the rule fires only when the caller supplies the name — `reconstruct(name)` takes it as its argument. The catalogue it is reconstructed against is the one that was read when the cache was cold: after a **restart**, or after a **`reload()`**.
+
+**Pinned by:** `tests/contracts/extensions.test.ts` — the subagent-lifecycle tests.
 
 ## The IDE bridge
 
@@ -308,7 +371,7 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 | A malformed matcher matches nothing rather than being treated as a literal | **implementation choice** | F-32 | same file |
 | `updatedPermissions` accepts both a map and a list of typed updates | **implementation choice** | F-32 | same file |
 | A manifest-declared path is used only when it is inside the plugin root — lexically and through `realpath` — and a refusal carries one of two named reasons, reported both as a `manifest.problems` entry and as a log record | **implementation choice** (the target's behavior is unobserved; the plan's Global Constraint requires implementation-owned path boundaries) | F-33 | `tests/contracts/extensions.test.ts` — the path-boundary tests, one per check |
-| The standalone (non-plugin) skill directory scan — `SKILL.md` per subdirectory, the frontmatter `description`, the `own` flag, the precedence and the byte limit — is this implementation's | **implementation choice** (§2.8 marks that scan "not traced to resolved relations") | F-33 | same file — the discovery and override tests |
+| The standalone (non-plugin) skill directory scan — a **single `readdir`**, **depth 1**, the fixed file name `SKILL.md`, the skips, and the frontmatter failure that is **not** a skip — is the target's | **REA observed** (the residual was closed by reading the target's own source) | F-33 | same file — the standalone-scan tests |
 | The precedence order `project > local > user > plugin > mcp`, and the meaning of `local`. The five **names** are the plan's | **implementation choice** (the order and `local`'s meaning) | F-33 | same file — the precedence test |
 | Two plugins that provide the same skill or subagent name collide; the collision is **reported** and the names are **not** namespaced. One plugin providing a name twice is reported as a different situation | **implementation choice** | F-33 | same file — the collision tests |
 | `collidesWith` is **absent** when nothing collided, **present and empty** when one provider shipped the name twice, and **present and non-empty** naming the **other** providers — never the winner's own | **implementation choice** | F-33 | same file — the collision-semantics tests |
@@ -316,9 +379,9 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 | A frontmatter field that is present but `undefined` is treated as absent | **implementation choice — a documented divergence** from the audit's literal reading | F-33 | same file — the undefined-field test |
 | An IDE action is validated as a single path segment (no empty, `.`, `..`, `/`, `\`, NUL) before anything is sent, in `apply()` and in the transport | **implementation choice** | F-33 | same file — the IDE action tests |
 | The default IDE transport refuses a host that is not a loopback address | **implementation choice** | F-33 | same file — the IDE transport tests |
-| A skill file or a subagent definition file over 1 MiB is surfaced with a problem and **never read** | **implementation choice** | F-33 | same file — the byte-cap tests |
+| A skill file over **1 000 000 bytes** is **skipped** — the target never reads it — and a subagent definition file over **1 048 576 bytes** is skipped by the markdown scan | **REA observed** (the two limits and the two skips) | F-33 | same file — "skips a skill file over the byte limit", "skips a subagent file over the byte limit" |
 | A `telemetry.log` destination other than `collector` is normalized to `anthropic` | **implementation choice** (the **default** is REA observed; the **rewriting** is this implementation's reading and a behavior change) | F-33 | same file — the telemetry tests |
-| A subagent's name is its file's basename, overridden by the frontmatter's `name`; a name two contributors provide is a reported collision | **implementation choice** (the subagent lifecycle is unobserved) | F-33 | same file — the subagent tests |
+| A subagent's name comes from its **frontmatter**, not from its file's name; a name two contributors provide is a reported collision | **REA observed** (the name comes from the frontmatter) + **implementation choice** (the collision report) | F-33 | same file — "takes the agent name from the frontmatter, not from the file name" |
 | The skill override modes are exactly four, and the resolution order is settings → session → policy/flag | REA observed | F-33 | `tests/contracts/extensions.test.ts` (the `CC-013` task) |
 | The skill-save protocol selects its mode by the target's rule and uses the target's wording | REA observed | F-33 | same file |
 | The marketplace install reports the disable reason, the enable hint, and distinguishes refused from failed | REA observed | F-33 | same file |
@@ -332,15 +395,45 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 
 ## The subagents — conformance
 
-§2.8 records the subagent definition lifecycle as *"Partial … not traced"*: the names and the storage are observed, the behavior is not. Every row of this table is therefore a **implementation choice**, and the measured outcome of the row is in [`results.md`](results.md).
+The subagent definition lifecycle was *"Partial … not traced"* in §2.8; the residual was closed by **reading the target's own source**, so the lifecycle's rules are **REA observed**. The rows below name the part of each rule that is the target's and the part that is this implementation's, and the measured outcome of the row is in [`results.md`](results.md).
 
 | Claim | Evidence class | Matrix row | Pinned by |
 | --- | --- | --- | --- |
-| The subagent registry mirrors the skill registry, and discovers a project subagent and a plugin subagent | **implementation choice** | F-33 | `tests/contracts/extensions.test.ts` — "discovers a project subagent and a plugin subagent" |
-| A subagent is resolved by name, and an inherited member is never resolved as one | **implementation choice** | F-33 | same file — "resolves a subagent by name and refuses an inherited member" |
+| The subagent registry discovers a project subagent and a plugin subagent | **REA observed** (the discovery) + **implementation choice** (the two sources) | F-33 | `tests/contracts/extensions.test.ts` — "discovers a project subagent and a plugin subagent" |
+| A subagent is resolved by name, and an inherited member is never resolved as one | **implementation choice** (the prototype-key guard) | F-33 | same file — "resolves a subagent by name and refuses an inherited member" |
 | A session may use only the subagents it is allowed to use | **implementation choice** | F-33 | same file — "applies the subagents a session may use" |
-| A subagent file over the byte limit is **surfaced**, never read | **implementation choice** | F-33 | same file — "surfaces a subagent file over the byte limit rather than reading it" |
+| The agent's name comes from the **frontmatter**, not from the file's name | **REA observed** | F-33 | same file — "takes the agent name from the frontmatter, not from the file name" |
+| The scan is **recursive**, for `*.md` files only | **REA observed** | F-33 | same file — "scans an agents directory recursively, for markdown files only" |
+| A definition without a `description` is **refused by name** | **REA observed** | F-33 | same file — "refuses a definition without a description, by name" |
+| A name that starts with a dash, is longer than 256 characters, or contains a colon is refused | **REA observed** | F-33 | same file — "refuses a definition whose name the target refuses" |
+| A name two sources define is won by the target's per-source order — built-in, plugin, user settings, project settings, feature flags, machine policy | **REA observed** (the order) + **implementation choice** (the within-tier rule, and the `local` origin) | F-33 | same file — "resolves a name two sources define by the target's precedence" |
+| The definition carries the frontmatter fields the target's carries — the model, the tools, the disallowed tools, the skills, the initial prompt, the permission mode, the effort, the colour and the turn ceiling | **REA observed** (the fields) + **implementation choice** (the subset this implementation reads) | F-33 | same file — "reads the frontmatter fields the target's definition carries" |
+| A runtime registration beats a project definition | **REA observed** (the flag tier) | F-33 | same file — "lets a runtime registration beat a project definition" |
+| The catalogue is **cached** per process and dropped on a **reload** | **REA observed** (the cache and its invalidation) + **implementation choice** (the explicit `reload()`, in place of the target's file watcher) | F-33 | same file — "caches the catalogue, and re-reads it after a reload" |
+| Everything is re-read from disk across a **restart** | **REA observed** (nothing is persisted) | F-33 | same file — "re-reads the catalogue across a restart" |
+| A resumed session's main-thread agent is **reconstructed by name**, and the target says so when it is no longer available | **REA observed** (the reconstruction) + **implementation choice** (the wording) | F-33 | same file — "reconstructs an agent by name against the freshly read catalogue", "says so when the agent is no longer available" |
+| A subagent file over the byte limit is **skipped**, never read | **REA observed** | F-33 | same file — "skips a subagent file over the byte limit" |
 | A subagent name two plugins provide is **reported**, not dropped silently | **implementation choice** | F-33 | same file — "reports a subagent name two plugins provide, instead of dropping one silently" |
+
+## The standalone skill scan — conformance
+
+The standalone (non-plugin) skill directory scan was *"not traced to resolved relations"* in §2.8; the residual was closed by **reading the target's own source**, so the scan's rules are **REA observed**. The measured outcome of the row is in [`results.md`](results.md).
+
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The scan of a root is a **single `readdir`** — **depth 1** — and the skill file is the fixed name `SKILL.md` | **REA observed** | F-33 | `tests/contracts/extensions.test.ts` — "scans a root one level deep, and takes the fixed file name SKILL.md" |
+| An entry that is not a directory or a symlink is skipped | **REA observed** | F-33 | same file — "skips an entry that is not a directory or a symlink" |
+| A symlinked skill directory is followed | **REA observed** | F-33 | same file — "follows a symlinked skill directory" |
+| The reserved entry name `synced` is skipped | **REA observed** | F-33 | same file — "skips the reserved entry name …" |
+| An entry whose name contains `:` is skipped in the **synced** scan | **REA observed** | F-33 | same file — "skips an entry whose name contains …" |
+| An entry whose **plugin is disabled** is skipped | **REA observed** | F-33 | same file — "skips an entry whose plugin is disabled" |
+| A `SKILL.md` that is not a regular file is skipped | **REA observed** | F-33 | same file — "skips a SKILL.md that is not a regular file" |
+| A skill whose own name is reserved (`anthropic-skills`) is skipped | **REA observed** | F-33 | same file — "skips a skill whose own name is reserved" |
+| A frontmatter that does not parse is **not** a skip: it is reported at error level and the frontmatter is ignored, and the skill still loads | **REA observed** | F-33 | same file — "loads a skill whose frontmatter does not parse, ignoring the frontmatter" |
+| A directory that cannot be read yields nothing, with an error, and the scan goes on | **REA observed** | F-33 | same file — "reports a skills directory it cannot read, and scans the other roots" |
+| The standalone list and the plugin list stay apart, and the standalone skills come **first** in the merge | **REA observed** (the two lists and their order) | F-33 | same file — "keeps the standalone skills and the plugin skills apart, and merges the standalone first" |
+| The scan is **cached** per process and dropped on a **reload** | **REA observed** (the cache and its invalidation) + **implementation choice** (the explicit `reload()`, in place of the target's file watcher) | F-33 | same file — "caches the scan, and re-reads it after a reload" |
+| The scan is re-read across a **restart** | **REA observed** (nothing is persisted) | F-33 | same file — "re-reads the skills across a restart" |
 
 ## The IDE bridge — conformance
 
