@@ -411,6 +411,19 @@ export type ProviderEvent =
  */
 export interface ProviderDriver {
   readonly route: ProviderRoute;
+  /**
+   * The retry budget this driver declares.
+   *
+   * **Optional and additive.** A driver that declares a budget is retried
+   * that many times; a driver that declares none falls back to the
+   * transport's own setting and, failing that, to the default of two
+   * retries.
+   *
+   * The member is here because the plan's Step 5 says a request is "retried
+   * up to the **driver's** `maxRetries`" — and without the member on the
+   * interface, no production driver could ever declare one.
+   */
+  readonly maxRetries?: number;
   buildUrl(req: ProviderRequest, baseUrl?: string): string;
   buildHeaders(req: ProviderRequest, cred: string | undefined): Record<string, string>;
   buildBody(req: ProviderRequest, cred: string | undefined): { body: unknown; headers: Record<string, string> };

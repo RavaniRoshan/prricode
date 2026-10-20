@@ -31,11 +31,12 @@
 
 import type { TokenAcquirer } from './http.js';
 
-export { sendProviderRequest } from './http.js';
+export { ProviderAbortedError, ProviderTimeoutError, sendProviderRequest } from './http.js';
 export type { SendResult, TokenAcquirer, TransportOptions } from './http.js';
 export {
   DEFAULT_MAX_RETRIES,
   RETRY_AFTER_HEADER,
+  RETRY_AFTER_MAX_DELAY_MS,
   RETRY_BASE_DELAY_MS,
   RETRY_MAX_DELAY_MS,
   SHOULD_RETRY_HEADER,
@@ -43,7 +44,6 @@ export {
   parseRetryAfter,
   readShouldRetry,
   retryDelayMs,
-  shouldRetryStatus,
 } from './retry.js';
 export type { RetryResponseLike } from './retry.js';
 export {
@@ -52,18 +52,26 @@ export {
   AUTHORIZATION_HEADER,
   CONNECTION_HEADER,
   HOST_HEADER,
+  PROXY_HEADER_PATTERN,
+  SEC_HEADER_PATTERN,
   SIGV4_ALGORITHM,
   UNSIGNABLE_HEADERS,
+  buildCanonicalRequest,
   buildSignedHeaders,
   canonicalQueryString,
   canonicalUriPath,
+  escapeUri,
+  escapeUriPath,
   formatAmzDate,
   formatDateStamp,
+  normaliseHeaderValue,
+  normalisePath,
+  parseAmzDate,
   sha256Hex,
   signingKey,
   signingScope,
 } from './sigv4.js';
-export type { SigV4Input } from './sigv4.js';
+export type { CanonicalRequest, SigV4Input } from './sigv4.js';
 
 /* -------------------------------------------------------------------------- */
 /* The token-acquisition seam                                                   */

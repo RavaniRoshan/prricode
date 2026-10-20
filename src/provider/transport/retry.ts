@@ -26,13 +26,13 @@
  *     jitter — so that a test can pin it and so that two runs of the same
  *     request behave identically;
  *   - the **`retry-after` clamp**: a server's `retry-after` is honoured, but
- *     it is clamped to the same maximum as the backoff, so that a hostile or
- *     mistaken header cannot park a turn for an hour;
+ *     it is clamped to **its own, larger** maximum (`60 000 ms`), so that a
+ *     hostile or mistaken header cannot park a turn for an hour — but a
+ *     server's explicit instruction is not truncated to the backoff's
+ *     `8 000 ms` either;
  *   - the **`retry-after` parsing**: the header is either a number of seconds
  *     or an HTTP-date; anything else is ignored and the backoff is used.
  */
-
-import { classifyErrorStatus } from '../drivers/types.js';
 
 /** The header the target honours in both directions. **Observed** (audit §2.2). */
 export const SHOULD_RETRY_HEADER = 'x-should-retry';
@@ -45,6 +45,16 @@ export const RETRY_BASE_DELAY_MS = 500;
 
 /** The longest delay this implementation waits between two attempts. **Implementation choice.** */
 export const RETRY_MAX_DELAY_MS = 8_000;
+
+/**
+ * The longest delay a server's `retry-after` may ask for.
+ *
+ * **Implementation choice.** It is deliberately **larger** than the backoff's cap: the
+ * backoff is this implementation's own shape, while a `retry-after` is the server's
+ * explicit instruction, and truncating it to the backoff's maximum would
+ * ignore the server by a factor of seven and a half.
+ */
+export const RETRY_AFTER_MAX_DELAY_MS = 60_000;
 
 /** The number of retries a request gets when nothing else says. **Implementation choice.** */
 export const DEFAULT_MAX_RETRIES = 2;
@@ -79,46 +89,15 @@ export function readShouldRetry(headers: Headers | null | undefined): boolean | 
 }
 
 /**
- * Whether a status is retryable under the target's rule.
- *
- * **Observed** (audit §2.2): `408`, `409`, `429` and every status `>= 500`
- * are retryable. The `x-should-retry` header overrides the answer **in both
- * directions**.
- *
- * The rule is **not** written out a second time: the shared driver classifier
- * (`classifyErrorStatus`) owns it, and this delegates to it, so the transport
- * and the drivers can never disagree about what is retryable.
- *
- * The cached-token `401` is **not** decided here: it needs the error body (or
- * the caller's own knowledge of the auth state), so the driver classifies it.
- */
-export function shouldRetryStatus(status: number, headers?: Headers | null): boolean {
-  return classifyErrorStatus(status, undefined, { headers: headerRecord(headers) }).retryable;
-}
-
-/**
- * The response headers as a plain record.
- *
- * The record is **null-prototype**: a header name is caller-supplied data, so
- * a lookup must never resolve an inherited `Object.prototype` member.
- */
-function headerRecord(headers: Headers | null | undefined): Record<string, string> {
-  const record: Record<string, string> = Object.create(null) as Record<string, string>;
-  if (headers === null || headers === undefined) return record;
-  for (const [key, value] of headers.entries()) {
-    record[key.toLowerCase()] = value;
-  }
-  return record;
-}
-
-/**
  * Parse a `retry-after` header into a delay in milliseconds.
  *
  * The header is either a number of **seconds** or an **HTTP-date**. A value
  * that is neither is **absent**, and the caller falls back to the backoff.
  *
+ * @param value the header's value.
  * @param now the current time, in milliseconds since the epoch; used to turn
- *   an HTTP-date into a delay.
+ *   an HTTP-date into a delay. It is a parameter, so that the answer is a
+ *   function of the caller's inputs.
  */
 export function parseRetryAfter(value: string | null | undefined, now: number = Date.now()): number | undefined {
   if (typeof value !== 'string') return undefined;
@@ -141,14 +120,17 @@ export function parseRetryAfter(value: string | null | undefined, now: number = 
 /**
  * The delay before the next attempt.
  *
- * The delay is a **function of its inputs only** — there is no jitter and no
- * clock read other than the one an HTTP-date needs — so two calls with the
+ * The delay is a **function of its inputs only** — there is no jitter, and
+ * the clock is read only through the `now` argument — so two calls with the
  * same arguments always answer the same number.
  *
  * @param attempt the zero-based index of the attempt that just failed: `0` is
  *   the first request, so `retryDelayMs(0)` is the delay before the second
  *   one.
  * @param response the failed response, when there was one.
+ * @param now the current time, in milliseconds since the epoch. It is only
+ *   read when the response carries an HTTP-date `retry-after`, and it makes
+ *   that answer a function of the inputs rather than of the wall clock.
  *
  * The rules:
  *
@@ -156,14 +138,14 @@ export function parseRetryAfter(value: string | null | undefined, now: number = 
  *     caller must not retry it, and a caller that consults only the delay
  *     waits for nothing;
  *   - a response that carries a usable `retry-after` yields **that** delay,
- *     clamped to the maximum;
+ *     clamped to the `retry-after` maximum (which is **not** the backoff's);
  *   - otherwise the delay is the exponential backoff.
  */
-export function retryDelayMs(attempt: number, response?: RetryResponseLike): number {
+export function retryDelayMs(attempt: number, response?: RetryResponseLike, now: number = Date.now()): number {
   if (response !== undefined) {
     if (readShouldRetry(response.headers) === false) return 0;
-    const after = parseRetryAfter(response.headers.get(RETRY_AFTER_HEADER));
-    if (after !== undefined) return Math.min(after, RETRY_MAX_DELAY_MS);
+    const after = parseRetryAfter(response.headers.get(RETRY_AFTER_HEADER), now);
+    if (after !== undefined) return Math.min(after, RETRY_AFTER_MAX_DELAY_MS);
   }
   return backoffMs(attempt);
 }

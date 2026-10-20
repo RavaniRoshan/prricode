@@ -25,23 +25,42 @@
  *     every occurrence of a repeated parameter survives, and the query that is
  *     signed is the query that is sent.
  *
- * ## What is observed and what is a implementation choice
+ * ## Which reference this implementation follows: the SDK, not the test suite
+ *
+ * The SigV4 **specification** says that every path segment must be
+ * URI-encoded **twice** (except for Amazon S3), and the AWS SDK the target
+ * runs — `@smithy/signature-v4` — implements exactly that. Its
+ * `getCanonicalPath` normalises the path (dropping the empty segments, `.`
+ * and `..`), escapes the **already-encoded** path a **second** time, and
+ * restores `%2F` to `/`.
+ *
+ * The AWS **test suite** (the `.creq` files) encodes the path **once**. The
+ * suite is the older reference; this implementation follows the **SDK**, because the
+ * SDK is what the target runs. The observable difference is the Bedrock
+ * route: the target sends the request target `/model/…-v1%3A0/invoke` and
+ * signs the canonical URI `/model/…-v1%253A0/invoke`, while a single-encoded
+ * signer signs `/model/…-v1%3A0/invoke` — a different signature **and** a
+ * different request line.
+ *
+ * **What is observed and what is a implementation choice**
  *
  * Observed: the three rules above, and that the signature covers the method,
  * the path, the query, the headers and the body.
  *
  * Implementation choices (the audit does not pin them, so they are marked as such):
  *
- *   - the **canonical URI** is the path encoded **once**, with the SigV4
- *     escaping rules (the unreserved characters survive, everything else is
- *     percent-encoded) and the path segments kept apart;
+ *   - the **canonical URI** follows the **SDK's double encoding** of the
+ *     encoded path (see above) — this implementation follows the SDK rather than the
+ *     test suite, and says so;
  *   - the **canonical query** is the query decoded and re-encoded with the
- *     same rules, sorted by name and then by value, as the SigV4
- *     specification requires;
- *   - the **unsignable headers** are the AWS SDK's always-unsignable list
- *     (`authorization`, `connection`, `user-agent`, `expect`, …);
- *   - the **header values** are trimmed, and the internal whitespace of a
- *     value is left alone.
+ *     same rules and sorted by the **encoded** name and then by the encoded
+ *     value, as the SDK does;
+ *   - the **unsignable headers** are the SDK's always-unsignable list
+ *     (`authorization`, `cache-control`, `connection`, `user-agent`,
+ *     `expect`, `pragma`, …) plus the SDK's `proxy-*` and `sec-*` patterns;
+ *   - the **header values** are normalised the SDK's way: a CR or an LF
+ *     becomes a space, a run of spaces or tabs collapses to one space, and
+ *     the value is trimmed.
  */
 
 import { createHash, createHmac } from 'node:crypto';
@@ -111,12 +130,13 @@ export const CONNECTION_HEADER = 'connection';
  */
 export const UNSIGNABLE_HEADERS: ReadonlySet<string> = new Set([
   'authorization',
+  'cache-control',
   'connection',
   'expect',
   'from',
   'keep-alive',
   'max-forwards',
-  'proxy-authorization',
+  'pragma',
   'referer',
   'te',
   'trailer',
@@ -125,6 +145,47 @@ export const UNSIGNABLE_HEADERS: ReadonlySet<string> = new Set([
   'user-agent',
   'x-amzn-trace-id',
 ]);
+
+/**
+ * The SDK's pattern for the headers that are never signed because they
+ * belong to a proxy.
+ */
+export const PROXY_HEADER_PATTERN = /^proxy-/;
+
+/**
+ * The SDK's pattern for the headers that are never signed because they
+ * belong to the browser's own security machinery.
+ */
+export const SEC_HEADER_PATTERN = /^sec-/;
+
+/* -------------------------------------------------------------------------- */
+/* The canonical request                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The canonical request of a signed request, in its parts.
+ *
+ * The parts are exposed so that a test can pin the **canonical request
+ * string** itself and not only the signature that comes out of it: a signer
+ * with a wrong canonicalisation produces a different string, and the string
+ * is where the difference is visible.
+ */
+export interface CanonicalRequest {
+  /** The HTTP method, upper-cased. */
+  method: string;
+  /** The canonical URI — the path, encoded twice. */
+  canonicalUri: string;
+  /** The canonical query string. */
+  canonicalQuery: string;
+  /** The canonical headers block; every line ends with a newline. */
+  canonicalHeaders: string;
+  /** The names of the signed headers, sorted and `;`-joined. */
+  signedHeaders: string;
+  /** The hex-encoded SHA-256 of the payload. */
+  payloadHash: string;
+  /** The canonical request itself. */
+  canonicalRequest: string;
+}
 
 /* -------------------------------------------------------------------------- */
 /* The signer                                                                   */
@@ -137,12 +198,54 @@ export const UNSIGNABLE_HEADERS: ReadonlySet<string> = new Set([
  * by the URL's host, the `connection` header **deleted**, the `x-amz-date` and
  * (when there is one) the `x-amz-security-token` header added, and the
  * `authorization` header carrying the SigV4 signature.
+ *
+ * The header bag is a **null-prototype** object: a header name is
+ * caller-supplied data, so a header literally called `__proto__` must not
+ * vanish into the prototype chain.
  */
 export async function buildSignedHeaders(input: SigV4Input): Promise<Record<string, string>> {
   const date = input.date ?? new Date();
   const amzDate = formatAmzDate(date);
   const stamp = formatDateStamp(date);
 
+  const headers = signingHeaders(input, amzDate);
+  const canonical = buildCanonicalRequestFor(input, headers);
+
+  const scope = signingScope(stamp, input.region, input.service);
+  const stringToSign = [SIGV4_ALGORITHM, amzDate, scope, sha256Hex(canonical.canonicalRequest)].join('\n');
+  const key = signingKey(input.secretAccessKey, stamp, input.region, input.service);
+  const signature = createHmac('sha256', key).update(stringToSign, 'utf8').digest('hex');
+
+  const result: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const [name, value] of headers) result[name] = value;
+  result[AUTHORIZATION_HEADER] =
+    `${SIGV4_ALGORITHM} Credential=${input.accessKeyId}/${scope}, ` +
+    `SignedHeaders=${canonical.signedHeaders}, Signature=${signature}`;
+  return result;
+}
+
+/**
+ * The canonical request of a request, in its parts.
+ *
+ * The function is the signer's own view of the request: it is what the
+ * signature is computed over, so a test can compare it with the reference
+ * implementation's canonical request.
+ */
+export function buildCanonicalRequest(input: SigV4Input): CanonicalRequest {
+  const date = input.date ?? new Date();
+  return buildCanonicalRequestFor(input, signingHeaders(input, formatAmzDate(date)));
+}
+
+/**
+ * The headers that take part in the signature, with the SigV4 mutations
+ * applied.
+ *
+ * The `host` header is **replaced** by the URL's host, the `connection`
+ * header is **deleted**, the `authorization` header is the signature itself,
+ * and the `x-amz-date` and (when there is one) the `x-amz-security-token`
+ * headers are added.
+ */
+function signingHeaders(input: SigV4Input, amzDate: string): Map<string, string> {
   const headers = new Map<string, string>();
   for (const [name, value] of Object.entries(input.headers)) {
     const key = name.toLowerCase();
@@ -156,62 +259,154 @@ export async function buildSignedHeaders(input: SigV4Input): Promise<Record<stri
   if (typeof input.sessionToken === 'string' && input.sessionToken !== '') {
     headers.set(AMZ_SECURITY_TOKEN_HEADER, input.sessionToken);
   }
-
-  const canonical = canonicalHeaders(headers);
-  const signedHeaderNames = canonical.map(([name]) => name).join(';');
-  const canonicalRequest = [
-    input.method.toUpperCase(),
-    canonicalUriPath(input.url),
-    canonicalQueryString(input.url),
-    canonical.map(([name, value]) => `${name}:${value.trim()}\n`).join(''),
-    signedHeaderNames,
-    sha256Hex(input.body ?? ''),
-  ].join('\n');
-
-  const scope = signingScope(stamp, input.region, input.service);
-  const stringToSign = [SIGV4_ALGORITHM, amzDate, scope, sha256Hex(canonicalRequest)].join('\n');
-  const key = signingKey(input.secretAccessKey, stamp, input.region, input.service);
-  const signature = createHmac('sha256', key).update(stringToSign, 'utf8').digest('hex');
-
-  const result: Record<string, string> = {};
-  for (const [name, value] of headers) result[name] = value;
-  result[AUTHORIZATION_HEADER] =
-    `${SIGV4_ALGORITHM} Credential=${input.accessKeyId}/${scope}, ` +
-    `SignedHeaders=${signedHeaderNames}, Signature=${signature}`;
-  return result;
+  return headers;
 }
 
-/* -------------------------------------------------------------------------- */
-/* The canonical request                                                        */
-/* -------------------------------------------------------------------------- */
+/**
+ * The canonical request of a request, computed over a header set.
+ */
+function buildCanonicalRequestFor(input: SigV4Input, headers: Map<string, string>): CanonicalRequest {
+  const canonical = canonicalHeaders(headers);
+  const signedHeaderNames = canonical.map(([name]) => name).join(';');
+  const method = input.method.toUpperCase();
+  const canonicalUri = canonicalUriPath(input.url);
+  const canonicalQuery = canonicalQueryString(input.url);
+  const canonicalHeaderBlock = canonical.map(([name, value]) => `${name}:${value}\n`).join('');
+  const payloadHash = sha256Hex(input.body ?? '');
+  const canonicalRequest = [
+    method,
+    canonicalUri,
+    canonicalQuery,
+    canonicalHeaderBlock,
+    signedHeaderNames,
+    payloadHash,
+  ].join('\n');
+
+  return {
+    method,
+    canonicalUri,
+    canonicalQuery,
+    canonicalHeaders: canonicalHeaderBlock,
+    signedHeaders: signedHeaderNames,
+    payloadHash,
+    canonicalRequest,
+  };
+}
 
 /**
  * The headers that take part in the signature, sorted by name.
+ *
+ * The value is normalised the SDK's way: a CR or an LF becomes a space, a run
+ * of spaces or tabs collapses to a **single** space, and the value is
+ * trimmed. (The suite's `get-header-value-trim` vector is the reference: the
+ * value `"a   b   c"` is signed as `"a b c"`.)
  */
 function canonicalHeaders(headers: Map<string, string>): Array<[string, string]> {
   const entries: Array<[string, string]> = [];
   for (const [name, value] of headers) {
-    if (UNSIGNABLE_HEADERS.has(name)) continue;
-    entries.push([name, value]);
+    if (isUnsignable(name)) continue;
+    entries.push([name, normaliseHeaderValue(value)]);
   }
   entries.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
   return entries;
 }
 
 /**
- * The canonical URI of a request: its path, encoded once.
+ * Whether a header is one the SDK never signs.
+ */
+function isUnsignable(name: string): boolean {
+  return (
+    UNSIGNABLE_HEADERS.has(name) ||
+    PROXY_HEADER_PATTERN.test(name) ||
+    SEC_HEADER_PATTERN.test(name)
+  );
+}
+
+/**
+ * Normalise a header value the SDK's way.
  *
- * The path segments are kept apart, and every segment is percent-encoded with
- * the SigV4 escaping rules — the unreserved characters (`A-Z`, `a-z`, `0-9`,
- * `-`, `_`, `.`, `~`) survive, everything else does not.
+ * The order matters: the line breaks become spaces **first**, so that a
+ * folded value collapses like any other run of whitespace.
+ */
+export function normaliseHeaderValue(value: string): string {
+  return value.replace(/[\r\n]/g, ' ').replace(/[ \t]+/g, ' ').replace(/^ | $/g, '');
+}
+
+/* -------------------------------------------------------------------------- */
+/* The canonical URI                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The canonical URI of a request: its path, encoded **twice**.
+ *
+ * The rule is the AWS SDK's (`@smithy/signature-v4`'s `getCanonicalPath`),
+ * which is what the target runs:
+ *
+ *   1. the path is **normalised** — the empty segments, `.` and `..` are
+ *      dropped, and a `..` pops the segment before it;
+ *   2. the path is **escaped** — and the path that is escaped is the
+ *      **already-encoded** one (the wire path), so the encoding happens
+ *      twice: the SigV4 specification's rule, and the SDK's;
+ *   3. the `%2F` sequences are restored to `/`, so that the separators
+ *      survive the second encoding.
+ *
+ * **Implementation choice.** This implementation follows the SDK rather than the AWS test
+ * suite, whose `.creq` files encode the path only once. The difference is
+ * visible on the Bedrock route: the canonical URI of
+ * `/model/anthropic.claude-sonnet-4-5-20250929-v1%3A0/invoke` is
+ * `/model/anthropic.claude-sonnet-4-5-20250929-v1%253A0/invoke`.
  */
 export function canonicalUriPath(url: URL): string {
   const path = url.pathname === '' ? '/' : url.pathname;
+  const normalised = normalisePath(path);
+  return escapeUri(normalised).replace(/%2F/g, '/');
+}
+
+/**
+ * The **wire** path of a request: its path, encoded once.
+ *
+ * The AWS SDK builds the request path by escaping the values of the URI
+ * template's labels (`extendedEncodeURIComponent`), so the path that goes on
+ * the wire is already percent-encoded — the Bedrock model id
+ * `anthropic.claude-sonnet-4-5-20250929-v1:0` travels as
+ * `anthropic.claude-sonnet-4-5-20250929-v1%3A0`.
+ *
+ * The encoding is **idempotent**: a path that is already encoded is left
+ * alone, so the transport may apply it to a path that came from a driver
+ * without knowing whether that driver escaped its own labels.
+ */
+export function escapeUriPath(path: string): string {
   return path
     .split('/')
-    .map((segment) => uriEscape(uriDecode(segment)))
+    .map((segment) => escapeUri(uriDecode(segment)))
     .join('/');
 }
+
+/**
+ * Normalise a path the SDK's way.
+ *
+ * The empty segments, `.` and `..` are dropped, and a `..` pops the segment
+ * before it. A leading `/` and a trailing `/` survive.
+ */
+export function normalisePath(path: string): string {
+  const segments: string[] = [];
+  for (const segment of path.split('/')) {
+    if (segment.length === 0) continue;
+    if (segment === '.') continue;
+    if (segment === '..') {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  const prefix = path.startsWith('/') ? '/' : '';
+  const suffix = segments.length > 0 && path.endsWith('/') ? '/' : '';
+  return `${prefix}${segments.join('/')}${suffix}`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The canonical query                                                          */
+/* -------------------------------------------------------------------------- */
 
 /**
  * The canonical query string of a request.
@@ -219,8 +414,12 @@ export function canonicalUriPath(url: URL): string {
  * The query is **not** re-serialised through a `URLSearchParams`: a round trip
  * would rewrite `%20` as `+` and could drop a repeated parameter. Every
  * occurrence of every parameter is kept — the multi-valued parameters
- * survive **byte for byte** — and the pairs are sorted by name and then by
- * value, as the SigV4 specification requires.
+ * survive **byte for byte** — and the pairs are sorted by the **encoded**
+ * name and then by the encoded value, as the SigV4 specification requires.
+ *
+ * The sort key is the **encoded** name, because that is what the AWS SDK
+ * sorts (`getCanonicalQuery` sorts `escapeUri(key)`): the two orders differ
+ * for the names whose encoded and decoded spellings sort differently.
  */
 export function canonicalQueryString(url: URL): string {
   const raw = url.search.startsWith('?') ? url.search.slice(1) : url.search;
@@ -232,7 +431,7 @@ export function canonicalQueryString(url: URL): string {
     const equals = pair.indexOf('=');
     const name = equals === -1 ? pair : pair.slice(0, equals);
     const value = equals === -1 ? '' : pair.slice(equals + 1);
-    pairs.push({ name: uriDecode(name), value: uriDecode(value) });
+    pairs.push({ name: escapeUri(uriDecode(name)), value: escapeUri(uriDecode(value)) });
   }
 
   pairs.sort((left, right) => {
@@ -241,7 +440,7 @@ export function canonicalQueryString(url: URL): string {
     return left.value < right.value ? -1 : 1;
   });
 
-  return pairs.map((pair) => `${uriEscape(pair.name)}=${uriEscape(pair.value)}`).join('&');
+  return pairs.map((pair) => `${pair.name}=${pair.value}`).join('&');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -263,6 +462,33 @@ export function formatAmzDate(date: Date): string {
  */
 export function formatDateStamp(date: Date): string {
   return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`;
+}
+
+/**
+ * Parse an `x-amz-date` value into the moment it names.
+ *
+ * The AWS format is the **basic** ISO 8601 one — `YYYYMMDDTHHMMSSZ` — and
+ * `Date.parse` does not read it. The extended spelling
+ * (`2026-01-02T03:04:05Z`) and any other date `Date.parse` understands are
+ * accepted too.
+ *
+ * The value is `undefined` when it names no moment at all.
+ */
+export function parseAmzDate(value: string): Date | undefined {
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(value);
+  if (match !== null) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6]);
+    if (![year, month, day, hour, minute, second].every((part) => Number.isFinite(part))) return undefined;
+    return new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  }
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return undefined;
+  return new Date(parsed);
 }
 
 /**
@@ -312,8 +538,10 @@ function uriDecode(value: string): string {
  *
  * The unreserved characters survive; everything else — including `!`, `'`,
  * `(`, `)` and `*`, which `encodeURIComponent` leaves alone — is encoded.
+ *
+ * This is the AWS SDK's `escapeUri`, byte for byte.
  */
-function uriEscape(value: string): string {
+export function escapeUri(value: string): string {
   return encodeURIComponent(value).replace(
     /[!'()*]/g,
     (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
