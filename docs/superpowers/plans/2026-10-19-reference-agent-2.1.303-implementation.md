@@ -609,25 +609,25 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 
 **Design note.** The target's resume is **not a file replay**: it indexes messages by id, selects the newest leaf, and walks the parent chain backwards, then applies projections (compaction boundary, preserved segments, content replacements). File order is write order only; dead branches from a rewind stay in the file and are pruned. This implementation adopts the same shape, because the difference is observable: a user who rewinds and then resumes must see the rewound branch, not the later one. The target's compaction is a **boundary marker, not a deletion** — a system line with a `compact_boundary` subtype whose `logicalParentUuid` points at the last pre-compact message, with the summary in a separate line — and this implementation must match that, because a reimplementation that *deletes* the prefix cannot replay a preserved tail. The target also replaces oversized tool output with a stub plus a content-replacement entry so the large payload does not return to context on resume; this implementation needs the same mechanism or it will blow the context window on the first large file read.
 
-- [ ] **Step 1: Write the failing store test** — `append` writes one JSON object per line; `read` yields the same events in order; the file lives under `<configDir>/projects/<encoded-cwd>/<sessionId>.jsonl`; a reader tolerates a torn final line by discarding it.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement `src/session/event.ts`** and `src/session/store.ts` with an append-only JSONL writer and a line-oriented reader that skips a trailing partial line. The project directory name is derived from the working directory path with non-alphanumeric characters replaced by `-`, truncated at 200 characters with a hash of the full path appended.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing version test** — reading a file whose first event has `v: 2` raises a `SessionVersionError` that names the found and supported versions; it does not silently drop events. Every record carries its own `version`, so a format change is visible per record.
-- [ ] **Step 6: Implement the version guard** in `read`.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing resume test** — given a file with a rewound branch (two children of one parent, the later one written first), `resumeEvents` reconstructs the branch ending at the newest leaf, not the branch that was written last; `tool_result` events pair to their `tool_call` by id.
-- [ ] **Step 9: Implement `src/session/resume.ts`** with the index → newest-leaf → walk-backwards algorithm, then apply the compaction-boundary and content-replacement projections.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Write the failing compaction test** — `compact` keeps the last `keepLast` events and emits a `compaction` event carrying the summary of the dropped prefix; the summary is produced by the provider and passed in, not generated locally; the pre-compact prefix is **skipped when reading**, not deleted from the file.
-- [ ] **Step 12: Implement `src/session/compaction.ts`**.
-- [ ] **Step 13: Write the failing oversized-output test** — a tool result whose serialized content exceeds a size limit is stored **verbatim** in the transcript together with a content-replacement entry, and the **stub is applied on read**, so the file keeps the data and the context does not. (Amended after the first fix round: the earlier wording — "stored as a stub" — contradicted the implemented design and would have lost the payload permanently.)
-- [ ] **Step 14: Implement the content-replacement mechanism** in `src/session/store.ts` and `resume.ts`.
-- [ ] **Step 15: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 16: Write the failing carried-prompt test** — a prompt persisted for a later process is returned only when it is **bound** to the same session identity, is not older than the configured limit, is not dated in the future, and has not already been delivered. The outcome vocabulary is exactly `sent`, `bound`, `altered`, `no_row`, `job_has_run`, `too_old`, `future_dated`, and the test asserts each.
-- [ ] **Step 17: Implement the carried-prompt store** in `src/session/store.ts` with the binding, age, and delivery checks, and emit the outcome as the telemetry event name the target uses.
-- [ ] **Step 18: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 19: Commit.**
+- [x] **Step 1: Write the failing store test** — `append` writes one JSON object per line; `read` yields the same events in order; the file lives under `<configDir>/projects/<encoded-cwd>/<sessionId>.jsonl`; a reader tolerates a torn final line by discarding it.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement `src/session/event.ts`** and `src/session/store.ts` with an append-only JSONL writer and a line-oriented reader that skips a trailing partial line. The project directory name is derived from the working directory path with non-alphanumeric characters replaced by `-`, truncated at 200 characters with a hash of the full path appended.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing version test** — reading a file whose first event has `v: 2` raises a `SessionVersionError` that names the found and supported versions; it does not silently drop events. Every record carries its own `version`, so a format change is visible per record.
+- [x] **Step 6: Implement the version guard** in `read`.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing resume test** — given a file with a rewound branch (two children of one parent, the later one written first), `resumeEvents` reconstructs the branch ending at the newest leaf, not the branch that was written last; `tool_result` events pair to their `tool_call` by id.
+- [x] **Step 9: Implement `src/session/resume.ts`** with the index → newest-leaf → walk-backwards algorithm, then apply the compaction-boundary and content-replacement projections.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Write the failing compaction test** — `compact` keeps the last `keepLast` events and emits a `compaction` event carrying the summary of the dropped prefix; the summary is produced by the provider and passed in, not generated locally; the pre-compact prefix is **skipped when reading**, not deleted from the file.
+- [x] **Step 12: Implement `src/session/compaction.ts`**.
+- [x] **Step 13: Write the failing oversized-output test** — a tool result whose serialized content exceeds a size limit is stored **verbatim** in the transcript together with a content-replacement entry, and the **stub is applied on read**, so the file keeps the data and the context does not. (Amended after the first fix round: the earlier wording — "stored as a stub" — contradicted the implemented design and would have lost the payload permanently.)
+- [x] **Step 14: Implement the content-replacement mechanism** in `src/session/store.ts` and `resume.ts`.
+- [x] **Step 15: Run it to verify it passes** — expected: PASS.
+- [x] **Step 16: Write the failing carried-prompt test** — a prompt persisted for a later process is returned only when it is **bound** to the same session identity, is not older than the configured limit, is not dated in the future, and has not already been delivered. The outcome vocabulary is exactly `sent`, `bound`, `altered`, `no_row`, `job_has_run`, `too_old`, `future_dated`, and the test asserts each.
+- [x] **Step 17: Implement the carried-prompt store** in `src/session/store.ts` with the binding, age, and delivery checks, and emit the outcome as the telemetry event name the target uses.
+- [x] **Step 18: Run it to verify it passes** — expected: PASS.
+- [x] **Step 19: Commit.**
   ```bash
   git add src/session tests/contracts/session-store.test.ts tests/contracts/session-resume.test.ts
   git commit -m "feat(session): JSONL event store, resume, compaction"
@@ -643,14 +643,14 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 - Consumes: `src/platform/sandbox/launcher.ts` (`launchSandbox`, the sandbox status), `src/platform/sandbox/policy.ts` (`sandboxPolicy`, `evaluateSandbox`).
 - Produces: the `Bash` tool routes its command through `launchSandbox` when the policy says the command is sandboxed, and runs it unconfined — with the reason recorded — when the policy says so.
 
-- [ ] **Step 1: Write the failing test** — a `Bash` call with the sandbox enabled runs through the launcher; a call the policy exempts runs unconfined and says so; a call whose sandbox cannot be started is refused when `failIfUnavailable` is set and runs unconfined when it is not; and `dangerouslyDisableSandbox` **never** skips a permission rule.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the tool does not call the launcher.
-- [ ] **Step 3: Implement the wiring** in `src/tools/builtins/bash.ts` — resolve the policy, call `evaluateSandbox`, and route the command through `launchSandbox` or run it directly, recording the reason in the result. The tool's existing timeout, output cap, and environment handling stay as they are.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing safety test** — the sandboxed command cannot see the host's environment (the agent's credentials are not in it), and a denied sandbox leaves the tool's result reporting the refusal rather than a bare non-zero exit.
-- [ ] **Step 6: Implement the safety behavior** and correct the tool's header, which currently says the sandbox is not implemented.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Commit.**
+- [x] **Step 1: Write the failing test** — a `Bash` call with the sandbox enabled runs through the launcher; a call the policy exempts runs unconfined and says so; a call whose sandbox cannot be started is refused when `failIfUnavailable` is set and runs unconfined when it is not; and `dangerouslyDisableSandbox` **never** skips a permission rule.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the tool does not call the launcher.
+- [x] **Step 3: Implement the wiring** in `src/tools/builtins/bash.ts` — resolve the policy, call `evaluateSandbox`, and route the command through `launchSandbox` or run it directly, recording the reason in the result. The tool's existing timeout, output cap, and environment handling stay as they are.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing safety test** — the sandboxed command cannot see the host's environment (the agent's credentials are not in it), and a denied sandbox leaves the tool's result reporting the refusal rather than a bare non-zero exit.
+- [x] **Step 6: Implement the safety behavior** and correct the tool's header, which currently says the sandbox is not implemented.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Commit.**
   ```bash
   git add src/tools tests/security/bash-sandbox.test.ts
   git commit -m "feat(tools): route the Bash tool through the sandbox"
