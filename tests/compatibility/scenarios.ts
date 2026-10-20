@@ -44,6 +44,7 @@
  */
 
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +68,7 @@ import {
   resolveMergedKey,
   resolveTopLevelKey,
   type SettingsSource,
+  mergeSettingsValue,
 } from '../../src/config/tiers.js';
 import { classifyProjectSettingsPath, loadSettings } from '../../src/config/loader.js';
 import { SOURCE_ENUMERATION_ORDER } from '../../src/config/scope.js';
@@ -111,6 +113,7 @@ import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../../src/session/eve
 import {
   isResumableCandidate,
   providerToolResultBlock,
+  selectResumableCandidate,
   resumeAtMessage,
   resumeSession,
   toolResultContent,
@@ -165,6 +168,7 @@ import {
   RESERVED_SKILL_DIRECTORY_NAME,
   SKILL_FILE_BYTE_LIMIT,
   SKILL_FILE_NAME,
+  createSkillRegistry,
   isReservedSkillDirectoryName,
   isReservedSkillName,
 } from '../../src/extensions/skills/registry.js';
@@ -351,6 +355,8 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   PROJECT_SIDE_SOURCES,
   SOURCE_ENUMERATION_ORDER,
   resolveBlock,
+  selectResumableCandidate,
+  mergeSettingsValue,
   resolveMergedKey,
   resolveTopLevelKey,
   classifyProjectSettingsPath,
@@ -382,6 +388,7 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   resolveSessionTarget,
   SESSION_SCHEMA_VERSION,
   // The tools.
+  createSkillRegistry,
   createToolRegistry,
   // The extensions.
   DECISION_EVENTS,
@@ -606,6 +613,13 @@ export function observe<T>(label: string, value: T): T {
   const provenance = provenanceOf(value);
   run.observations.push({ label, value, strict: provenance !== 'derived' && provenance !== 'bare-constant', provenance });
   return value;
+}
+
+/** Make a directory, and every directory above it. */
+async function makeDirectory(relative: string): Promise<string> {
+  const target = path.join(tmpdir(), 'prricode-compat', relative);
+  await mkdir(target, { recursive: true });
+  return target;
 }
 
 /**
@@ -1078,6 +1092,33 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(object).toMatchObject({ value: { fromProject: true } });
       const list = observe('the array rule', resolveBlock(ordinary, 'list'));
       expect(list).toMatchObject({ value: ['a', 'b'] });
+      // The **whole** value table, rule by rule.
+      const replaced = observe('the replaced value', mergeSettingsValue({ a: 1 }, { b: 2 }, 'thing'));
+      expect(replaced).toEqual({ b: 2 });
+      const concatenated = observe(
+        'the concatenated array',
+        mergeSettingsValue(['a', 'b'], ['b', 'c'], 'list'),
+      );
+      expect(concatenated).toEqual(['a', 'b', 'c']);
+      const fallback = observe(
+        'the replaced fallback model',
+        mergeSettingsValue(['a'], ['b'], 'fallbackModel'),
+      );
+      expect(fallback).toEqual(['b']);
+      const picker = observe(
+        'the replaced model picker',
+        mergeSettingsValue({ a: 1 }, { b: 2 }, 'modelPicker'),
+      );
+      expect(picker).toEqual({ b: 2 });
+      const shallow = observe(
+        'the shallow merge',
+        mergeSettingsValue(
+          { alpha: { keep: true }, beta: { keep: true } },
+          { alpha: { changed: true } },
+          'managedMcpServers',
+        ),
+      );
+      expect(shallow).toEqual({ alpha: { changed: true }, beta: { keep: true } });
       return measured(
         'match',
         "Both observed precedence orderings, the whole-block override and the per-top-level-key merge are reproduced; an object a higher tier defines replaces the lower tier's whole, and an array two tiers define is the concatenation of both.",
@@ -1215,18 +1256,28 @@ export const SCENARIOS: readonly Scenario[] = [
         resolveRouteForModel(haiku!, 'gateway', enabled),
       );
       if (omitted.length > 0) {
-        // The target's **own** literal omits the `gateway` key of that row, so
-        // this implementation's absent-key test agrees with the target's data. The
-        // audited prose predicate (`provider_ids[route] === null`) would not
-        // match an omitted key — that is a difference in how the rule is
-        // **written**, not in the route either of them resolves to. The
-        // resolution itself is measured, with the enabled set the target's
-        // half (a) is decided by.
+        // The target's **own** literal omits the `gateway` key of that row.
         expect(omitted).toEqual(['claude-haiku-5-5/gateway']);
+        // The override half: with Bedrock and Mantle both enabled, the target
+        // sends an `anthropic.*` model to `mantle`, and so does this
+        // implementation.
         expect(resolved).toBe('mantle');
+        // The **fallback** half, and the divergence. The target's predicate is
+        // `provider_ids[route] === null`, and an **omitted** key is not `null`:
+        // the target does not treat that row as "not served" by `gateway`, and
+        // it resolves to `gateway`. This implementation's "not served" test is
+        // an **absent key** — a superset — so it falls back to `mantle`.
+        // Measured with **only** Mantle enabled, so the override cannot
+        // decide it.
+        const mantleOnly = enabledRoutes({ CLAUDE_CODE_USE_MANTLE: '1' });
+        const fallback = observe(
+          'the haiku fallback resolution',
+          resolveRouteForModel(haiku!, 'gateway', mantleOnly),
+        );
+        expect(fallback).toBe('mantle');
         return measured(
-          'match',
-          "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown; the target's own literal omits the one key the audited predicate would have matched, so this implementation's absent-key test agrees with the target's data and the row resolves to the same route.",
+          'mismatch',
+          "The built-in catalog carries all 22 of the target's rows, nine of them served by all eight routes, and a route that does not serve a model is absent rather than unknown. One difference remains: the target's fallback predicate is provider_ids[route] === null, and an omitted key is not null, so the target does not treat that row as unserved by gateway and resolves it to gateway — this implementation's not-served test is an absent key, a superset, so it falls back to mantle instead.",
         );
       }
       return measured(
@@ -1266,9 +1317,9 @@ export const SCENARIOS: readonly Scenario[] = [
         ),
       ).toBe('bedrock');
       // The target's **per-model** override: with Bedrock and Mantle enabled,
-      // an `anthropic.*` model resolves to `mantle`. This implementation does not
-      // implement that half of the rule, so what is measured below is a
-      // **divergence**, and the row is reported as one.
+      // an `anthropic.*` model resolves to `mantle`. This implementation
+      // implements that half of the rule, so what is measured below is the
+      // target's behaviour.
       const models = await observeCall('the catalog rows', listModels, [builtinCatalog]);
       const anthropic = models.filter((model) =>
         (providerIdFor(model, 'mantle') ?? '').startsWith('anthropic.'),
@@ -1547,7 +1598,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(streamed).toMatchObject({ events: [{ type: 'tool_use', id: 'toolu_1' }] });
       return measured(
         'partial',
-        "The non-streaming body and the SSE stream parse into the same events, and the SDK's extended `agent.*` vocabulary is tolerated — the response parsing the audit records as observed; the only residual is the per-resource `parseResponse` callee, which the audit does not resolve.",
+        "The non-streaming body and the SSE stream parse into the same events, and the SDK\u0027s extended agent.* vocabulary is tolerated. Measured: the non-streaming body, one SSE frame, and the extended vocabulary. The audit also records the 204 and binary paths, the content-length branch, the text() helper and the non-enumerable request and workspace members, which are implemented but not compared here.",
       );
     },
   },
@@ -1988,7 +2039,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(asked).toMatchObject({ behavior: 'ask' });
       return measured(
         'partial',
-        "Deny wins over allow, and a deny blocks in all six modes, which is what the audit observes; the precedence between the ask and allow lists — deny, then ask, then allow — is this implementation's own, because the audit records that rule as unknown.",
+        "Deny wins over allow, and a deny blocks in every mode, the five the audit names; the precedence between the ask and allow lists — deny, then ask, then allow — is this implementation\u0027s own, because the audit records that rule as unknown.",
       );
     },
   },
@@ -2170,8 +2221,7 @@ export const SCENARIOS: readonly Scenario[] = [
       );
     },
   },
-  {
-    rowId: 'F-25',
+  {    rowId: 'F-25',
     title: 'F-25 resume semantics',
     command: reproduce('F-25 resume semantics'),
     pinning: {
@@ -2291,8 +2341,57 @@ export const SCENARIOS: readonly Scenario[] = [
       );
       expect(print).toBe(true);
 
+      // The **creation-time** tie-break: the same modification time, a
+      // different creation time.
+      const tied = [
+        {
+          sessionId: 'older_created',
+          path: '/tmp/older_created.jsonl',
+          startedAt: 1,
+          updatedAt: 1,
+          modifiedAt: 5,
+          createdAt: 1,
+          messageCount: 1,
+        },
+        {
+          sessionId: 'newer_created',
+          path: '/tmp/newer_created.jsonl',
+          startedAt: 1,
+          updatedAt: 1,
+          modifiedAt: 5,
+          createdAt: 9,
+          messageCount: 1,
+        },
+      ];
+      const byCreation = [...tied].sort(compareSessionSummaries);
+      expect(byCreation.map((summary) => summary.sessionId)).toEqual([
+        'newer_created',
+        'older_created',
+      ]);
+
+      // A session that is **live in the background**. The target **drops** such
+      // a candidate and carries on with the next one; this implementation
+      // **reports** it and continues with nothing. That is the difference.
+      const live = {
+        sessionId: 'live_one',
+        path: '/tmp/live_one.jsonl',
+        startedAt: 1,
+        updatedAt: 1,
+        modifiedAt: 9,
+        createdAt: 1,
+        messageCount: 1,
+      };
+      const older = { ...live, sessionId: 'older_one', path: '/tmp/older_one.jsonl', modifiedAt: 5 };
+      const lookup = await observeCall('the live-background lookup', selectResumableCandidate, [
+        [live, older],
+        { liveSessionIds: new Set(['live_one']) },
+      ]);
+      // The **reported** session is the live one, and nothing is continued.
+      expect(lookup).toMatchObject({ background: { sessionId: 'live_one' } });
+      expect((lookup as { summary?: unknown }).summary).toBeUndefined();
+
       return measured(
-        'partial',
+        'mismatch',
         "The exact-title match, the ambiguity error that lists the candidates, the drop guard and the interrupted-turn rule are reproduced; so are the lookup's ordering — the file's modification time, then its creation time — and its skip rules, where a /loop session is skipped and a print session is not. One difference remains: a candidate that is live in the background is reported and the lookup continues with nothing, where the target drops it and carries on with the next candidate.",
       );
     },
@@ -2392,8 +2491,8 @@ export const SCENARIOS: readonly Scenario[] = [
       );
       expect(withoutSummary.events).toEqual(events);
       return measured(
-        'partial',
-        "This implementation implements the boundary marker and the summary model the audit observes, but the boundary-and-projection model is inference, not an observed relation.",
+        'unknown',
+        "This implementation implements the boundary marker and the summary model, but the target's own compaction behaviour was never established: the audit records the compaction trigger conditions as unknown and its ordering as not resolved, so there is nothing observed to compare this against.",
       );
     },
   },
@@ -2568,7 +2667,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(states[2]?.error).toBeDefined();
       return measured(
         'partial',
-        "This implementation's batched connect returns one state per configuration, in the order the configurations were given, and a failed server is a state and not a crash; the audit traces only the configuration write, so the full target lifecycle is not reproduced.",
+        "This implementation\u0027s batched connect returns one state per configuration, in the order the configurations were given, and a failed server is a state and not a crash. The audit observes the target\u0027s client lifecycle — the connect, the identity-epoch eviction, the negotiation, the capabilities, the timeouts, the teardown and the reconnect — and those are implemented, but the batched state list is this implementation\u0027s own shape and is not compared here.",
       );
     },
   },
@@ -2649,9 +2748,36 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(observe('a valid subagent name', isValidSubagentName('reviewer'))).toBe(true);
       expect(observe('a refused subagent name', isValidSubagentName('has:colon'))).toBe(false);
       expect(observe('a refused subagent name', isValidSubagentName('-leading-dash'))).toBe(false);
+      expect(observe('a refused subagent name', isValidSubagentName('x'.repeat(257)))).toBe(false);
+      expect(observe('an accepted subagent name', isValidSubagentName('x'.repeat(256)))).toBe(true);
+
+      // The standalone skill scan, **run**: the root is read **one level
+      // deep** and the file name is the fixed `SKILL.md`.
+      const scanBase = await makeDirectory('scan');
+      const scanRoot = path.join(scanBase, '.claude', 'skills');
+      await mkdir(scanRoot, { recursive: true });
+      const write = async (relative: string, name: string): Promise<void> => {
+        const file = path.join(scanRoot, relative);
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(
+          file,
+          `---\nname: ${name}\ndescription: A skill.\n---\n\nThe body.\n`,
+          'utf8',
+        );
+      };
+      await write(path.join('found', 'SKILL.md'), 'found');
+      // One level deep only: a skill below the first level is not found.
+      await write(path.join('found', 'nested', 'SKILL.md'), 'nested');
+      // The file name is fixed: a skill file with another name is not found.
+      await write(path.join('other', 'skill.md'), 'other');
+      const registry = await observeCall('the skill registry', createSkillRegistry, [
+        { cwd: scanBase, configDir: await makeDirectory('config') },
+      ]);
+      const found = observe('the discovered skills', registry.discover());
+      expect(found.map((item) => item.name)).toEqual(['found']);
       return measured(
         'match',
-        "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the skill file is the fixed name SKILL.md, the byte limit is a million, the reserved names are refused, and the name of a subagent comes from its frontmatter and is validated the way the target validates it.",
+        "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the scan reads a root one level deep and takes the fixed file name SKILL.md, the byte limit is a million, the reserved names are refused, and the name of a subagent comes from its frontmatter and is validated the way the target validates it.",
       );
     },
   },
@@ -2844,7 +2970,7 @@ export const SCENARIOS: readonly Scenario[] = [
       expect(reasons.disabled).toBe('sandbox.enabled is false');
       return measured(
         'unknown',
-        "The target's routing is unobserved: the audit records the `sandboxOverride` reason kind and the `dangerouslyDisableSandbox` flag, and this implementation's routing is its own.",
+        "The target\u0027s routing is unobserved: the audit records the sandboxOverride reason kind, and this implementation\u0027s routing is its own. The dangerouslyDisableSandbox flag is this implementation\u0027s, not the audit\u0027s.",
       );
     },
   },

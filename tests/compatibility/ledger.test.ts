@@ -77,6 +77,46 @@ describe('the ledger and the plan', () => {
     expect(merged).toEqual([]);
   });
 
+  it('counts the matrix\'s own rows in its totals table', () => {
+    // The matrix is the contract list; a totals table that miscounts its own
+    // rows is a claim the reader cannot check, and nothing else would catch it.
+    const matrix = read('docs/compatibility/feature-matrix.md');
+    const statuses = new Map<string, number>();
+    for (const match of matrix.matchAll(/^\| (F-[0-9a-z]+) \|[^|]*\|[^|]*\| ([^|]*)\|/gm)) {
+      const status = (match[2] ?? '').trim();
+      statuses.set(status, (statuses.get(status) ?? 0) + 1);
+    }
+    const table = /\| Status \| Count \|\n\|---\|---\|\n((?:\|.*\n)+)/.exec(matrix);
+    if (table === null) throw new Error('the matrix has no totals table');
+    const counted = new Map<string, number>();
+    for (const line of (table[1] ?? '').split('\n')) {
+      const row = /^\| ([^|]+?) \| (\d+) \|$/.exec(line);
+      if (row === null) continue;
+      counted.set((row[1] ?? '').trim(), Number(row[2] ?? '0'));
+    }
+    // The table's labels, mapped to the statuses the rows carry.
+    const label: Record<string, string> = {
+      observed: 'observed',
+      partial: 'partial',
+      unknown: 'unknown',
+      inferred: 'inferred',
+      'implementation choice': 'implementation choice',
+      'not applicable (project requirement)': 'not applicable',
+      'project requirement': 'project requirement',
+    };
+    const problems: string[] = [];
+    for (const [tableLabel, count] of counted) {
+      const status = label[tableLabel];
+      if (status === undefined) continue;
+      if (tableLabel === '**Total rows**') continue;
+      const actual = statuses.get(status) ?? 0;
+      if (actual !== count) problems.push(`${tableLabel}: the table says ${count}, the rows carry ${actual}`);
+    }
+    expect(problems).toEqual([]);
+    const total = [...statuses.values()].reduce((sum, value) => sum + value, 0);
+    expect(total).toBe(42);
+  });
+
   it('gives every row the same number of cells', () => {
     // A table row is `| a | b | c |` — three cells. A row that lost or gained
     // a separator would read as a row but would not be one.

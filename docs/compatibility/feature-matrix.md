@@ -48,9 +48,9 @@
 | F-22 | Permissions | Host-level gates | observed | REA observed | `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG`; hook failure of severity `stop` denies all tool calls |  implemented | CC-007 | `tests/security/permission-rules.test.ts` |
 | F-23 | Permissions | Remote permission transport (`can_use_tool`) | observed | REA observed | `TransportPermissionDispatcher`: subtype filter, non-string `request_id` dropped, malformed request denied, in-flight dedup, repository-trust and computer-folder prompt validation |  implemented | CC-007, CC-011 | `tests/contracts/permission-decision.test.ts` |
 | F-24 | Sessions | Session storage layout and transcript format | observed | REA observed | `~/.claude` 55-subdirectory listing; JSONL transcripts under a `projects` subtree; `transcriptSource` of `ccr-api` / `local-jsonl` |  implemented | CC-009 | `tests/contracts/session-store.test.ts` |
-| F-25 | Sessions | Resume semantics | partial | REA observed | the **selection** is established — a session id or an exact title, the ambiguity error listing the candidates with their modification times, the attach short-circuit, `--resume-session-at` with its drop guard, and the structured resumed state; what remains is the **store-level ordering rule** inside the lookup (which candidates are skipped — live background, headless, SDK, and slash-command sessions), which is not observed |  implemented | CC-009 | `tests/contracts/session-resume.test.ts` |
+| F-25 | Sessions | Resume semantics | partial | REA observed | the **selection** is established — a session id or an exact title, the ambiguity error listing the candidates with their modification times, the attach short-circuit, `--resume-session-at` with its drop guard, and the structured resumed state; the **store-level ordering rule** inside the lookup is observed too — the candidates it skips and the modification-time-then-creation-time order — and one difference remains: a live background candidate is reported where the target drops it |  implemented | CC-009 | `tests/contracts/session-resume.test.ts` |
 | F-26 | Sessions | Cross-restart prompt carry-over | observed | REA observed | outcomes `sent`, `bound`, `altered`, `no_row`, `job_has_run`, `too_old`, `future_dated` |  implemented | CC-009 | `tests/contracts/session-store.test.ts` |
-| F-27 | Sessions | Compaction | partial | REA observed | Compaction event and summary model observed; the boundary/projection model is inference |  implemented | CC-009 | `tests/contracts/session-resume.test.ts` |
+| F-27 | Sessions | Compaction |  unknown | REA observed |  the target's own compaction behaviour was **never established**: the audit records the compaction trigger conditions as unknown and the compaction/fallback ordering as not resolved, so there is nothing observed to compare this against |  implemented | CC-009 | `tests/contracts/session-resume.test.ts` |
 | F-28 | Extensions | MCP control-request surface | observed | REA observed | 23 handled subtypes in `chunk-0j25qbd0.js`; MCP callback absence error text |  implemented | CC-011 | `tests/contracts/mcp-control.test.ts` |
 | F-29 | Extensions | Directional control-request policy | observed | REA observed | rejection table in `chunk-081t8575.js` |  implemented | CC-011 | `tests/contracts/mcp-control.test.ts` |
 | F-30 | Extensions | MCP transport and batching | observed | REA observed | stdio spawn with `shell: false`; `MCP_SERVER_CONNECTION_BATCH_SIZE` 3, `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` 20; `initialize`/`tools/list`/`tools/call` |  implemented | CC-011 | `tests/contracts/mcp-manager.test.ts` |
@@ -69,16 +69,18 @@
 
 | Status | Count |
 |---|---|
-| observed | 26 |
-| partial | 10 |
-| unknown | 1 |
+| observed | 30 |
+| partial | 5 |
+| unknown | 2 |
 | inferred | 0 |
-| not applicable (project requirement) | 2 |
 | implementation choice | 2 |
+| not applicable (project requirement) | 2 |
 | project requirement | 1 |
 | **Total rows** | **42** |
 
-`F-27` is counted as partial rather than observed because the compaction *event* is observed but the boundary-and-projection *model* is inferred from the tool-result shaping code, not from a resolved relation.
+`F-27` is counted as **unknown** rather than observed: the target's own compaction behaviour was never established, so there is nothing observed for this implementation to be compared against.
+
+`F-25` and `F-27` are counted as **mismatch** and **unknown** rather than as matches, because the target's store-lookup rule and the target's compaction behaviour are each established and each differ from this implementation's, and the report names both.
 
 ## Compatibility-reporting rule
 

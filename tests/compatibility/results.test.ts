@@ -59,6 +59,7 @@ import {
   type ResultRow,
 } from './matrix.js';
 import { REPOSITORY_ROOT } from './scenarios.js';
+import { measureAll, regenerateReport } from '../../scripts/regenerate-report.js';
 import { SCENARIOS, meaningfulness, measure, scenarioOf } from './scenarios.js';
 import { declaredTitlesOf } from './references.js';
 
@@ -100,6 +101,34 @@ function filesOf(cell: string): string[] {
 }
 
 describe('the compatibility report', () => {
+  it('is what the harness measures, regenerated', async () => {
+    // The report's totals, its measured rows and its honest gaps are
+    // **derived** from the harness. This test regenerates them and fails when
+    // the file differs — so a milestone that changes the implementation
+    // cannot leave the summary describing the state before it.
+    const measured = await measureAll();
+    const path_ = path.join(REPOSITORY_ROOT, 'docs/compatibility/results.md');
+    const current = readFileSync(path_, 'utf8');
+    const regenerated = regenerateReport(current, measured);
+    if (regenerated !== current) {
+      // The report names the rows that differ, so the reader knows where to
+      // look rather than being handed a wall of text.
+      const before = current.split('\n');
+      const after = regenerated.split('\n');
+      const differences: string[] = [];
+      for (let index = 0; index < Math.max(before.length, after.length); index += 1) {
+        if (before[index] !== after[index]) {
+          differences.push(`line ${index + 1}: ${String(before[index]).slice(0, 80)}`);
+        }
+      }
+      expect(
+        differences,
+        'the report is stale — run `bun run scripts/regenerate-report.ts`',
+      ).toEqual([]);
+    }
+    expect(regenerated).toBe(current);
+  });
+
   it('the report exists', () => {
     expect(
       existsSync(RESULTS_PATH),

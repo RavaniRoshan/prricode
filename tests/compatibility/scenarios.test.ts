@@ -25,6 +25,8 @@ import { describe, expect, it } from 'vitest';
 
 import { SESSION_SCHEMA_VERSION } from '../../src/session/event.js';
 import { selectRoute } from '../../src/provider/routes.js';
+import { listModels } from '../../src/provider/catalog.js';
+import { builtinCatalog } from '../../src/provider/catalog.js';
 
 import { readMatrix } from './matrix.js';
 import {
@@ -308,6 +310,22 @@ describe('the harness refuses a rubber stamp', () => {
     const meaning = meaningfulness(measurement);
     expect(meaning.meaningful).toBe(false);
     expect(meaning.reason).toContain('with itself');
+  });
+
+  it('a probe that compares an object with itself through an alias measures nothing', async () => {
+    // The **aliased** self-comparison: the source check cannot see it, because
+    // the two sides are not the same expression. The runtime check can: an
+    // object compared with its own reference is not a measurement.
+    const measurement = await measure(
+      probeScenario(async () => {
+        const c = await observeCall('the catalog rows', listModels, [builtinCatalog]);
+        const alias = c;
+        harnessExpect(c).toBe(alias);
+        return { outcome: 'match', detail: 'a rubber stamp' };
+      }),
+    );
+    const meaning = meaningfulness(measurement);
+    expect(meaning.meaningful).toBe(false);
   });
 
   it('a probe that compares a value this implementation produced against the constant it must equal measures something', async () => {
