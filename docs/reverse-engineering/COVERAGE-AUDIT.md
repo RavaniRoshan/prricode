@@ -218,6 +218,12 @@ This is a **second, locally implemented request path** in addition to the direct
   - `uo(blocks, registry)` maps `tool_use` blocks to display metadata, attaching MCP provenance when the tool belongs to an MCP server: `server_display_name`, `icon_url`, `server_id`, `server_id_stamp`, `tool_name`.
 - Permission decisions are threaded back to the model through the tool result, so the model observes the decision and its reason type.
 
+**The tool-result content shape is observed.** Each tool converts its own result object into a `tool_result` content block through a `mapToolResultToToolResultBlockParam(result, toolUseId)` mapper, and the block is `{ tool_use_id, type: "tool_result", content: <string> }` with `is_error: true` added for a failure. Observed content strings:
+- the file write tool — `File created successfully at: <path>` and `The file <path> has been updated successfully.`, each optionally followed by ` The user modified your proposed content before accepting it.` and a synced-skill note;
+- the file listing tool — `No files found`, or the matched filenames joined with newlines and a truncation note appended;
+- the search tool in `content` mode — `Found <n> <file|files>[ with pagination = <n>]` or `No matches found`; in `count` mode — `Found <n> total occurrence(s) across <m> file(s)`;
+- the memory-store tool — `<kind> [updated: <date>] [version: <v>] <content>`, with `not found` and the reason for a failure.
+
 **Partial:** the exact scheduling of concurrent tool calls, the ordering of tool execution against the next model request, and the sub-agent / task delegation scheduler were not traced to resolved relations. `chunk-6bp7hdav.js` (the session controller) is the orchestration module, but its complete facts exceed the REA transfer byte budget and its semantic graph is therefore **bounded**, not complete (§6).
 
 **Unknown:** the retry/fallback chain between a failed turn and a re-issued turn, and the exact compaction trigger conditions.
