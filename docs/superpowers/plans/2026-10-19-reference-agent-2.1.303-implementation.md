@@ -524,17 +524,17 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
 - Consumes: `src/extensions/hooks/runner.ts` (`createPreToolUseApproval`, `mergePreToolUseApproval`) — read only; `src/extensions/hooks/registry.ts` (`HookSpec`).
 - Produces: a `preToolUseHook?: (ctx: ToolContext) => PermissionDecision | undefined | Promise<PermissionDecision | undefined>` member on `CheckPermissionOptions`; a call site in `checkPermission` **after the ask list and before the mode's semantics**.
 
-- [ ] **Step 1: Write the failing precedence test** — a `PreToolUse` hook returning `allow` does **not** override a deny rule, and does **not** override an ask rule; a `PreToolUse` hook returning `deny` holds in `default`, `plan`, `acceptEdits`, `auto`, `dontAsk` and `bypassPermissions`.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the option does not exist.
-- [ ] **Step 3: Add the option and the call site** in `src/permissions/decision.ts` — the hook runs after the deny and ask lists, so its `allow` can never rescue a call the rules refuse, and its `deny` is returned immediately. A hook that returns `undefined` expresses no opinion and changes nothing.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing combination test** — when both a `PreToolUse` hook and the `PermissionRequest` seam are wired, the **stricter** of the two decisions wins: a `PreToolUse` `allow` and a `PermissionRequest` `deny` gives `deny`; a `PreToolUse` `deny` and a `PermissionRequest` `allow` gives `deny`.
-- [ ] **Step 6: Implement the combination** — the two seams must not be able to cancel each other.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing rewrite test** — a `PreToolUse` hook that rewrites the tool input has the **whole** permission check re-run against the **effective** input, and a rewritten input the tool's validator rejects **denies** the call.
-- [ ] **Step 9: Implement the rewrite handling** — the `createPermissionRequestHook` wrapper already applies the safety check and the tool's validator to a rewritten input, so the `PreToolUse` seam must go through the same path.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Commit.**
+- [x] **Step 1: Write the failing precedence test** — a `PreToolUse` hook returning `allow` does **not** override a deny rule, and does **not** override an ask rule; a `PreToolUse` hook returning `deny` holds in `default`, `plan`, `acceptEdits`, `auto`, `dontAsk` and `bypassPermissions`.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the option does not exist.
+- [x] **Step 3: Add the option and the call site** in `src/permissions/decision.ts` — the hook runs after the deny and ask lists, so its `allow` can never rescue a call the rules refuse, and its `deny` is returned immediately. A hook that returns `undefined` expresses no opinion and changes nothing.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing combination test** — when both a `PreToolUse` hook and the `PermissionRequest` seam are wired, the **stricter** of the two decisions wins: a `PreToolUse` `allow` and a `PermissionRequest` `deny` gives `deny`; a `PreToolUse` `deny` and a `PermissionRequest` `allow` gives `deny`.
+- [x] **Step 6: Implement the combination** — the two seams must not be able to cancel each other.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing rewrite test** — a `PreToolUse` hook that rewrites the tool input has the **whole** permission check re-run against the **effective** input, and a rewritten input the tool's validator rejects **denies** the call.
+- [x] **Step 9: Implement the rewrite handling** — the `createPermissionRequestHook` wrapper already applies the safety check and the tool's validator to a rewritten input, so the `PreToolUse` seam must go through the same path.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Commit.**
   ```bash
   git add src/permissions tests/contracts/permission-hook.test.ts
   git commit -m "feat(permissions): the PreToolUse hook seam"
@@ -706,17 +706,17 @@ Ordering is dependency-driven, not scope-driven. Every domain stays in the plan;
   export function groupToolCalls(calls: { id: string; name: string; input: unknown }[]): { parallel: boolean; groups: string[][] };
   ```
 
-- [ ] **Step 1: Write the failing loop test** — given a driver that emits `message_start`, a `tool_use`, and `message_stop`, the runtime appends the corresponding session events, runs the tool, appends the tool result, and issues a second provider request containing the tool result.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 3: Implement `src/agent/loop.ts`** with the request → stream → tool-call → tool-result → request cycle, persisting every event through the store.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing ordering test** — two tool calls in one assistant message are executed in the order they appear, and each result is appended before the next provider request is issued.
-- [ ] **Step 6: Implement `src/agent/dispatch.ts`** with the ordering rule and the parallel-group classifier.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing abort test** — aborting mid-stream stops the loop, appends a `provider_event` with `type: 'error'` and `retryable: false`, and returns `stopReason: 'aborted'`.
-- [ ] **Step 9: Implement the abort path.**
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Commit.**
+- [x] **Step 1: Write the failing loop test** — given a driver that emits `message_start`, a `tool_use`, and `message_stop`, the runtime appends the corresponding session events, runs the tool, appends the tool result, and issues a second provider request containing the tool result.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 3: Implement `src/agent/loop.ts`** with the request → stream → tool-call → tool-result → request cycle, persisting every event through the store.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing ordering test** — two tool calls in one assistant message are executed in the order they appear, and each result is appended before the next provider request is issued.
+- [x] **Step 6: Implement `src/agent/dispatch.ts`** with the ordering rule and the parallel-group classifier.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing abort test** — aborting mid-stream stops the loop, appends a `provider_event` with `type: 'error'` and `retryable: false`, and returns `stopReason: 'aborted'`.
+- [x] **Step 9: Implement the abort path.**
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Commit.**
   ```bash
   git add src/agent tests/contracts/agent-loop.test.ts
   git commit -m "feat(agent): turn orchestration and tool dispatch"

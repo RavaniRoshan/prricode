@@ -93,6 +93,25 @@ Each of these was a real defect in an earlier the reference agent release. This 
 | Bash rules mistaken for a program boundary | This implementation matches command text and **says so** rather than implying a stronger guarantee. |
 | Auto mode treated as a security boundary | The review fails closed on no verdict, and it is a caller-supplied seam — this implementation performs no server-side review and no local model call. |
 
+## The `PreToolUse` hook seam
+
+The target changed this behavior in a later release without a deprecation warning, so the target's own behavior at `2.1.303` is ambiguous from the outside. This implementation picks the **stricter** of the two:
+
+| Rule | Evidence class |
+|---|---|
+| A `PreToolUse` hook returning `allow` does **not** override a deny rule | REA observed (the mechanism) + **implementation choice** (the pick) |
+| A `PreToolUse` hook returning `allow` does **not** override an ask rule | REA observed (the mechanism) + **implementation choice** (the pick) |
+| A `PreToolUse` hook returning `deny` holds in **every** mode, `bypassPermissions` included | REA observed (the mechanism) + **implementation choice** (the pick) |
+| A `PreToolUse` hook that returns `undefined` expresses no opinion and changes nothing | **implementation choice** |
+| A `PreToolUse` `ask` is the pending question — the prompt is consulted | **implementation choice** |
+| A `PreToolUse` `defer` is no opinion — the normal permission path decides | **implementation choice** |
+| The `PreToolUse` seam and the `PermissionRequest` seam merge by **strictness**, so neither can cancel the other | **implementation choice** |
+| A `PreToolUse` rewrite is re-checked with the **whole** permission check against the **effective** input, and a rewritten input the tool's validator rejects **denies** the call | REA observed (the mechanism) |
+
+The permission layer owns its own strictness table (`allow: 1`, `ask: 2`, `deny: 3`); the hooks module's four-value table is not imported, because the permission vocabulary has no `defer`.
+
+**Pinned by:** `tests/contracts/permission-hook.test.ts`.
+
 ## Conformance table
 
 | Audit claim | Evidence class | Pinned by |
