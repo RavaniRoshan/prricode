@@ -484,7 +484,7 @@ export function parseSessionEvent(
       // user's feedback. The envelope this build returns carries the target's
       // names and nothing else.
       const legacyDecision = ownRecordOf(envelope, 'permissionDecision');
-      if (legacyDecision !== undefined && normalized['permission_decision'] === undefined) {
+      if (legacyDecision !== undefined && !Object.hasOwn(normalized, 'permission_decision')) {
         const decision = ownString(legacyDecision, 'decision');
         const source = ownString(legacyDecision, 'source');
         const reasonType = ownString(legacyDecision, 'reasonType');
@@ -497,11 +497,11 @@ export function parseSessionEvent(
         }
       }
       const legacyKind = ownString(envelope, 'nonExecutionKind');
-      if (legacyKind !== undefined && normalized['non_execution_kind'] === undefined) {
+      if (legacyKind !== undefined && !Object.hasOwn(normalized, 'non_execution_kind')) {
         normalized['non_execution_kind'] = legacyKind;
       }
       const legacyFeedback = ownString(envelope, 'userFeedback');
-      if (legacyFeedback !== undefined && normalized['user_feedback'] === undefined) {
+      if (legacyFeedback !== undefined && !Object.hasOwn(normalized, 'user_feedback')) {
         normalized['user_feedback'] = legacyFeedback;
       }
       delete normalized['toolUseId'];
