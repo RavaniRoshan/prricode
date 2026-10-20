@@ -53,6 +53,7 @@ import {
   createCommandSession,
   runCommand,
   type CommandSession,
+  type SessionContext,
   type SessionFactory,
 } from '../../src/cli/command.js';
 import {
@@ -64,6 +65,7 @@ import {
 } from '../../src/cli/interactive.js';
 import { EXIT_FAILURE, EXIT_SUCCESS } from '../../src/cli/output.js';
 import { createHookRegistry } from '../../src/extensions/hooks/registry.js';
+import { readAllSessionEvents, sessionFilePath } from '../../src/session/store.js';
 import type { PermissionDecision, ToolContext } from '../../src/permissions/decision.js';
 import type {
   ProviderDriver,
@@ -101,15 +103,30 @@ afterEach(() => {
  * rendered with.
  */
 class FakeApp implements MountedApp {
+  constructor() {
+    this.done = new Promise<void>((resolve) => {
+      this.teardown = resolve;
+    });
+  }
+
   /** Every set of props the host rendered, in order. */
   readonly frames: AppProps[] = [];
   /** Every text the host wrote above the app. */
   readonly outputs: string[] = [];
   /** Whether the host tore the app down. */
   torn = false;
+  /** Resolves when the app is torn down by the terminal itself. */
+  private teardown: (() => void) | undefined;
+  /** The promise the host waits on when the app ends. */
+  readonly done: Promise<void>;
 
   private readonly waiters: { predicate: (props: AppProps) => boolean; resolve: (props: AppProps) => void }[] =
     [];
+
+  /** Resolves the app's `done` promise: the terminal tore the app down. */
+  tearDown(): void {
+    this.teardown?.();
+  }
 
   update(props: AppProps): void {
     this.frames.push(props);
@@ -426,7 +443,7 @@ describe('the interactive session host', () => {
   });
 
   it('clears the line it was given and shows the line the user types', async () => {
-    const test = harness();
+    const test = harness({ rounds: [[...finalTurn('Hello there.')]] });
     const controller = new AbortController();
 
     const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
@@ -435,8 +452,85 @@ describe('the interactive session host', () => {
     test.app.latest.onInputChange?.('half a line');
     await test.app.waitFor((props) => props.input === 'half a line');
 
+    // A submitted line is **cleared**: the line the user typed is not left in
+    // the composer, and the next line starts from an empty one.
+    test.app.latest.onSubmit?.('half a line');
+    await test.app.waitFor((props) => props.input === '');
+    await test.app.waitFor((props) =>
+      props.events.some((event) => event.t === 'assistant_message'),
+    );
+
+    controller.abort();
+    expect(await host).toBe(EXIT_SUCCESS);
+  });
+
+  it('trims the line it is given and refuses an empty one', async () => {
+    const test = harness();
+    const controller = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
+    await test.app.mounted();
+
+    // A line of only spaces is **not** a prompt: the model is not asked.
+    test.app.latest.onSubmit?.('   ');
+    await test.app.waitFor((props) => props.input === '');
+    expect(test.prompts()).toEqual([]);
+
+    // A line with padding is **trimmed** before it is sent.
+    test.app.latest.onSubmit?.('   spaced   ');
+    await test.app.waitFor((props) =>
+      props.events.some((event) => event.t === 'user_message'),
+    );
+    expect(test.prompts()).toEqual(['spaced']);
+
     controller.abort();
     await host;
+  });
+
+  it('opens with the session\'s own records', async () => {
+    // The host **owns** the state the app renders, and the conversation opens
+    // with the session's own records — not with an empty transcript. The first
+    // session writes a turn; the second opens on it.
+    const test = harness({ rounds: [[...finalTurn('earlier answer.')]] });
+    const first = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: first.signal }));
+    await test.app.mounted();
+    test.app.latest.onSubmit?.('earlier question');
+    await test.app.waitFor((props) =>
+      props.events.some((event) => event.t === 'assistant_message'),
+    );
+    first.abort();
+    await host;
+
+    // A second session on the same store and the same session id, with its
+    // **own** app, so the frames are the second session's.
+    const reopenedApp = new FakeApp();
+    const second = new AbortController();
+    const reopened = runInteractiveSession(
+      interactiveArgs(),
+      test.context({
+        signal: second.signal,
+        mountApp: ((props: AppProps) => {
+          reopenedApp.update(props);
+          return reopenedApp;
+        }) satisfies MountApp,
+      }),
+    );
+    const mounted = await reopenedApp.mounted();
+
+    // The conversation opens on the **earlier** turn: the question and the
+    // answer, with the records the runtime wrote between them.
+    const kinds = mounted.events.map((event) => event.t);
+    expect(kinds).toContain('user_message');
+    expect(kinds).toContain('assistant_message');
+    expect(mounted.events[0]).toMatchObject({ t: 'user_message', text: 'earlier question' });
+    expect(
+      mounted.events.find((event) => event.t === 'assistant_message'),
+    ).toMatchObject({ text: 'earlier answer.' });
+
+    second.abort();
+    await reopened;
   });
 
   it('refuses to start when the app cannot mount', async () => {
@@ -575,6 +669,71 @@ describe('the approval bridge', () => {
 
     controller.abort();
     expect(await host).toBe(EXIT_SUCCESS);
+  });
+
+  it('resolves a pending question when the session is aborted', async () => {
+    // The turn waits for an answer that will never come. The abort must
+    // **resolve** the question, or the turn waits for ever and the host never
+    // ends.
+    let executed = 0;
+    const test = harness({
+      rounds: [[...toolTurn('call-1', 'Echo', { text: 'hi' })]],
+      tool: askingTool(() => {
+        executed += 1;
+      }),
+    });
+    const controller = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
+    await test.app.mounted();
+
+    test.app.latest.onSubmit?.('echo hi');
+    await test.app.waitFor((props) => props.approval !== undefined);
+
+    // The session stops while the question is pending.
+    controller.abort();
+
+    expect(await host).toBe(EXIT_SUCCESS);
+    // The tool did **not** run: the question was refused, not answered.
+    expect(executed).toBe(0);
+  });
+
+  it('resolves a pending question when the app is torn down', async () => {
+    // The terminal's own `Ctrl+C` unmounts the app, which is the only way a
+    // session ends in production. The pending question must be refused then
+    // too, or the transcript ends with a tool call that has no result.
+    let executed = 0;
+    const test = harness({
+      rounds: [[...toolTurn('call-1', 'Echo', { text: 'hi' })]],
+      tool: askingTool(() => {
+        executed += 1;
+      }),
+    });
+    const controller = new AbortController();
+
+    const host = runInteractiveSession(interactiveArgs(), test.context({ signal: controller.signal }));
+    await test.app.mounted();
+
+    test.app.latest.onSubmit?.('echo hi');
+    await test.app.waitFor((props) => props.approval !== undefined);
+
+    // The terminal tears the app down while the question is pending.
+    test.app.tearDown();
+
+    expect(await host).toBe(EXIT_SUCCESS);
+    expect(executed).toBe(0);
+
+    // The turn **settled**: the refused call produced its result, so the
+    // transcript does not end with a tool call that has no result. Without the
+    // question being resolved, the turn would still be waiting and no result
+    // would ever be written.
+    const filePath = sessionFilePath(test.configDir, test.cwd, 'session-under-test');
+    let settled = false;
+    for (let attempt = 0; attempt < 300 && !settled; attempt += 1) {
+      settled = (await readAllSessionEvents(filePath)).some((event) => event.t === 'tool_result');
+      if (!settled) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(settled).toBe(true);
   });
 
   it('refuses the call when the user denies it', async () => {
@@ -764,20 +923,77 @@ describe('the command\'s default seam', () => {
   });
 
   it('builds the same session the headless path builds', async () => {
-    // The production factory: the host's approval bridge reaches the runtime
-    // through the session context, exactly as the headless path's session does.
+    // The two paths must build **one** session context, not two that look
+    // alike. The test runs the command twice — once headless, once
+    // interactive — and compares the context the factory was handed.
     const test = harness();
-    const session = await createCommandSession({
-      parsed: interactiveArgs(),
-      sessionId: 'session-under-test',
+    const seen: SessionContext[] = [];
+    // The command's **own** hook registry. The test supplies it, so the
+    // identity of the registry the factory receives is observable: a host that
+    // built its own would carry a different one, and the command's hooks would
+    // never fire.
+    const hooks = createHookRegistry();
+    const capture = async (context: SessionContext): Promise<CommandSession> => {
+      seen.push(context);
+      return {
+        sessionId: context.sessionId,
+        runtime: { runTurn: async () => ({ events: [], stopReason: 'end_turn' }) } as never,
+        mode: 'default',
+      };
+    };
+
+    // The headless run.
+    const headless = parseArgs(['--print', 'hello'], { isTTY: false });
+    if (headless.kind !== 'run') throw new Error('the parse did not produce a run');
+    await runCommand(headless, {
       cwd: test.cwd,
       configDir: test.configDir,
       env: {},
-      hooks: { for: () => [] } as never,
-      store: test.store,
+      isTTY: false,
+      stdout: { write: () => true },
+      stderr: { write: () => true },
+      createSession: capture,
+      hooks,
     });
 
-    expect(session.sessionId).toBe('session-under-test');
-    expect(session.mode).toBe('auto');
+    // The interactive run.
+    const controller = new AbortController();
+    const running = runCommand(interactiveArgs(), {
+      cwd: test.cwd,
+      configDir: test.configDir,
+      env: {},
+      isTTY: true,
+      stdout: { write: () => true },
+      stderr: { write: () => true },
+      createSession: capture,
+      hooks,
+      mountApp: ((props: AppProps) => {
+        test.app.update(props);
+        return test.app;
+      }) satisfies MountApp,
+      signal: controller.signal,
+    });
+    await test.app.mounted();
+    controller.abort();
+    await running;
+
+    expect(seen).toHaveLength(2);
+    const [first, second] = seen as [SessionContext, SessionContext];
+    // The **same** context, with the host's **approval bridge** as the only
+    // difference: that is the one thing the interactive path adds. (The two
+    // runs are two sessions, so the session id differs; everything else must
+    // not.)
+    expect(Object.keys(second).sort()).toEqual([...Object.keys(first), 'approveAsk'].sort());
+    expect(second.cwd).toBe(first.cwd);
+    expect(second.configDir).toBe(first.configDir);
+    expect(second.env).toEqual(first.env);
+    // Both contexts carry **the command's own** hook registry — the one the
+    // caller supplied. A host that built its own would carry a different one.
+    expect(first.hooks).toBe(hooks);
+    expect(second.hooks).toBe(hooks);
+    expect(first.store).toBeDefined();
+    expect(second.store).toBeDefined();
+    // The bridge is the host's, and it is a function.
+    expect(typeof second.approveAsk).toBe('function');
   });
 });

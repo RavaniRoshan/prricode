@@ -1400,24 +1400,68 @@ diverge.
 - Consumes: `src/ui/app.ts` (`renderApp`, `AppProps`, `PendingApproval`), `src/ui/render/messages.ts` (`renderConversation`), `src/agent/loop.ts` (`AgentRuntime`, `AgentRuntimeDeps.approveAsk`), `src/session/store.ts` (`createSessionStore`, `readAllSessionEvents`), `src/cli/commands/manager.ts` (`isManagerCommand`, `runManagerText`), `src/cli/args.ts` (`ParsedRunArgs`).
 - Produces: `runInteractiveSession(parsed: ParsedRunArgs, context: InteractiveContext): Promise<number>` in `src/cli/interactive.ts`; `CommandOptions.runInteractive` is **defaulted** to it, so an interactive run works without a caller supplying the seam.
 
-- [ ] **Step 1: Write the failing test** — an interactive session **mounts the app**, a submitted line **runs a turn**, the turn's records appear in the app's `events`, and a tool call that needs approval **raises the app's approval prompt** and the user's answer **decides the call**.
-- [ ] **Step 2: Run it to verify it fails** — expected: FAIL, the interactive host does not exist.
-- [ ] **Step 3: Implement the host** in `src/cli/interactive.ts` — it **owns the state** the controlled app renders: the session's records, the typed line, the pending approval and the status line. It mounts the app, and it drives a turn on submit.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Write the failing approval test** — a tool call the rules do not cover reaches the app's approval prompt **with the tool's name and the decision's reason**, and the user's answer **resolves the call**; a denial is a denial.
-- [ ] **Step 6: Implement the approval bridge** — the runtime's `approveAsk` seam is how the host learns that a call is pending and how the user's answer reaches it. The bridge must not deadlock: a turn that waits for an answer must be able to re-render the app while it waits.
-- [ ] **Step 7: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 8: Write the failing slash-command test** — a line beginning with `/provider` or `/catalog` runs the manager instead of the model, and any other line is a prompt.
-- [ ] **Step 9: Implement the slash command** — the manager's own helpers (`isManagerCommand`, `runManagerText`) already exist and are tested; the host calls them.
-- [ ] **Step 10: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 11: Default the seam** in `src/cli/command.ts` — an interactive run uses the host unless the caller supplies its own `runInteractive`. The current refusal message becomes the fallback **only** when the app cannot mount (no TTY).
-- [ ] **Step 12: Commit.**
+- [x] **Step 1: Write the failing test** — an interactive session **mounts the app**, a submitted line **runs a turn**, the turn's records appear in the app's `events`, and a tool call that needs approval **raises the app's approval prompt** and the user's answer **decides the call**.
+- [x] **Step 2: Run it to verify it fails** — expected: FAIL, the interactive host does not exist.
+- [x] **Step 3: Implement the host** in `src/cli/interactive.ts` — it **owns the state** the controlled app renders: the session's records, the typed line, the pending approval and the status line. It mounts the app, and it drives a turn on submit.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Write the failing approval test** — a tool call the rules do not cover reaches the app's approval prompt **with the tool's name and the decision's reason**, and the user's answer **resolves the call**; a denial is a denial.
+- [x] **Step 6: Implement the approval bridge** — the runtime's `approveAsk` seam is how the host learns that a call is pending and how the user's answer reaches it. The bridge must not deadlock: a turn that waits for an answer must be able to re-render the app while it waits.
+- [x] **Step 7: Run it to verify it passes** — expected: PASS.
+- [x] **Step 8: Write the failing slash-command test** — a line beginning with `/provider` or `/catalog` runs the manager instead of the model, and any other line is a prompt.
+- [x] **Step 9: Implement the slash command** — the manager's own helpers (`isManagerCommand`, `runManagerText`) already exist and are tested; the host calls them.
+- [x] **Step 10: Run it to verify it passes** — expected: PASS.
+- [x] **Step 11: Default the seam** in `src/cli/command.ts` — an interactive run uses the host unless the caller supplies its own `runInteractive`. The current refusal message becomes the fallback **only** when the app cannot mount (no TTY).
+- [x] **Step 12: Commit.**
   ```bash
   git add src/cli tests/contracts/interactive-session.test.ts
   git commit -m "feat(cli): the interactive session host"
   ```
 
 **Design note.** The app is **controlled** — it takes `events`, `input`, `approval` and `status` as props and calls back — so the host is a small state machine over the session, and the Ink instance is a view of it. The turn runs while the app is mounted, so the host must be able to re-render **during** a turn: the approval is the case that matters, because the runtime waits for the user's answer mid-turn.
+
+
+**Result:** the host exists, and the Ink app is mounted by a real run. `src/cli/interactive.ts`
+owns the state the controlled app renders, runs a turn on submit, bridges the runtime's
+`approveAsk` to the app's approval prompt, and dispatches a `/provider` or `/catalog` line
+to the manager. `CommandOptions.runInteractive` is **defaulted** to the host, and the
+command's own seam still wins over it.
+
+**A review found seven defects and two unpinned behaviours; all are fixed.**
+
+- The **app-teardown** path did not resolve a pending approval, so a session ended by the
+  terminal's own `Ctrl+C` left a tool call with **no result** in the transcript. The
+  teardown now **refuses** the pending question. Pinned by a test that reads the
+  transcript and waits for the result — and by a mutation: removing the resolve turns
+  that test red.
+- The **abort** path's resolve was untested. There is now a test for it. It is belt and
+  braces — the runtime's own abort settles the turn — so it is not a guard on that line,
+  and the plan says so rather than claiming otherwise.
+- The host's **read of the session's records** was untested, and it swallowed every read
+  error silently. There is now a test that runs a turn, reopens the session and asserts
+  the conversation opens on the earlier turn. Pinned by mutation.
+- The test named *"builds the same session the headless path builds"* was **vacuous**. It
+  now runs the command twice — headless and interactive — and compares the contexts the
+  factory was handed: the same key set plus the host's `approveAsk`, the same
+  `cwd`, `configDir` and `env`, and **the caller's own hook registry** in both. The
+  registry's identity is what makes it a guard: a host that built its own would carry a
+  different one, and the mutation turns the test red.
+- A line submitted while a **manager command** is in flight was not refused. The manager
+  now takes the same "one thing at a time" lock the model path does.
+- The interactive path **resolved its model on its own**. There is now one
+  `resolveModel`, used by both paths, so they cannot drift.
+- The header pointed at a constant that no longer existed, and claimed the **bundled
+  artifact does not carry the terminal UI** — false since the import became literal and
+  `react-devtools-core` was added. Both are corrected.
+
+**Also pinned:** the line is cleared on submit, a line of only spaces is not a prompt,
+and a padded line is trimmed before it is sent.
+
+**Packaging.** The concern the implementer raised — that a bundle reaching Ink could not
+be built — is resolved: `react-devtools-core` is in the dependency set, the dynamic
+imports are literal, and `bun build --compile` produces a single self-contained binary
+that **does** carry the terminal UI.
+
+**The suite is green at 1841 tests** and `npx tsc --noEmit` is clean.
 
 **Implementation choices.** The target's own interactive behavior — the prompt's wording, the keybindings, the layout — is **not** observed by the audit, so every one of them is a implementation choice and must be labelled as such in the module header.
 

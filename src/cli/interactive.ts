@@ -96,7 +96,10 @@
  *   - the **end of the session**: the host ends when the abort signal fires
  *     or when the app is torn down (the terminal's own `Ctrl+C`, which Ink
  *     handles);
- *   - the **terminal UI being loaded on demand** — see {@link UI_MODULE}.
+ *   - the **terminal UI being loaded on demand** — the two modules are behind
+ *     literal dynamic specifiers, so the bundler follows them and the packaged
+ *     artifact **does** carry the UI, but the modules are only *evaluated* when
+ *     an interactive session actually starts.
  *
  * The refusal the command used to print — "The interactive terminal UI is not
  * implemented in this implementation yet" — is **no longer true** and is not printed
@@ -116,9 +119,9 @@ import type { SessionEvent } from '../session/event.js';
 import type { AppProps, PendingApproval } from '../ui/app.js';
 import type { ApprovalChoice } from '../ui/render/prompts.js';
 
-import { DEFAULT_MODEL, type ParsedRunArgs } from './args.js';
+import type { ParsedRunArgs } from './args.js';
 import { isManagerCommand, loadManagerState, runManagerText } from './commands/manager.js';
-import type { CommandSession, SessionContext, SessionFactory } from './command.js';
+import { resolveModel, type CommandSession, type SessionContext, type SessionFactory } from './command.js';
 import { EXIT_FAILURE, EXIT_SUCCESS, type OutputSink } from './output.js';
 
 /* -------------------------------------------------------------------------- */
@@ -215,8 +218,8 @@ export const NO_TERMINAL_MESSAGE =
 /**
  * The refusal the host prints when the terminal UI cannot be loaded.
  *
- * **Implementation choice** (the wording). The case is the *bundled* artifact, which
- * does not carry the terminal UI: see {@link UI_MODULE}.
+ * **Implementation choice** (the wording). The case is a host on which the
+ * terminal UI cannot be loaded at all.
  */
 export const UI_UNAVAILABLE_MESSAGE =
   'The interactive terminal UI could not be loaded, so the session cannot start:';
@@ -291,9 +294,9 @@ export async function runInteractiveSession(
   }
 
   const signal = context.signal;
-  // The model: the arguments win over the caller's, and this implementation's own
-  // default is the last resort.
-  const model = parsed.model ?? context.model ?? DEFAULT_MODEL;
+  // The model: the **same** resolution the headless path uses, so the two
+  // cannot drift apart.
+  const model = resolveModel(parsed, context);
   const state: HostState = {
     events: [],
     input: '',
@@ -453,6 +456,9 @@ export async function runInteractiveSession(
 
   /** Run the manager for a slash command. */
   async function runManager(line: string): Promise<void> {
+    // The manager is work too: a line submitted while it runs is refused, the
+    // same rule the model path follows.
+    turning = true;
     const statePath = path.join(context.session.configDir, PROVIDER_STATE_FILE);
     try {
       const { registry, catalogs } = await loadManagerState(statePath);
@@ -468,6 +474,7 @@ export async function runInteractiveSession(
     } catch (error) {
       state.status = `The command failed: ${messageOf(error)}`;
     }
+    turning = false;
     render();
   }
 
@@ -525,7 +532,26 @@ export async function runInteractiveSession(
       signal.addEventListener('abort', onAbort, { once: true });
     }
     const done = app?.done;
-    if (done !== undefined) void done.then(finish, finish);
+    if (done !== undefined) {
+      void done.then(
+        () => {
+          // The app is torn down while a question is pending — the terminal's
+          // own `Ctrl+C` does exactly that. The pending question must be
+          // **refused**, or the turn waits for an answer that can never come
+          // and the transcript ends with a tool call that has no result.
+          const waiting = pending;
+          pending = undefined;
+          waiting?.resolve(undefined);
+          finish();
+        },
+        () => {
+          const waiting = pending;
+          pending = undefined;
+          waiting?.resolve(undefined);
+          finish();
+        },
+      );
+    }
   });
 
   // The app is torn down before the host returns, so the terminal is handed

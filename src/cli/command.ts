@@ -718,7 +718,7 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
     events: runHeadless({
       prompt,
       sessionId: session.sessionId,
-      model: parsed.model ?? context.model ?? DEFAULT_MODEL,
+      model: resolveModel(parsed, context),
       runtime: session.runtime,
       ...(context.signal === undefined ? {} : { signal: context.signal }),
       ...(context.now === undefined ? {} : { now: context.now }),
@@ -1137,6 +1137,20 @@ export function startModeAvailabilityOf(
  * member of `Object.prototype` is reported as absent rather than resolving to
  * the inherited member.
  */
+/**
+ * The model a run uses.
+ *
+ * The arguments win over the caller's, and this implementation's own default is
+ * the last resort. **One** resolution, so the headless and the interactive
+ * paths cannot drift apart.
+ */
+export function resolveModel(
+  parsed: { model?: string | undefined },
+  context: { model?: string | undefined },
+): string {
+  return parsed.model ?? context.model ?? DEFAULT_MODEL;
+}
+
 function mergedTopLevelKey(
   tiers: ReadonlyMap<SettingsSource, SettingsTier>,
   key: string,
