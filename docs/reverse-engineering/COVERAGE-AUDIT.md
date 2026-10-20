@@ -473,7 +473,25 @@ Two of them carry a documented default. `tool.call` is given a `tool_use_id` whe
 
 **The hook pipeline shape is observed.** A hook event runs two paths — a "classic hooks" path and a "managed hooks" path — and the results are merged: a `block` result is preserved, and a synthetic result is appended for each blocked command so the caller sees one entry per blocked command.
 
-**Partial:** the skills **discovery** registry — where a skill's directory is found and its `SKILL.md` is discovered on disk — and the subagent definition lifecycle were not traced to resolved relations. Their names and storage are observed; their behavior was not.
+**The plugin manifest schema is observed.** A plugin's manifest declares its content in two groups of keys:
+
+- **directory keys** — `commands`, `agents`, `skills`, `outputStyles`, `themes`, `workflows`, `monitors`;
+- **file keys** — `mcpServers`, `lspServers`, `hooks`.
+
+Each key may be declared at the **top level** or under **`experimental`**, and a value may be a **single path string** or an **array of path strings**. `commands` may additionally be an **object** whose entries carry a `source` path. A manifest that is not a JSON object is `broken` with the reason *"it is not a JSON object"*, and a plugin can present **several manifest candidates** (for example `.claude-plugin/plugin.json`). A plugin is `ok` when a **`SKILL.md` exists at the plugin root**.
+
+**The command and skill discovery rules are observed** (`chunk-4jsg44k7.js`). A plugin's `commandsPaths` are loaded in two shapes:
+
+- a **directory** — its `.md` files are the commands, and a directory with neither `.md` files nor `SKILL.md` in subdirectories is a **warning**, not an error: *"Warning: No commands found in plugin `<name>` custom directory: `<path>`. Expected .md files or SKILL.md in subdirectories."*;
+- a **file** — it must end in `.md`; a file that exceeds the command **byte limit** is skipped with *"Skipping plugin command `<path>`: exceeds `<N>` byte limit"*.
+
+A command's **name** is `<plugin>:<basename without the .md>`, unless a `commandsMetadata` entry declares a `source` that resolves to the same path, in which case the name is `<plugin>:<metadata key>`. A `commandsMetadata` entry with `content` but **no** `source` is an **inline** command: its name is `<plugin>:<key>` and its path is the pseudo-path `<inline:<plugin>:<key>>`.
+
+The frontmatter is parsed with **key normalization**, and the parse reports the frontmatter **as written** alongside a **problem** describing what was wrong with it — so a malformed frontmatter is surfaced rather than silently dropped. The skill body is **interned**, so identical skill contents are stored once.
+
+The skill telemetry events observed are `tengu_propose_skills`, `tengu_propose_skills_read_check` and `tengu_propose_skills_kept_lines`, plus a `skills_load_ms` timing event. The `propose_skills` path has its own read check — it refuses a proposal whose file it cannot `stat` or read, and it skips its input checks for a documented reason.
+
+**Partial:** the **subagent definition lifecycle** — where a subagent's definition is found, parsed and registered — and the standalone (non-plugin) skill directory scan were not traced to resolved relations. Their names and storage are observed; their behavior was not.
 
 ### 2.9 Native and platform sandbox
 
