@@ -219,7 +219,7 @@ The result of `installPluginFromMarketplace` carries `{ success, message, depNot
 
 **Implementation choice.** §2.8 says nothing about a plugin reaching outside its own root, so the rule is this implementation's. The plan's Global Constraint requires "path boundaries … enforced by **implementation-owned** code, independent of model instructions".
 
-A manifest-declared path is used only when it is inside the plugin root — **lexically** and through **`realpath`** — and a refusal carries one of two named reasons: *"it resolves outside the plugin root"* or *"it is a symlink that resolves outside the plugin root"*. The check applies to the commands, the skills, the agents, the metadata sources and every other manifest key. A path that does not exist is allowed; the **commands** key reports *"it does not exist"*, while a declared **skills** or **agents** path that does not exist is dropped silently.
+A manifest-declared path is used only when it is inside the plugin root — **lexically** and through **`realpath`** — and a refusal carries one of two named reasons: *"it resolves outside the plugin root"* or *"it is a symlink that resolves outside the plugin root"*. The check applies to the commands, the skills, the agents, the metadata sources and every other manifest key. A path that does not exist is allowed, and it is **reported** — in the log and in the manifest's `problems`, exactly as a refused path is. The `commands` key reports it **twice**: once by the containment at load time (naming the declared path) and once by the command discovery (naming the resolved path, where the commands are read).
 
 **Pinned by:** `tests/contracts/extensions.test.ts` — the path-boundary tests.
 
@@ -311,6 +311,7 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 | The standalone (non-plugin) skill directory scan — `SKILL.md` per subdirectory, the frontmatter `description`, the `own` flag, the precedence and the byte limit — is this implementation's | **implementation choice** (§2.8 marks that scan "not traced to resolved relations") | same file — the discovery and override tests |
 | The precedence order `project > local > user > plugin > mcp`, and the meaning of `local`. The five **names** are the plan's | **implementation choice** (the order and `local`'s meaning) | same file — the precedence test |
 | Two plugins that provide the same skill or subagent name collide; the collision is **reported** and the names are **not** namespaced. One plugin providing a name twice is reported as a different situation | **implementation choice** | same file — the collision tests |
+| `collidesWith` is **absent** when nothing collided, **present and empty** when one provider shipped the name twice, and **present and non-empty** naming the **other** providers — never the winner's own | **implementation choice** | same file — the collision-semantics tests |
 | The merged settings' `skillOverrides` block merges **per leaf**, so a user tier survives a local tier | **implementation choice — a documented divergence** from the audit's per-key order | same file — the per-leaf merge test |
 | A frontmatter field that is present but `undefined` is treated as absent | **implementation choice — a documented divergence** from the audit's literal reading | same file — the undefined-field test |
 | An IDE action is validated as a single path segment (no empty, `.`, `..`, `/`, `\`, NUL) before anything is sent, in `apply()` and in the transport | **implementation choice** | same file — the IDE action tests |
@@ -328,3 +329,28 @@ The **standalone (non-plugin) skill directory scan** — a `SKILL.md` per subdir
 | A command's name is `<plugin>:<basename>`, or `<plugin>:<metadata key>` when a `source` resolves to the same path | REA observed | same file |
 | A directory with no `.md` files and no `SKILL.md` in subdirectories is a warning, not an error | REA observed | same file |
 | A command file over the byte limit is skipped with the target's wording | REA observed | same file |
+
+## The subagents — conformance
+
+§2.8 records the subagent definition lifecycle as *"Partial … not traced"*: the names and the storage are observed, the behavior is not. Every row of this table is therefore a **implementation choice**, and the measured outcome of the row is in [`results.md`](results.md).
+
+| Claim | Evidence class | Pinned by |
+|---|---|---|
+| The subagent registry mirrors the skill registry, and discovers a project subagent and a plugin subagent | **implementation choice** | `tests/contracts/extensions.test.ts` — "discovers a project subagent and a plugin subagent" |
+| A subagent is resolved by name, and an inherited member is never resolved as one | **implementation choice** | same file — "resolves a subagent by name and refuses an inherited member" |
+| A session may use only the subagents it is allowed to use | **implementation choice** | same file — "applies the subagents a session may use" |
+| A subagent file over the byte limit is **surfaced**, never read | **implementation choice** | same file — "surfaces a subagent file over the byte limit rather than reading it" |
+| A subagent name two plugins provide is **reported**, not dropped silently | **implementation choice** | same file — "reports a subagent name two plugins provide, instead of dropping one silently" |
+
+## The IDE bridge — conformance
+
+§2.8 observes only the two `mcp__ide__executeCode` / `mcp__ide__getDiagnostics` tools; there is no observed lock-file, port or discovery mechanism to copy. Every row of this table is therefore a **implementation choice**, and the measured outcome of the row is in [`results.md`](results.md).
+
+| Claim | Evidence class | Pinned by |
+|---|---|---|
+| The bridge lists the IDE integrations it discovers and resolves one by name | **implementation choice** | `tests/contracts/extensions.test.ts` — "lists the IDE integrations it discovers and resolves one by name" |
+| A request is applied to the resolved IDE, and one that cannot be resolved is refused | **implementation choice** | same file — "applies a request to the resolved IDE", "refuses a request for an IDE it cannot resolve" |
+| The two observed actions are `executeCode` and `getDiagnostics` | REA observed (the two names) + **implementation choice** (the set) | same file — "names the two observed IDE actions" |
+| An action is validated as a **single path segment** — no empty, `.`, `..`, `/`, `\` or NUL — before anything is sent | **implementation choice** | same file — "refuses an action that is not a single path segment", "refuses an action that carries a path separator", "refuses an action that is empty, a dot, a dot-dot, or carries a separator or a NUL" |
+| An action outside the observed set is accepted, as a single path segment | **implementation choice** | same file — "applies an action outside the observed set, as a single path segment" |
+| A request is never sent to a host that is not a loopback address | **implementation choice** | same file — "refuses to send an IDE request to a host that is not a loopback address" |
