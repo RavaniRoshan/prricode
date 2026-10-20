@@ -795,7 +795,7 @@ describe('renderApprovalPrompt — the approval prompt', () => {
     expect(prompt).toContain("2. Yes, and don't ask again for this Bash call");
     expect(prompt).toContain('3. No, and tell the assistant what to do differently');
     // This implementation is an independent implementation: it never names a product.
-    expect(prompt).not.toContain('Agent');
+    expect(prompt.toLowerCase()).not.toContain('claude');
   });
 
   it('numbers the choices from one', () => {
