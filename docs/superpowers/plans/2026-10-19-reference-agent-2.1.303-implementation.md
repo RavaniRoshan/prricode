@@ -2497,6 +2497,8 @@ not act on.
 
 **Why this task exists.** Six smaller surfaces the audit never opened: **cost and usage accounting**, **output styles**, the **status line**, the **prompt-management** surface (`prompt.section`, the `type:"prompt"` command kind, and flags such as `/heapdump` and `permission-prompt-tool`), **checkpointing**, and the target's own **git and GitHub rule templates** (`git checkout -b *`, `gh pr create --title * --body *`, …). Each is either implemented or named as a gap.
 
+**A seventh, found while the report was being re-measured.** The target ships a default **site-configuration bundle** — `severityByModel` (a per-model threshold table), `editRemovalCap: 3000`, `outcomeVisibility`, `repoVisibility`, `gitStatusType`, `gitStatusUploads` and `tagConnectorWrites` — and this implementation ships no such bundle. The report's `F-32` row was claiming otherwise, which is how the gap was found. It is part of this task: read the bundle, implement what can be implemented, and name what cannot.
+
 **Files:** Modify the modules each reading names; Modify the tests; Modify the conformance documents.
 
 - [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,

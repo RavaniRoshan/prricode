@@ -808,6 +808,7 @@ The record is `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-s
 | 18 | **The prompt surface** | `prompt.section`, a `type:"prompt"` command kind, and flags such as `/heapdump`, `pause-memory`, `edit-chrome-settings`, `permission-prompt-tool` | nothing |
 | 19 | **The target's own rule templates** | the built-in git and GitHub rule templates — `git checkout -b *`, `gh pr create --title * --body *`, … | §2.5 has the rule **syntax**; the target's own **templates** were never read |
 | 20 | **The on-disk surfaces outside the configuration root** | IDE lock files, the plugin zip cache, `known_marketplaces_claudeai.json` | §2.6 covers the layout **inside** the root |
+| 21 | **The shipped site-configuration bundle** | a default bundle the target ships: `severityByModel` (a per-model threshold table — `claude-sonnet-5[1m]` and `claude-sonnet-5` at `{t1: 25, t2: 35}`, `claude-opus-4-8[1m]` and `claude-opus-4-8` at `{t1: 45, t2: 35}`, with the thresholds defaulting to `t1: 15` and `t2: 20`), `editRemovalCap: 3000`, `outcomeVisibility`, `repoVisibility`, `gitStatusType`, `gitStatusUploads` and `tagConnectorWrites`, together with the resolution that prefers the bundle's own severity, then the per-model entry, then the defaults | §2.5 mentions the severity of a **hook failure**; the target's shipped **bundle** and its per-model thresholds are not established |
 
 **The inventory is now generated and checked.** `docs/reverse-engineering/SURFACE-INVENTORY.md`
 is produced by `scripts/verify-rea.ts --write` from the target's own source, and

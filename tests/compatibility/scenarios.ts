@@ -2799,8 +2799,8 @@ export const SCENARIOS: readonly Scenario[] = [
       registry.register({ event: 'PreToolUse', command: 'echo', matcher: 'Bash' });
       expect(registry.for('PreToolUse')).toHaveLength(1);
       return measured(
-        'partial',
-        "The 33 events, the two display handlers outside that set and the per-event classification are reproduced. Measured: the event set, the display handlers and the per-event classification. The mcp_tool hook type and the per-model severity thresholds are established by the audit and implemented here, but this probe does not compare them.",
+        'mismatch',
+        "The 33 events, the two display handlers outside that set and the per-event classification are reproduced, and the `mcp_tool` hook type is implemented. One difference remains: the target ships a default **site-configuration bundle** carrying a `severityByModel` table — `claude-sonnet-5[1m]` and `claude-sonnet-5` at `{t1: 25, t2: 35}`, `claude-opus-4-8[1m]` and `claude-opus-4-8` at `{t1: 45, t2: 35}` — with per-model thresholds defaulting to `t1: 15` and `t2: 20`, and this implementation ships no such bundle at all. The other fields of that bundle (`editRemovalCap`, `outcomeVisibility`, `repoVisibility`, `gitStatusType`, `gitStatusUploads`, `tagConnectorWrites`) are missing for the same reason.",
       );
     },
   },
