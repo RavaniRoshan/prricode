@@ -87,18 +87,19 @@ The built executable needs **neither** the host's Node **nor** the host's
 
 ## The honest gaps
 
-Four requirement groups are **partial**, each with a named artifact and a
-implementation-visible consequence, recorded in the audit's §5 and measured in the
-results:
+**The reverse-engineering exit gate is met.** All eight requirement groups are
+observed, every one of them on the target's own text — the audit's §5 records the
+gate, and §4 lists what is still unknown.
 
-- the target's **ordinary per-key** settings merge (this implementation merges per leaf);
-- the target's **concurrent tool-call scheduling order** (this implementation runs them
-  sequentially, in message order);
-- the target's **store-level session-lookup ordering** (this implementation selects the
-  newest session and says so when it is already running);
-- the target's **subagent definition lifecycle** and **standalone skill scan**
-  (both entirely this implementation's).
+Three things are **not** established, and the report says so rather than
+papering over them:
 
-The whole-image native inventory produced no Evidence record, so that row is
-`unknown` rather than `partial`. None of these is a claim that the target does
-something this implementation has not established.
+- the **whole-image native inventory** produced no Evidence record, so that row is
+  `unknown` rather than `partial`;
+- the **member-call targets** — 38 call sites inside one request function have no
+  resolved relation, and the same limit applies across the graph;
+- the **retry and fallback chain** between a failed turn and a re-issued turn, and the
+  exact compaction trigger conditions.
+
+None of these is a claim that the target does something this implementation has
+not established.
