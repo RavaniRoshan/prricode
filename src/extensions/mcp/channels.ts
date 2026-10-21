@@ -55,6 +55,14 @@
  * handlers. A skip of one of the other four **preserves** handlers that were
  * already registered.
  *
+ * ## The registration lifecycle
+ *
+ * {@link ChannelRegistration} carries the target's own rules for what a
+ * decision does to a server's handlers: a **register** installs them, a
+ * **hard revocation** removes them, a **soft** skip of a server that was
+ * already registered **preserves** them, and the warning the user reads is
+ * shown **once per kind**. The state is tracked; nothing is installed.
+ *
  * ## The honest boundary
  *
  * This implementation has **no channel transport**: there is no server that
