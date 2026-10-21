@@ -114,6 +114,13 @@ describe('the five authentication flows', () => {
   it('refuses an unknown flow rather than guessing one', () => {
     expect(() => beginAuthFlow('nope' as AuthFlowKind)).toThrow(/unknown authentication flow/);
   });
+
+  it('refuses a name that collides with an inherited member', () => {
+    expect(() => beginAuthFlow('constructor' as AuthFlowKind)).toThrow(
+      /unknown authentication flow/,
+    );
+    expect(() => beginAuthFlow('toString' as AuthFlowKind)).toThrow(/unknown authentication flow/);
+  });
 });
 
 describe('the credential kinds and their storage', () => {

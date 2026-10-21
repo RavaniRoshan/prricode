@@ -637,10 +637,13 @@ export interface AuthFlowRefusal {
  * carries, which names the capability that is missing.
  */
 export function beginAuthFlow(kind: AuthFlowKind): AuthFlowRefusal {
-  const flow = AUTH_FLOWS[kind];
-  if (!flow) {
+  // The lookup is **own-property** guarded: a caller-supplied name that
+  // collides with an `Object.prototype` member (`constructor`, `toString`, …)
+  // must be refused rather than resolving to the inherited member.
+  if (!Object.hasOwn(AUTH_FLOWS, kind)) {
     throw new Error(`unknown authentication flow: ${JSON.stringify(kind)}`);
   }
+  const flow = AUTH_FLOWS[kind];
   return { kind: flow.kind, capability: flow.requiredCapability, message: flow.refusal };
 }
 
