@@ -2146,16 +2146,16 @@ The surfaces found so far, none of which the audit mentions:
 **Files:** the modules each reading names; the compatibility matrix; the conformance
 documents.
 
-- [ ] **Step 1: Establish each surface from the source** — what it is, where it lives, what
+- [x] **Step 1: Establish each surface from the source** — what it is, where it lives, what
   it does, and what it produces. Record it in
   `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-surfaces.md`, which the
   gap hunt also feeds.
-- [ ] **Step 2: Add a matrix row** for each surface that the target has, with its
+- [x] **Step 2: Add a matrix row** for each surface that the target has, with its
   evidence class and its owning task. A surface that is **not** established is a row
   with `unknown` — which is honest and is what the report will then say.
-- [ ] **Step 3: Implement** the surfaces the reading established.
-- [ ] **Step 4: Update the conformance documents and the report.**
-- [ ] **Step 5: Commit.**
+- [x] **Step 3: Implement** the surfaces the reading established.
+- [x] **Step 4: Update the conformance documents and the report.**
+- [x] **Step 5: Commit.**
   ```bash
   git add src docs/compatibility docs/reverse-engineering tests
   git commit -m "feat: the surfaces the audit never covered"

@@ -75,6 +75,13 @@ import {
 } from '../../src/cli/args.js';
 import { ZERO_USAGE, buildResultDocument } from '../../src/cli/headless.js';
 import {
+  DEFAULT_SEVERITY_THRESHOLDS,
+  DEFAULT_SITE_CONFIG,
+  SEVERITY_BY_MODEL,
+  resolveSeverity,
+  resolveSeverityByModel,
+} from '../../src/config/siteConfig.js';
+import {
   AUTO_COMPACT_OUTPUT_RESERVE,
   AUTO_COMPACT_THRESHOLD_MARGIN,
   COMPACT_FALLBACK_ORDER,
@@ -196,6 +203,7 @@ import {
   HOOK_EXECUTION_CLASS,
   createHookRegistry,
 } from '../../src/extensions/hooks/registry.js';
+import { effectiveHandlerType } from '../../src/extensions/hooks/schema.js';
 import {
   AGENT_ORIGINATED_CONTROL_SUBTYPES,
   HOST_CONTROL_REQUEST_SUBTYPES,
@@ -441,6 +449,12 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   signingScope,
   buildResultDocument,
   ZERO_USAGE,
+  effectiveHandlerType,
+  DEFAULT_SEVERITY_THRESHOLDS,
+  DEFAULT_SITE_CONFIG,
+  SEVERITY_BY_MODEL,
+  resolveSeverity,
+  resolveSeverityByModel,
   AUTO_COMPACT_OUTPUT_RESERVE,
   AUTO_COMPACT_THRESHOLD_MARGIN,
   COMPACT_FALLBACK_ORDER,
@@ -3804,9 +3818,55 @@ export const SCENARIOS: readonly Scenario[] = [
       const registry = observe('the hook registry', createHookRegistry());
       registry.register({ event: 'PreToolUse', command: 'echo', matcher: 'Bash' });
       expect(registry.for('PreToolUse')).toHaveLength(1);
+    // The **per-model severity thresholds**, which the target ships in its
+    // site-configuration bundle.
+    expect(observe('the severity table', SEVERITY_BY_MODEL)).toEqual({
+      'claude-sonnet-5[1m]': { t1: 25, t2: 35 },
+      'claude-opus-4-8[1m]': { t1: 45, t2: 35 },
+      'claude-sonnet-5': { t1: 25, t2: 35 },
+      'claude-opus-4-8': { t1: 45, t2: 35 },
+    });
+    expect(observe('the default thresholds', DEFAULT_SEVERITY_THRESHOLDS)).toEqual({ t1: 15, t2: 20 });
+    // The `mcp_tool` hook type is the target's wider handler vocabulary.
+    expect(
+      observe('the mcp_tool handler type', effectiveHandlerType({ type: 'mcp_tool' } as never)),
+    ).toBe('mcp_tool');
+    // The bundle carries the target's members, and the table among them.
+    const bundle = observe('the site-configuration bundle', DEFAULT_SITE_CONFIG);
+    expect(Object.keys(bundle)).toEqual([
+      'twoStageClassifier',
+      'sameTurnSiblingContext',
+      'editRemovalVisibility',
+      'editRemovalCap',
+      'outcomeVisibility',
+      'repoVisibility',
+      'gitStatusType',
+      'gitStatusUploads',
+      'tagConnectorWrites',
+      'severityByModel',
+    ]);
+    expect(bundle.severityByModel).toEqual(SEVERITY_BY_MODEL);
+    expect(bundle.editRemovalCap).toBe(3000);
+    // The resolution: the bundle's own severity, then the per-model entry,
+    // then the defaults.
+    expect(observe('the resolved thresholds', resolveSeverity(bundle, 'claude-sonnet-5'))).toEqual({
+      value: { t1: 25, t2: 35 },
+      source: 'bundle',
+    });
+    expect(observe('the unresolved thresholds', resolveSeverity(bundle, 'claude-sonnet-4-5'))).toEqual({
+      value: null,
+      source: 'default',
+    });
+    // And the alias fallback, when the exact model is not in the table.
+    expect(
+      observe(
+        'the aliased thresholds',
+        resolveSeverityByModel(SEVERITY_BY_MODEL, 'claude-sonnet-5[1m]', () => ['claude-sonnet-5']),
+      ),
+    ).toEqual({ t1: 25, t2: 35 });
       return measured(
-        'mismatch',
-        "The 33 events, the two display handlers outside that set and the per-event classification are reproduced, and the `mcp_tool` hook type is implemented. One difference remains: the target ships a default **site-configuration bundle** carrying a `severityByModel` table — `claude-sonnet-5[1m]` and `claude-sonnet-5` at `{t1: 25, t2: 35}`, `claude-opus-4-8[1m]` and `claude-opus-4-8` at `{t1: 45, t2: 35}` — with per-model thresholds defaulting to `t1: 15` and `t2: 20`, and this implementation ships no such bundle at all. The other fields of that bundle (`editRemovalCap`, `outcomeVisibility`, `repoVisibility`, `gitStatusType`, `gitStatusUploads`, `tagConnectorWrites`) are missing for the same reason.",
+        'match',
+        "The 33 events, the two display handlers outside that set and the per-event classification are reproduced, and so are the two the probe used to leave uncompared: the `mcp_tool` hook type, which is the target's wider handler vocabulary, and the **per-model severity thresholds**, which the target ships in its site-configuration bundle — `claude-sonnet-5[1m]` and `claude-sonnet-5` at `{t1: 25, t2: 35}`, `claude-opus-4-8[1m]` and `claude-opus-4-8` at `{t1: 45, t2: 35}`, the thresholds defaulting to `t1: 15` and `t2: 20`, the bundle carrying the target's own ten members, and the resolution preferring the bundle's own severity, then the per-model entry, then the defaults, with the alias fallback.",
       );
     },
   },
