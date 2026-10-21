@@ -589,10 +589,13 @@ The **reconstruction by name** needs the main-thread agent's **name**. This impl
 
 ## The IDE bridge
 
-**Entirely a implementation choice.** §2.8 observes only the two `mcp__ide__executeCode` / `mcp__ide__getDiagnostics` tools; there is no observed lock-file, port or discovery mechanism to copy. Two rules are this implementation's:
+**Two rules are this implementation's.** §2.8 observes only the two `mcp__ide__executeCode` / `mcp__ide__getDiagnostics` tools; there is no observed lock-file, port or discovery mechanism in the audit. Two rules are this implementation's:
 
 - an **action is validated as a single path segment** — no empty, `.`, `..`, `/`, `\` or NUL — before anything is sent;
 - the default transport **refuses a host that is not a loopback address**.
+
+**The rest of the surface is the target's own**, and was closed by reading the
+target's source in `CC-036` — see [The IDE integration surface](#the-ide-integration-surface-cc-036).
 
 **Pinned by:** `tests/contracts/extensions.test.ts` — the IDE action and IDE transport tests.
 
@@ -1255,3 +1258,134 @@ re-measures. The measured outcome is in [`results.md`](results.md).
 | Asking a channel to answer a permission request **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-30 | same file — "refuses to request a permission and names the capability" |
 | The queued-prompt delivery, the permission request's bounded members, the growth-book ledger, the feature switch and the plugin scaffold are **recorded, not reproduced** | **REA observed** (the rules) + **not reproduced** (nothing here runs them) | F-30 | — |
 | The two CLI flags stay `CC-031`'s refusal | **not reproduced** (this implementation has no channel session) | F-30 | — |
+
+## The IDE integration surface (CC-036)
+
+The audit's §2.8 mentions only that `mcp__ide__executeCode` and
+`mcp__ide__getDiagnostics` are special-cased. The target's **whole** IDE
+surface — the IDE table, the lock-file protocol and the diagnostics subsystem
+— was absent from it, and was closed by **reading the target's own source**.
+Every fact below carries the file and the byte offset it was read from; the
+full reading is in
+`/home/shiva/opt/reference-agent-rea/analysis/findings-ide-integration.md`.
+
+**The matrix row is not assigned by this milestone.** The feature matrix and
+the compatibility report are the orchestrator's. The rows below therefore
+name **F-33** — the row that already carries the **IDE** — and the
+orchestrator may re-file the surface under a row of its own when it
+re-measures. The measured outcome is in [`results.md`](results.md).
+
+### The surface, part by part
+
+| the part | what the target has | where it came from | what this implementation does | implemented or refused |
+|---|---|---|---|---|
+| the IDE table | **18** entries, in a fixed order, each with an `ideKind`, a `displayName` and per-OS process keywords | `chunk-f27ph7ed.js:661418` — the literal `var LMt={…}`, read with a **parser** | the same table, entry for entry, in `src/integration/ide/registry.ts` | **implemented** |
+| the IDE kinds | exactly **two** — `vscode` (**3** entries) and `jetbrains` (**15**) | `chunk-f27ph7ed.js:661418` | the same, with the kinds deciding the install path | **implemented** |
+| the editor display-name table | a **second** table, **12** entries, naming editors as well as IDEs | `chunk-f27ph7ed.js:661418`+ — the literal `var Wv={…}` | the same table, kept apart from the IDE table | **implemented** |
+| the display-name resolver | empty → `"IDE"`; a registry key → its display name; an editor key → its name; otherwise the part **before the first space**, reduced to its **basename** | `chunk-f27ph7ed.js:661418`+ — `Kw(e)` | the same rule, in the same order | **implemented** |
+| the process-detection commands | three — `ps aux \| grep -E …` on macOS and Linux, `tasklist \| findstr /I …` on Windows | `chunk-4jsg44k7.js:4017676`+ — `O7r()` | the three commands, as data, and the rule that reads a listing | **implemented** |
+| the detection rule | macOS matches **case-sensitively**; Windows lower-cases both sides; Linux matches as-is, and does **not** report VS Code when the listing holds `cursor` or `appcode` | `chunk-4jsg44k7.js:4017676`+ | the same rule, in the same registry order | **implemented** |
+| the lock directories | the configuration root's `ide`; `~/.claude/ide` when the root is overridden or blank; under WSL the Windows profile's and every `/mnt/c/Users/<user>/.claude/ide`, except the four shared accounts | `chunk-a8rm68wf.js:794259` — `vWn()` | the same rule, in the same order | **implemented** |
+| the Windows → WSL mapping | `C:\Users\x` → `/mnt/c/Users/x`; anything else is not mapped | `chunk-wz3ehw15.js:651` — `znn(t)` | the same | **implemented** |
+| the lock body | JSON with `{workspaceFolders, port, pid, ideName, transport, runningInWindows, authToken}`, or — when the body does not parse as JSON — a newline-delimited list of workspace folders | `chunk-4jsg44k7.js:4009265` — `DOn(e)` | the same, and the same drop of a `pid`, an `ideName` and an `authToken` that are not of the right type | **implemented** |
+| the port | the **file name's** suffix, not the JSON's `port` | `chunk-4jsg44k7.js:4009265` | the same | **implemented** |
+| staleness | a dead **pid** is enough outside WSL; under WSL the port must also refuse a connection; a lock that cannot be parsed is deleted | `chunk-4jsg44k7.js:4009753`+ — `T7r()`, `IOn(e)`, `Bot(host, port, 500)` | the same **rule**; the probe and the deletion are **injected**, so nothing here opens a socket or removes a file | **implemented** (the rule) / **not reproduced** (the deletion) |
+| the workspace relation | **three** values — `contains-cwd`, `inside-cwd`, `unrelated` — from a containment test that splits on the **first** space's counterpart, the path separator | `chunk-4jsg44k7.js:4012440`+ — `POn`, and `chunk-z2dde3wc.js:24927` — `Yse` | the same three values and the same test | **implemented** |
+| the IDE record | `{url, name, workspaceFolders, port, isValid, workspaceContainsCwd, authToken, ideRunningInWindows}`, with the URL `ws://<host>:<port>` or `http://<host>:<port>/sse` | `chunk-4jsg44k7.js:4011960`+ — `Lbr(e)` | the same record and the same two URLs | **implemented** |
+| the detection loop | **30 000 ms** of polling, every **1000 ms**, and exactly one IDE whose workspace holds the session's directory | `chunk-4jsg44k7.js:4012440`+ — `Dbr()` | the same two durations and the same "exactly one" rule | **implemented** |
+| the diagnostics shape | `{message, severity, range{start,end}, code?, source?}` per diagnostic, and `{uri, diagnostics[]}` per file | `chunk-4jsg44k7.js:555731`+ — `class rCt` | the same shape | **implemented** |
+| the severity vocabulary | **four** severities behind **five** keys — `information` and `info` are the same one; a severity outside the set is **dropped** | `chunk-4jsg44k7.js:4021561` — the table in `N7r` | the same, and a severity outside the set is dropped | **implemented** |
+| the payload validation | a file that is not an object, whose `uri` is not a string or whose `diagnostics` is not an array is dropped; a diagnostic whose `message` is not a string, or whose `range.start` is not a pair of numbers, is dropped; a file whose diagnostics **all** drop out is dropped too; the range end falls back to the range start | `chunk-4jsg44k7.js:4021561` — `cHn(e)` | the same rule, and the same two counts | **implemented** |
+| the baseline | a `getDiagnostics` for the one file, under a **500 ms** timeout; the reply's path must match; three timeouts in a row disable the baselines, and the manager logs the target's own sentence | `chunk-4jsg44k7.js:555731`+ — `beforeFileEdited(e)` | the same rule, the same timeouts, the same cutoff and the same log line | **implemented** |
+| the fetch | a workspace-wide `getDiagnostics` under a **2000 ms** timeout; only the files in the baseline count; only the diagnostics that are **not** in the baseline are new | `chunk-4jsg44k7.js:556998`+ — `getNewDiagnostics()` | the same rule and the same timeouts | **implemented** |
+| the rendering | the file's name, the severity glyph, the **one-based** position, the message, the code and the source; the block is cut at **4000** characters and given the ellipsis marker | `chunk-4jsg44k7.js:4021561`+ — `L7r(e)`, `UAe(e)` | the same form, the same glyphs and the same truncation | **implemented** |
+| the diagnostics telemetry | `ide_diagnostics_baseline` and `ide_diagnostics_fetch`, with the target's kinds | `chunk-4jsg44k7.js:556058`+ | the two event names and the kinds | **implemented** (as data) |
+| the `ide_*` telemetry namespace | exactly **12** event names | `chunk-dt3pd9ft.js:594288`+ — the event-name registry, read with a parser | the two names this surface emits are carried; the other ten belong to other surfaces | **implemented** (as data) |
+| the IDE MCP server | two server shapes — `sse-ide` and `ws-ide` — inside a `type` vocabulary of `stdio`, `sse`, `sse-ide`, `http`, `ws`, `sdk` | `chunk-c9s0jh80.js:67384`, `:65965` | the two shapes and the six-type vocabulary | **recorded, not reproduced** — this implementation ships no MCP server of its own for an IDE |
+| the `/ide` command | `local-jsx`, *"Manage IDE integrations and show status"*, `argumentHint: "[open]"` | `chunk-4jsg44k7.js:1684406` | the shape and the wording | **recorded, not reproduced** — the command is not this milestone's file list |
+| the `--ide` flag | *"Automatically connect to IDE on startup if exactly one valid IDE is available"* | `chunk-t0c9yez3.js:62564` | the flag stays the CLI's own refusal | **not reproduced** — `CC-031`'s refusal stands |
+| the settings | `autoConnectIde` (default `false`) and `autoInstallIdeExtension` (default `true`) | `chunk-c9s0jh80.js:208277`, `chunk-5befw1yz.js:28721` | the keys are the target's own; this milestone does not read them | **recorded, not reproduced** |
+| the environment variables | `CLAUDE_CODE_AUTO_CONNECT_IDE`, `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL`, `CLAUDE_CODE_IDE_SKIP_VALID_CHECK`, `CLAUDE_CODE_IDE_HOST_OVERRIDE`, `CLAUDE_CODE_SSE_PORT`, `FORCE_CODE_TERMINAL` | `chunk-68z1nb51.js` — the environment-variable schema | the two the discovery reads — `CLAUDE_CODE_SSE_PORT` and `CLAUDE_CODE_IDE_SKIP_VALID_CHECK` — are read; the rest are **recorded** | **implemented** (two) / **recorded** (four) |
+| the extension install | the VS Code extension id `anthropic.claude-code`, the JetBrains plugin directory `claude-code-jetbrains-plugin`, and **15** JetBrains product directories | `chunk-4jsg44k7.js:4015800`+, `:4006008` | the id, the directory name and the product directories are carried as data | **implemented** (as data) / **refused** (the install) |
+| connecting to an IDE | the target connects to the `ide` MCP server it discovered | `chunk-faqnk9sf.js:23174` | **refuses** | **refused** — names *a running IDE with its extension or plugin installed* |
+| asking an IDE for diagnostics | the target asks the `ide` MCP client | `chunk-6s9yz1tm.js:151452` — `callIdeRpc` | **refuses** | **refused** — names *a connected IDE client* |
+| installing the extension | the target runs the IDE's own launcher | `chunk-4jsg44k7.js:4015800`+ | **refuses** | **refused** — names *the IDE's own command-line launcher* |
+
+### The honest boundary
+
+**This implementation has no IDE to talk to.** There is no extension, no
+plugin, no lock file written by an IDE, no socket and no diagnostics channel.
+So the surface is **recorded and shaped, never faked**:
+
+- the **table**, the **protocol** and the **shapes** are implemented, and the
+  rules are the target's own;
+- the three operations that need an IDE — connecting to one, asking one for
+  diagnostics, and installing the extension into one — **refuse**, and each
+  refusal **names the capability** it needed:
+  - *"Connecting to VS Code needs a running IDE with its extension or plugin installed, which this session does not have, so it was not attempted."*
+  - *"Requesting IDE diagnostics needs a connected IDE client, which this session does not have, so it was not attempted."*
+  - *"Installing the extension into Cursor needs the IDE's own command-line launcher, which this session does not have, so it was not attempted."*
+
+**Nothing is faked.** There is no stub that pretends an extension connected,
+no invented socket and no fake diagnostics channel.
+
+**Two earlier rules stand.** The IDE bridge's **action validation** — an
+action is a single path segment — and the default transport's **loopback
+refusal** are still this implementation's own, and are still pinned by
+`tests/contracts/extensions.test.ts`.
+
+**The bridge's lock-file reading is now the target's**, with two **fallbacks**
+kept so that the earlier `CC-013` surface does not change: the `ide` and
+`workspacePath` members, which the target's own lock file does not carry.
+Where the target's own fields are present they win; the port comes from the
+**file name** whenever the name carries one.
+
+### The clone-choice labels this milestone adds
+
+| Label | What it means | Which entries |
+|---|---|---|
+| `reproduced` | the name, the value, the shape, the message, the rule and the order are the target's own | the eighteen IDEs and their five fields each; the two kinds; the twelve editor names; the display-name resolver; the three detection commands and the detection rule; the lock directories; the Windows-to-WSL mapping; the lock body and its newline-delimited fallback; the port-from-the-file-name rule; the staleness rule and its WSL difference; the three workspace relations; the IDE record and its two URLs; the detection window and interval; the diagnostic shape; the severity vocabulary; the validation rule and its two counts; the baseline, the fetch and their three timeouts; the cutoff and its log line; the rendering, the glyphs and the truncation; the two diagnostics telemetry names; the six environment-variable names; the extension id, the plugin directory and the fifteen product directories |
+| `refused` | the call ends in a typed failure that names the **capability** it needs and this session does not have | connecting to an IDE; asking an IDE for diagnostics; installing the extension into an IDE |
+| `recorded, not reproduced` | the surface is **named** and nothing here runs it | the two IDE MCP server shapes and the six-type server vocabulary; the `/ide` command; the two settings keys; the extension install and the JetBrains plugin search |
+| `not reproduced` | the target's own rule is recorded, and this implementation has **no counterpart** for it | the `--ide` flag — it stays `CC-031`'s refusal; the **deletion** of a stale lock file, and the TCP probe it needs — the rule is implemented and the side effect is not |
+
+### Conformance table
+
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The IDE table holds **18** entries in the target's order, and the count was verified with a **parser** and not with a pattern | **REA observed** | F-33 | `tests/contracts/ide-integration.test.ts` — "has exactly eighteen IDEs, in the target's order" |
+| The table has exactly **two** kinds, **three** of one and **fifteen** of the other | **REA observed** | F-33 | same file — "has exactly two IDE kinds, three of one and fifteen of the other" |
+| Every entry's display name and its three per-OS keyword lists are the target's own | **REA observed** | F-33 | same file — "gives every IDE its own display name and its own per-OS process keywords" |
+| Aqua, Gateway and Fleet carry **no** macOS and **no** Linux keyword | **REA observed** | F-33 | same file — "leaves the macOS and Linux keyword lists of Aqua, Gateway and Fleet empty" |
+| The editor display-name table is a **different** table with **12** entries | **REA observed** | F-33 | same file — "has twelve editor display names, in a table of its own" |
+| The display-name resolver follows the target's own order, including the "before the first space, then the basename" rule | **REA observed** | F-33 | same file — "resolves a display name the way the target does" |
+| A caller-supplied IDE key never resolves to an inherited member | **implementation choice** (the guard; the target's own map is safe) | F-33 | same file — "resolves a key through a guard, so an inherited member is not an IDE" |
+| The three detection commands are the target's own, and the detection rule is per-platform — case-sensitive on macOS, case-insensitive on Windows, and the Linux rule that does not report VS Code when AppCode or Cursor is running | **REA observed** | F-33 | same file — "holds the target's own detection command for each platform", the three detection tests |
+| The lock directories are the target's, and the home directory's is added only when the configuration root is overridden or blank | **REA observed** | F-33 | same file — "lists the lock directories the target lists", "adds the home directory's lock directory when the root is overridden or blank" |
+| Under WSL the Windows-side directories are added and the **four** shared accounts are skipped | **REA observed** | F-33 | same file — "adds the Windows-side directories under WSL, and skips the four shared accounts", "skips exactly the four shared Windows accounts" |
+| The Windows → WSL mapping is the target's, and a path without a drive letter is not mapped | **REA observed** | F-33 | same file — "maps a Windows profile to its WSL path" |
+| The **port is the file name**, not the JSON's `port` | **REA observed** | F-33 | same file — "takes the port from the file name, not from the JSON" |
+| A lock body that does not parse as JSON is a newline-delimited list of workspace folders, and the trailing empty line is kept | **REA observed** | F-33 | same file — "reads a body that is not JSON as a newline-delimited list of folders" |
+| Only the exact value `true` makes a lock say the IDE runs on Windows | **REA observed** | F-33 | same file — "only calls the IDE running on Windows when the lock says so" |
+| The staleness rule is the target's, and it differs under WSL | **REA observed** | F-33 | same file — the three staleness tests |
+| The workspace relation has exactly **three** values | **REA observed** | F-33 | same file — "has three workspace relations" |
+| The containment test takes the **candidate first**, and it is case-sensitive | **REA observed** (the order and the case) + **implementation choice** (the case-insensitive mode) | F-33 | same file — "tests containment the way the target does: the candidate comes first" |
+| The IDE record carries the target's eight members and the target's two URLs | **REA observed** | F-33 | same file — "keeps the IDE whose workspace holds the session's directory", "builds the two urls the target builds" |
+| An IDE whose workspace is unrelated is dropped, unless the unrelated ones are asked for | **REA observed** | F-33 | same file — "drops the IDE whose workspace is unrelated, unless they are asked for" |
+| The detection window is **30 000 ms** and the poll interval is **1000 ms**, and exactly one containing IDE is chosen | **REA observed** | F-33 | same file — "waits thirty seconds for an IDE, polling every second", "calls the one IDE the target connects to, and only when there is exactly one" |
+| The severity vocabulary is **four** severities behind **five** keys, and an unknown severity is **dropped** | **REA observed** | F-33 | same file — "has four severities, and five keys that name them" |
+| The validation rule drops a malformed file and a malformed diagnostic, counts both, and drops a file whose diagnostics all drop out | **REA observed** | F-33 | same file — the three validation tests |
+| The range end falls back to the range start, and only a string code and a string source are kept | **REA observed** | F-33 | same file — "falls back to the range start when the range end is not a pair of numbers", "keeps only a string code and a string source" |
+| Only the diagnostics that are not in the baseline are new | **REA observed** | F-33 | same file — "finds only the diagnostics that are not in the baseline" |
+| The rendered block is the target's own form, with the **one-based** position and the target's glyphs | **REA observed** | F-33 | same file — "renders the new-diagnostics block the target's way" |
+| The rendered block is cut at **4000** characters and given the ellipsis marker | **REA observed** | F-33 | same file — "truncates the rendered block at four thousand characters" |
+| The three timeouts are **500 ms**, **2000 ms** and a cutoff of **3**, and the cutoff logs the target's own sentence | **REA observed** | F-33 | same file — "holds the target's own three timeouts and its cutoff", "disables the baselines after three consecutive timeouts, and says so" |
+| The manager's lifecycle is the target's: initialize once, `shutdown` clears the cutoff counter and `reset` does not | **REA observed** | F-33 | same file — "follows the target's lifecycle: initialize once, shutdown clears, reset keeps the counter" |
+| The server the target leaves out of the baselines is left out here too; its name is a **parameter**, because this repository may not name the target's product | **REA observed** (the rule) + **implementation choice** (the name is a parameter) | F-33 | same file — "does not baseline the server the target leaves out" |
+| The baseline and the fetch report only what is new | **REA observed** | F-33 | same file — "baselines a file and reports only the diagnostics that are new" |
+| Asking for diagnostics **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses a diagnostics request that has no client, and names the capability" |
+| The bridge carries the target's **18** IDEs and reads a lock file the target's way | **REA observed** | F-33 | same file — "exposes the target's eighteen IDEs", "reads a lock file the target's way" |
+| Connecting to an IDE **refuses**, and the refusal names the capability it needed and the IDE it was about | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses to connect to an IDE, and names the capability" |
+| Asking an IDE for diagnostics **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses to ask an IDE for diagnostics, and names the capability" |
+| Installing the extension **refuses**, and the refusal names the capability it needed and the IDE it was about | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses to install the extension, and names the capability" |
+| The IDE bridge's **action validation** and the default transport's **loopback refusal** remain this implementation's own | **implementation choice** | F-33 | `tests/contracts/extensions.test.ts` — the IDE action and IDE transport tests |
