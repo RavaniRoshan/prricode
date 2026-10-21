@@ -205,6 +205,17 @@ import {
 } from '../../src/extensions/hooks/registry.js';
 import { effectiveHandlerType } from '../../src/extensions/hooks/schema.js';
 import {
+  CHANNEL_CAPABILITY,
+  CHANNEL_GATE_KINDS,
+  CHANNEL_HARD_REVOCATION_KINDS,
+  CHANNEL_MESSAGE_METHOD,
+  CHANNEL_MESSAGE_TAG,
+  CHANNEL_META_KEY_PATTERN,
+  CHANNEL_PERMISSION_CAPABILITY,
+  CHANNEL_PERMISSION_METHOD,
+  CHANNEL_PERMISSION_REQUEST_METHOD,
+} from '../../src/extensions/mcp/channels.js';
+import {
   DEFAULT_TEAMMATE_MODE,
   TEAMMATE_FALLBACK_NOTIFICATION_KEY,
   TEAMMATE_MODES,
@@ -487,6 +498,15 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   buildResultDocument,
   ZERO_USAGE,
   effectiveHandlerType,
+  CHANNEL_CAPABILITY,
+  CHANNEL_GATE_KINDS,
+  CHANNEL_HARD_REVOCATION_KINDS,
+  CHANNEL_MESSAGE_METHOD,
+  CHANNEL_MESSAGE_TAG,
+  CHANNEL_META_KEY_PATTERN,
+  CHANNEL_PERMISSION_CAPABILITY,
+  CHANNEL_PERMISSION_METHOD,
+  CHANNEL_PERMISSION_REQUEST_METHOD,
   DEFAULT_TEAMMATE_MODE,
   TEAMMATE_FALLBACK_NOTIFICATION_KEY,
   TEAMMATE_MODES,
@@ -3845,7 +3865,31 @@ export const SCENARIOS: readonly Scenario[] = [
       const failedState = observe('the failed state', states[2]);
       expect(failedState).toMatchObject({ status: 'failed' });
       expect(observe('the failed state error', failedState?.error)).toBeDefined();
-      return measured(
+      // The **channel surface**: the capability, the methods, the gate's
+    // decision kinds and the hard revocations.
+    expect(observe('the channel capability', CHANNEL_CAPABILITY)).toBe('claude/channel');
+    expect(observe('the permission capability', CHANNEL_PERMISSION_CAPABILITY)).toBe(
+      'claude/channel/permission',
+    );
+    expect(observe('the channel method', CHANNEL_MESSAGE_METHOD)).toBe('notifications/claude/channel');
+    expect(observe('the permission method', CHANNEL_PERMISSION_METHOD)).toBe(
+      'notifications/claude/channel/permission',
+    );
+    expect(observe('the permission-request method', CHANNEL_PERMISSION_REQUEST_METHOD)).toBe(
+      'notifications/claude/channel/permission_request',
+    );
+    expect(observe('the channel tag', CHANNEL_MESSAGE_TAG)).toBe('channel');
+    expect(observe('the meta-key rule', CHANNEL_META_KEY_PATTERN.source)).toBe(
+      '^[a-zA-Z_][a-zA-Z0-9_]*$',
+    );
+    expect(observe('the gate kinds', CHANNEL_GATE_KINDS)).toHaveLength(8);
+    expect(observe('the hard revocations', CHANNEL_HARD_REVOCATION_KINDS)).toEqual([
+      'provider',
+      'disabled',
+      'capability',
+      'era',
+    ]);
+    return measured(
         'match',
         "The target's whole client lifecycle is compared, element by element: the **connect** (the modern revision is probed first and the legacy `initialize` handshake is the fallback, and the connection carries the negotiated revision, the server's identity and its capabilities), the **negotiation point** and its `MCP_PROTOCOL_NEGOTIATION=legacy` opt-out, the **identity-epoch eviction** (the memo is dropped when the epoch changes, when it is dropped explicitly, and when a failed memo goes stale), the **state** of a connection (a live connection and a dial that is still in flight), the **capabilities** (the four listings, fetched separately and aggregated, with the discover-prior memo beside the hydration path), the **calling** (the tool result, and the URL-elicitation retry), the **auth-failure classification** (the expired token, the unauthorized, the forbidden, the invalid token, the missing credential, the network failure and the unknown one), the **timeouts** (the four distinct deadlines — the armed-request, the request, the tool and the tool idle one — the overrides that win over them, the environment they read, the four a connection carries, and the connect phase's armed deadline beside an ordinary request's own), the **teardown** (detach-and-close, dispose-detached and the clean-up) and the **reconnect** (the deliberately inert shape). The **batched state list** this implementation's own batched connect returns remains this implementation's own shape: the target has no such list, and it is compared here only as this implementation's own shape.",
       );
