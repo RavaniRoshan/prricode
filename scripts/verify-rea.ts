@@ -4,31 +4,49 @@
  *
  * **The goal.** "The reverse engineering of the target is complete" is a claim that
  * can be checked. This script re-derives the target's own inventories from the
- * extracted source — the tool registry, the telemetry vocabulary, the
- * environment-variable surface, the slash-command names and the CLI flags — and
- * checks that the record in `docs/reverse-engineering/SURFACE-INVENTORY.md`
- * accounts for **every** entry the target has.
+ * extracted source — the tool registry, the browser tool bundle, the telemetry
+ * vocabulary, the environment-variable surface, the settings document, the hook
+ * event matrix and the command-line flag sets — and checks that the record in
+ * `docs/reverse-engineering/SURFACE-INVENTORY.md` accounts for **every** entry the
+ * target has.
  *
  * The check is a *diff*, not a count: an entry the target has and the record does
- * not name is a failure, and so is an entry the record names and the target does
- * not have. A count that merely agrees proves nothing, because both sides could
- * be wrong in the same way.
+ * not name is a failure. A count that merely agrees proves nothing, because both
+ * sides could be wrong in the same way.
+ *
+ * ## Why the tree-wide scans are delegated to `grep`
+ *
+ * The target's extracted source is 2 434 minified chunks — 56 MB, the largest a
+ * single file 4.8 MB. Reading them in this process and running a regular
+ * expression over each one costs a **gigabyte** of resident memory: every file's
+ * text is a fresh string, and the collector lets the garbage pile up until the
+ * host is squeezed. A verifier that cannot run is not a check, and a verifier
+ * that takes the machine down with it is worse than no verifier.
+ *
+ * So the tree-wide scans are handed to `grep`, which does the same work in C for
+ * a few megabytes, and this process only ever holds the **four** chunks a
+ * per-chunk derivation reads. The measurements are the same; the footprint is
+ * not.
  *
  * Usage:
  *   bun run scripts/verify-rea.ts                # the check
  *   bun run scripts/verify-rea.ts --derive       # re-derive and print the inventories
+ *   bun run scripts/verify-rea.ts --write        # regenerate the record from the derivation
+ *   bun run scripts/verify-rea.ts --write-matrix # regenerate the matrix's totals
  *
- * The extracted source lives outside the repository. When it is absent the
- * script says so and exits **0** — a missing extraction is not a failed audit.
+ * The extracted source lives outside the repository. When it is absent the script
+ * says so and exits **0** — a missing extraction is not a failed audit.
  */
 
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
   callSites,
   collections as collectionsIn,
   keysOfObject,
+  nameExpressionsOfObjectArray,
   nthArgumentObjectAt,
 } from './rea-scan.js';
 
@@ -36,426 +54,323 @@ const REPOSITORY = path.resolve(process.cwd());
 const EXTRACTED = '/home/shiva/opt/reference-agent-rea/extracted-patched';
 const INVENTORY = path.join(REPOSITORY, 'docs/reverse-engineering/SURFACE-INVENTORY.md');
 
-interface Surface {
-  readonly name: string;
-  readonly entries: readonly string[];
+/** The chunks a per-chunk derivation reads. */
+const SETTINGS_CHUNK = 'chunk-c9s0jh80.js';
+const ENVIRONMENT_CHUNK = 'chunk-68z1nb51.js';
+const PARSER_CHUNK = 'chunk-0y0ptpy9.js';
+const BROWSER_CHUNK = 'chunk-g8377zgj.js';
+
+/**
+ * Run `grep` over the extracted tree and return its lines.
+ *
+ * The lines come back with the file that produced them, because a minified
+ * identifier is only unique inside its own module and the resolution has to
+ * happen there.
+ */
+function grepTree(pattern: string): string[] {
+  const result = spawnSync('grep', ['-rhoHP', pattern, '.', '--', '*.js'], {
+    cwd: EXTRACTED,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const text = result.stdout ?? '';
+  if (text === '') return [];
+  return text.split('\n').filter((line: string) => line !== '');
 }
 
-function sourceFiles(root: string): string[] {
-  const files: string[] = [];
-  const walk = (directory: string): void => {
-    let items: string[];
-    try {
-      items = readdirSync(directory);
-    } catch {
-      return;
-    }
-    for (const item of items) {
-      const full = path.join(directory, item);
-      let isDirectory = false;
-      try {
-        isDirectory = statSync(full).isDirectory();
-      } catch {
-        continue;
-      }
-      if (isDirectory) walk(full);
-      else if (item.endsWith('.js')) files.push(full);
-    }
-  };
-  walk(root);
-  return files;
-}
-
-/** Every file's text, one at a time — the files are large and never all held. */
-function* texts(files: readonly string[]): Generator<string> {
-  for (const file of files) {
-    try {
-      yield readFileSync(file, 'utf8');
-    } catch {
-      // An unreadable file is not a reason to stop the sweep.
-    }
+/** Read one chunk, or nothing if it is not there. */
+function readChunk(base: string): string | undefined {
+  try {
+    return readFileSync(path.join(EXTRACTED, base), 'utf8');
+  } catch {
+    return undefined;
   }
 }
 
-/** The tool registry: every `Qt({...})` call site, with its name and its hint. */
-function deriveTools(files: readonly string[]): { names: Set<string>; hints: Map<string, string> } {
-  const names = new Set<string>();
-  const hints = new Map<string, string>();
-  // The identifiers the `name:` positions use, so their values can be resolved.
-  // The name is resolved **in the chunk that uses it**, because a minified
-  // identifier is only unique inside its own module.
-  const wanted = new Map<string, Set<string>>();
-  for (const file of files) {
-    const base = path.basename(file);
-    const text = readFileSync(file, 'utf8');
-    for (const match of text.matchAll(/Qt\(\{/g)) {
-      const at = match.index ?? 0;
-      const opening = text.slice(at, at + 400);
-      const literal = /name:"([A-Za-z][A-Za-z0-9_-]*)"/.exec(opening);
-      if (literal !== null) {
-        names.add(literal[1] ?? '');
-        continue;
-      }
-      const identifier = /name:([A-Za-z_$][A-Za-z0-9_$]*)/.exec(opening);
-      if (identifier === null) continue;
-      const set = wanted.get(base) ?? new Set<string>();
-      set.add(identifier[1] ?? '');
-      wanted.set(base, set);
-    }
+/**
+ * The tool factory's call sites, and the name each one carries.
+ *
+ * The name is a literal or a minified identifier, and the identifier is
+ * resolved **in the chunk that uses it**.
+ */
+function deriveToolSites(): Map<string, string[]> {
+  const sites = new Map<string, string[]>();
+  for (const line of grepTree('Qt\\(\\{[^}]{0,200}name:("[A-Za-z][A-Za-z0-9_-]*"|[A-Za-z_$][A-Za-z0-9_$]*)')) {
+    const separator = line.indexOf(':');
+    if (separator === -1) continue;
+    const file = line.slice(0, separator);
+    const match = /name:("[A-Za-z][A-Za-z0-9_-]*"|[A-Za-z_$][A-Za-z0-9_$]*)/.exec(line.slice(separator));
+    if (match === null) continue;
+    const expression = (match[1] ?? '').replace(/^"|"$/g, '');
+    if (expression === '') continue;
+    const list = sites.get(file) ?? [];
+    list.push(expression);
+    sites.set(file, list);
   }
-  const identifiers = new Set<string>();
-  for (const set of wanted.values()) {
-    for (const id of set) identifiers.add(id);
-  }
-  // Resolve the identifiers **through the import graph**: a tool's name is
-  // usually a constant that another chunk owns and re-exports, so the value is
-  // followed from the using chunk to the chunk that assigns it.
-  const valueOf = new Map<string, Map<string, string>>();
-  const importedFrom = new Map<string, Map<string, [string, string]>>();
-  const byName = new Map<string, string>();
-  for (const file of files) {
-    const base = path.basename(file);
-    const chunk = valueOf.get(base) ?? new Map<string, string>();
-    const links = importedFrom.get(base) ?? new Map<string, [string, string]>();
-    for (const text of texts([file])) {
-      for (const match of text.matchAll(/(?:^|[^A-Za-z0-9_$])([A-Za-z_$][A-Za-z0-9_$]*)="([A-Za-z][A-Za-z0-9_-]*)"/g)) {
-        const id = match[1] ?? '';
-        const value = match[2] ?? '';
-        if (!chunk.has(id)) chunk.set(id, value);
-        if (!byName.has(id)) byName.set(id, value);
-      }
-      for (const match of text.matchAll(/import\{([^}]*)\}from"\.\/(chunk-[A-Za-z0-9]+\.js)"/g)) {
-        const source = match[2] ?? '';
-        for (const part of (match[1] ?? '').split(',')) {
-          const local = part.trim().split(/\s+as\s+/)[0]?.trim();
-          const exported = part.trim().split(/\s+as\s+/)[1]?.trim() ?? local;
-          if (local === undefined || local === '') continue;
-          links.set(local, [source, exported ?? local]);
-        }
-      }
-    }
-    valueOf.set(base, chunk);
-    importedFrom.set(base, links);
-  }
-  const resolve = (chunk: string, name: string, depth = 0): string | undefined => {
-    if (depth > 8) return undefined;
-    // An **imported** binding is an alias, so the import is followed first: a
-    // local name of the same shape is a different binding and must not shadow
-    // the one the module actually uses.
-    const link = importedFrom.get(chunk)?.get(name);
-    if (link !== undefined) {
-      const through = resolve(link[0], link[1], depth + 1);
-      if (through !== undefined) return through;
-    }
-    const direct = valueOf.get(chunk)?.get(name);
-    if (direct !== undefined) return direct;
-    return byName.get(name);
-  };
-  for (const [base, set] of wanted) {
-    for (const id of set) {
-      const value = resolve(base, id);
-      if (value !== undefined) names.add(value);
-    }
-  }
-  // The target's own **tool-set arrays**: the permission layer and the
-  // built-in registry both name the tools in arrays. An array whose elements
-  // are mostly tool names is one of those, and the factory-generated tools
-  // only ever appear in an array.
-  for (const text of texts(files)) {
-    for (const match of text.matchAll(/\[("[A-Za-z][A-Za-z0-9_]{1,30}",?){3,}\]/g)) {
-      const literal = match[0];
-      const elements = [...literal.matchAll(/"([A-Z][A-Za-z0-9_]{1,30})"/g)].map(
-        (element) => element[1] ?? '',
-      );
-      const known = elements.filter((element) => names.has(element)).length;
-      if (known >= 3 || (known >= 2 && elements.length >= 4)) {
-        for (const element of elements) names.add(element);
-      }
-    }
-  }
-  // The **string constants** the tool registry names. A tool that is created by
-  // the factory rather than written out — the artifact add-ons, the
-  // factory-generated ones — only ever appears as a constant, and the
-  // target's own tool-set arrays are what say which constants are tools.
-  const setArrays: string[][] = [];
-  for (const text of texts(files)) {
-    for (const match of text.matchAll(/\[("[A-Za-z][A-Za-z0-9_]{1,30}",?){4,}\]/g)) {
-      const elements = [...match[0].matchAll(/"([A-Z][A-Za-z0-9_]{1,30})"/g)].map(
-        (element) => element[1] ?? '',
-      );
-      const known = elements.filter((element) => names.has(element)).length;
-      if (known >= 4) setArrays.push(elements);
-    }
-  }
-  const inASet = new Set<string>();
-  for (const elements of setArrays) {
-    for (const element of elements) inASet.add(element);
-  }
-  for (const text of texts(files)) {
-    for (const match of text.matchAll(
-      /(?:^|[^A-Za-z0-9_$])([A-Za-z_$][A-Za-z0-9_$]*)="([A-Z][A-Za-z0-9_]{1,30})"/g,
-    )) {
-      const value = match[2] ?? '';
-      if (inASet.has(value)) names.add(value);
-    }
-  }
-  // The search hint, which is the target's own one-line statement of purpose.
-  for (const text of texts(files)) {
-    for (const match of text.matchAll(/Qt\(\{name:[A-Za-z_$][A-Za-z0-9_$]*,searchHint:"([^"]{4,160})"/g)) {
-      hints.set(match[1] ?? '', match[2] ?? '');
-    }
-    for (const match of text.matchAll(/Qt\(\{name:"([A-Za-z][A-Za-z0-9_-]*)",searchHint:"([^"]{4,160})"/g)) {
-      hints.set(match[1] ?? '', match[2] ?? '');
-    }
-  }
-  return { names, hints };
+  return sites;
 }
 
-/** The telemetry vocabulary: every `tengu_*` literal. */
-function deriveTelemetry(files: readonly string[]): Set<string> {
+/** The telemetry vocabulary: every `tengu_*` event name. */
+function deriveTelemetry(): Set<string> {
   const events = new Set<string>();
-  for (const text of texts(files)) {
-    for (const match of text.matchAll(/"(tengu_[A-Za-z0-9_]{2,80})"/g)) {
-      events.add(match[1] ?? '');
-    }
+  for (const line of grepTree('"tengu_[A-Za-z0-9_]{2,80}"')) {
+    events.add(line.replace(/^"|"$/g, ''));
   }
   return events;
 }
 
-/** The environment-variable surface: every `NAME` read from `process.env`. */
-function deriveEnvironment(files: readonly string[]): Set<string> {
+/** The environment variables the target reads directly off `process.env`. */
+function deriveDirectEnvironment(): Set<string> {
   const names = new Set<string>();
-  // The target reads its environment through one **lazy namespace**, built by
-  // the `Mr(schema, {...})` helper in the chunk that owns it. The names in
-  // that namespace are the surface.
-  for (const file of files) {
-    if (!file.endsWith('chunk-68z1nb51.js')) continue;
-    const text = readFileSync(file, 'utf8');
-    for (const at of callSites(text, 'Mr')) {
-      const object = nthArgumentObjectAt(text, at, 1);
-      if (object === -1) continue;
-      for (const key of keysOfObject(text, object)) names.add(key);
-    }
+  for (const line of grepTree('process\\.env\\.[A-Z][A-Z0-9_]{2,60}')) {
+    names.add(line.replace(/^.*process\.env\./, ''));
   }
-  // The direct reads, for the names the namespace does not carry.
-  for (const text of texts(files)) {
-    for (const match of text.matchAll(/process\.env\.([A-Z][A-Z0-9_]{2,60})/g)) {
-      names.add(match[1] ?? '');
+  return names;
+}
+
+/**
+ * The values the needed identifiers hold, and where they were imported from.
+ *
+ * Only the **needed** identifiers are kept, so the map is a few dozen entries
+ * rather than millions — a map of every identifier in every chunk is the largest
+ * thing this program could allocate, and it is not needed.
+ */
+function collectValues(needed: ReadonlySet<string>): {
+  values: Map<string, Map<string, string>>;
+  imports: Map<string, Map<string, [string, string]>>;
+} {
+  const values = new Map<string, Map<string, string>>();
+  const imports = new Map<string, Map<string, [string, string]>>();
+  if (needed.size === 0) return { values, imports };
+  const alternation = [...needed].map((id) => id.replace(/\$/g, '\\$')).join('|');
+
+  for (const line of grepTree(`\\b(${alternation})="[^"]*"`)) {
+    const separator = line.indexOf(':');
+    if (separator === -1) continue;
+    const file = line.slice(0, separator);
+    const match = /\b([A-Za-z_$][A-Za-z0-9_$]*)="([^"]*)"/.exec(line.slice(separator));
+    if (match === null) continue;
+    const chunk = values.get(file) ?? new Map<string, string>();
+    const id = match[1] ?? '';
+    if (!chunk.has(id)) chunk.set(id, match[2] ?? '');
+    values.set(file, chunk);
+  }
+
+  for (const line of grepTree('import\\{[^}]*\\}from"\\./(chunk-[A-Za-z0-9]+\\.js)"')) {
+    const separator = line.indexOf(':');
+    if (separator === -1) continue;
+    const file = line.slice(0, separator);
+    const match = /import\{([^}]*)\}from"\.\/(chunk-[A-Za-z0-9]+\.js)"/.exec(line.slice(separator));
+    if (match === null) continue;
+    const chunk = imports.get(file) ?? new Map<string, [string, string]>();
+    for (const part of (match[1] ?? '').split(',')) {
+      const pieces = part.trim().split(/\s+as\s+/);
+      const local = pieces[0]?.trim();
+      if (local === undefined || local === '' || !needed.has(local)) continue;
+      chunk.set(local, [match[2] ?? '', pieces[1]?.trim() ?? local]);
     }
-    for (const match of text.matchAll(/process\.env\[["']([A-Z][A-Z0-9_]{2,60})["']\]/g)) {
-      names.add(match[1] ?? '');
+    imports.set(file, chunk);
+  }
+  return { values, imports };
+}
+
+/**
+ * Resolve an identifier to the string it holds.
+ *
+ * An **imported** binding is an alias, so the import is followed first: a local
+ * name of the same shape is a different binding and must not shadow the one the
+ * module actually uses.
+ */
+function resolve(
+  values: Map<string, Map<string, string>>,
+  imports: Map<string, Map<string, [string, string]>>,
+  chunk: string,
+  name: string,
+  depth = 0,
+): string | undefined {
+  if (depth > 8) return undefined;
+  const link = imports.get(chunk)?.get(name);
+  if (link !== undefined) {
+    const through = resolve(values, imports, link[0], link[1], depth + 1);
+    if (through !== undefined) return through;
+  }
+  return values.get(chunk)?.get(name);
+}
+
+/** The tool registry: the main factory's tools. */
+function deriveTools(
+  sites: Map<string, string[]>,
+  values: Map<string, Map<string, string>>,
+  imports: Map<string, Map<string, [string, string]>>,
+): Set<string> {
+  const names = new Set<string>();
+  for (const [chunk, expressions] of sites) {
+    for (const expression of expressions) {
+      if (/^[A-Za-z][A-Za-z0-9_-]*$/.test(expression)) {
+        names.add(expression);
+        continue;
+      }
+      const value = resolve(values, imports, chunk, expression);
+      if (value !== undefined) names.add(value);
     }
   }
   return names;
 }
 
 /**
- * The settings document: the target's own settings factory, `cc`, and the
- * object literal it returns.
- *
- * The literal's **spread** at its end merges the gated blocks in, so the
- * document's own members are what the factory declares, and the spread's
- * contribution is a separate surface.
+ * The environment-variable surface: the target's own lazy namespace, plus the
+ * variables it reads directly.
  */
-function deriveSettings(files: readonly string[]): Set<string> {
-  const keys = new Set<string>();
-  for (const file of files) {
-    if (!file.endsWith('chunk-c9s0jh80.js')) continue;
-    const text = readFileSync(file, 'utf8');
-    const factory = text.indexOf('function cc(e,{strictPolicyHelperKeys');
-    if (factory === -1) continue;
-    const returned = text.indexOf('return{', factory);
-    if (returned === -1) continue;
-    const brace = text.indexOf('{', returned);
-    for (const key of keysOfObject(text, brace)) keys.add(key);
+function deriveEnvironment(direct: ReadonlySet<string>): Set<string> {
+  const names = new Set<string>(direct);
+  const text = readChunk(ENVIRONMENT_CHUNK);
+  if (text === undefined) return names;
+  for (const at of callSites(text, 'Mr')) {
+    const object = nthArgumentObjectAt(text, at, 1);
+    if (object === -1) continue;
+    for (const key of keysOfObject(text, object)) names.add(key);
   }
+  return names;
+}
+
+/**
+ * The settings document: the target's own settings factory, `cc`, and the object
+ * literal it returns.
+ */
+function deriveSettings(): Set<string> {
+  const keys = new Set<string>();
+  const text = readChunk(SETTINGS_CHUNK);
+  if (text === undefined) return keys;
+  const factory = text.indexOf('function cc(e,{strictPolicyHelperKeys');
+  if (factory === -1) return keys;
+  const returned = text.indexOf('return{', factory);
+  if (returned === -1) return keys;
+  const brace = text.indexOf('{', returned);
+  for (const key of keysOfObject(text, brace)) keys.add(key);
   return keys;
 }
 
 /**
  * The target's **seven flag sets**, read from its own parser.
  *
- * The parser keeps them apart: the value-taking set, the boolean set, the
- * optional-value set, the repeatable subset, the command tokens, the session
- * subcommands, and the three value-taking flags the scanner does not count as
- * flags. They are told apart by their **size**, and the identification is
- * **checked**: the repeatable set must be a subset of the value set, the
- * boolean set must be disjoint from it, and the session subcommands must not
- * look like flags. A misidentification fails loudly rather than silently.
+ * They are told apart by their **size**, and the identification is **checked**:
+ * the repeatable set must be a subset of the value set, the boolean set must be
+ * disjoint from it, and the session subcommands must not look like flags. A
+ * misidentification fails loudly rather than silently.
  */
-function deriveFlagSets(files: readonly string[]): Map<string, string[]> {
+function deriveFlagSets(): Map<string, string[]> {
   const sets = new Map<string, string[]>();
-  for (const file of files) {
-    if (!file.endsWith('chunk-0y0ptpy9.js')) continue;
-    const text = readFileSync(file, 'utf8');
-    const collections = collectionsIn(text, 3);
-    const bySize = new Map<number, string[]>();
-    for (const collection of collections) {
-      if (!bySize.has(collection.members.length)) bySize.set(collection.members.length, collection.members);
-    }
-    const value = bySize.get(85);
-    const boolean = bySize.get(45);
-    const optional = bySize.get(14);
-    const repeatable = bySize.get(11);
-    const tokens = bySize.get(10);
-    const subcommands = bySize.get(6);
-    const carveouts = bySize.get(3);
-    if (
-      value === undefined ||
-      boolean === undefined ||
-      optional === undefined ||
-      repeatable === undefined ||
-      tokens === undefined ||
-      subcommands === undefined ||
-      carveouts === undefined
-    ) {
-      continue;
-    }
-    // The identification is only believed if the target's own relationships
-    // hold: the repeatable set is a subset of the value set, the boolean set
-    // is disjoint from it, and the session subcommands are words, not flags.
-    const repeatableIsSubset = repeatable.every((flag) => value.includes(flag));
-    const booleanIsDisjoint = boolean.every((flag) => !value.includes(flag));
-    const subcommandsAreWords = subcommands.every((word) => !word.startsWith('-'));
-    if (!repeatableIsSubset || !booleanIsDisjoint || !subcommandsAreWords) continue;
-    sets.set('The value-taking flags', value);
-    sets.set('The boolean flags', boolean);
-    sets.set('The optional-value flags', optional);
-    sets.set('The repeatable flags', repeatable);
-    sets.set('The command tokens', tokens);
-    sets.set('The session subcommands', subcommands);
-    sets.set('The carve-out flags', carveouts);
+  const text = readChunk(PARSER_CHUNK);
+  if (text === undefined) return sets;
+  const bySize = new Map<number, string[]>();
+  for (const collection of collectionsIn(text, 3)) {
+    if (!bySize.has(collection.members.length)) bySize.set(collection.members.length, collection.members);
   }
+  const value = bySize.get(85);
+  const boolean = bySize.get(45);
+  const optional = bySize.get(14);
+  const repeatable = bySize.get(11);
+  const tokens = bySize.get(10);
+  const subcommands = bySize.get(6);
+  const carveouts = bySize.get(3);
+  if (
+    value === undefined ||
+    boolean === undefined ||
+    optional === undefined ||
+    repeatable === undefined ||
+    tokens === undefined ||
+    subcommands === undefined ||
+    carveouts === undefined
+  ) {
+    return sets;
+  }
+  const repeatableIsSubset = repeatable.every((flag) => value.includes(flag));
+  const booleanIsDisjoint = boolean.every((flag) => !value.includes(flag));
+  const subcommandsAreWords = subcommands.every((word) => !word.startsWith('-'));
+  if (!repeatableIsSubset || !booleanIsDisjoint || !subcommandsAreWords) return sets;
+  sets.set('The value-taking flags', value);
+  sets.set('The boolean flags', boolean);
+  sets.set('The optional-value flags', optional);
+  sets.set('The repeatable flags', repeatable);
+  sets.set('The command tokens', tokens);
+  sets.set('The session subcommands', subcommands);
+  sets.set('The carve-out flags', carveouts);
   return sets;
 }
 
 /**
- * The hook-event matrix: the target's own list of the events a hook may
- * answer to.
+ * The hook-event matrix: the target's own list of the events a hook may answer
+ * to.
  *
- * The list is identified by its **shape** — every member is an event-shaped
- * name — and by the two events that anchor it, `PreToolUse` and
- * `PostToolBatch`. The largest such collection is taken, so a stray
- * three-member list cannot be mistaken for it.
+ * The list is identified by its **shape** — every member is an event-shaped name
+ * — and by the two events that anchor it, `PreToolUse` and `PostToolBatch`. The
+ * largest such collection is taken, so a stray three-member list cannot be
+ * mistaken for it.
  */
-function deriveHookEvents(files: readonly string[]): Set<string> {
+function deriveHookEvents(): Set<string> {
   const HOOK_SHAPED = /^[A-Z][A-Za-z]{2,24}$/;
+  const events = new Set<string>();
+  const text = readChunk(SETTINGS_CHUNK);
+  if (text === undefined) return events;
   let best: string[] = [];
-  for (const file of files) {
-    if (!file.endsWith('chunk-c9s0jh80.js')) continue;
-    const text = readFileSync(file, 'utf8');
-    for (const collection of collectionsIn(text, 10)) {
-      const members = collection.members;
-      if (members.length < 20) continue;
-      if (!members.every((member) => HOOK_SHAPED.test(member))) continue;
-      if (!members.includes('PreToolUse') || !members.includes('PostToolBatch')) continue;
-      if (members.length > best.length) best = members;
-    }
+  for (const collection of collectionsIn(text, 10)) {
+    const members = collection.members;
+    if (members.length < 20) continue;
+    if (!members.every((member) => HOOK_SHAPED.test(member))) continue;
+    if (!members.includes('PreToolUse') || !members.includes('PostToolBatch')) continue;
+    if (members.length > best.length) best = members;
   }
-  return new Set(best);
+  for (const member of best) events.add(member);
+  return events;
 }
 
-/** The inventory the record carries, parsed out of the markdown. */
-function recordedEntries(markdown: string, heading: string): Set<string> {
-  const entries = new Set<string>();
-  const at = markdown.indexOf(`## ${heading}`);
-  if (at === -1) return entries;
-  const rest = markdown.slice(at);
-  const next = rest.indexOf('\n## ', 2);
-  const section = next === -1 ? rest : rest.slice(0, next);
-  for (const match of section.matchAll(/^\|\s*`([^`]+)`\s*\|/gm)) {
-    entries.add(match[1] ?? '');
+/**
+ * The browser tool bundle: the target's **second** tool set, a separate bundle
+ * from the main registry.
+ *
+ * The bundle is an array of tool **objects**, so the names are read from each
+ * object's own `name` member — and a name that is a minified identifier is
+ * resolved against the chunk that uses it, because a minified identifier is only
+ * unique inside its own module.
+ */
+function deriveBrowserTools(): Set<string> {
+  const names = new Set<string>();
+  const text = readChunk(BROWSER_CHUNK);
+  if (text === undefined) return names;
+  const at = text.indexOf('yNe=[{name:');
+  if (at === -1) return names;
+  const open = text.indexOf('[', at);
+  for (const expression of nameExpressionsOfObjectArray(text, open)) {
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(expression)) {
+      const resolved = new RegExp(
+        `(?:^|[^A-Za-z0-9_$])${expression.replace(/\$/g, '\\$')}\\s*=\\s*"([^"]+)"`,
+      ).exec(text);
+      if (resolved === null) continue;
+      names.add(resolved[1] ?? '');
+      continue;
+    }
+    names.add(expression);
   }
-  for (const match of section.matchAll(/^\s*-\s*`([^`]+)`/gm)) {
-    entries.add(match[1] ?? '');
+  return names;
+}
+
+/** Every section of the generated record, with its members. */
+function inventorySections(markdown: string): Map<string, Set<string>> {
+  const sections = new Map<string, Set<string>>();
+  for (const match of markdown.matchAll(/^## ([^\n]+)\n[\s\S]*?((?:^\| `[^`]+` \|\n?)+)/gm)) {
+    const heading = (match[1] ?? '').trim();
+    const members = [...(match[2] ?? '').matchAll(/^\| `([^`]+)` \|$/gm)].map((m) => m[1] ?? '');
+    if (members.length > 0) sections.set(heading, new Set(members));
   }
-  return entries;
+  return sections;
 }
 
 function main(): number {
   const deriveOnly = process.argv.includes('--derive');
-  if (!statSync(EXTRACTED, { throwIfNoEntry: false })?.isDirectory?.()) {
-    process.stdout.write(
-      'the extracted source is not present, so nothing can be re-derived; ' +
-        'a missing extraction is not a failed audit\n',
-    );
-    return 0;
-  }
-  const files = sourceFiles(EXTRACTED);
-  const tools = deriveTools(files);
-  const telemetry = deriveTelemetry(files);
-  const environment = deriveEnvironment(files);
-  const settings = deriveSettings(files);
-  const flagSets = deriveFlagSets(files);
-  const hookEvents = deriveHookEvents(files);
+  const write = process.argv.includes('--write');
+  const writeMatrix = process.argv.includes('--write-matrix');
 
-  if (process.argv.includes('--write')) {
-    // The record is **generated from the derivation**, so it cannot drift from
-    // the target: the inventory is re-derived and the file is rewritten.
-    const sections = [
-      {
-        heading: 'The tool registry',
-        note: 'Every tool the target defines, re-derived from the target\'s own tool factory and its tool-set arrays.',
-        entries: [...tools.names].sort(),
-      },
-      {
-        heading: 'The telemetry vocabulary',
-        note: 'Every `tengu_*` event name the target emits, re-derived by a literal scan of the whole tree.',
-        entries: [...telemetry].sort(),
-      },
-      {
-        heading: 'The environment-variable surface',
-        note: 'Every environment variable the target reads, re-derived from the target\'s own lazy namespace and its direct reads.',
-        entries: [...environment].sort(),
-      },
-      {
-        heading: 'The settings document',
-        note: 'Every key the target\'s settings document accepts, re-derived from the target\'s own settings factory.',
-        entries: [...settings].sort(),
-      },
-      {
-        heading: 'The hook event matrix',
-        note: 'Every event a hook may answer to, re-derived from the target\'s own list.',
-        entries: [...hookEvents].sort(),
-      },
-      ...[...flagSets].map(([heading, members]) => ({
-        heading,
-        note: 'Re-derived from the target\'s own parser, and told apart by the target\'s own relationships.',
-        entries: [...members].sort(),
-      })),
-    ];
-    const body = sections
-      .map(
-        (section) =>
-          `## ${section.heading}\n\n${section.note}\n\n| name |\n|---|\n` +
-          section.entries.map((entry) => `| \`${entry}\` |\n`).join(''),
-      )
-      .join('\n');
-    const header = [
-      '# The target\'s surface inventory',
-      '',
-      '**This file is generated** by `scripts/verify-rea.ts --write`, from the',
-      'target\'s own source, and checked by `scripts/verify-rea.ts`. It is the',
-      'inventory of what the target **has**; the compatibility matrix is the list of',
-      'what this implementation **reproduces**, and the two are different things.',
-      '',
-      'The verifier re-derives each inventory from the source and fails when the',
-      'target has an entry this file does not name. A gap in the audit shows up here',
-      'as a missing row, not as a paragraph nobody notices.',
-      '',
-      '---',
-      '',
-    ].join('\n');
-    writeFileSync(INVENTORY, `${header}${body}`, 'utf8');
-    process.stdout.write(
-      `wrote ${INVENTORY}: ${sections
-        .map((section) => `${section.entries.length} ${section.heading}`)
-        .join(', ')}\n`,
-    );
-    return 0;
-  }
-
-  if (process.argv.includes('--write-matrix')) {
+  if (writeMatrix) {
     // The matrix's own **totals** are derived from its rows, so they cannot
     // miscount. A row that moves from `partial` to `observed` moves the table
     // with it.
@@ -493,15 +408,105 @@ function main(): number {
     return 0;
   }
 
-  if (deriveOnly) {
+  if (!statSync(EXTRACTED, { throwIfNoEntry: false })?.isDirectory?.()) {
     process.stdout.write(
-      `tools ${tools.names.size}\ntelemetry ${telemetry.size}\nenvironment ${environment.size}\nsettings ${settings.size}\n`,
+      'the extracted source is not present, so nothing can be re-derived; ' +
+        'a missing extraction is not a failed audit\n',
     );
-    for (const [heading, members] of flagSets) {
-      process.stdout.write(`${heading} ${members.length}\n`);
+    return 0;
+  }
+
+  const sites = deriveToolSites();
+  const needed = new Set<string>();
+  for (const expressions of sites.values()) {
+    for (const expression of expressions) {
+      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(expression)) needed.add(expression);
     }
-    for (const name of [...tools.names].sort()) {
-      process.stdout.write(`tool\t${name}\t${tools.hints.get(name) ?? ''}\n`);
+  }
+  const { values, imports } = collectValues(needed);
+  const tools = deriveTools(sites, values, imports);
+  const browserTools = deriveBrowserTools();
+  const telemetry = deriveTelemetry();
+  const environment = deriveEnvironment(deriveDirectEnvironment());
+  const settings = deriveSettings();
+  const hookEvents = deriveHookEvents();
+  const flagSets = deriveFlagSets();
+
+  const sections: { heading: string; note: string; entries: string[] }[] = [
+    {
+      heading: 'The tool registry',
+      note: "Every tool the target's main factory defines, re-derived from the target's own source.",
+      entries: [...tools].sort(),
+    },
+    {
+      heading: 'The browser tool bundle',
+      note: "Every tool in the target's **second** tool bundle, re-derived from the bundle the target ships.",
+      entries: [...browserTools].sort(),
+    },
+    {
+      heading: 'The telemetry vocabulary',
+      note: "Every `tengu_*` event name the target emits, re-derived by a literal scan of the whole tree.",
+      entries: [...telemetry].sort(),
+    },
+    {
+      heading: 'The environment-variable surface',
+      note: "Every environment variable the target reads, re-derived from the target's own lazy namespace and its direct reads.",
+      entries: [...environment].sort(),
+    },
+    {
+      heading: 'The settings document',
+      note: "Every key the target's settings document accepts, re-derived from the target's own settings factory.",
+      entries: [...settings].sort(),
+    },
+    {
+      heading: 'The hook event matrix',
+      note: "Every event a hook may answer to, re-derived from the target's own list.",
+      entries: [...hookEvents].sort(),
+    },
+    ...[...flagSets].map(([heading, members]) => ({
+      heading,
+      note: "Re-derived from the target's own parser, and told apart by the target's own relationships.",
+      entries: [...members].sort(),
+    })),
+  ];
+
+  if (write) {
+    // The record is **generated from the derivation**, so it cannot drift from
+    // the target: the inventory is re-derived and the file is rewritten.
+    const body = sections
+      .map(
+        (section) =>
+          `## ${section.heading}\n\n${section.note}\n\n| name |\n|---|\n` +
+          section.entries.map((entry) => `| \`${entry}\` |\n`).join(''),
+      )
+      .join('\n');
+    const header = [
+      "# The target's surface inventory",
+      '',
+      '**This file is generated** by `scripts/verify-rea.ts --write`, from the',
+      "target's own source, and checked by `scripts/verify-rea.ts`. It is the",
+      "inventory of what the target **has**; the compatibility matrix is the list of",
+      'what this implementation **reproduces**, and the two are different things.',
+      '',
+      'The verifier re-derives each inventory from the source and fails when the',
+      'target has an entry this file does not name. A gap in the audit shows up here',
+      'as a missing row, not as a paragraph nobody notices.',
+      '',
+      '---',
+      '',
+    ].join('\n');
+    writeFileSync(INVENTORY, `${header}${body}`, 'utf8');
+    process.stdout.write(
+      `wrote ${INVENTORY}: ${sections
+        .map((section) => `${section.entries.length} ${section.heading}`)
+        .join(', ')}\n`,
+    );
+    return 0;
+  }
+
+  if (deriveOnly) {
+    for (const section of sections) {
+      process.stdout.write(`${section.entries.length}\t${section.heading}\n`);
     }
     return 0;
   }
@@ -514,38 +519,27 @@ function main(): number {
     return 1;
   }
 
-  const checks: { surface: string; derived: number; recorded: number; missing: string[] }[] = [];
-  const compare = (surface: string, derived: ReadonlySet<string>, heading: string): void => {
-    const recorded = recordedEntries(markdown, heading);
-    const missing = [...derived].filter((entry) => !recorded.has(entry)).sort();
-    checks.push({ surface, derived: derived.size, recorded: recorded.size, missing });
-  };
-  compare('the tool registry', tools.names, 'The tool registry');
-  compare('the telemetry vocabulary', telemetry, 'The telemetry vocabulary');
-  compare('the environment-variable surface', environment, 'The environment-variable surface');
-  compare('the settings document', settings, 'The settings document');
-  for (const [heading, members] of flagSets) {
-    compare(heading, new Set(members), heading);
-  }
-  compare('the hook event matrix', hookEvents, 'The hook event matrix');
-
+  const recorded = inventorySections(markdown);
   let failed = 0;
-  for (const check of checks) {
-    if (check.missing.length === 0) {
+  for (const section of sections) {
+    const target = new Set(section.entries);
+    const have = recorded.get(section.heading) ?? new Set<string>();
+    const missing = [...target].filter((entry) => !have.has(entry)).sort();
+    if (missing.length === 0) {
       process.stdout.write(
-        `ok    ${check.surface}: ${check.derived} derived, ${check.recorded} recorded, none unaccounted\n`,
+        `ok    ${section.heading}: ${target.size} derived, ${have.size} recorded, none unaccounted\n`,
       );
       continue;
     }
     failed += 1;
     process.stdout.write(
-      `FAIL  ${check.surface}: ${check.missing.length} of ${check.derived} entries the target has are not in the record\n`,
+      `FAIL  ${section.heading}: ${missing.length} of ${target.size} entries the target has are not in the record\n`,
     );
-    for (const entry of check.missing.slice(0, 20)) {
+    for (const entry of missing.slice(0, 20)) {
       process.stdout.write(`        ${entry}\n`);
     }
-    if (check.missing.length > 20) {
-      process.stdout.write(`        ... and ${check.missing.length - 20} more\n`);
+    if (missing.length > 20) {
+      process.stdout.write(`        ... and ${missing.length - 20} more\n`);
     }
   }
   process.stdout.write(

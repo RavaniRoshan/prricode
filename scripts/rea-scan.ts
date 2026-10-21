@@ -402,3 +402,61 @@ export function collections(
   }
   return found;
 }
+
+/**
+ * The `name` member of every object in the array literal that starts at `at`.
+ *
+ * An array of tool definitions holds objects, not strings, and the name is
+ * the member that identifies the tool. A name that is a **minified identifier**
+ * is returned as the identifier, and the caller resolves it.
+ */
+export function nameExpressionsOfObjectArray(text: string, at: number): string[] {
+  if (text[at] !== '[') return [];
+  let depth = 0;
+  let index = at;
+  let end = -1;
+  while (index < text.length) {
+    const character = text[index];
+    if (character === '"' || character === "'" || character === '`') {
+      index = endOfString(text, index);
+      continue;
+    }
+    if (character === '[') depth += 1;
+    else if (character === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        end = index;
+        break;
+      }
+    }
+    index += 1;
+  }
+  if (end === -1) return [];
+  // The elements, one by one: each is a literal that starts at the top level.
+  const names: string[] = [];
+  index = at + 1;
+  while (index < end) {
+    const character = text[index];
+    if (character === '"' || character === "'" || character === '`') {
+      index = endOfString(text, index);
+      continue;
+    }
+    if (character === '{') {
+      const literalEnd = endOfObject(text, index);
+      const slice = text.slice(index, literalEnd);
+      const literal = /[{,]\s*name\s*:\s*"([^"]+)"/.exec(slice);
+      if (literal !== null) {
+        names.push(literal[1] ?? '');
+        continue;
+      }
+      // The name is a **minified identifier** in the target's own source, and it
+      // is resolved by the caller.
+      const identifier = /[{,]\s*name\s*:\s*([A-Za-z_$][A-Za-z0-9_$]*)/.exec(slice);
+      if (identifier !== null) names.push(identifier[1] ?? '');
+      index = literalEnd;
+      continue;
+    }
+    index += 1;
+  }
+  return names;
+}
