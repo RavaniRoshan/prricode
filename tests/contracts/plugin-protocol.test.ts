@@ -30,6 +30,7 @@ import {
   describePluginSource,
   pluginSourceCapability,
   pluginSourceKind,
+  resolvePluginSource,
 } from '../../src/extensions/plugins/pluginSources.js';
 import {
   MARKETPLACE_MANIFEST_KEYS,
@@ -266,6 +267,20 @@ describe('the plugin source types', () => {
     expect(describePluginSource('./plugins/one')).toBe('./plugins/one');
     expect(describePluginSource({ source: 'github', repo: 'a/b' })).toBe('github:a/b');
     expect(describePluginSource({ source: 'unsupported', error: 'why' })).toBe('unsupported: why');
+  });
+
+  it('refuses to install a plugin, and names the capability it needs', () => {
+    const archive = resolvePluginSource({ source: 'archive', url: 'https://x.test/a.zip' });
+    expect(archive.ok).toBe(false);
+    if (archive.ok) throw new Error('unreachable');
+    expect(archive.capability).toBe('https-archive');
+    expect(archive.reason).toContain('https-archive');
+
+    const local = resolvePluginSource('./plugins/one');
+    expect(local.ok).toBe(false);
+    if (local.ok) throw new Error('unreachable');
+    expect(local.capability).toBe('filesystem');
+    expect(local.reason).toContain('filesystem');
   });
 });
 

@@ -236,6 +236,62 @@ export function pluginSourceCapability(source: PluginSource): PluginSourceCapabi
 }
 
 /* -------------------------------------------------------------------------- */
+/* The refusal                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/** The result of resolving a plugin source. */
+export type PluginSourceResolution =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      /** The capability the source needs. */
+      readonly capability: PluginSourceCapability;
+      /** Why the source was refused. */
+      readonly reason: string;
+    };
+
+/**
+ * Resolve a plugin source — that is, install the plugin from it.
+ *
+ * This implementation has **no plugin registry**, so every source is refused —
+ * and the refusal names **the capability the source would need**, so a caller
+ * can tell a clone from a registry client from an archive download.
+ */
+export function resolvePluginSource(source: PluginSource): PluginSourceResolution {
+  const capability = pluginSourceCapability(source);
+
+  if (typeof source === 'string') {
+    return {
+      ok: false,
+      capability,
+      reason:
+        `installing a plugin from a local path needs a ${capability}; this implementation has ` +
+        `no plugin registry, so it refuses.`,
+    };
+  }
+
+  if (source.source === 'unsupported') {
+    return {
+      ok: false,
+      capability,
+      reason:
+        source.error === undefined
+          ? `the plugin's source is one this implementation does not support; installing it ` +
+            `needs a ${capability}, which this implementation does not have.`
+          : `the plugin's source is one this implementation does not support: ${source.error}`,
+    };
+  }
+
+  return {
+    ok: false,
+    capability,
+    reason:
+      `installing a plugin from a "${source.source}" source needs a ${capability}; this ` +
+      `implementation has no plugin registry, so it refuses.`,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
 /* The canonical kind                                                           */
 /* -------------------------------------------------------------------------- */
 

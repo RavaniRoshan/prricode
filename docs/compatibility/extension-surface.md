@@ -430,6 +430,18 @@ from a fetch from a registry client. The refusal is a **return value**, not an
 exception, and it is what `resolveMarketplaceSource` and
 `pluginSourceCapability` produce.
 
+### The clone-choice labels
+
+| Label | What it means | Which entries |
+|---|---|---|
+| **implemented** | the shape is read, validated and reproduced — the target's own keys, types, defaults and rules | the **ten** marketplace source types and their **eleventh** policy-list member; the **seven** named plugin source types and the **eight** canonical kinds; the **twenty-nine** manifest keys; the **forty-two**, **twenty-two** and **four** frontmatter keys; the **ten** catalogue-manifest keys and the catalogue entry; the autoupdater's vocabulary, its codes and its classification; the output styles' remote filter |
+| **refused** | the operation is understood, and the refusal names the **capability** it needs and this implementation does not have | every source that would **reach** a marketplace or **install** a plugin — `resolveMarketplaceSource` and `resolvePluginSource` |
+
+The refusals are **return values**, not exceptions: a caller reads the
+capability and knows what would have to exist for the operation to run. A
+refused source is **not** silently dropped — it is in the vocabulary, it has a
+capability, and naming it says what would have to exist.
+
 **Pinned by:** `tests/contracts/plugin-protocol.test.ts` — the source-type, the
 capability and the refusal tests.
 
