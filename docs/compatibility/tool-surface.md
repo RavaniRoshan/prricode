@@ -149,6 +149,15 @@ the inventory's own order.
 | `switch_browser` | send a connection request to every Chrome browser with the extension installed and wait for the user to pick one | **Refuses**: it needs the browser extension account connection, which this session does not have. | 2 |
 | `list_connected_browsers` | list all Chrome browsers currently connected to this account | **Refuses**: it needs the browser extension account connection, which this session does not have. | 2 |
 | `select_browser` | select a specific Chrome browser by deviceId for browser automation | **Refuses**: it needs the browser extension account connection, which this session does not have. | 2 |
+| `self_hosted_runner_get_pool` | read a self-hosted environment's aggregate state | **Refuses**: it needs the self-hosted environment management API, which this session does not have. | 2 |
+| `self_hosted_runner_list_runners` | list runners registered to a self-hosted environment | **Refuses**: it needs the self-hosted environment management API, which this session does not have. | 2 |
+| `self_hosted_runner_list_sessions` | list sessions queued/assigned in a self-hosted environment | **Refuses**: it needs the self-hosted environment management API, which this session does not have. | 2 |
+| `self_hosted_runner_list_secrets` | list self-hosted environment secrets (metadata only) | **Refuses**: it needs the self-hosted environment management API, which this session does not have. | 2 |
+| `self_hosted_runner_spawn_local` | start a local self-hosted runner process for try-it-out | **Refuses**: it needs a self-hosted runner process, which this session does not have. | 2 |
+| `self_hosted_runner_read_health` | probe local self-hosted runner /healthz endpoint | **Refuses**: it needs a local self-hosted runner, which this session does not have. | 2 |
+| `self_hosted_runner_read_metrics` | read self-hosted runner Prometheus gauges from /metrics | **Refuses**: it needs a local self-hosted runner, which this session does not have. | 2 |
+| `self_hosted_runner_tail_log` | tail self-hosted runner log file with secret redaction | **Refuses**: it needs a local self-hosted runner, which this session does not have. | 2 |
+| `self_hosted_runner_requeue_session` | requeue a stuck self-hosted runner session onto another runner | **Refuses**: it needs the self-hosted environment management API, which this session does not have. | 2 |
 
 ### The tools this implementation does **not** ship
 
@@ -195,15 +204,6 @@ implemented honestly is omitted and named — never faked.
 | `WaitForMcpServers` | live MCP channels | The same as `RefreshMcpTools`. |
 | `Workflow` | a deterministic-JavaScript sub-agent orchestrator | The orchestrator runs model-supplied JavaScript; the sub-agent seam is the `Agent` tool's `delegate`. |
 | `propose_skills` | the account's skill catalogue | The catalogue is the account's own. |
-| `self_hosted_runner_get_pool` | a self-hosted runner | The runner is the product's own deployment surface. |
-| `self_hosted_runner_list_runners` | a self-hosted runner | The same. |
-| `self_hosted_runner_list_secrets` | a self-hosted runner | The same. |
-| `self_hosted_runner_list_sessions` | a self-hosted runner | The same. |
-| `self_hosted_runner_read_health` | a self-hosted runner | The same. |
-| `self_hosted_runner_read_metrics` | a self-hosted runner | The same. |
-| `self_hosted_runner_requeue_session` | a self-hosted runner | The same. |
-| `self_hosted_runner_spawn_local` | a self-hosted runner | The same. |
-| `self_hosted_runner_tail_log` | a self-hosted runner | The same. |
 
 **Two names in the inventory are not tools.** `latest` and `mcp` are the
 verifier's scan picking up two entries of the target's tool-set arrays that are

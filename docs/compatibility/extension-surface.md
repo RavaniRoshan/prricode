@@ -602,6 +602,144 @@ The **reconstruction by name** needs the main-thread agent's **name**. This impl
 
 **Pinned by:** `tests/contracts/extensions.test.ts` — the telemetry tests.
 
+## The self-hosted runner surface (CC-033)
+
+**The target has a self-hosted runner and this implementation does not.** The
+target ships **nine** runner tools, a runner process, a registration protocol
+and **forty-one** environment variables. There is no runner, no registration,
+no environment secret and no account here, so the surface is **recorded and
+shaped, never faked**: the nine tools exist, with the target's names,
+descriptions, input schemas, result shapes, endpoints, Admin-UI paths,
+read-only flags, concurrency flags and permission rules; the environment
+variables are reproduced as **data**; and every one of the nine **refuses**
+with a typed failure that names the capability it needed.
+
+The reading is `/home/shiva/opt/reference-agent-rea/analysis/findings-self-hosted-runner.md`;
+every claim there carries the target's own file and byte offset.
+
+### The nine tools, in the target's order
+
+`chunk-c4brmbaw.js:16557` — the target's export array.
+
+| # | tool | the capability it needs | what this implementation does |
+|---|---|---|---|
+| 1 | `self_hosted_runner_get_pool` | the self-hosted environment management API | **Refuses**: it needs the self-hosted environment management API, which this session does not have. |
+| 2 | `self_hosted_runner_list_runners` | the self-hosted environment management API | **Refuses**: the same. |
+| 3 | `self_hosted_runner_list_sessions` | the self-hosted environment management API | **Refuses**: the same. |
+| 4 | `self_hosted_runner_list_secrets` | the self-hosted environment management API | **Refuses**: the same. |
+| 5 | `self_hosted_runner_spawn_local` | a self-hosted runner process | **Refuses**: it needs a self-hosted runner process, which this session does not have. |
+| 6 | `self_hosted_runner_read_health` | a local self-hosted runner | **Refuses**: it needs a local self-hosted runner, which this session does not have. |
+| 7 | `self_hosted_runner_read_metrics` | a local self-hosted runner | **Refuses**: the same. |
+| 8 | `self_hosted_runner_tail_log` | a local self-hosted runner | **Refuses**: the same. |
+| 9 | `self_hosted_runner_requeue_session` | the self-hosted environment management API | **Refuses**: the same. |
+
+### The permission rules
+
+| rule | the target's own statement | this implementation |
+|---|---|---|
+| the seven read tools are read-only and concurrency safe | `isReadOnly(){return!0}, isConcurrencySafe(){return!0}` on each of the seven | the same; the concurrency flag is declared, so a call may run beside another |
+| the two write tools are neither | `isReadOnly(){return!1}` and **no** `isConcurrencySafe` — the target's own default for a tool that does not declare the flag is "not concurrency safe" | the same: the flag is left off, so the tool is not concurrency safe |
+| a **whole-tool** allow rule does not apply to the two write tools | `ignoresWholeToolAllowRule(){return!0}` | the whole-tool allow rules for the tool are dropped before the check runs, so `allow: ["self_hosted_runner_spawn_local"]` does not wave it through |
+| the two write tools **ask**, with the target's own message, in every mode but `auto` | `checkPermissions` returns `{behavior:"ask", message:…}` | the same: the tool's own check is the tool's own safety check, so it answers after the deny rules and before the mode dispatch |
+| in `auto` mode the two write tools go to the **classifier** | `{behavior:"passthrough", message:"… requires classifier review."}` | the tool's own check stands aside in `auto` mode and the standard check runs, so the classifier decides |
+| the "don't ask again" affordance does not persist an always-allow rule for the two write tools | `suppressesAlwaysAllowRule(){return!0}` | **not reproduced**: this implementation has no always-allow persistence, so the flag has no counterpart. The flag is carried on the tool definition and named here rather than pretended at |
+| the log-tail tool is the only one with a path | `getPath(e){return e.log_path}` — and only it declares one | the same: `log_path` is the tool's path field |
+| the requeue and the spawn name their own content | `toAutoClassifierInput` names `session_id`/`runner_id` and `secret_file_path`/`base_dir` | the same: those are the tools' primary content fields, so a scoped rule matches them |
+| the five read tools declare **neither** a path nor a classifier input | they declare neither | the same: a scoped rule on one of them matches nothing |
+
+### The environment variables
+
+**Forty-one** names: **thirty-seven** the runner reads, and **four** it refuses
+or ignores on purpose. The record's §3.5 list held **thirty-one** and called
+them thirty; the derivation that produced it only saw the names read as
+`process.env.NAME`, and **ten** more are read through a variable.
+
+| variable | the target's default | the target's validation |
+|---|---|---|
+| `SELF_HOSTED_RUNNER_BASE_DIR` | `/workspace` | — |
+| `SELF_HOSTED_RUNNER_BG_RESULT_GRACE_MS` | `30000` | 0 or unusable falls back to the default — the hold cannot be disabled |
+| `SELF_HOSTED_RUNNER_CLIENT_LABEL` | unset | trimmed |
+| `SELF_HOSTED_RUNNER_CONFIGURE_GIT` | `false` | a boolean |
+| `SELF_HOSTED_RUNNER_CONFINE_REPO_SETTINGS` | `warn` | `enforce`/`warn`/`off`; an invalid value fails closed at startup |
+| `SELF_HOSTED_RUNNER_DEBUG_DIR` | unset | the orchestrator's debug directory |
+| `SELF_HOSTED_RUNNER_DEBUG_TOKEN_DIR` | unset | debug only |
+| `SELF_HOSTED_RUNNER_DEFER_SHUTDOWN_MAX_MS` | `0` (off) | — |
+| `SELF_HOSTED_RUNNER_DRAIN_GRACE_MS` | `0` | max 604 800 000 ms |
+| `SELF_HOSTED_RUNNER_DRAIN_MARKER_FILE` | unset | — |
+| `SELF_HOSTED_RUNNER_DRAIN_WAIT_BG_TASKS_MS` | `0` | the deprecated alias of `DRAIN_WAIT_MS` |
+| `SELF_HOSTED_RUNNER_DRAIN_WAIT_MS` | `0` | max 86 400 s |
+| `SELF_HOSTED_RUNNER_ENVIRONMENT_SECRET` | unset | the environment secret |
+| `SELF_HOSTED_RUNNER_EXEC_PATH` | the process's own binary | — |
+| `SELF_HOSTED_RUNNER_HEALTH_PORT` | `8080` | an integer in `[0, 65535]`; 0 disables `/healthz` |
+| `SELF_HOSTED_RUNNER_HOOKS_DIR` | unset | — |
+| `SELF_HOSTED_RUNNER_HOST_CONFIG_DIR` | `~/.claude` | — |
+| `SELF_HOSTED_RUNNER_HOST_CONFIG_SNAPSHOT` | `disk` | `disk`/`memory` |
+| `SELF_HOSTED_RUNNER_IDLE_SHUTDOWN_MS` | `0` (never) | — |
+| `SELF_HOSTED_RUNNER_LOCK_TO_ACCOUNT` | unset | — |
+| `SELF_HOSTED_RUNNER_LOG_FILE` | unset | — |
+| `SELF_HOSTED_RUNNER_MAX_LIFETIME_GRACE_MS` | `900000` | floored at the post-session budget |
+| `SELF_HOSTED_RUNNER_MAX_LIFETIME_MS` | `0` (never) | — |
+| `SELF_HOSTED_RUNNER_POOL_SECRET` | unset | the deprecated alias of `ENVIRONMENT_SECRET` |
+| `SELF_HOSTED_RUNNER_POST_SESSION_HOOK_TIMEOUT_MS` | `60000` | — |
+| `SELF_HOSTED_RUNNER_POST_TURN_SETTLE_MS` | `7000` | — |
+| `SELF_HOSTED_RUNNER_PROXY_AUTHORIZATION_COMMAND` | unset | only one of the two proxy variables may be set |
+| `SELF_HOSTED_RUNNER_PROXY_AUTHORIZATION_FILE` | unset | the same |
+| `SELF_HOSTED_RUNNER_PUSH_OUTCOME_ON_RELEASE` | `false` | a boolean |
+| `SELF_HOSTED_RUNNER_REMOVE_SESSION_STATE` | `false` | a boolean |
+| `SELF_HOSTED_RUNNER_RETIRE_AT` | `0` (never) | a Unix timestamp in whole seconds, a safe integer in `[1e9, 1e11]` |
+| `SELF_HOSTED_RUNNER_SERVER_AUTO_MODE_LISTS` | `no-allow` | `all`/`no-allow`/`none` |
+| `SELF_HOSTED_RUNNER_SESSION_IDLE_MS` | `0` (never) | — |
+| `SELF_HOSTED_RUNNER_SESSION_STOP_GRACE_MS` | `5000` | — |
+| `SELF_HOSTED_RUNNER_SIGKILL_GRACE_MS` | `30000` | — |
+| `SELF_HOSTED_RUNNER_STARTUP_TIMEOUT_MS` | `900000` | — |
+| `SELF_HOSTED_RUNNER_TRUST_WORKSPACE` | `true` | a boolean |
+
+**The four the target refuses or ignores**, with the target's own behaviour:
+
+| variable | the target |
+|---|---|
+| `SELF_HOSTED_RUNNER_SIGKILL_TIMEOUT_MS` | **fatal** — it was renamed to `SELF_HOSTED_RUNNER_SESSION_STOP_GRACE_MS`, and the runner exits 1 |
+| `SELF_HOSTED_RUNNER_RELEASE_IDLE_SESSION_MIN` | **ignored**, with a warning |
+| `SELF_HOSTED_RUNNER_SESSION_IDLE_MIN` | **ignored**, with a warning |
+| `SELF_HOSTED_RUNNER_SESSION_IDLE_SEC` | **ignored**, with a warning |
+
+Two names under the same prefix are **not** environment variables:
+`SELF_HOSTED_RUNNER_TOOLS` is the export name of the tool array, and
+`SELF_HOSTED_RUNNER_PLAN` is the export name of the runner's home-seed plan.
+
+### The protocol, the registration and the lifecycle
+
+The runner's own protocol is **ten** calls, and the five account-side tools
+call five more. The full table, with the target's own timeouts, is in
+`src/tools/builtins/selfHostedRunner.ts` and in the findings.
+
+| what | the target's own statement | this implementation |
+|---|---|---|
+| the runner's calls | `POST /v1/code/runners/self-hosted/runners/register`, `…/spawn-hints/poll`, `…/spawn-hints/nack`, `…/runners/{id}/poll`, `…/sessions/{id}/token`, `…/sessions/{id}/report-failure`, `…/sessions/{id}/release`, `…/deregister`, `POST /v1/code/auth/refresh`, and the `…/runners/{id}/work-hints/stream` event stream | **recorded, not reproduced** — there is no runner here |
+| the headers | `anthropic-version: 2023-06-01` and `x-self-hosted-runner-version: 2.1.303` on every call | **recorded** |
+| the auth chain | the environment secret → `runner_token` → `session_token` → inference, in four tokens | **recorded** |
+| the registration body | `{ runner_version, use_anthropic_git_proxy, server_auto_mode_lists, client_label?, lock_to_account_id? }` | **recorded** |
+| the account-side tools' endpoints | `GET …/pools/{pool_id}`, `GET …/pools/{pool_id}/sessions`, `GET …/runners?pool_id=`, `GET …/pools/{pool_id}/secrets`, `POST …/sessions/{session_id}/requeue` | **recorded**; the tools refuse |
+| the account-side tools' transport | the operator's OAuth session, `anthropic-version: 2023-06-01`, a 20 000 ms timeout, and a 403 when the provider is not the first-party one | **recorded**; the tools refuse |
+| the metrics the tool parses | the `claude_code_self_hosted_runner_*` Prometheus gauges, less every `*_bucket`, `session_idle_seconds` and `poll_errors_total` | **recorded**; the tool refuses |
+| the CLI tree | `self-hosted-runner` and its five subcommands — `orchestrator`, `setup`, `doctor`, `code-sign`, `decode-token` | **not shipped**: there is no runner to orchestrate, set up, diagnose, sign or decode |
+| the gate | the nine tools exist only while the setup wizard's **one-way** latch is open | **not reproduced**: the tools are registered, and the latch has no counterpart here |
+
+### The clone's own choices on this surface
+
+- The **refusal** is this implementation's own. The target has a runner, so the
+  target never refuses; here the refusal is a typed `capabilityUnavailable` that
+  names the capability the tool needed.
+- The **capability names** are this implementation's own.
+- The **input validation** is this implementation's own: it checks the target's
+  schema — the required fields, the types, the bounds and the strictness — and
+  reports the typed codes the rest of this implementation reports.
+- The **environment-variable reader** is this implementation's own. The target's
+  reader lives inside the runner's own process, and the runner does not exist
+  here; what is reproduced is the *contract*.
+- The **product's own name** replaces the target's where the target's own text
+  names it, and nowhere else.
+
 ## Conformance table
 
 | Claim | Evidence class | Matrix row | Pinned by |
@@ -720,3 +858,33 @@ The standalone (non-plugin) skill directory scan was *"not traced to resolved re
 | An action is validated as a **single path segment** — no empty, `.`, `..`, `/`, `\` or NUL — before anything is sent | **implementation choice** | F-33 | same file — "refuses an action that is not a single path segment", "refuses an action that carries a path separator", "refuses an action that is empty, a dot, a dot-dot, or carries a separator or a NUL" |
 | An action outside the observed set is accepted, as a single path segment | **implementation choice** | F-33 | same file — "applies an action outside the observed set, as a single path segment" |
 | A request is never sent to a host that is not a loopback address | **implementation choice** | F-33 | same file — "refuses to send an IDE request to a host that is not a loopback address" |
+
+## The self-hosted runner — conformance
+
+The self-hosted runner surface was **absent from the coverage audit entirely**.
+It was closed by **reading the target's own source**, so the surface's facts
+are **REA observed**; the rows below name the part of each rule that is the
+target's and the part that is this implementation's. The measured outcome is in
+[`results.md`](results.md).
+
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The target ships **nine** runner tools, and this implementation carries all nine, in the target's own order | **REA observed** | F-17 | `tests/contracts/self-hosted-runner.test.ts` — "carries the target's nine runner tools, in the target's order" |
+| Each tool's **description** is the target's own text | **REA observed** | F-17 | same file — "carries the target's own descriptions" |
+| Each tool's **input schema** is the target's own, and it is a **strict** object | **REA observed** | F-17 | same file — "carries the target's own input schemas" |
+| The **result shapes**, the **endpoints** and the **Admin-UI paths** are the target's own | **REA observed** | F-17 | same file — "carries the target's result shapes, endpoints and Admin-UI paths" |
+| The seven read tools are read-only and concurrency safe; the two write tools are neither, and the target's own default for a tool that does not declare the flag is "not concurrency safe" | **REA observed** | F-17 | same file — "carries the target's read-only and concurrency flags" and "is concurrency safe only for the seven read tools" |
+| The **environment-variable surface** is **thirty-seven** names the runner reads — the record's list held thirty-one and called them thirty, and ten more are read through a variable | **REA observed** | F-17 | same file — "carries the target's environment-variable surface — thirty-seven names" |
+| The **defaults** and the **validation messages** are the target's own | **REA observed** | F-17 | same file — "carries the target's environment-variable defaults" and "validates the environment variables the way the target does" |
+| The four variables the target **refuses or ignores** are named, with the target's own behaviour and message | **REA observed** | F-17 | same file — "names the four environment variables the target refuses or ignores" |
+| The runner's **protocol** is ten calls, the request headers are the target's own, and the CLI tree has five subcommands | **REA observed** | F-38 | same file — "carries the target's runner protocol and the CLI subcommand tree" |
+| Every one of the nine **refuses**, with a typed failure that names the capability it needed | **implementation choice** (the refusal; the capability each tool needs is REA observed) | F-17 | same file — "refuses every runner tool and names the capability it needs" and "names the capability each runner tool needs in the refusal" |
+| No runner tool pretends to run a runner | **implementation choice** (deliberate) | F-17 | same file — "does not let a runner tool pretend to run a runner" |
+| The two write tools **ask**, with the target's own message, and a **deny rule** still blocks them | **REA observed** | F-20 | same file — "asks for the two write tools, with the target own message" and "lets a deny rule block the two write tools" |
+| A **whole-tool** allow rule does not apply to the two write tools | **REA observed** | F-20 | same file — "ignores a whole-tool allow rule for the two write tools" |
+| A call whose input does not match the target's schema is **rejected** | **implementation choice** (the validator) | F-17 | same file — "rejects a runner call whose input does not match the target own schema" |
+| No runner description names the target's product | **implementation choice** (the substitution) | F-17 | same file — "names no target product name in any runner description" |
+| The "don't ask again" affordance does not persist an always-allow rule for the two write tools | **REA observed** (the target's flag) + **not reproduced** (this implementation has no always-allow persistence) | F-20 | — |
+| The runner's **process**, its **registration** and the `self-hosted-runner` **subcommand tree** are **not** shipped | **implementation choice** — the honest boundary | F-38 | — |
+
+
