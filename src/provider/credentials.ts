@@ -1,5 +1,6 @@
 /**
- * Provider credential **references**.
+ * Provider credential **references**, and the **five authentication flows**
+ * that produce them.
  *
  * The **project's** rule (plan §Global Constraints, "Credentials are references
  * only") is that a credential is a *reference* and never a value: the provider
@@ -38,10 +39,29 @@
  * `KeychainBackend` interface keeps the layered shape so a native backend can be
  * added later without changing a single call site.
  *
+ * ## The five authentication flows (the second half of this module)
+ *
+ * Everything below the reference model is the **authentication surface**: the
+ * five sign-in paths the target has — first-party, local, MCP, SEP-990 and
+ * host/device/org — with their credential kinds, their storage, their state
+ * machines, their discriminators and their validation.
+ *
+ * **This implementation has no account and no login.** There is no OAuth
+ * client, no device flow, no OIDC provider and no token store here. What is
+ * reproduced is the **shape**: the discriminators, the state machines, the
+ * validation, the credential kinds and the storage. Every flow **refuses** when
+ * it is invoked, and every refusal **names the capability it needed**. Nothing
+ * here pretends to authenticate, and nothing here writes a credential.
+ *
  * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.1 (each route resolves
  * credentials in a distinct order: bearer-token environment variable → skip-auth →
  * AWS credential chain → provider-chain resolver) and the plan's Global
- * Constraints ("Credentials are references only").
+ * Constraints ("Credentials are references only"); and, for the flows, the pinned
+ * build's own source — `chunk-1kkch1sj.js` (the first-party flow), `chunk-dvjkd4rv.js`
+ * (the local endpoint table), `chunk-f2n7zke5.js` and `chunk-f8pz14g5.js` (the MCP
+ * flow), `chunk-3kc8svea.js` (the SEP-990 flow) and `chunk-grnjpsdz.js` and
+ * `chunk-c9s0jh80.js` (the host/device/org flow). The conformance table is
+ * `docs/compatibility/provider-catalog.md`.
  */
 
 import { access, stat } from 'node:fs/promises';
@@ -530,7 +550,12 @@ export const AUTH_FLOWS: Readonly<Record<AuthFlowKind, AuthFlowDescriptor>> = Ob
   },
   local: {
     kind: 'local',
-    targetNames: ['local OAuth endpoint table', 'USE_LOCAL_OAUTH', 'USE_STAGING_OAUTH'],
+    targetNames: [
+      'local OAuth endpoint table',
+      'CLAUDE_LOCAL_OAUTH_API_BASE',
+      'CLAUDE_LOCAL_OAUTH_APPS_BASE',
+      'CLAUDE_LOCAL_OAUTH_CONSOLE_BASE',
+    ],
     credentialKinds: ['oauth', 'apiKey'],
     states: FIRST_PARTY_AUTH_STATES,
     requiredCapability: 'local-oauth-server',
