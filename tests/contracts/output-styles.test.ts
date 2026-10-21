@@ -427,4 +427,19 @@ describe('the output-style command over a remote or relayed session', () => {
       "Custom output styles can't be selected over Remote Control or from a relayed message.",
     );
   });
+
+  it('reports a current style the registry does not hold as a custom one', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    await writeOutputStyleSetting(cwd, 'Gone');
+
+    const context = {
+      ...slashContext(cwd, configDir),
+      dispatchedOverBridge: true,
+    };
+    const result = await runSlashCommand('/output-style', context);
+
+    expect(result?.exitCode).toBe(0);
+    expect(result?.stdout).toContain('Output style: a custom style');
+  });
 });

@@ -489,10 +489,14 @@ export function outputStyleSelection(
   }
 
   const selectable = styles.filter((style) => isRemotelySelectableOutputStyle(style));
-  const currentStyle = styles.find((style) => style.name === current) ?? null;
-  const currentLabel = isRemotelySelectableOutputStyle(currentStyle)
-    ? current
-    : REMOTE_CURRENT_OUTPUT_STYLE_LABEL;
+  // The target reads the **registry's** entry for the current style, and a
+  // style the registry does not hold is not remotely selectable — so the
+  // current style is reported as a custom one.
+  const currentStyle = styles.find((style) => style.name === current);
+  const currentLabel =
+    currentStyle !== undefined && isRemotelySelectableOutputStyle(currentStyle)
+      ? current
+      : REMOTE_CURRENT_OUTPUT_STYLE_LABEL;
 
   return { styles: selectable, currentLabel, note: REMOTE_OUTPUT_STYLE_NOTE };
 }

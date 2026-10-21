@@ -52,6 +52,7 @@ import {
   AUTOUPDATE_FAILURE_CODES,
   AUTOUPDATE_SKIP_REASONS,
   classifyAutoupdate,
+  pluginUpdateOperationOf,
 } from '../../src/extensions/plugins/autoupdate.js';
 
 /* -------------------------------------------------------------------------- */
@@ -596,6 +597,25 @@ describe('the plugin autoupdater', () => {
     expect(result.updated).toBeUndefined();
     expect(result.failed).toBe(false);
     expect(result.blocked).toBeUndefined();
+  });
+
+  it('reads an update result out of a caller-supplied record', () => {
+    const operation = pluginUpdateOperationOf({
+      outcome: 'skipped',
+      pluginId: 'one@market',
+      oldVersion: '1.0.0',
+      skipReason: 'pinner_blocked',
+      blockedBy: ['other@market'],
+    });
+    expect(operation?.outcome).toBe('skipped');
+    expect(operation?.skipReason).toBe('pinner_blocked');
+    expect(operation?.blockedBy).toEqual(['other@market']);
+  });
+
+  it('reads no update result out of a record that names no outcome', () => {
+    expect(pluginUpdateOperationOf({ pluginId: 'one@market' })).toBeUndefined();
+    expect(pluginUpdateOperationOf({ outcome: 'not-an-outcome' })).toBeUndefined();
+    expect(pluginUpdateOperationOf('not a record')).toBeUndefined();
   });
 });
 
