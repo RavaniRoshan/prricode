@@ -31,6 +31,27 @@
  * follows the same rule: a delivery is recorded by **appending** an updated
  * row, and the last row for an id wins.
  *
+ * ## The compaction boundary is a record, and the store writes it like any other
+ *
+ * The target's compaction writes a **boundary row** — `type:"system"`,
+ * `subtype:"compact_boundary"`, `content:"Conversation compacted"` — that
+ * links to the last pre-compact message, and the rows before it stay in the
+ * file: the target's own resume takes the rows **after the last boundary**
+ * (`chunk-4jsg44k7.js` — `ZHo`, `1336966`).
+ *
+ * This implementation's transcript has its own vocabulary, and its boundary is
+ * a **`compaction` record** — it names the summary of the prefix it replaces
+ * and the **record** it hangs off. The store writes it the way it writes
+ * every other record: by **appending** it, with the store's own
+ * `transcriptSource` marker beside it. Nothing is rewritten and nothing is
+ * removed, so the pre-compact prefix is still in the file when the session is
+ * read back.
+ *
+ * The boundary is applied by the **projections**, not by this store's reader:
+ * the cross-turn projection (`resumeEvents`) and the between-turns load
+ * (`compactedContext`, in `src/session/compaction.ts`) both skip the prefix
+ * and lead the context with the summary.
+ *
  * ## A torn final line is discarded
  *
  * A process killed mid-append leaves a partial line at the end of the file. The

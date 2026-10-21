@@ -68,6 +68,7 @@ import { randomUUID } from 'node:crypto';
 import type { ProviderContentBlock, ProviderMessage } from '../provider/drivers/types.js';
 
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from './event.js';
+import { resumeEvents, type ContextItem } from './resume.js';
 
 /* -------------------------------------------------------------------------- */
 /* The trigger                                                                 */
@@ -486,6 +487,17 @@ export interface CompactSummaryOptions {
 }
 
 /**
+ * The options the **core** compaction's summary is built with.
+ *
+ * **Observed** — `chunk-4jsg44k7.js` `3176793` — `ubr` builds the summary with
+ * `suppressFollowUpQuestions` on; the directional `/compact` (`3182483` —
+ * `Xys`) builds it without them.
+ */
+export const COMPACT_CORE_SUMMARY_OPTIONS: CompactSummaryOptions = Object.freeze({
+  suppressFollowUpQuestions: true,
+});
+
+/**
  * The content of the summary message.
  *
  * **Observed** — `chunk-4jsg44k7.js` `3111343` — `function zZ(e,n)`.
@@ -670,11 +682,14 @@ export interface CompactOptions {
   /**
    * The summary of the dropped prefix — the **text the model produced**.
    *
-   * The record stores the summary's **message content** — the target's
-   * preamble, the normalised summary and the target's resume guidance — and
-   * that is the text the model receives. When it is absent, `compact` cannot
-   * mark a boundary and leaves the events alone: the summary is never produced
-   * locally.
+   * The record stores the summary the model produced, unchanged: the summary
+   * is the model's output, and the record is this implementation's own format.
+   * The **summary message** the model receives — the target's preamble, the
+   * normalised summary and the target's resume guidance — is built by
+   * `compactSummaryContent` when the context is projected.
+   *
+   * When it is absent, `compact` cannot mark a boundary and leaves the events
+   * alone: the summary is never produced locally.
    */
   summary?: string;
   /** The timestamp of the marker. */
@@ -692,8 +707,6 @@ export interface CompactOptions {
    * the record is.
    */
   parentId?: string;
-  /** What the summary's content depends on. */
-  summaryOptions?: CompactSummaryOptions;
 }
 
 /**
@@ -709,7 +722,7 @@ export interface CompactResult {
    */
   events: SessionEvent[];
   /**
-   * The summary's **message content** — the text the model receives — or
+   * The summary of the dropped prefix — the text the model produced — or
    * `undefined` when there is no boundary.
    */
   summary: string | undefined;
@@ -738,7 +751,6 @@ export function compact(events: SessionEvent[], opts: CompactOptions): CompactRe
     return { events: [...events], summary: undefined };
   }
 
-  const content = compactSummaryContent(summary, opts.summaryOptions);
   const replacedFrom = events.length - keepLast;
   const tail = events.slice(replacedFrom);
 
@@ -750,12 +762,12 @@ export function compact(events: SessionEvent[], opts: CompactOptions): CompactRe
     t: 'compaction',
     ts: opts.ts ?? Date.now(),
     id: opts.id ?? randomUUID(),
-    summary: content,
+    summary,
     replacedFrom,
     ...(parentId === undefined ? {} : { parentId }),
   };
 
-  return { events: [marker, ...tail], summary: content };
+  return { events: [marker, ...tail], summary };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -796,6 +808,36 @@ export function projectCompactedContext(parts: CompactedParts): ProviderMessage[
     ...(parts.attachments ?? []),
     ...(parts.hookResults ?? []),
   ];
+}
+
+/**
+ * The context a transcript projects into, with the **compaction boundary**
+ * applied.
+ *
+ * The boundary is located by the **link** the marker carries — never by a
+ * count — and the prefix it replaces is **skipped**, not deleted: the
+ * transcript keeps every record, and the context starts at the boundary. The
+ * summary **leads** the context, the target's projection order.
+ *
+ * The summary the model receives is the target's **summary message content**:
+ * the target's preamble, the summary the model produced (normalised out of
+ * its `<analysis>`/`<summary>` tags) and the target's resume guidance. The
+ * record keeps the model's own text; the content is built here, where the
+ * context becomes the request.
+ *
+ * The projection itself is the resume module's: the branch is selected, the
+ * content replacements are applied, and the summary and the records after the
+ * boundary become the context. Reading it here — rather than in a second
+ * place — is what keeps the between-turns load and the cross-turn resume
+ * from disagreeing about where a compacted conversation starts.
+ */
+export function compactedContext(events: SessionEvent[]): ContextItem[] {
+  const context = resumeEvents(events).context;
+  for (const item of context) {
+    if (item.type !== 'summary') continue;
+    item.text = compactSummaryContent(item.text, COMPACT_CORE_SUMMARY_OPTIONS);
+  }
+  return context;
 }
 
 /* -------------------------------------------------------------------------- */

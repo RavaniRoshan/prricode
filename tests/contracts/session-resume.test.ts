@@ -41,7 +41,7 @@ import {
   type SessionResumePrintTelemetry,
   type SessionResumedTelemetry,
 } from '../../src/session/resume.js';
-import { compact } from '../../src/session/compaction.js';
+import { compact, compactedContext, COMPACT_SUMMARY_PREAMBLE } from '../../src/session/compaction.js';
 
 const CWD = '/home/user/project';
 
@@ -389,6 +389,44 @@ describe('the compaction boundary', () => {
     expect(summary).toBeUndefined();
     // Without a summary there is no boundary to mark, and nothing is dropped.
     expect(compacted).toEqual(events);
+  });
+
+  it('projects the summary the model receives as the target\'s summary message', () => {
+    // The target's summary is a **user** message whose content is its
+    // preamble, the summary the model produced and its resume guidance — the
+    // reading's §3.2. The record keeps the model's own text; the message is
+    // built where the context becomes the request.
+    const events = [
+      userMessage('m0', 'one', 1000),
+      assistantMessage('m1', 'two', 1100, 'm0'),
+      assistantMessage('m2', 'three', 1200, 'm1'),
+    ];
+    const { events: compacted } = compact(events, {
+      keepLast: 1,
+      summary: 'the earlier conversation',
+      ts: 5000,
+      id: 'cmp_1',
+    });
+
+    const context = compactedContext(compacted);
+    const summary = context[0];
+    expect(summary?.type).toBe('summary');
+    if (summary?.type !== 'summary') throw new Error('expected a summary');
+    // The **target's** preamble, spelled out: the constant would make the
+    // assertion circular.
+    expect(summary.text.startsWith(
+      'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nthe earlier conversation',
+    )).toBe(true);
+
+    // The summary leads the context, and the messages that follow the boundary
+    // are the ones that survive.
+    const messages = context.filter((item) => item.type === 'message');
+    expect(messages.map((item) => (item.type === 'message' ? item.eventIds : []))).toEqual([['m2']]);
+
+    // And it is a **user** message on the wire.
+    const wire = contextToProviderMessages(context);
+    expect(wire[0]?.role).toBe('user');
+    expect(JSON.stringify(wire[0]?.content)).toContain(COMPACT_SUMMARY_PREAMBLE);
   });
 
   it('skips the pre-compact prefix when reading and does not delete it from the file', async () => {

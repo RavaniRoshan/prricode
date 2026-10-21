@@ -197,9 +197,9 @@
  * The content-replacement mechanism exists so that an oversized tool result
  * does not come back into the **context**. The store writes the payload
  * **verbatim** and a content-replacement record beside it, and the two
- * **projection** paths — the between-turns load (`conversationFromEvents`) and
- * the cross-turn projection (`resumeEvents`) — apply the replacement when they
- * project the transcript.
+ * **projection** paths — the between-turns load (`compactedContext`, in
+ * `src/session/compaction.ts`) and the cross-turn projection (`resumeEvents`)
+ * — apply the replacement when they project the transcript.
  *
  * The **within-turn** push applies it as well. The turn the tool ran is the
  * turn an oversized payload matters most in: it is the turn that would blow up.
@@ -253,7 +253,23 @@ import type {
   StopReason,
   Usage,
 } from '../provider/drivers/types.js';
+import {
+  COMPACT_CORE_SUMMARY_OPTIONS,
+  COMPACT_PROMPT_TOO_LONG,
+  COMPACT_PROMPT_TOO_LONG_RETRIES,
+  COMPACT_SUMMARY_SYSTEM_PROMPT,
+  autoCompactDecision,
+  bytesPerTokenFor,
+  compact,
+  compactRetryMessages,
+  compactSummaryContent,
+  compactSummaryPrompt,
+  compactedContext,
+  estimateConversationTokens,
+  projectCompactedContext,
+} from '../session/compaction.js';
 import { SESSION_SCHEMA_VERSION, type SessionEvent } from '../session/event.js';
+import { contextToProviderMessages } from '../session/resume.js';
 import {
   DEFAULT_MAX_TOOL_RESULT_BYTES,
   contentReplacementStub,
@@ -267,7 +283,9 @@ import { runTool, withLegacyEnvelopeNames, type ToolResultEnvelope } from '../to
 import {
   buildProviderRequest,
   buildProviderTools,
-  conversationFromEvents,
+  dropEmptyMessages,
+  dropUnansweredToolUses,
+  mergeUserMessages,
   pushAssistant,
   pushToolResults,
   pushUserText,
@@ -293,6 +311,15 @@ export interface TurnInput {
   sessionId: string;
   /** The model the turn runs on. */
   model: string;
+  /**
+   * The context window of the model, in tokens.
+   *
+   * The compaction trigger is a threshold on the conversation's size, and the
+   * threshold is a function of the model's own context window — so a turn that
+   * does not know the window cannot decide whether to compact. It overrides
+   * the runtime's own `contextWindow`.
+   */
+  contextWindow?: number;
 }
 
 /**
@@ -450,6 +477,35 @@ export interface AgentRuntimeDeps {
   now?: () => number;
   /** The id factory of the records the runtime writes. */
   idFactory?: () => string;
+  /**
+   * The context window of the model a turn runs on, in tokens.
+   *
+   * The compaction trigger measures the conversation against the model's own
+   * window, so a runtime that is not told the window **never compacts** — the
+   * threshold would be undefined. A turn's own `contextWindow` overrides it.
+   */
+  contextWindow?: number;
+  /**
+   * The configured auto-compact window — the target's `autoCompactWindow`
+   * setting.
+   *
+   * It is capped at the model's own context window, the way the target's
+   * window resolver caps it.
+   */
+  autoCompactWindow?: number;
+  /**
+   * Whether auto-compaction is switched on — the target's `autoCompactEnabled`
+   * setting, **on** by default.
+   */
+  autoCompactEnabled?: boolean;
+  /**
+   * The model's own output-token limit.
+   *
+   * The trigger's reserve is `min(modelMaxOutputTokens, 20000)`, the target's
+   * `min(e.maxOutputTokens, 20000)`. It defaults to the request's
+   * output-token budget.
+   */
+  modelMaxOutputTokens?: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -669,7 +725,24 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
       // The conversation is projected from the transcript **before** the prompt
       // is appended: the transcript is the source of truth, and the prompt is
       // the one message this turn adds.
-      const conversation = await loadConversation(handle);
+      let { conversation, records } = await loadConversation(handle);
+
+      // The compaction trigger. The target evaluates it **once per query,
+      // before the first request** — the query loop's `message_prep` phase
+      // calls `autocompact` before the round loop begins — and the threshold
+      // is a function of the model's own context window.
+      //
+      // The compaction happens **before** the prompt is appended: the summary
+      // covers the earlier conversation, and the prompt itself is never
+      // summarised away.
+      const compacted = await compactConversation(
+        conversation,
+        records,
+        input,
+        signal,
+        append,
+      );
+      if (compacted !== undefined) conversation = compacted;
 
       // The prompt is recorded first: the turn exists in the transcript even
       // when the provider never answers it.
@@ -900,11 +973,128 @@ export function createAgentRuntime(deps: AgentRuntimeDeps): AgentRuntime {
 
   /**
    * The conversation of a session, projected from its transcript.
+   *
+   * The **compaction boundary** is applied here: a compacted transcript
+   * projects its summary and the records after the boundary, and the
+   * pre-compact prefix never comes back — it is skipped, never deleted. The
+   * boundary is located by the **link** the marker carries, so the summary
+   * leads the context and the records that follow it survive.
    */
-  async function loadConversation(handle: SessionHandle): Promise<ProviderMessage[]> {
+  async function loadConversation(
+    handle: SessionHandle,
+  ): Promise<{ conversation: ProviderMessage[]; records: SessionEvent[] }> {
     const records: SessionEvent[] = [];
     for await (const event of deps.store.read(handle)) records.push(event);
-    return conversationFromEvents(records);
+    const context = compactedContext(records);
+    dropUnansweredToolUses(context);
+    dropEmptyMessages(context);
+    return { conversation: mergeUserMessages(contextToProviderMessages(context)), records };
+  }
+
+  /**
+   * Compact the conversation, when the trigger says so.
+   *
+   * The trigger is the target's: the conversation's **estimated token count**
+   * against a threshold that is a function of the model's own context window.
+   * A runtime that is not told the window never compacts, and a runtime whose
+   * auto-compaction is switched off never compacts.
+   *
+   * The compaction itself is the target's **core** compaction:
+   *
+   *   - the summary is produced by the **model**, in a separate one-turn
+   *     request whose tools are stripped and which is never written to the
+   *     transcript;
+   *   - the whole pre-compact conversation is replaced by the summary — the
+   *     core path keeps no tail;
+   *   - the boundary is a marker **record**, appended to the transcript; the
+   *     prefix stays in the file and is skipped on read;
+   *   - when the summarization comes back too long, the **head** of the
+   *     conversation is dropped and the request is retried, at most three
+   *     times; after that the compaction is given up and the turn carries on
+   *     with the conversation it had.
+   */
+  async function compactConversation(
+    conversation: ProviderMessage[],
+    records: SessionEvent[],
+    input: TurnInput,
+    signal: AbortSignal | undefined,
+    append: (event: SessionEvent) => Promise<void>,
+  ): Promise<ProviderMessage[] | undefined> {
+    const contextWindow = input.contextWindow ?? deps.contextWindow;
+    if (contextWindow === undefined) return undefined;
+    if (deps.autoCompactEnabled === false) return undefined;
+
+    const tokens = estimateConversationTokens(
+      conversation,
+      bytesPerTokenFor(input.model),
+    );
+    const decision = autoCompactDecision(tokens, {
+      contextWindow,
+      maxOutputTokens: deps.modelMaxOutputTokens ?? maxTokens,
+      ...(deps.autoCompactWindow === undefined ? {} : { configuredWindow: deps.autoCompactWindow }),
+      enabled: true,
+    });
+    if (decision.level !== 'compact' && decision.level !== 'blocked') return undefined;
+
+    // The summarization request. One turn, no tools, and it is never written
+    // to the transcript — the target's `skipTranscript`.
+    let toSummarize = conversation;
+    for (let attempt = 0; attempt <= COMPACT_PROMPT_TOO_LONG_RETRIES; attempt += 1) {
+      const request = buildProviderRequest({
+        model: input.model,
+        maxTokens,
+        messages: [...toSummarize, { role: 'user', content: compactSummaryPrompt() }],
+        tools: [],
+        system: COMPACT_SUMMARY_SYSTEM_PROMPT,
+      });
+      const collected = await collect(request, signal, discard);
+      if (collected.kind === 'aborted') return undefined;
+      if (collected.kind === 'error') return undefined;
+
+      const summary = summarise(collected.events);
+      if (summary.error !== undefined) {
+        // The API refused. The target recognises one refusal in particular —
+        // "prompt is too long" — and answers it by dropping the head of the
+        // conversation and retrying.
+        if (!summary.error.message.startsWith(COMPACT_PROMPT_TOO_LONG)) return undefined;
+        const retry = compactRetryMessages(toSummarize);
+        if (retry === null) return undefined;
+        toSummarize = retry;
+        continue;
+      }
+      if (summary.text === '') return undefined;
+
+      // The boundary. The marker is a record of the transcript; the prefix it
+      // replaces stays in the file and is skipped on read.
+      const result = compact(records, { keepLast: 0, summary: summary.text, ts: now() });
+      const marker = result.events[0];
+      if (marker === undefined || result.summary === undefined) return undefined;
+      await append(marker);
+
+      // The projection: the summary leads, and the core path keeps no tail.
+      // The text the model receives is the target's summary **message
+      // content** — its preamble, the summary and its resume guidance.
+      return projectCompactedContext({
+        summary: [
+          {
+            role: 'user',
+            content: compactSummaryContent(summary.text, COMPACT_CORE_SUMMARY_OPTIONS),
+          },
+        ],
+      });
+    }
+    return undefined;
+  }
+
+  /**
+   * Discard a record.
+   *
+   * The summarization request is **not** written to the transcript: the target
+   * sends it with `skipTranscript`, so the stream of the summarization never
+   * reaches the session's records.
+   */
+  async function discard(_event: SessionEvent): Promise<void> {
+    // The summarization is not part of the transcript.
   }
 
   /**
