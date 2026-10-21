@@ -1118,6 +1118,220 @@ export function validateSignInScopes(
 }
 
 // ---------------------------------------------------------------------------
+// The first-party credential-kind discriminator
+// ---------------------------------------------------------------------------
+
+/**
+ * The credential kinds the target's own `auth status` command reports.
+ *
+ * **REA observed** — `chunk-1kkch1sj.js` derives exactly these six, in a
+ * fixed priority order.
+ */
+export type FirstPartyAuthMethod =
+  /** Nothing is configured. */
+  | 'none'
+  /** The session is served by a third party. */
+  | 'third_party'
+  /** A sign-in against the subscription. */
+  | 'claude.ai'
+  /** A key the helper script produces. */
+  | 'api_key_helper'
+  /** An OAuth token that is not one of the two above. */
+  | 'oauth_token'
+  /** An API key. */
+  | 'api_key';
+
+/** The six credential kinds the first-party flow reports. */
+export const FIRST_PARTY_AUTH_METHODS: readonly FirstPartyAuthMethod[] = Object.freeze([
+  'none',
+  'third_party',
+  'claude.ai',
+  'api_key_helper',
+  'oauth_token',
+  'api_key',
+] as const);
+
+/** The input to the first-party credential-kind discriminator. */
+export interface FirstPartyAuthMethodInput {
+  /** Whether the session is served by a third party. */
+  thirdParty?: boolean | undefined;
+  /**
+   * Whether the session uses a Cloud gateway and has no gateway login.
+   *
+   * The target treats that case as **not** third-party: the gateway is its own
+   * thing.
+   */
+  gatewayWithoutLogin?: boolean | undefined;
+  /** The token source — `claude.ai`, `apiKeyHelper`, `none`, or another name. */
+  tokenSource?: string | undefined;
+  /** The API-key source — `ANTHROPIC_API_KEY`, `apiKeyHelper`, `/login managed key`, or `none`. */
+  apiKeySource?: string | undefined;
+  /** Whether the environment holds an `ANTHROPIC_API_KEY`. */
+  environmentApiKey?: boolean | undefined;
+  /** Whether the key helper is configured while the token source is `none`. */
+  helperWithoutToken?: boolean | undefined;
+}
+
+/** What the first-party credential-kind discriminator decided. */
+export interface FirstPartyAuthDecision {
+  /** The credential kind. */
+  authMethod: FirstPartyAuthMethod;
+  /** Whether the session counts as signed in. */
+  loggedIn: boolean;
+}
+
+/**
+ * Decide which credential kind a session holds, and whether it counts as
+ * signed in.
+ *
+ * **REA observed** — the target's own order:
+ *
+ *   1. a third-party session is `third_party`, and a gateway session with no
+ *      gateway login is `none`;
+ *   2. the token source decides: `claude.ai`, then `api_key_helper`, then
+ *      `oauth_token` for any other source that is not `none`;
+ *   3. the API-key source decides: `api_key` for `ANTHROPIC_API_KEY`, for an
+ *      environment key, or for the `/login managed key` source, and
+ *      `api_key_helper` when the helper is configured and there is no token.
+ */
+export function classifyFirstPartyAuth(
+  input: FirstPartyAuthMethodInput,
+): FirstPartyAuthDecision {
+  const tokenSource = input.tokenSource ?? 'none';
+  const apiKeySource = input.apiKeySource ?? 'none';
+  const environmentApiKey = input.environmentApiKey === true;
+
+  let authMethod: FirstPartyAuthMethod;
+  if (input.thirdParty === true) {
+    authMethod = input.gatewayWithoutLogin === true ? 'none' : 'third_party';
+  } else if (tokenSource === 'claude.ai') {
+    authMethod = 'claude.ai';
+  } else if (tokenSource === 'apiKeyHelper') {
+    authMethod = 'api_key_helper';
+  } else if (tokenSource !== 'none') {
+    authMethod = 'oauth_token';
+  } else if (
+    apiKeySource === 'ANTHROPIC_API_KEY' ||
+    environmentApiKey ||
+    apiKeySource === '/login managed key'
+  ) {
+    authMethod = 'api_key';
+  } else if (apiKeySource === 'apiKeyHelper' && input.helperWithoutToken === true) {
+    authMethod = 'api_key_helper';
+  } else {
+    authMethod = 'none';
+  }
+
+  const loggedIn =
+    input.gatewayWithoutLogin !== true &&
+    (tokenSource !== 'none' ||
+      apiKeySource !== 'none' ||
+      environmentApiKey ||
+      input.thirdParty === true);
+
+  return { authMethod, loggedIn };
+}
+
+/**
+ * The shape of the target's `auth status` document.
+ *
+ * **REA observed** — `chunk-1kkch1sj.js` emits exactly these members, and the
+ * optional ones only when they apply.
+ */
+export interface FirstPartyAuthStatus {
+  loggedIn: boolean;
+  authMethod: FirstPartyAuthMethod;
+  apiProvider: string;
+  analyticsDisabled: boolean;
+  projectsDirectory: string | null;
+  configDirectory: string;
+  forcedLoginMethod?: LoginMethod;
+  allowedProviders?: readonly string[];
+  apiKeySource?: string | null;
+  email?: string | null;
+  orgId?: string | null;
+  orgName?: string | null;
+  subscriptionType?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// The credential store
+// ---------------------------------------------------------------------------
+
+/**
+ * The states a read of the target's credential file can report.
+ *
+ * **REA observed** — `chunk-mm3r1yz6.js`.
+ */
+export type CredentialStoreState =
+  /** There is no credential file. */
+  | 'absent'
+  /** The file is there but could not be read; the state carries the code. */
+  | 'read-failed'
+  /** The file is not a credential file: too large, not JSON, or not a file. */
+  | 'corrupt'
+  /** The path is a symlink, and the target does not follow it. */
+  | 'refused-symlink'
+  /** The file was read. */
+  | 'present';
+
+/**
+ * The shape of the target's credential store.
+ *
+ * **REA observed** — `chunk-mm3r1yz6.js`:
+ *
+ *   - the file is `<configuration root>/.credentials.json`;
+ *   - it is written with mode `0600`;
+ *   - it is opened with `O_NOFOLLOW`, so a symlink is **refused** rather than
+ *     followed;
+ *   - it is read with a **1 MiB** ceiling, and a larger file is `corrupt`.
+ *
+ * **This implementation ships no token store.** Nothing here writes a
+ * credential: the descriptor records the *shape* the target uses, so a reader
+ * of this implementation knows where a credential would live and how it would
+ * be protected.
+ */
+export interface CredentialStoreDescriptor {
+  /** The file name, under the configuration root. */
+  fileName: string;
+  /** The mode the target writes it with. */
+  mode: number;
+  /** The largest credential file the target reads. */
+  maxBytes: number;
+  /** The states a read can report. */
+  states: readonly CredentialStoreState[];
+  /** The record keys the target writes into it. */
+  recordKeys: readonly string[];
+  /** The suffixes of the single-credential files the target also reads. */
+  fileSuffixes: readonly string[];
+}
+
+/** The target's credential store, as a shape. */
+export const CREDENTIAL_STORE: CredentialStoreDescriptor = Object.freeze({
+  fileName: '.credentials.json',
+  mode: 0o600,
+  maxBytes: 1_048_576,
+  states: Object.freeze([
+    'absent',
+    'read-failed',
+    'corrupt',
+    'refused-symlink',
+    'present',
+  ] as const),
+  recordKeys: Object.freeze([
+    'claudeAiOauth',
+    'mcpXaaIdp',
+    'mcpXaaIdpConfig',
+    'trustedDeviceToken',
+  ] as const),
+  fileSuffixes: Object.freeze([
+    '.oauth_token',
+    '.api_key',
+    '.session_ingress_token',
+  ] as const),
+});
+
+// ---------------------------------------------------------------------------
 // The pure helpers
 // ---------------------------------------------------------------------------
 

@@ -35,10 +35,13 @@ import {
   AUTH_CREDENTIALS,
   AUTH_FLOW_KINDS,
   AUTH_FLOWS,
+  CREDENTIAL_STORE,
+  FIRST_PARTY_AUTH_METHODS,
   LOGIN_METHODS,
   MCP_BLOCKED_LOCAL_OAUTH_HOSTS,
   authIssuerKey,
   beginAuthFlow,
+  classifyFirstPartyAuth,
   classifyLoginMethod,
   classifyMcpAuthSource,
   classifyMcpServerAuth,
@@ -479,6 +482,105 @@ describe('the validation the target performs', () => {
       validateSignInScopes(['user:inference'], true, Number.NaN),
     ).toContain("without the token's expiry");
     expect(validateSignInScopes(['user:inference'], true, 1)).toBeUndefined();
+  });
+});
+
+describe('the first-party credential-kind discriminator', () => {
+  it('names exactly the six kinds the target reports', () => {
+    expect([...FIRST_PARTY_AUTH_METHODS]).toEqual([
+      'none',
+      'third_party',
+      'claude.ai',
+      'api_key_helper',
+      'oauth_token',
+      'api_key',
+    ]);
+  });
+
+  it('reports a third-party session', () => {
+    expect(classifyFirstPartyAuth({ thirdParty: true }).authMethod).toBe('third_party');
+  });
+
+  it('reports a gateway session with no login as none', () => {
+    expect(
+      classifyFirstPartyAuth({ thirdParty: true, gatewayWithoutLogin: true }).authMethod,
+    ).toBe('none');
+  });
+
+  it('reports the subscription sign-in', () => {
+    expect(classifyFirstPartyAuth({ tokenSource: 'claude.ai' }).authMethod).toBe('claude.ai');
+  });
+
+  it('reports the key helper', () => {
+    expect(classifyFirstPartyAuth({ tokenSource: 'apiKeyHelper' }).authMethod).toBe(
+      'api_key_helper',
+    );
+    expect(
+      classifyFirstPartyAuth({ apiKeySource: 'apiKeyHelper', helperWithoutToken: true })
+        .authMethod,
+    ).toBe('api_key_helper');
+  });
+
+  it('reports an OAuth token that is neither of the two above', () => {
+    expect(classifyFirstPartyAuth({ tokenSource: 'something-else' }).authMethod).toBe(
+      'oauth_token',
+    );
+  });
+
+  it('reports an API key', () => {
+    expect(classifyFirstPartyAuth({ apiKeySource: 'ANTHROPIC_API_KEY' }).authMethod).toBe(
+      'api_key',
+    );
+    expect(classifyFirstPartyAuth({ environmentApiKey: true }).authMethod).toBe('api_key');
+    expect(classifyFirstPartyAuth({ apiKeySource: '/login managed key' }).authMethod).toBe(
+      'api_key',
+    );
+  });
+
+  it('reports nothing when nothing is configured', () => {
+    const decision = classifyFirstPartyAuth({});
+    expect(decision.authMethod).toBe('none');
+    expect(decision.loggedIn).toBe(false);
+  });
+
+  it('counts a third-party session as signed in', () => {
+    expect(classifyFirstPartyAuth({ thirdParty: true }).loggedIn).toBe(true);
+  });
+
+  it('does not count a gateway session with no login as signed in', () => {
+    expect(
+      classifyFirstPartyAuth({ thirdParty: true, gatewayWithoutLogin: true }).loggedIn,
+    ).toBe(false);
+  });
+});
+
+describe('the credential store shape', () => {
+  it('names the file, the mode and the ceiling the target uses', () => {
+    expect(CREDENTIAL_STORE.fileName).toBe('.credentials.json');
+    expect(CREDENTIAL_STORE.mode).toBe(0o600);
+    expect(CREDENTIAL_STORE.maxBytes).toBe(1_048_576);
+  });
+
+  it('reports the states a read can have', () => {
+    expect([...CREDENTIAL_STORE.states]).toEqual([
+      'absent',
+      'read-failed',
+      'corrupt',
+      'refused-symlink',
+      'present',
+    ]);
+  });
+
+  it('names the record keys and the single-credential file suffixes', () => {
+    expect(CREDENTIAL_STORE.recordKeys).toContain('claudeAiOauth');
+    expect(CREDENTIAL_STORE.recordKeys).toContain('mcpXaaIdp');
+    expect(CREDENTIAL_STORE.recordKeys).toContain('mcpXaaIdpConfig');
+    expect(CREDENTIAL_STORE.recordKeys).toContain('trustedDeviceToken');
+    expect([...CREDENTIAL_STORE.fileSuffixes]).toEqual([
+      '.oauth_token',
+      '.api_key',
+      '.session_ingress_token',
+    ]);
   });
 });
 

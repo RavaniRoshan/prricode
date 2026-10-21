@@ -178,6 +178,106 @@ This is the load-bearing rule of the catalog surface, and it is what keeps a ref
 
 A **user override** of a catalog-owned field lives in its **own** record and survives a refresh, because the refresh rewrites the catalog and not the overrides.
 
+## The five authentication flows
+
+**Target:** the pinned reference build `2.1.303`. The target has **five** distinct sign-in
+paths, and they are not five spellings of one path: they differ in who issues the credential,
+in what the credential is, in where it is stored, and in what the flow needs in order to run.
+
+| Flow | The target's own names | Credential kinds | What it needs |
+|---|---|---|---|
+| `firstParty` | `claude auth login`, `claude auth status`, `claude auth logout`, `setup-token` | an OAuth access/refresh token, an API key | a registered OAuth client and a browser |
+| `local` | the local endpoint table, `USE_LOCAL_OAUTH`, `USE_STAGING_OAUTH` | an OAuth access/refresh token, an API key | a local OAuth server and a client registered with it |
+| `mcp` | `claude mcp login`, `claude mcp logout` | an MCP server's own OAuth token | the server's RFC 8414 registration and a browser |
+| `sep990` | `claude mcp xaa setup｜login｜show｜clear` | an `id_token`, an IdP client secret | an OIDC identity provider |
+| `hostDeviceOrg` | `CLAUDE_CODE_HOST_AUTH_ENV_VAR`, `CLAUDE_TRUSTED_DEVICE_TOKEN`, `forceLoginMethod` | a host-supplied credential, a trusted-device token | the host application, or an enrolled device |
+
+**This implementation has no account and no login.** There is no OAuth client, no device flow,
+no OIDC provider and no token store here. What it reproduces is the **shape** — the
+discriminators, the state machines, the validation, the credential kinds and the storage — and
+every flow **refuses** when it is invoked, and every refusal **names the capability it needed**.
+Nothing pretends to authenticate.
+
+### The state machines
+
+Each flow's states are the target's own, and each is a *form* rather than a running machine.
+
+| Flow | The states |
+|---|---|
+| `firstParty`, `local` | `idle`, `ready_to_start`, `console_method`, `platform_setup`, `waiting_for_login`, `polling`, `about_to_retry`, `success`, `storage_failed`, `error`, `account_on_hold`, `confirm_account` |
+| `mcp` | `server_not_found`, `server_pending_approval`, `server_rejected`, `server_config_error`, `unsupported_transport`, `anthropic_hosted`, `claudeai_proxy`, `no_login_required`, `awaiting_redirect`, `cancelled`, `succeeded` |
+| `sep990` | `url_input`, `connecting`, `trust_prompt`, `polling`, `token_cached`, `error` |
+| `hostDeviceOrg` | `host_managed`, `device_enrollment_required`, `device_enrollment_disabled`, `org_pinned`, `not_applicable` |
+
+The first-party and the local flow **share** their states: they are the same machine over two
+different endpoint tables, and the target switches between the tables rather than between two
+machines.
+
+### The discriminators
+
+| Discriminator | The target's rule | Matrix row | Pinned by |
+|---|---|---|---|
+| the login method | the managed settings can pin exactly three — `claudeai`, `console`, `gateway`; the forced method wins over the flags; a declared `gateway` is **suppressed** unless the host application manages the machine; a declared method that disagrees with the chosen one is reported | F-11 | `tests/contracts/auth-flows.test.ts` — "the login-method discriminator" |
+| the MCP server kind | four kinds — `claudeai-proxy`, `unsupported-transport`, `anthropic-hosted`, `oauth` — decided in that order; the vendor-hosted case names the server and, when the record's scope allows it, the removal command | F-11 | same file — "the MCP server discriminator" |
+| the MCP auth source | four sources — `static_auth_header`, `first_party_auth`, `first_party_design_auth`, `none` — checked in that order; every source but `none` means there is **no login to perform** | F-11 | same file — "the MCP auth-source discriminator" |
+| the flow detector | the first-party flow always applies; the local flow applies when a local endpoint variable or a local/staging switch is set; the MCP flow when there are servers to sign in to; the SEP-990 flow when the IdP is configured; the host/device/org flow when the host supplies a credential, a trusted-device token is present, or an organization is pinned | F-11 | same file — "the flow detector" |
+| the first-party credential kind | exactly six — `none`, `third_party`, `claude.ai`, `api_key_helper`, `oauth_token`, `api_key` — decided in that order, with the `loggedIn` predicate beside it | F-11 | same file — "the first-party credential-kind discriminator" |
+
+### The validation
+
+Each rule is the target's own, and each carries the target's message.
+
+| Rule | Message | Matrix row | Pinned by |
+|---|---|---|---|
+| the SEP-990 issuer must be `https:`, except on loopback | `Error: --issuer must be a valid URL (got "…")` / `Error: --issuer must use https:// (got "…")` | F-11 | `tests/contracts/auth-flows.test.ts` — "requires an https issuer, except on loopback" |
+| the fixed callback port | `Error: --callback-port must be an integer in [1, 65535]` | F-11 | same file — "bounds the callback port" |
+| the IdP client secret comes from the environment, never the command line | `Error: --client-secret requires MCP_XAA_IDP_CLIENT_SECRET env var` | F-11 | same file — "reads the IdP client secret from the environment, never the command line" |
+| what an `--xaa` server is still missing | `Error: --xaa requires: --client-id, --client-secret, 'claude mcp xaa setup' (settings.xaaIdp not configured)` | F-11 | same file — "lists every requirement an --xaa server is missing" |
+| the login flags are mutually exclusive | `Error: --console and --claudeai cannot be used together.` | F-11 | same file — "refuses --console together with --claudeai" |
+| a custom OAuth endpoint must be on the approved list | `CLAUDE_CODE_CUSTOM_OAUTH_URL is not an approved endpoint.` | F-11 | same file — "refuses a custom OAuth URL that is not on the approved list" |
+| a refresh token needs its scopes | `CLAUDE_CODE_OAUTH_SCOPES is required when using CLAUDE_CODE_OAUTH_REFRESH_TOKEN.` | F-11 | same file — "requires scopes with a refresh token" |
+| a sign-in that cannot be used is refused, for one of three reasons | no inference access, no refresh token, no expiry | F-11 | same file — "refuses a sign-in that cannot be refreshed" |
+
+### The credential kinds and the storage
+
+The credential kinds carry the target's own record keys and variable names: `claudeAiOauth`,
+`mcpXaaIdp`, `mcpXaaIdpConfig` and `trustedDeviceToken` in the credential file, and the variables
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `MCP_XAA_IDP_CLIENT_SECRET`,
+`CLAUDE_CODE_HOST_AUTH_ENV_VAR` and `CLAUDE_TRUSTED_DEVICE_TOKEN` in the environment.
+
+**The trusted-device variable is `CLAUDE_TRUSTED_DEVICE_TOKEN`, not
+`CLAUDE_CODE_TRUSTED_DEVICE_TOKEN`.** The untouched-surface record has the wrong name, and the
+name is load-bearing: it is the variable the target reads, so an implementation that used the
+other spelling would never see the token.
+
+The credential file's **shape** is recorded — `.credentials.json`, mode `0600`, a 1 MiB read
+ceiling, `O_NOFOLLOW` (a symlink is refused rather than followed), and the five read states
+`absent`, `read-failed`, `corrupt`, `refused-symlink` and `present`. **No token store is
+shipped**: the descriptor records where a credential *would* live and how it would be protected,
+and nothing here writes one.
+
+### The refusals
+
+| Flow | The capability it needs |
+|---|---|
+| `firstParty` | `oauth-authorization-code` |
+| `local` | `local-oauth-server` |
+| `mcp` | `mcp-server-oauth-registration` |
+| `sep990` | `oidc-identity-provider` |
+| `hostDeviceOrg` | `host-application-or-enrolled-device` |
+
+A connection may name the flow that supplies its credential. Such a connection **refuses to
+resolve** it, and the refusal names the capability; a connection that names no flow is
+untouched, and its credential resolves exactly as it did before.
+
+### The matrix row is not assigned by this milestone
+
+The feature matrix and the compatibility report are the orchestrator's, and the five
+authentication flows are **not** a row of `feature-matrix.md` at the time of writing. The rows
+below therefore name **F-11** — the row that carries the **credential model** — and the
+orchestrator may re-file the flows under a row of their own when it re-measures. The measured
+outcome is in [`results.md`](results.md).
+
 ## Conformance table
 
 | Audit claim | Evidence class | Matrix row | Pinned by |
@@ -199,6 +299,15 @@ A **user override** of a catalog-owned field lives in its **own** record and sur
 | A registered flag that is explicitly disabled is not treated as set | implementation choice | F-08 | same file — "selectRoute" |
 | Two connections may share the same route | project requirement | F-10 | same file — "the connection registry" |
 | A run with **no** enabled connection is exactly the run it always was, and a run with an active one uses that connection's route, base URL and credential | project requirement | F-10 | `tests/contracts/cli-surface.test.ts` — "CC-021 — a run uses the active connection" |
+| The target has **five** distinct authentication flows, and this implementation names all five | REA observed | F-11 | `tests/contracts/auth-flows.test.ts` — "the five authentication flows" |
+| Each flow carries the target's own credential kinds, its own state machine, and its own storage | REA observed | F-11 | same file — "the credential kinds and their storage", "the state machines" |
+| The login method is one of exactly three, the forced method wins over the flags, and a declared `gateway` is suppressed unless the host manages the machine | REA observed | F-11 | same file — "the login-method discriminator" |
+| The MCP server kind is one of exactly four, and the MCP auth source is one of exactly four | REA observed | F-11 | same file — "the MCP server discriminator", "the MCP auth-source discriminator" |
+| The validation the target performs — the issuer rule, the callback port, the IdP secret, the `--xaa` requirements, the login flags, the custom endpoint, the refresh-token scopes and the unusable sign-in — is reproduced with the target's messages | REA observed | F-11 | same file — "the validation the target performs" |
+| The first-party credential kind is one of exactly six, and the `loggedIn` predicate is the target's | REA observed | F-11 | same file — "the first-party credential-kind discriminator" |
+| The credential file's shape — the name, the mode, the ceiling, the symlink refusal and the read states — is recorded | REA observed | F-11 | same file — "the credential store shape" |
+| Every flow refuses, and every refusal names the capability it needed | project requirement | F-11 | same file — "refuses every flow by name, and names the capability it needed" |
+| A connection that names a flow refuses to resolve its credential; a connection that names none is untouched | project requirement | F-11 | same file — "a connection that names an auth flow" |
 
 ## The manager surfaces — conformance
 
