@@ -302,6 +302,31 @@ export function workspaceRelation(
   return 'unrelated';
 }
 
+/**
+ * The target's own truthy test for a **boolean** environment variable.
+ *
+ * The target parses its boolean environment variables, and the parser accepts
+ * `1`, `true`, `yes` and `on` — lower-cased and trimmed. Everything else,
+ * including an unset variable, is false.
+ */
+export function envBoolean(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.toLowerCase().trim();
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
+}
+
+/**
+ * The target's own integer read of an environment variable.
+ *
+ * The target parses its integer environment variables, and a value that is not
+ * a number is **absent** rather than `NaN`.
+ */
+export function envInteger(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number.parseInt(value.trim(), 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The enumeration                                                             */
 /* -------------------------------------------------------------------------- */

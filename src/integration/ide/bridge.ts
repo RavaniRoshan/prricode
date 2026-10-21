@@ -82,6 +82,8 @@ import {
 } from './diagnostics.js';
 import {
   discoverIdes,
+  envBoolean,
+  envInteger,
   ideLockDirectories,
   parseIdeLock,
   sortIdeLockFiles,
@@ -474,12 +476,12 @@ export function createIdeBridge(options: IdeBridgeOptions): IdeBridge {
       cwd: options.cwd ?? process.cwd(),
       locks: locks(),
       fallbackName: 'IDE',
-      ...(environment.env['CLAUDE_CODE_SSE_PORT'] === undefined
+      ...(envInteger(environment.env['CLAUDE_CODE_SSE_PORT']) === undefined
         ? {}
-        : { ssePort: Number(environment.env['CLAUDE_CODE_SSE_PORT']) }),
-      ...(environment.env['CLAUDE_CODE_IDE_SKIP_VALID_CHECK'] === undefined
-        ? {}
-        : { skipValidCheck: true }),
+        : { ssePort: envInteger(environment.env['CLAUDE_CODE_SSE_PORT']) as number }),
+      ...(envBoolean(environment.env['CLAUDE_CODE_IDE_SKIP_VALID_CHECK'])
+        ? { skipValidCheck: true }
+        : {}),
     });
 
   const manager = new IdeDiagnosticsManager();

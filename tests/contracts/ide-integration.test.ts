@@ -61,6 +61,8 @@ import {
   IDE_DETECTION_WINDOW_MS,
   IDE_SKIPPED_WINDOWS_USERS,
   discoverIdes,
+  envBoolean,
+  envInteger,
   ideLockDirectories,
   ideLockPortFromFileName,
   ideUrl,
@@ -624,6 +626,24 @@ describe('the IDE lock-file protocol', () => {
     expect(IDE_DETECTION_WINDOW_MS).toBe(30_000);
     expect(IDE_DETECTION_POLL_INTERVAL_MS).toBe(1_000);
   });
+
+  it('parses a boolean environment variable the way the target does', () => {
+    // The target accepts `1`, `true`, `yes` and `on`, lower-cased and
+    // trimmed; everything else is false.
+    for (const value of ['1', 'true', 'TRUE', ' yes ', 'on', 'ON']) {
+      expect(envBoolean(value)).toBe(true);
+    }
+    for (const value of [undefined, '', '0', 'false', 'no', 'off', 'maybe']) {
+      expect(envBoolean(value)).toBe(false);
+    }
+  });
+
+  it('parses an integer environment variable the way the target does', () => {
+    expect(envInteger('1234')).toBe(1234);
+    expect(envInteger(' 1234 ')).toBe(1234);
+    expect(envInteger(undefined)).toBeUndefined();
+    expect(envInteger('not a number')).toBeUndefined();
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -929,6 +949,46 @@ describe('the IDE bridge and the target\'s IDE surface', () => {
     expect(integrations.map((integration) => integration.name)).toEqual(['Cursor']);
     expect(integrations[0]?.transport).toBe('websocket');
     expect(integrations[0]?.endpoint).toBe('http://127.0.0.1:12345');
+  });
+
+  it('reads the two environment variables the discovery takes', () => {
+    const configDir = tempDir();
+    mkdirSync(path.join(configDir, 'ide'), { recursive: true });
+    writeFileSync(
+      path.join(configDir, 'ide', '12345.lock'),
+      JSON.stringify({ workspaceFolders: ['/elsewhere'], ideName: 'Cursor' }),
+    );
+
+    // Without the skip, the IDE's workspace is unrelated to the session's
+    // directory and it is dropped.
+    const strict = createIdeBridge({ configDir, cwd: '/w/project', env: {} });
+    expect(strict.ides()).toEqual([]);
+
+    // The skip makes every lock valid.
+    const skipping = createIdeBridge({
+      configDir,
+      cwd: '/w/project',
+      env: { CLAUDE_CODE_IDE_SKIP_VALID_CHECK: '1' },
+    });
+    expect(skipping.ides()).toHaveLength(1);
+    expect(skipping.ides()[0]?.isValid).toBe(true);
+
+    // The variable is parsed the target's way: `0` is not a skip.
+    const notSkipping = createIdeBridge({
+      configDir,
+      cwd: '/w/project',
+      env: { CLAUDE_CODE_IDE_SKIP_VALID_CHECK: '0' },
+    });
+    expect(notSkipping.ides()).toEqual([]);
+
+    // The SSE port names exactly one IDE, and it is valid.
+    const named = createIdeBridge({
+      configDir,
+      cwd: '/w/project',
+      env: { CLAUDE_CODE_SSE_PORT: '12345' },
+    });
+    expect(named.ides()).toHaveLength(1);
+    expect(named.ides()[0]?.port).toBe(12345);
   });
 
   it('refuses to connect to an IDE, and names the capability', async () => {
