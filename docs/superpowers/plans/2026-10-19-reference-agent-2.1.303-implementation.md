@@ -1871,15 +1871,15 @@ from the source.
 the compaction lives); Modify `tests/contracts/session-resume.test.ts`; Modify
 `docs/compatibility/session-format.md`.
 
-- [ ] **Step 1: Read the target's compaction behaviour from the source** — the trigger,
+- [x] **Step 1: Read the target's compaction behaviour from the source** — the trigger,
   the boundary, the summary's shape, the projection, and the fallback ordering — and
   record it in `/home/shiva/opt/reference-agent-rea/analysis/findings-compaction.md`.
-- [ ] **Step 2: Write the failing test** — the trigger, the boundary and the summary must
+- [x] **Step 2: Write the failing test** — the trigger, the boundary and the summary must
   match the target's.
-- [ ] **Step 3: Implement** what the reading established.
-- [ ] **Step 4: Update the conformance document** — `F-27` moves from `unknown` to
+- [x] **Step 3: Implement** what the reading established.
+- [x] **Step 4: Update the conformance document** — `F-27` moves from `unknown` to
   `match` or `partial`, with the reading named.
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
   ```bash
   git add src/session tests/contracts/session-resume.test.ts docs/compatibility/session-format.md
   git commit -m "fix(session): the compaction behaviour is the target's"
@@ -2042,12 +2042,12 @@ list before the **ask** list, and it asked where the target denies.
 
 **Files:** `tests/compatibility/scenarios.ts`; the conformance documents the rows name.
 
-- [ ] **Step 1: Extend each probe** so it compares the whole contract its row names.
-- [ ] **Step 2: Run it** — a row whose implementation is right becomes a `match`; a row
+- [x] **Step 1: Extend each probe** so it compares the whole contract its row names.
+- [x] **Step 2: Run it** — a row whose implementation is right becomes a `match`; a row
   whose implementation differs becomes a `mismatch`, and the report says so.
-- [ ] **Step 3: Update the report** — the generator writes the new outcomes and the new
+- [x] **Step 3: Update the report** — the generator writes the new outcomes and the new
   cells.
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
   ```bash
   git add tests/compatibility docs/compatibility
   git commit -m "test(compat): the partial rows compare the whole contract"
