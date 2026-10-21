@@ -156,6 +156,52 @@ function deriveDirectEnvironment(): Set<string> {
 }
 
 /**
+ * The environment variables read through an **accessor**.
+ *
+ * The target does not only read `process.env.NAME`: it has small helpers that
+ * take the name as an argument and read it, and it reads `process.env[NAME]`
+ * through a variable. A scan for the literal `process.env.NAME` sees none of
+ * those, so the surface it reports is **short** — a sweep of the target's own
+ * registries found the runner's forty-one variables and the scan saw none.
+ *
+ * So the accessors are found — the functions whose own body reads
+ * `process.env[` — and the calls to them, with an environment-variable-shaped
+ * literal, are resolved **in the chunk that uses them**, because an identifier
+ * is only unique inside its own module.
+ */
+function deriveAccessedEnvironment(): Set<string> {
+  const names = new Set<string>();
+  const accessors = new Map<string, Set<string>>();
+  for (const line of grepTree(
+    'function [A-Za-z_$][A-Za-z0-9_$]*\\([^)]*\\)\\{[^}]{0,200}process\\.env\\[',
+  )) {
+    const separator = line.indexOf(':');
+    if (separator === -1) continue;
+    const file = line.slice(0, separator).replace(/^\.\//, '');
+    const match = /function ([A-Za-z_$][A-Za-z0-9_$]*)/.exec(line.slice(separator));
+    if (match === null) continue;
+    const set = accessors.get(file) ?? new Set<string>();
+    set.add(match[1] ?? '');
+    accessors.set(file, set);
+  }
+  if (accessors.size === 0) return names;
+  for (const line of grepTree(
+    '\\b([A-Za-z_$][A-Za-z0-9_$]*)\\("([A-Z][A-Z0-9_]*(_[A-Z0-9_]+)+)"\\)',
+  )) {
+    const separator = line.indexOf(':');
+    if (separator === -1) continue;
+    const file = line.slice(0, separator).replace(/^\.\//, '');
+    if (!accessors.get(file)?.has('')) {
+      const callee = /\b([A-Za-z_$][A-Za-z0-9_$]*)\("/.exec(line.slice(separator))?.[1];
+      if (callee === undefined || !accessors.get(file)?.has(callee)) continue;
+    }
+    const name = /"([A-Z][A-Z0-9_]*(_[A-Z0-9_]+)+)"/.exec(line.slice(separator))?.[1];
+    if (name !== undefined) names.add(name);
+  }
+  return names;
+}
+
+/**
  * The values the needed identifiers hold, and where they were imported from.
  *
  * Only the **needed** identifiers are kept, so the map is a few dozen entries
@@ -248,8 +294,11 @@ function deriveTools(
  * The environment-variable surface: the target's own lazy namespace, plus the
  * variables it reads directly.
  */
-function deriveEnvironment(direct: ReadonlySet<string>): Set<string> {
-  const names = new Set<string>(direct);
+function deriveEnvironment(
+  direct: ReadonlySet<string>,
+  accessed: ReadonlySet<string>,
+): Set<string> {
+  const names = new Set<string>([...direct, ...accessed]);
   const text = readChunk(ENVIRONMENT_CHUNK);
   if (text === undefined) return names;
   for (const at of callSites(text, 'Mr')) {
@@ -468,6 +517,11 @@ function main(): number {
   const sites = deriveToolSites();
   mark('the tool sites');
   const needed = new Set<string>();
+  // The names read through `process.env[NAME]`, where `NAME` is a variable.
+  for (const line of grepTree('process\\.env\\[([A-Za-z_$][A-Za-z0-9_$]*)\\]')) {
+    const match = /process\.env\[([A-Za-z_$][A-Za-z0-9_$]*)\]/.exec(line.slice(line.indexOf(':')));
+    if (match?.[1] !== undefined) needed.add(match[1]);
+  }
   for (const expressions of sites.values()) {
     for (const expression of expressions) {
       if (!expression.startsWith('"') && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(expression)) {
@@ -494,7 +548,10 @@ function main(): number {
   mark('the browser tools');
   const telemetry = deriveTelemetry();
   mark('the telemetry');
-  const environment = deriveEnvironment(deriveDirectEnvironment());
+  const environment = deriveEnvironment(
+    deriveDirectEnvironment(),
+    deriveAccessedEnvironment(),
+  );
   mark('the environment');
   const settings = deriveSettings();
   mark('the settings');
