@@ -495,6 +495,26 @@ The `gatewayInternalNetworks` setting names the **public blocks** the organisati
 
 **Implemented** — `validateGatewayInternalNetworks`, with the target's own reason texts and the target's own message `gatewayInternalNetworks in managed settings <reason>.` The ranges the target declares are `GATEWAY_PRIVATE_NETWORKS` (6), `GATEWAY_SHARED_NETWORKS` (5, of which 3 are the documentation ranges), `GATEWAY_DOCUMENTATION_NETWORKS` (3) and `GATEWAY_RESERVED_NETWORKS` (3).
 
+## The settings and the environment variables of this surface
+
+**The four toggles are the target's _managed-configuration_ keys, not the CLI's settings keys.** `disableAutoUpdates`, `disableEssentialTelemetry`, `disableNonessentialTelemetry` and `disableNonessentialServices` appear in the target's managed-configuration module (`chunk-z6a1zj5w.js`), together with their nested forms `autoUpdate.disabled`, `autoUpdate.viaUpdatesHost`, `telemetry.disableEssential`, `telemetry.disableNonessential` and `telemetry.disableNonessentialServices`. They are **not** in the CLI's own settings schema (`chunk-c9s0jh80.js` carries no such key), and they are therefore not in this implementation's settings schema either. `EgressConfig` is the shape a caller supplies them in.
+
+**The settings this implementation's own settings document already carries** — `proxyAuthHelper`, `gatewayInternalNetworks`, `sandbox.network.*`, and the workspace block's `allowedEgressHosts`, `egressProxyUrl` and `egressProxyPacUrl` — are in `src/config/schema.ts` with the target's own key names and descriptions.
+
+**The environment variables this surface reads**, all in the target's own namespace:
+
+| variable | what it does | implemented |
+|---|---|---|
+| `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY` | the corporate proxy's URL, in that order of precedence | **yes** — `resolveProxyUrl` |
+| `no_proxy`, `NO_PROXY` | the bypass list | **yes** — `resolveNoProxy`, `matchesNoProxy` |
+| `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER` | switches the proxy-auth helper on | **yes** — `PROXY_AUTH_HELPER_ENABLED_VARIABLE` |
+| `CLAUDE_CODE_PROXY_AUTH_HELPER_TTL_MS` | the helper's cache lifetime | **yes** — `proxyAuthHelperTtl` |
+| `CLAUDE_CODE_PROXY_RESOLVES_HOSTS` | the proxy resolves the name, not the client | **recorded** — the target's agent wiring, not this implementation's |
+| `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE` | the mTLS client certificate | **recorded** — the target's client-certificate handling belongs to its HTTP client |
+| `NODE_EXTRA_CA_CERTS` | a CA bundle the runtime appends to the built-in roots | **recorded** — the target's transport layer |
+| `AGENT_PROXY_URL`, `AGENT_PROXY_AUTH_TOKEN` | the **CCR agent proxy**'s relay and its token | **recorded, not implemented** — a different surface: the remote-session relay, not the corporate proxy |
+| `CCR_AGENT_PROXY_*` (eight names) | the agent proxy's mode, include list, gates, CA watch and CA certificate | **recorded, not implemented** — the same |
+
 ## The clone-choice labels this milestone adds
 
 - The **catalogue** — the eleven services, their keys, their toggle keys, their group labels, their endpoints, their purposes, and the host constants — is **the target's own data**, REA observed, not an implementation choice. The only change is the two purpose strings and the core group label that name the target's product: this implementation names **PRRICODE** there, because a **name** is not reproduced and a **datum** is.
