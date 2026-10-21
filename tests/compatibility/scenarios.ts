@@ -205,6 +205,23 @@ import {
 } from '../../src/extensions/hooks/registry.js';
 import { effectiveHandlerType } from '../../src/extensions/hooks/schema.js';
 import {
+  DEFAULT_TEAMMATE_MODE,
+  TEAMMATE_FALLBACK_NOTIFICATION_KEY,
+  TEAMMATE_MODES,
+} from '../../src/agent/teammateMode.js';
+import {
+  AGENT_ID_PATTERN,
+  RESERVED_TEAMMATE_NAMES,
+  TEAMMATE_NAME_PATTERN,
+  TEAMMATE_RECORD_SOURCES,
+  TEAMMATE_SETTLE_VALUES,
+} from '../../src/agent/teamLedger.js';
+import {
+  CROSS_SESSION_HOLD_CAPACITY,
+  CROSS_SESSION_INBOUND_VALUES,
+  CROSS_SESSION_MESSAGE_TAG,
+} from '../../src/agent/crossSessionInbound.js';
+import {
   AUTOUPDATE_BLOCK_TYPES,
   AUTOUPDATE_FAILURE_CODES,
   AUTOUPDATE_SKIP_REASONS,
@@ -470,6 +487,17 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   buildResultDocument,
   ZERO_USAGE,
   effectiveHandlerType,
+  DEFAULT_TEAMMATE_MODE,
+  TEAMMATE_FALLBACK_NOTIFICATION_KEY,
+  TEAMMATE_MODES,
+  AGENT_ID_PATTERN,
+  RESERVED_TEAMMATE_NAMES,
+  TEAMMATE_NAME_PATTERN,
+  TEAMMATE_RECORD_SOURCES,
+  TEAMMATE_SETTLE_VALUES,
+  CROSS_SESSION_HOLD_CAPACITY,
+  CROSS_SESSION_INBOUND_VALUES,
+  CROSS_SESSION_MESSAGE_TAG,
   AUTOUPDATE_BLOCK_TYPES,
   AUTOUPDATE_FAILURE_CODES,
   AUTOUPDATE_SKIP_REASONS,
@@ -4044,6 +4072,44 @@ export const SCENARIOS: readonly Scenario[] = [
     expect(observe('the block types', AUTOUPDATE_BLOCK_TYPES)).toHaveLength(4);
     expect(observe('the skip reasons', AUTOUPDATE_SKIP_REASONS)).toHaveLength(3);
     expect(observe('the failure codes', AUTOUPDATE_FAILURE_CODES)).toHaveLength(67);
+    // The **agent-team surface**: the mode, the ledger and the inbound gate.
+    expect(observe('the teammate modes', TEAMMATE_MODES)).toEqual([
+      'auto',
+      'tmux',
+      'iterm2',
+      'in-process',
+    ]);
+    expect(observe('the default teammate mode', DEFAULT_TEAMMATE_MODE)).toBe('in-process');
+    expect(observe('the fallback notification key', TEAMMATE_FALLBACK_NOTIFICATION_KEY)).toBe(
+      'teammate-auto-fallback',
+    );
+    expect(observe('the reserved teammate names', RESERVED_TEAMMATE_NAMES)).toEqual([
+      'main',
+      'team-lead',
+      'user',
+      'system',
+    ]);
+    expect(observe('the teammate name shape', TEAMMATE_NAME_PATTERN.source)).toBe(
+      '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$',
+    );
+    expect(observe('the agent id shape', AGENT_ID_PATTERN.source)).toBe(
+      '^a(?:[\\w-]{1,63}-)?[0-9a-f]{16}$',
+    );
+    expect(observe('the settle values', TEAMMATE_SETTLE_VALUES)).toHaveLength(6);
+    expect(observe('the record sources', TEAMMATE_RECORD_SOURCES)).toEqual([
+      'collision',
+      'auto',
+      'user',
+      'peer',
+      'hook',
+    ]);
+    expect(observe('the inbound values', CROSS_SESSION_INBOUND_VALUES)).toEqual([
+      'accept',
+      'hold',
+      'refuse',
+    ]);
+    expect(observe('the hold capacity', CROSS_SESSION_HOLD_CAPACITY)).toBe(100);
+    expect(observe('the message tag', CROSS_SESSION_MESSAGE_TAG)).toBe('cross-session-message');
     return measured(
         'match',
         "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the scan reads a root one level deep and takes the fixed file name SKILL.md, the byte limit is a million, the reserved names are refused, a subagent definition\u0027s name comes from its frontmatter rather than its file name, a definition without a description is refused, and the name is validated the way the target validates it.” and the **plugin and marketplace protocol** is compared too: the ten marketplace source types and the eleventh the policy lists carry, the two runtime-only ones, the seven plugin source types and the eight canonical kinds, the twenty-nine manifest keys, the forty-two, twenty-two and four frontmatter keys, the ten catalogue-manifest keys, and the autoupdater's four outcomes, four block types, three skip reasons and sixty-seven failure codes and the **plugin and marketplace protocol** is compared too: the ten marketplace source types and the eleventh the policy lists carry, the two runtime-only ones, the seven plugin source types and the eight canonical kinds, the twenty-nine manifest keys, the forty-two, twenty-two and four frontmatter keys, the ten catalogue-manifest keys, and the autoupdater's four outcomes, four block types, three skip reasons and sixty-seven failure codes",
