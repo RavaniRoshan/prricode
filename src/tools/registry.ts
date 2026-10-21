@@ -55,7 +55,7 @@
  */
 
 import type { PermissionDecision, ToolContext } from '../permissions/decision.js';
-import { FILE_MUTATING_TOOL_NAMES } from '../permissions/rules.js';
+import { FILE_MUTATING_TOOL_NAMES, type RuleSet } from '../permissions/rules.js';
 
 export type { PermissionDecision, ToolContext } from '../permissions/decision.js';
 
@@ -93,6 +93,33 @@ export interface ToolDefinition<I = unknown, O = unknown> {
    * narrower input type stays assignable to the registry's own type.
    */
   isConcurrencySafe?(input: I): boolean;
+  /**
+   * Whether a **whole-tool** allow rule does not apply to this tool.
+   *
+   * The target declares the flag on a tool — `ignoresWholeToolAllowRule()` —
+   * and a bare tool name in the allow list then does not approve a call of
+   * that tool. The target's own two self-hosted runner write tools declare it
+   * (`chunk-c4brmbaw.js:11180` and `:13575`), and their own check answers
+   * `ask` in every mode but `auto`.
+   *
+   * A **scoped** rule — one that names an argument — is not affected: the flag
+   * is about the bare tool name.
+   */
+  ignoresWholeToolAllowRule?(input: I): boolean;
+  /**
+   * Whether the "don't ask again" affordance may persist an always-allow rule
+   * for this tool.
+   *
+   * The target declares the flag on a tool — `suppressesAlwaysAllowRule()` —
+   * and the affordance is then suppressed for it. The target's own two
+   * self-hosted runner write tools declare it (`chunk-c4brmbaw.js:11180` and
+   * `:13575`).
+   *
+   * **This implementation has no always-allow persistence**, so the flag has
+   * no counterpart here: it is carried so the target's rule is recorded, and
+   * it is named in the conformance document rather than pretended at.
+   */
+  suppressesAlwaysAllowRule?(input: I): boolean;
   /**
    * The tool's own permission check.
    *
@@ -261,6 +288,40 @@ export function isToolConcurrencySafe(tool: ToolDefinition | undefined, input: u
 /** Whether a tool writes to the filesystem. */
 export function isFileMutatingTool(name: string): boolean {
   return FILE_MUTATING_TOOL_NAMES.includes(name);
+}
+
+/**
+ * Whether a rule is a **whole-tool** allow rule for a tool.
+ *
+ * A whole-tool rule is the tool's **bare** name, with no argument and no
+ * matcher — the form the target's `ignoresWholeToolAllowRule()` flag speaks
+ * about. A scoped rule — one that names an argument — is not a whole-tool
+ * rule.
+ *
+ * The rule text is caller-supplied data, so the comparison is on the trimmed
+ * text and not on a lookup in an inherited table.
+ */
+export function isWholeToolAllowRule(raw: string, toolName: string): boolean {
+  let body = raw.trim();
+  if (body.startsWith('!')) body = body.slice(1).trim();
+  return body === toolName;
+}
+
+/**
+ * The rules a whole-tool allow rule does not govern.
+ *
+ * The target's `ignoresWholeToolAllowRule()` flag says that a bare tool name in
+ * the allow list does not approve a call of that tool. This drops those rules
+ * from the allow list, so the check that runs against the result is the one
+ * the target runs.
+ *
+ * The ruleset is returned unchanged when there is nothing to drop, so a tool
+ * that does not ignore whole-tool allow rules keeps the session's own object.
+ */
+export function withoutWholeToolAllowRules<T extends RuleSet>(rules: T, toolName: string): T {
+  const allow = rules.allow.filter((raw) => !isWholeToolAllowRule(raw, toolName));
+  if (allow.length === rules.allow.length) return rules;
+  return { ...rules, allow };
 }
 
 /**

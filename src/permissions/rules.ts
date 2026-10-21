@@ -188,6 +188,14 @@ const PRIMARY_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
   find: ['query'],
   computer: ['action'],
   select_browser: ['deviceId'],
+  // The self-hosted runner surface (`CC-033`). The target states the content of
+  // these two calls itself, in its own `toAutoClassifierInput`: the requeue
+  // names the session and the runner, and the spawn names the secret file and
+  // the base directory. The five read tools declare neither a path nor a
+  // classifier input in the target, so a scoped rule on one of them matches
+  // nothing — the same as here.
+  self_hosted_runner_requeue_session: ['session_id', 'runner_id'],
+  self_hosted_runner_spawn_local: ['secret_file_path', 'base_dir'],
 };
 
 const PATH_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
@@ -203,6 +211,10 @@ const PATH_FIELDS_BY_TOOL: Readonly<Record<string, readonly string[]>> = {
   LSP: ['filePath'],
   memory_read: ['path'],
   memory_write: ['path'],
+  // The self-hosted runner surface (`CC-033`). The target's own tool definition
+  // declares `getPath(e){return e.log_path}` for the log-tail tool and only
+  // for it, so this is the one runner tool with a path.
+  self_hosted_runner_tail_log: ['log_path'],
 };
 
 const DEFAULT_PATH_FIELDS: readonly string[] = ['file_path', 'notebook_path', 'path'];

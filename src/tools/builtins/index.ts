@@ -60,6 +60,7 @@ import { createReadTool } from './read.js';
 import { createReportFindingsTool } from './reportfindings.js';
 import { createSendMessageTool } from './sendmessage.js';
 import { createSendUserMessageTool } from './sendusermessage.js';
+import { createSelfHostedRunnerTools } from './selfHostedRunner.js';
 import { createSkillTool } from './skill.js';
 import { createStructuredOutputTool } from './structuredoutput.js';
 import { createSubagentHandbackTool } from './subagenthandback.js';
@@ -150,6 +151,18 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = Object.freeze([
   'switch_browser',
   'list_connected_browsers',
   'select_browser',
+  // The self-hosted runner surface: the target's nine runner tools, in the
+  // target's own order (`chunk-c4brmbaw.js:16557`). Every one of them refuses
+  // — there is no runner behind them — and the tool names are the target's own.
+  'self_hosted_runner_get_pool',
+  'self_hosted_runner_list_runners',
+  'self_hosted_runner_list_sessions',
+  'self_hosted_runner_list_secrets',
+  'self_hosted_runner_spawn_local',
+  'self_hosted_runner_read_health',
+  'self_hosted_runner_read_metrics',
+  'self_hosted_runner_tail_log',
+  'self_hosted_runner_requeue_session',
 ]);
 
 /**
@@ -220,6 +233,10 @@ export function createBuiltinTools(deps: BuiltinToolDeps): ToolDefinition[] {
     // The browser surface: the target's twenty-two browser tools, in the target's
     // own order. Every one of them refuses — there is no browser behind them.
     ...createBrowserTools(scoped),
+    // The self-hosted runner surface: the target's nine runner tools, in the
+    // target's own order. Every one of them refuses — there is no runner, no
+    // registration and no account behind them.
+    ...createSelfHostedRunnerTools(scoped),
   ];
 }
 
@@ -304,6 +321,28 @@ export { createReadTool } from './read.js';
 export { createReportFindingsTool } from './reportfindings.js';
 export { createSendMessageTool } from './sendmessage.js';
 export { createSendUserMessageTool } from './sendusermessage.js';
+export {
+  SELF_HOSTED_API_CAPABILITY,
+  SELF_HOSTED_LOCAL_CAPABILITY,
+  SELF_HOSTED_RUNNER_CLI_SUBCOMMANDS,
+  SELF_HOSTED_RUNNER_DEFAULT_HEALTH_PORT,
+  SELF_HOSTED_RUNNER_DEFAULT_TAIL_BYTES,
+  SELF_HOSTED_RUNNER_ENVIRONMENT_VARIABLES,
+  SELF_HOSTED_RUNNER_ENVIRONMENT_VARIABLE_NAMES,
+  SELF_HOSTED_RUNNER_IGNORED_METRICS,
+  SELF_HOSTED_RUNNER_METRIC_PREFIX,
+  SELF_HOSTED_RUNNER_PROTOCOL,
+  SELF_HOSTED_RUNNER_REFUSED_ENVIRONMENT_VARIABLES,
+  SELF_HOSTED_RUNNER_REQUEST_HEADERS,
+  SELF_HOSTED_RUNNER_TOOL_NAMES,
+  SELF_HOSTED_RUNNER_TOOL_SPECS,
+  SELF_HOSTED_RUNNER_WIZARD_TOOL_NAMES,
+  SELF_HOSTED_RUNNER_WRITE_TOOL_NAMES,
+  createSelfHostedRunnerTools,
+  readSelfHostedRunnerEnvironment,
+  type SelfHostedRunnerEnvSpec,
+  type SelfHostedRunnerToolSpec,
+} from './selfHostedRunner.js';
 export { createSkillTool } from './skill.js';
 export { createStructuredOutputTool } from './structuredoutput.js';
 export { createSubagentHandbackTool } from './subagenthandback.js';
