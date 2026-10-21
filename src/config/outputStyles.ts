@@ -34,6 +34,13 @@
  * The target also loads a plugin's `output-styles` directory. This implementation has
  * no plugin surface yet — that is `CC-040` — so the styles it loads are the **file**
  * styles only. The difference is recorded in `docs/compatibility/remaining-surfaces.md`.
+ *
+ * ## The remote session
+ *
+ * Over **Remote Control**, or from a **relayed message**, the target lets the
+ * session pick **only the built-in styles**: a custom style may not be selected
+ * there, and the command says so. The predicate and the note are the target's
+ * own — `chunk-720ca63b.js:1447` and `chunk-4jsg44k7.js:2269007`.
  */
 
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -351,6 +358,143 @@ export async function allOutputStyles(options: OutputStyleOptions): Promise<Outp
   for (const style of builtinOutputStyles()) styles.set(style.name, style);
   for (const style of await loadOutputStyles(options)) styles.set(style.name, style);
   return [...styles.values()];
+}
+
+/* -------------------------------------------------------------------------- */
+/* The remote session                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The flags the target's remote predicate reads.
+ *
+ * The target's predicate is `dispatchedOverBridge === true ||
+ * submissionVerifiedSlackHumanTurn === true` — the message was dispatched over
+ * a bridge (Remote Control), or it was submitted by a verified Slack human
+ * turn.
+ */
+export interface OutputStyleSession {
+  /** Whether the message was dispatched over a bridge. */
+  readonly dispatchedOverBridge?: boolean;
+  /** Whether the message was submitted by a verified Slack human turn. */
+  readonly submissionVerifiedSlackHumanTurn?: boolean;
+}
+
+/**
+ * Whether the session is **remote or relayed**.
+ *
+ * Evidence: `chunk-720ca63b.js:1447`.
+ */
+export function isRemoteOrRelayedSession(session: OutputStyleSession): boolean {
+  return session.dispatchedOverBridge === true || session.submissionVerifiedSlackHumanTurn === true;
+}
+
+/**
+ * Whether a style may be picked over a remote or relayed session.
+ *
+ * The target's own rule: a style may be picked only when it is the built-in
+ * "no style" entry — which the target holds as `null` — or when its source is
+ * `built-in`. A custom style may not.
+ *
+ * Evidence: `chunk-4jsg44k7.js:2269007` — `n6e(e) { return e === null || e?.source === "built-in" }`.
+ */
+export function isRemotelySelectableOutputStyle(style: OutputStyle | null): boolean {
+  return style === null || style?.source === 'built-in';
+}
+
+/**
+ * The note the command appends over a remote or relayed session.
+ *
+ * The target's own text.
+ *
+ * Evidence: `chunk-4jsg44k7.js:2269063`.
+ */
+export const REMOTE_OUTPUT_STYLE_NOTE =
+  "Custom output styles can't be selected over Remote Control or from a relayed message. " +
+  'Select one in the session itself, or pick a built-in style here.';
+
+/**
+ * The label the current style carries over a remote or relayed session, when
+ * the current style is a custom one.
+ *
+ * The target's own text.
+ */
+export const REMOTE_CURRENT_OUTPUT_STYLE_LABEL = 'a custom style';
+
+/**
+ * The words that ask the command for the **list** rather than for a style.
+ *
+ * The target's own list.
+ */
+export const OUTPUT_STYLE_QUERY_WORDS = [
+  'list',
+  'show',
+  'display',
+  'current',
+  'view',
+  'get',
+  'check',
+  'describe',
+  'print',
+  'version',
+  'about',
+  'status',
+  '?',
+] as const;
+
+/**
+ * The words that ask the command for its **help**.
+ *
+ * The target's own list.
+ */
+export const OUTPUT_STYLE_HELP_WORDS = ['help', '-h', '--help'] as const;
+
+/**
+ * Whether a word asks the command for the list rather than for a style.
+ */
+export function isOutputStyleQueryWord(word: string): boolean {
+  const lowered = word.trim().toLowerCase();
+  return (
+    (OUTPUT_STYLE_QUERY_WORDS as readonly string[]).includes(lowered) ||
+    (OUTPUT_STYLE_HELP_WORDS as readonly string[]).includes(lowered)
+  );
+}
+
+/**
+ * What the command reports: the styles the session may pick from, the label of
+ * the current one, and the note it appends.
+ */
+export interface OutputStyleSelection {
+  /** The styles the session may pick from. */
+  readonly styles: readonly OutputStyle[];
+  /** The label of the current style. */
+  readonly currentLabel: string;
+  /** The note the command appends, when the session is remote or relayed. */
+  readonly note?: string;
+}
+
+/**
+ * The styles a session may pick from, and the labels the command reports.
+ *
+ * Over a remote or relayed session the list is **only the built-in styles**,
+ * and the current style is reported as *"a custom style"* when it is not one of
+ * them.
+ */
+export function outputStyleSelection(
+  styles: readonly OutputStyle[],
+  current: string,
+  remote: boolean,
+): OutputStyleSelection {
+  if (!remote) {
+    return { styles, currentLabel: current };
+  }
+
+  const selectable = styles.filter((style) => isRemotelySelectableOutputStyle(style));
+  const currentStyle = styles.find((style) => style.name === current) ?? null;
+  const currentLabel = isRemotelySelectableOutputStyle(currentStyle)
+    ? current
+    : REMOTE_CURRENT_OUTPUT_STYLE_LABEL;
+
+  return { styles: selectable, currentLabel, note: REMOTE_OUTPUT_STYLE_NOTE };
 }
 
 /* -------------------------------------------------------------------------- */

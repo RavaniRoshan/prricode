@@ -23,6 +23,8 @@ import {
   allOutputStyles,
   builtinOutputStyleOf,
   currentOutputStyle,
+  isRemoteOrRelayedSession,
+  isRemotelySelectableOutputStyle,
   loadOutputStyles,
   outputStyleDescription,
   parseOutputStyleFrontmatter,
@@ -291,5 +293,138 @@ describe('the output-style command', () => {
       ),
     ) as { outputStyle: string };
     expect(written.outputStyle).toBe('Concise');
+  });
+
+  it('shows the list for a word that asks for the list', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    const result = await runSlashCommand('/output-style list', slashContext(cwd, configDir));
+
+    expect(result?.exitCode).toBe(0);
+    expect(result?.stdout).toContain('Available styles:');
+  });
+});
+
+describe('the output-style command over a remote or relayed session', () => {
+  it('is a remote session when the message was dispatched over a bridge', () => {
+    expect(isRemoteOrRelayedSession({ dispatchedOverBridge: true })).toBe(true);
+    expect(isRemoteOrRelayedSession({ dispatchedOverBridge: false })).toBe(false);
+    expect(isRemoteOrRelayedSession({})).toBe(false);
+  });
+
+  it('is a remote session when the message came from a verified Slack turn', () => {
+    expect(isRemoteOrRelayedSession({ submissionVerifiedSlackHumanTurn: true })).toBe(true);
+    expect(isRemoteOrRelayedSession({ submissionVerifiedSlackHumanTurn: false })).toBe(false);
+  });
+
+  it('lets only the built-in styles be picked', () => {
+    expect(isRemotelySelectableOutputStyle(null)).toBe(true);
+    expect(
+      isRemotelySelectableOutputStyle({
+        name: 'Concise',
+        description: '',
+        prompt: '',
+        source: 'built-in',
+        baseDir: '',
+        keepCodingInstructions: false,
+      }),
+    ).toBe(true);
+    expect(
+      isRemotelySelectableOutputStyle({
+        name: 'Mine',
+        description: '',
+        prompt: '',
+        source: 'user',
+        baseDir: '',
+        keepCodingInstructions: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('lists only the built-in styles, and says why', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    mkdirSync(path.join(configDir, 'output-styles'), { recursive: true });
+    writeFileSync(
+      path.join(configDir, 'output-styles', 'mine.md'),
+      ['---', 'name: Mine', 'description: My own style', '---', 'Be brief.'].join('\n'),
+      'utf8',
+    );
+
+    const context = {
+      ...slashContext(cwd, configDir),
+      dispatchedOverBridge: true,
+    };
+    const result = await runSlashCommand('/output-style', context);
+
+    expect(result?.exitCode).toBe(0);
+    expect(result?.stdout).toContain('- Concise');
+    expect(result?.stdout).not.toContain('- Mine');
+    expect(result?.stdout).toContain(
+      "Custom output styles can't be selected over Remote Control or from a relayed message.",
+    );
+  });
+
+  it('reports the current custom style as "a custom style"', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    mkdirSync(path.join(configDir, 'output-styles'), { recursive: true });
+    writeFileSync(
+      path.join(configDir, 'output-styles', 'mine.md'),
+      ['---', 'name: Mine', '---', 'Be brief.'].join('\n'),
+      'utf8',
+    );
+    await writeOutputStyleSetting(cwd, 'Mine');
+
+    const context = {
+      ...slashContext(cwd, configDir),
+      submissionVerifiedSlackHumanTurn: true,
+    };
+    const result = await runSlashCommand('/output-style', context);
+
+    expect(result?.exitCode).toBe(0);
+    expect(result?.stdout).toContain('Output style: a custom style');
+  });
+
+  it('refuses a custom style over a remote session', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    mkdirSync(path.join(configDir, 'output-styles'), { recursive: true });
+    writeFileSync(
+      path.join(configDir, 'output-styles', 'mine.md'),
+      ['---', 'name: Mine', '---', 'Be brief.'].join('\n'),
+      'utf8',
+    );
+
+    const context = {
+      ...slashContext(cwd, configDir),
+      dispatchedOverBridge: true,
+    };
+    const result = await runSlashCommand('/output-style Mine', context);
+
+    expect(result?.exitCode).not.toBe(0);
+    expect(result?.stderr).toContain('Unknown output style "Mine"');
+    expect(result?.stderr).toContain(
+      "Custom output styles can't be selected over Remote Control or from a relayed message.",
+    );
+  });
+
+  it('lists every style in a session that is not remote', async () => {
+    const configDir = makeDirectory();
+    const cwd = makeDirectory();
+    mkdirSync(path.join(configDir, 'output-styles'), { recursive: true });
+    writeFileSync(
+      path.join(configDir, 'output-styles', 'mine.md'),
+      ['---', 'name: Mine', '---', 'Be brief.'].join('\n'),
+      'utf8',
+    );
+
+    const result = await runSlashCommand('/output-style', slashContext(cwd, configDir));
+
+    expect(result?.exitCode).toBe(0);
+    expect(result?.stdout).toContain('- Mine');
+    expect(result?.stdout).not.toContain(
+      "Custom output styles can't be selected over Remote Control or from a relayed message.",
+    );
   });
 });

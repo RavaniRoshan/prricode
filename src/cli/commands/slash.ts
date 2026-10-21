@@ -59,9 +59,11 @@
 
 import { loadSettings } from '../../config/loader.js';
 import {
-  DEFAULT_OUTPUT_STYLE_NAME,
   allOutputStyles,
   currentOutputStyle,
+  isOutputStyleQueryWord,
+  isRemoteOrRelayedSession,
+  outputStyleSelection,
   writeOutputStyleSetting,
 } from '../../config/outputStyles.js';
 import { mergeMergedSettings } from '../../config/tiers.js';
@@ -686,6 +688,20 @@ export interface SlashCommandContext {
   readonly resumeSession?: (sessionId: string) => Promise<void>;
   /** Compact the conversation and report the summary. */
   readonly compactSession?: (instructions?: string) => Promise<string | undefined>;
+  /**
+   * Whether the message that reached the command was **dispatched over a
+   * bridge** — Remote Control.
+   *
+   * The target's remote predicate is `dispatchedOverBridge === true ||
+   * submissionVerifiedSlackHumanTurn === true`, so the two flags are carried
+   * separately here too, and the predicate is the target's.
+   */
+  readonly dispatchedOverBridge?: boolean;
+  /**
+   * Whether the message that reached the command was submitted by a
+   * **verified Slack human turn**.
+   */
+  readonly submissionVerifiedSlackHumanTurn?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -927,6 +943,11 @@ function contextCommand(context: SlashCommandContext): CommandResult {
  *
  * The target's own wording is used: the list, the unknown-style line, the
  * already-set line and the set line.
+ *
+ * Over a **remote or relayed** session the target lets the session pick **only
+ * the built-in styles**, and appends its own note to the command's output. The
+ * predicate, the note and the label the current style carries are the target's
+ * own — `chunk-720ca63b.js:1447` and `chunk-4jsg44k7.js:2269007`.
  */
 async function outputStyleCommand(
   args: readonly string[],
@@ -940,26 +961,30 @@ async function outputStyleCommand(
   });
   const current = currentOutputStyle(mergeMergedSettings(settings.tiers) as Record<string, unknown>);
 
+  const remote = isRemoteOrRelayedSession(context);
+  const selection = outputStyleSelection(styles, current, remote);
+  const note = selection.note === undefined ? '' : `\n${selection.note}`;
+
   const wanted = args.join(' ').trim();
-  if (wanted === '') {
-    const rows = styles.map((style) => {
+  if (wanted === '' || isOutputStyleQueryWord(wanted)) {
+    const rows = selection.styles.map((style) => {
       const marker = style.name === current ? ' (current)' : '';
       return style.description === ''
         ? `- ${style.name}${marker}`
         : `- ${style.name}${marker}: ${style.description}`;
     });
-    const head = `Output style: ${current === DEFAULT_OUTPUT_STYLE_NAME ? current : current}`;
+    const head = `Output style: ${selection.currentLabel}`;
     return {
       exitCode: 0,
-      stdout: `${head}\n\nAvailable styles:\n${rows.join('\n')}\n\nUsage: /output-style <style>\n`,
+      stdout: `${head}\n\nAvailable styles:\n${rows.join('\n')}\n\nUsage: /output-style <style>${note}\n`,
       stderr: '',
     };
   }
 
-  const chosen = styles.find((style) => style.name.toLowerCase() === wanted.toLowerCase());
+  const chosen = selection.styles.find((style) => style.name.toLowerCase() === wanted.toLowerCase());
   if (chosen === undefined) {
-    const names = styles.map((style) => style.name).join(', ');
-    return usageError(`Unknown output style "${wanted}". Available styles: ${names}`);
+    const names = selection.styles.map((style) => style.name).join(', ');
+    return usageError(`Unknown output style "${wanted}". Available styles: ${names}${note}`);
   }
 
   if (chosen.name === current) {
