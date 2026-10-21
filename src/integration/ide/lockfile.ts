@@ -56,6 +56,8 @@
 
 import path from 'node:path';
 
+import { normalizeIdeName } from './registry.js';
+
 /* -------------------------------------------------------------------------- */
 /* The environment                                                             */
 /* -------------------------------------------------------------------------- */
@@ -479,8 +481,10 @@ export function ideUrl(lock: IdeLock, host: string): string {
  *     must be alive **and** must be the session's parent, or one of the
  *     session's ancestors — unless the lock's port is the session's own SSE
  *     port;
- *  7. the name is the lock's `ideName`, or the terminal's display name, or
- *     `"IDE"`.
+ *  7. the name is the lock's `ideName`, normalised the target's way — a
+ *     `windsurf` is shown as `Devin Desktop` — or the caller's fallback, which
+ *     is the terminal's display name when the session runs inside an IDE's
+ *     terminal and `"IDE"` otherwise.
  */
 export function discoverIdes(options: IdeDiscoveryOptions): DiscoveredIde[] {
   const found: DiscoveredIde[] = [];
@@ -521,7 +525,9 @@ export function discoverIdes(options: IdeDiscoveryOptions): DiscoveredIde[] {
       }
     }
 
-    const name = lock.ideName ?? options.fallbackName ?? 'IDE';
+    const name = lock.ideName === undefined
+      ? (options.fallbackName ?? 'IDE')
+      : normalizeIdeName(lock.ideName);
     found.push({
       url: ideUrl(lock, host),
       name,

@@ -587,6 +587,23 @@ describe('the IDE lock-file protocol', () => {
     ]);
   });
 
+  it('shows a lock that names Windsurf as Devin Desktop, the way the target does', () => {
+    const ides = discoverIdes({
+      cwd: '/w/project',
+      locks: [
+        {
+          workspaceFolders: ['/w'],
+          port: 1234,
+          ideName: 'Windsurf',
+          useWebSocket: false,
+          runningInWindows: false,
+        },
+      ],
+    });
+
+    expect(ides[0]?.name).toBe('Devin Desktop');
+  });
+
   it('drops the IDE whose workspace is unrelated, unless they are asked for', () => {
     const locks: IdeLock[] = [
       {
