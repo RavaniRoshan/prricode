@@ -67,6 +67,7 @@
 import { access, stat } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 // The environment reader lives in `src/provider/routes.ts`: it is the provider
@@ -376,6 +377,11 @@ export type AuthCredentialKind =
 
 /** Where a credential of that kind lives. */
 export type AuthCredentialStorage =
+  /**
+   * The target's **secure storage** — the keychain-backed store, whose
+   * plaintext backend is the credential file.
+   */
+  | 'secureStorage'
   /** The target's credential file, `<configDir>/.credentials.json`. */
   | 'credentialsFile'
   /** The OS credential store. */
@@ -383,29 +389,33 @@ export type AuthCredentialStorage =
   /** An environment variable. */
   | 'environment'
   /** A settings document. */
-  | 'settings';
+  | 'settings'
+  /** A file of the credential's own. */
+  | 'file';
 
 /**
  * One credential kind, and where it lives.
  *
  * A descriptor names a credential; it never holds one. The `recordKey` is the
- * key the target writes into its credential store, and the
+ * key the target writes into its secure storage, and the
  * `environmentVariable` is the variable the target reads the credential from.
  */
 export interface AuthCredentialDescriptor {
   kind: AuthCredentialKind;
   storage: AuthCredentialStorage;
-  /** The key the target writes into its credential store, when it has one. */
+  /** The key the target writes into its secure storage, when it has one. */
   recordKey?: string;
   /** The environment variable the target reads the credential from, when it has one. */
   environmentVariable?: string;
+  /** The file that backs the credential, when it has one. */
+  fileName?: string;
 }
 
 /**
  * The credential kinds, with the target's own record keys and variable names.
  *
- * **REA observed.** The record keys come from the target's own credential
- * store: `claudeAiOauth` for the OAuth record, `mcpXaaIdp` for the cached
+ * **REA observed.** The record keys come from the target's own secure storage:
+ * `claudeAiOauth` for the OAuth record, `mcpXaaIdp` for the cached
  * `id_token`s, `mcpXaaIdpConfig` for the IdP client secrets, and
  * `trustedDeviceToken` for the device token.
  *
@@ -418,19 +428,19 @@ export interface AuthCredentialDescriptor {
 export const AUTH_CREDENTIALS: readonly AuthCredentialDescriptor[] = Object.freeze([
   {
     kind: 'oauth',
-    storage: 'credentialsFile',
+    storage: 'secureStorage',
     recordKey: 'claudeAiOauth',
     environmentVariable: 'CLAUDE_CODE_OAUTH_TOKEN',
   },
   { kind: 'apiKey', storage: 'environment', environmentVariable: 'ANTHROPIC_API_KEY' },
   {
     kind: 'idToken',
-    storage: 'credentialsFile',
+    storage: 'secureStorage',
     recordKey: 'mcpXaaIdp',
   },
   {
     kind: 'clientSecret',
-    storage: 'keychain',
+    storage: 'secureStorage',
     recordKey: 'mcpXaaIdpConfig',
     environmentVariable: 'MCP_XAA_IDP_CLIENT_SECRET',
   },
@@ -441,16 +451,21 @@ export const AUTH_CREDENTIALS: readonly AuthCredentialDescriptor[] = Object.free
   },
   {
     kind: 'trustedDevice',
-    storage: 'credentialsFile',
+    storage: 'secureStorage',
     recordKey: 'trustedDeviceToken',
     environmentVariable: 'CLAUDE_TRUSTED_DEVICE_TOKEN',
   },
   {
     kind: 'sessionIngress',
-    storage: 'environment',
+    storage: 'file',
     environmentVariable: 'CLAUDE_SESSION_INGRESS_TOKEN_FILE',
+    fileName: '.session_ingress_token',
   },
-  { kind: 'mcpOAuth', storage: 'credentialsFile', recordKey: 'mcpOauth' },
+  {
+    kind: 'mcpOAuth',
+    storage: 'secureStorage',
+    fileName: 'mcp-needs-auth-cache.json',
+  },
 ] as const);
 
 /**
@@ -1331,6 +1346,10 @@ export type CredentialStoreState =
  *     followed;
  *   - it is read with a **1 MiB** ceiling, and a larger file is `corrupt`.
  *
+ * The file is the **plaintext backend** of the target's secure storage — the
+ * same records the keychain backend holds, in a file instead of the OS
+ * credential store.
+ *
  * **This implementation ships no token store.** Nothing here writes a
  * credential: the descriptor records the *shape* the target uses, so a reader
  * of this implementation knows where a credential would live and how it would
@@ -1353,6 +1372,8 @@ export interface CredentialStoreDescriptor {
   backends: readonly CredentialStorageBackend[];
   /** How a sign-in's credential landed. */
   sessionAuthValues: readonly SessionAuth[];
+  /** The file that backs the MCP OAuth auth cache. */
+  authCacheFileName: string;
 }
 
 /**
@@ -1421,6 +1442,7 @@ export const CREDENTIAL_STORE: CredentialStoreDescriptor = Object.freeze({
   ] as const),
   backends: CREDENTIAL_STORAGE_BACKENDS,
   sessionAuthValues: SESSION_AUTH_VALUES,
+  authCacheFileName: 'mcp-needs-auth-cache.json',
 });
 
 /**
@@ -1431,6 +1453,32 @@ export const CREDENTIAL_STORE: CredentialStoreDescriptor = Object.freeze({
  */
 export function authStatusExitCode(loggedIn: boolean): 0 | 1 {
   return loggedIn ? 0 : 1;
+}
+
+/**
+ * The key an MCP server's OAuth token is stored under.
+ *
+ * **REA observed** — the target derives it from the server's name and a
+ * fingerprint of the server's own configuration: the canonical JSON of
+ * `{type, url, headers}` (headers defaulting to `{}`), a SHA-256 of it, and
+ * the **first sixteen hex characters** of the digest. The key is
+ * `<server name>|<fingerprint>`.
+ *
+ * The canonical JSON is a plain `JSON.stringify` in **insertion order**, so
+ * `type` comes first, then `url`, then `headers`; an absent `url` is dropped
+ * by the serialiser, exactly as it is in the target.
+ */
+export function mcpAuthCacheKey(
+  serverName: string,
+  config: { type: string; url?: string | undefined; headers?: Record<string, string> | undefined },
+): string {
+  const canonical = JSON.stringify({
+    type: config.type,
+    url: config.url,
+    headers: config.headers || {},
+  });
+  const fingerprint = createHash('sha256').update(canonical).digest('hex').substring(0, 16);
+  return `${serverName}|${fingerprint}`;
 }
 
 // ---------------------------------------------------------------------------

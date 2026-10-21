@@ -241,9 +241,12 @@ Each rule is the target's own, and each carries the target's message.
 ### The credential kinds and the storage
 
 The credential kinds carry the target's own record keys and variable names: `claudeAiOauth`,
-`mcpXaaIdp`, `mcpXaaIdpConfig` and `trustedDeviceToken` in the credential file, and the variables
-`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `MCP_XAA_IDP_CLIENT_SECRET`,
-`CLAUDE_CODE_HOST_AUTH_ENV_VAR` and `CLAUDE_TRUSTED_DEVICE_TOKEN` in the environment.
+`mcpXaaIdp`, `mcpXaaIdpConfig` and `trustedDeviceToken` in the **secure storage**, and the
+variables `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `MCP_XAA_IDP_CLIENT_SECRET`,
+`CLAUDE_CODE_HOST_AUTH_ENV_VAR` and `CLAUDE_TRUSTED_DEVICE_TOKEN` in the environment. An MCP
+server's own OAuth token lives in the **auth cache**, under a key of the form
+`<server name>|<sixteen hex characters>` — a SHA-256 of the canonical JSON of the server's type,
+URL and headers, truncated to sixteen characters.
 
 **The trusted-device variable is `CLAUDE_TRUSTED_DEVICE_TOKEN`, not
 `CLAUDE_CODE_TRUSTED_DEVICE_TOKEN`.** The untouched-surface record has the wrong name, and the
@@ -252,9 +255,11 @@ other spelling would never see the token.
 
 The credential file's **shape** is recorded — `.credentials.json`, mode `0600`, a 1 MiB read
 ceiling, `O_NOFOLLOW` (a symlink is refused rather than followed), and the five read states
-`absent`, `read-failed`, `corrupt`, `refused-symlink` and `present`. **No token store is
-shipped**: the descriptor records where a credential *would* live and how it would be protected,
-and nothing here writes one.
+`absent`, `read-failed`, `corrupt`, `refused-symlink` and `present`. That file is the
+**plaintext backend** of the target's secure storage — the same records the keychain backend
+holds, in a file instead of the OS credential store. **No token store is shipped**: the
+descriptor records where a credential *would* live and how it would be protected, and nothing
+here writes one.
 
 The **storage backends** are the target's own five — `keychain`, `plaintext`,
 `windows-credman`, `keychain-with-plaintext-fallback` and

@@ -30,6 +30,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 
 import {
   AUTH_CREDENTIALS,
@@ -52,6 +53,7 @@ import {
   idTokenCacheExpiryMs,
   idTokenExpiryMs,
   isCachedIdTokenUsable,
+  mcpAuthCacheKey,
   validateCallbackPort,
   validateCustomOAuthUrl,
   validateLoginFlags,
@@ -125,7 +127,7 @@ describe('the credential kinds and their storage', () => {
     expect(kinds).toContain<AuthCredentialKind>('hostEnv');
     expect(kinds).toContain<AuthCredentialKind>('trustedDevice');
 
-    // The target's own record keys, in the credential store it writes.
+    // The target's own record keys, in the secure storage it writes.
     expect(byKind.get('oauth')?.recordKey).toBe('claudeAiOauth');
     expect(byKind.get('idToken')?.recordKey).toBe('mcpXaaIdp');
     expect(byKind.get('clientSecret')?.recordKey).toBe('mcpXaaIdpConfig');
@@ -137,6 +139,32 @@ describe('the credential kinds and their storage', () => {
     expect(byKind.get('trustedDevice')?.environmentVariable).toBe('CLAUDE_TRUSTED_DEVICE_TOKEN');
     expect(byKind.get('hostEnv')?.environmentVariable).toBe('CLAUDE_CODE_HOST_AUTH_ENV_VAR');
     expect(byKind.get('oauth')?.environmentVariable).toBe('CLAUDE_CODE_OAUTH_TOKEN');
+
+    // The MCP OAuth token lives in the auth cache, not in the credential file.
+    expect(byKind.get('mcpOAuth')?.fileName).toBe('mcp-needs-auth-cache.json');
+  });
+
+  it('derives the MCP auth-cache key the way the target does', () => {
+    const key = mcpAuthCacheKey('sentry', {
+      type: 'http',
+      url: 'https://mcp.sentry.dev/mcp',
+    });
+    expect(key.startsWith('sentry|')).toBe(true);
+    expect(key.slice('sentry|'.length)).toMatch(/^[0-9a-f]{16}$/);
+
+    // The fingerprint is over the canonical JSON of type, url and headers.
+    const canonical = JSON.stringify({
+      type: 'http',
+      url: 'https://mcp.sentry.dev/mcp',
+      headers: {},
+    });
+    const expected = createHash('sha256').update(canonical).digest('hex').substring(0, 16);
+    expect(key).toBe(`sentry|${expected}`);
+
+    // A different server configuration is a different key.
+    expect(mcpAuthCacheKey('sentry', { type: 'http', url: 'https://other.example/mcp' })).not.toBe(
+      key,
+    );
   });
 
   it('stores a credential kind exactly once, and never names a secret', () => {
@@ -612,6 +640,10 @@ describe('the credential store shape', () => {
 
   it('names the three ways a sign-in credential can land', () => {
     expect([...SESSION_AUTH_VALUES]).toEqual(['fresh', 'previous', 'none']);
+  });
+
+  it('names the file that backs the MCP auth cache', () => {
+    expect(CREDENTIAL_STORE.authCacheFileName).toBe('mcp-needs-auth-cache.json');
   });
 
   it('reports the exit code the target\'s auth status command uses', () => {
