@@ -2485,14 +2485,14 @@ nobody can reach is not an implementation.
 
 **Files:** Modify `src/provider/credentials.ts`; Modify `src/provider/registry.ts`; Modify the tests; Modify `docs/compatibility/provider-catalog.md`.
 
-- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+- [x] **Step 1: Read the surface from the source** and record it — the names, the shape,
   the behaviour, the file and the offset for every claim.
-- [ ] **Step 2: Write the failing test** for what the reading established.
-- [ ] **Step 3: Implement** it, and the rules that govern it.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+- [x] **Step 2: Write the failing test** for what the reading established.
+- [x] **Step 3: Implement** it, and the rules that govern it.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Update the conformance documents and the report** — the surface is named,
   and the report says what was compared.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
   ```bash
   git add src tests/contracts docs/compatibility
   git commit -m "feat: the five auth flows"

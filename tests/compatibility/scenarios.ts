@@ -205,6 +205,16 @@ import {
 } from '../../src/extensions/hooks/registry.js';
 import { effectiveHandlerType } from '../../src/extensions/hooks/schema.js';
 import {
+  AUTH_CREDENTIALS,
+  AUTH_FLOW_KINDS,
+  AUTH_FLOWS,
+  FIRST_PARTY_AUTH_STATES,
+  HOST_DEVICE_ORG_AUTH_STATES,
+  LOGIN_METHODS,
+  MCP_AUTH_STATES,
+  SEP990_AUTH_STATES,
+} from '../../src/provider/credentials.js';
+import {
   EDITOR_DISPLAY_NAMES,
   IDE_KINDS,
   IDE_PLATFORMS,
@@ -506,6 +516,14 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   buildResultDocument,
   ZERO_USAGE,
   effectiveHandlerType,
+  AUTH_CREDENTIALS,
+  AUTH_FLOW_KINDS,
+  AUTH_FLOWS,
+  FIRST_PARTY_AUTH_STATES,
+  HOST_DEVICE_ORG_AUTH_STATES,
+  LOGIN_METHODS,
+  MCP_AUTH_STATES,
+  SEP990_AUTH_STATES,
   EDITOR_DISPLAY_NAMES,
   IDE_KINDS,
   IDE_PLATFORMS,
@@ -1970,7 +1988,16 @@ export const SCENARIOS: readonly Scenario[] = [
         expect(JSON.stringify(listing)).not.toContain(secret);
         expect(listing).toMatchObject([{ id: 'prod' }]);
       });
-      return measured(
+      // The **five authentication flows** and the vocabularies around them.
+    expect(observe('the auth flow kinds', AUTH_FLOW_KINDS)).toHaveLength(5);
+    expect(Object.keys(observe('the auth flows', AUTH_FLOWS))).toHaveLength(5);
+    expect(observe('the credential kinds', AUTH_CREDENTIALS)).toHaveLength(8);
+    expect(observe('the login methods', LOGIN_METHODS)).toBeDefined();
+    expect(observe('the first-party states', FIRST_PARTY_AUTH_STATES).length).toBeGreaterThan(0);
+    expect(observe('the SEP-990 states', SEP990_AUTH_STATES).length).toBeGreaterThan(0);
+    expect(observe('the MCP auth states', MCP_AUTH_STATES).length).toBeGreaterThan(0);
+    expect(observe('the host/device/org states', HOST_DEVICE_ORG_AUTH_STATES).length).toBeGreaterThan(0);
+    return measured(
         'not-tested',
         "This implementation implements the project's own rule — a credential is a reference and a status is presence only, never a secret — and the clone's own contract tests pin it. The **target has no such model**, so there is no target behaviour to compare this row against, and the row is reported as **not tested** rather than as a match.",
       );
