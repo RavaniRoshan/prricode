@@ -118,9 +118,10 @@ styles, refuses an unknown one with the target's own wording, says when the styl
 already the active one, and saves the choice to the project's local settings file the
 way the target does.
 
-**The difference.** The target also loads a plugin's `output-styles` directory. This
-implementation has no plugin surface yet — that is `CC-040` — so the styles it loads
-are the **file** styles only.
+**The difference.** The target also loads a plugin's `output-styles` directory. The
+plugin **protocol** landed with `CC-040` — the manifest, the frontmatter, the
+catalogue and the source types — but this implementation loads no plugin's
+directory, so the styles it loads are the **file** styles only.
 
 ---
 

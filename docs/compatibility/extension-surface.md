@@ -193,6 +193,8 @@ A plugin's manifest declares its content in two groups of keys:
 
 Each key may be declared at the **top level** or under **`experimental`**, and a value may be a **single path string** or an **array of path strings**. `commands` may additionally be an **object** whose entries carry a `source` path. A manifest that is not a JSON object is `broken` with the reason *"it is not a JSON object"*. A plugin can present **several manifest candidates** (for example `.claude-plugin/plugin.json`). A plugin is `ok` when a **`SKILL.md` exists at the plugin root**.
 
+The target's own schema declares **twenty-nine** keys in all, in three groups — the **identity** group, the **content** group and the **experimental** group — and the full list, with the types and the defaults, is in the section below.
+
 ### The command discovery rules
 
 A plugin's `commandsPaths` are loaded in two shapes:
@@ -216,6 +218,248 @@ The result of `installPluginFromMarketplace` carries `{ success, message, depNot
 - A **refused** install is distinct from a **failed** one. A refusal is logged at `info` level with `installPluginFromMarketplace refused for <plugin>: <reason>` and a failure reason of `command-source-refused` — the install is refused when the **command source** is not trusted — while a genuine failure is logged at `error` level with `failed`. The telemetry carries the reason (`failureCode`, `command-source-refused`, or `unexpected-error`), an `errorKind`, the plugin id, the marketplace name, the trigger, and the surface.
 - A **stray orphan marker** left in a staged plugin is removed, with the warning `Could not drop a stray orphan marker from the staged plugin: <reason>`.
 - A version transition is computed as a `{ from, to }` pair.
+
+## The plugin and marketplace protocol
+
+**REA observed.** The protocol was read out of the target's own source — the zod
+schemas, the loader, the cache and the autoupdater — and every claim below names
+the file and the offset it came from. The full record, with the method and the
+discrepancies against the earlier sweep, is
+`/home/shiva/opt/reference-agent-rea/analysis/findings-marketplace.md`.
+
+### The marketplace source types — ten, and eleven in the policy lists
+
+The target's schema is a **discriminated union** on the key `source`
+(`chunk-c9s0jh80.js:105243`), and it has **ten** declarable members:
+
+| `source` | The fields | What it reaches |
+|---|---|---|
+| `url` | `url`, `headers?`, `headersHelper?` | an HTTP fetch |
+| `github` | `repo`, `ref?`, `path?`, `sparsePaths?`, `skipLfs?` | a clone |
+| `git` | `url`, `ref?`, `path?`, `sparsePaths?`, `skipLfs?` | a clone |
+| `npm` | `package`, `version?`, `registry?` | an npm registry |
+| `file` | `path` | a local catalogue file |
+| `directory` | `path` | a local directory |
+| `skills-dir` | — | a **policy-list sentinel** |
+| `hostPattern` | `hostPattern` | a **policy-list sentinel** |
+| `pathPattern` | `pathPattern` | a **policy-list sentinel** |
+| `settings` | `name`, `plugins`, `owner?` | a settings file |
+
+The **policy lists** — the managed-settings allowlist and blocklist — carry **one**
+more member, `pluginDirectory`, the built-in Directory marketplace
+(`chunk-c9s0jh80.js:114636`). The target's own description says it *"cannot be
+added or declared anywhere else"*.
+
+Two more source values are accepted by the target's own switch but are
+**runtime-only** — the runtime produces them, nobody authors them: `claudeai`
+and `pluginDirectory` (`chunk-4jsg44k7.js:4156876`).
+
+The **canonical form** of a source is the target's own (`K1`,
+`chunk-4jsg44k7.js:4156876`): `github:<repo>[@<ref>]`, the sanitised URL for
+`url`, `git:<url>[@<ref>]`, `npm:<package>`, `file:<path>`, `dir:<path>`,
+`hostPattern:<pattern>`, `pathPattern:<pattern>`, `skills-dir`,
+`settings:<name> (N plugins)`, `claude.ai`, `Anthropic Directory`, and
+`unknown source` for a source the target does not know.
+
+The **description** of a source is the target's own (`HPt`,
+`chunk-4jsg44k7.js:4155409`): the repository, the sanitised URL, the path,
+`settings:<name>`, `claude.ai`, `Built in`, and `Unknown source` for the four
+types the target does not describe — `npm`, `skills-dir`, `hostPattern` and
+`pathPattern`.
+
+**This implementation.** `src/extensions/plugins/marketplaceSources.ts` carries the
+ten types, the eleventh, the two runtime-only ones, the canonical form, the
+description, and the capability each source needs.
+
+### The plugin source types — seven named, and eight canonical kinds
+
+The target's schema is a **union** whose first member is a bare **path string**
+(`chunk-c9s0jh80.js:116671`):
+
+| The source | The fields |
+|---|---|
+| a path string | the plugin root, relative to the marketplace root |
+| `npm` | `package`, `version?`, `registry?` |
+| `url` | `url`, `ref?`, `sha?` |
+| `github` | `repo`, `ref?`, `sha?` |
+| `git-subdir` | `url`, `path`, `ref?`, `sha?` |
+| `archive` | `url`, `sha256?` |
+| `command` | `command`, `timeout?`, `mode?` |
+| `unsupported` | `error?` — a **parse-time placeholder**, never authored |
+
+The **named** set is `Sy` — the seven `npm`, `url`, `github`, `git-subdir`,
+`archive`, `command`, `unsupported` (`chunk-c9s0jh80.js:126841`) — and the
+**canonical kinds** are `iss` — the eight `local`, `npm`, `github`, `git`,
+`subdir`, `archive`, `command`, `unknown`
+(`chunk-4jsg44k7.js:4481234`). A path becomes `local`, a `url` becomes `git`, a
+`git-subdir` becomes `subdir`, and the kind is also the **directory name** the
+plugin is cached under.
+
+**This implementation.** `src/extensions/plugins/pluginSources.ts` carries both
+vocabularies, the shapes, the validation (the `sha` is a full 40-character
+lowercase commit SHA, the `sha256` a 64-character hex digest, the archive's URL
+`https`, the command printable ASCII with no runs of four spaces), and the
+capability each source needs.
+
+### The plugin manifest — twenty-nine keys
+
+`chunk-c9s0jh80.js:102436` — the target's manifest is **one object schema
+composed of seventeen sub-schemas**, and it declares **twenty-nine** keys:
+
+| Group | The keys |
+|---|---|
+| **identity** | `$schema`, `name`, `displayName`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords`, `defaultEnabled`, `dependencies`, `metadata` |
+| **content** | `hooks`, `commands`, `agents`, `skills`, `outputStyles`, `themes`, `workflows`, `channels`, `mcpServers`, `lspServers`, `monitors`, `settings`, `types`, `userConfig`, `binaries` |
+| **experimental** | `experimental` |
+
+Only **`name`** is required, and only two keys carry a default the target's own
+text names: `defaultEnabled` is **true**, and the catalogue entry's `strict` is
+**true**. Every path a manifest declares is **relative to the plugin root** and
+**starts with `./`** (`chunk-c9s0jh80.js:80773`).
+
+**This implementation.** `src/extensions/plugins/manifestSchema.ts` carries the
+twenty-nine keys with their types and their defaults, and validates a manifest
+against them — naming the key a manifest gets wrong.
+
+### The frontmatter — forty-two, twenty-two and four
+
+The target parses three kinds of frontmatter, and **all three are strict**
+(`chunk-4jsg44k7.js:731474`):
+
+| The file | The keys | Where |
+|---|---|---|
+| a **skill** (`SKILL.md`) | **42** | `chunk-4jsg44k7.js:724143`, `:725756` |
+| an **agent** (`agents/*.md`) | **22** | `chunk-4jsg44k7.js:728221` |
+| an **output style** (`output-styles/*.md`) | **4** | `chunk-4jsg44k7.js:730964` |
+
+The value types are the target's own three shorthands: the **scalar**
+(`string | number | boolean | null`), the **list** (the scalar, or an array of
+strings), and the **free** (any value). The defaults the target's text names are
+a skill's `name` (the file's name), a skill's `shell` (**bash**, on every
+platform), an agent's `observeSubagents` (**true**), and an output style's
+`name` (the file's name).
+
+**The two lists that are not the schema.** The target keeps a **62-key**
+normalisation list (`chunk-gdvkvrkd.js:4198`) and a **42-key** skill
+declared-field list (`chunk-081t8575.js:100908`). Both are supersets of the
+schema keys and carry keys no schema declares — `type`, `originSessionId`,
+`evals`, `compatibility`, `hide-from-slash-command-tool` — so they are the
+**telemetry's** lists, not the schema.
+
+**This implementation.** `src/extensions/plugins/frontmatterSchema.ts` carries the
+three key sets, their types and their defaults, and validates a frontmatter
+against the schema for its kind.
+
+### The marketplace catalogue — the manifest and the entries
+
+The **marketplace manifest** (`chunk-c9s0jh80.js:128721`) declares **ten** keys:
+`$schema`, `name`, `version`, `description`, `owner`, `plugins`,
+`forceRemoveDeletedPlugins`, `metadata`, `allowCrossMarketplaceDependenciesOn`,
+`renames`. The `renames` map is **append-only** — an old plugin name to the
+current one, or `null` when the plugin was removed — and the target parses it
+with a **catch**, so a malformed map is dropped and the manifest still loads.
+
+The **catalogue entry** (`chunk-c9s0jh80.js:124812`) is the **whole plugin
+manifest, every key optional**, plus `name`, `source`, `headers`, `headersHelper`,
+`category`, `tags`, `strict` (**true** by default) and `relevance`.
+
+An entry that does not parse is **stubbed** — `{name, source: {source:
+"unsupported"}, strict: true}` — and **kept**, so that the delisting check does
+not read it as removed; an entry with **no name** is **dropped** instead
+(`chunk-c9s0jh80.js:126147`). A source whose *type* the target does not know
+carries **no reason** in the stub; a known type whose fields are wrong carries
+the reason.
+
+**This implementation.** `src/extensions/plugins/catalogue.ts` carries the ten
+keys, the entry's shape, the stub and the drop, and the append-only rename map.
+
+### The autoupdater
+
+The **update operation** reports one of four outcomes — `updated`, `up_to_date`,
+`skipped`, `failed` (`chunk-4420d0hq.js:102585`) — and the **autoupdater** maps
+them onto its own vocabulary (`chunk-wqmf3c8h.js:2646`):
+
+| The operation | The autoupdater |
+|---|---|
+| `updated` | the plugin id |
+| `up_to_date` | nothing |
+| `skipped` + `entry_helper_deferred` | `autoupdate-deferred-entry-helper` |
+| `skipped` + a pinner | `autoupdate-blocked-by-pinner`, with the version held at, the pinners, and the disabled pins |
+| `failed` + a policy code | `autoupdate-disabled-by-policy` |
+| `failed` + anything else | **failed** |
+
+The block types are exactly four: `autoupdate-deferred-entry-helper`,
+`autoupdate-blocked-by-pinner`, `autoupdate-disabled-by-policy` and
+`generic-error`. The **skip reasons** the plugin path produces are exactly three:
+`pinner_blocked`, `entry_helper_deferred` and `snapshot_file_refused` — the other
+`skipReason` values in the tree (`bare_repo`, `git_error`, `not_git`, `too_large`
+and the rest) belong to the **checkpoint** surface, not to plugins.
+
+The failure codes are the target's own — the codes its failure-code map carries
+(`chunk-4420d0hq.js:8161`), the entry-helper codes
+(`chunk-p9jh4s48.js:25526`), and the ones the plugin surface raises elsewhere.
+
+**This implementation.** `src/extensions/plugins/autoupdate.ts` carries the
+vocabularies and the classification, and the target's own error text for a
+Directory plugin whose background update failed.
+
+### The honest boundary — what this implementation refuses
+
+This implementation has **no marketplace server, no plugin registry and no
+account**. The **protocol** is reproduced exactly; the **marketplace behind it**
+is not, and nothing pretends otherwise.
+
+| The capability a source needs | Which sources | What this implementation does |
+|---|---|---|
+| `http-fetch` | the `url` marketplace source | **refused** |
+| `git-clone` | the `github` and `git` marketplace sources | **refused** |
+| `npm-registry` | the `npm` marketplace source | **refused**, with the target's own words — *"NPM marketplace sources not yet implemented"* |
+| `filesystem` | the `file` and `directory` marketplace sources | **refused** — the catalogue is *read*, but no catalogue is *reached* |
+| `skills-directory` | the `skills-dir` marketplace source | **refused** |
+| `policy-list` | the `hostPattern` and `pathPattern` marketplace sources | **refused** |
+| `settings-file` | the `settings` marketplace source | **refused** |
+| `filesystem` | a path plugin source | **refused** |
+| `npm-registry` | the `npm` plugin source | **refused** |
+| `git-clone` | the `url` and `github` plugin sources | **refused** |
+| `sparse-git-clone` | the `git-subdir` plugin source | **refused** |
+| `https-archive` | the `archive` plugin source | **refused** |
+| `command-runner` | the `command` plugin source | **refused** |
+
+Every refusal **names the capability it needs**, so a caller can tell a clone
+from a fetch from a registry client. The refusal is a **return value**, not an
+exception, and it is what `resolveMarketplaceSource` and
+`pluginSourceCapability` produce.
+
+**Pinned by:** `tests/contracts/plugin-protocol.test.ts` — the source-type, the
+capability and the refusal tests.
+
+## Output styles — the remote session
+
+**REA observed.** Over **Remote Control**, or from a **relayed message**, the
+target lets the session pick **only the built-in styles**. The predicate is the
+target's own — `dispatchedOverBridge === true || submissionVerifiedSlackHumanTurn
+=== true` (`chunk-720ca63b.js:1447`) — and a style is remotely selectable only
+when it is the built-in "no style" entry, which the target holds as `null`, or
+when its source is `built-in` (`chunk-4jsg44k7.js:2269007`).
+
+The target's own note is appended to the command's output:
+
+> Custom output styles can't be selected over Remote Control or from a relayed
+> message. Select one in the session itself, or pick a built-in style here.
+
+and the current style is reported as **"a custom style"** when the session is
+remote and the current style is not a built-in one.
+
+The command also shows the **list** for a word that asks for the list — `list`,
+`show`, `display`, `current`, `view`, `get`, `check`, `describe`, `print`,
+`version`, `about`, `status`, `?` — and for the help words `help`, `-h`,
+`--help` (`chunk-kmrt4q1v.js:10467`).
+
+**This implementation.** `src/config/outputStyles.ts` carries the predicate, the
+filter, the note, the label and the word lists; `src/cli/commands/slash.ts`
+applies them.
+
+**Pinned by:** `tests/contracts/output-styles.test.ts` — the remote-session tests.
 
 ## Plugins — the manifest's path boundary
 
@@ -392,6 +636,16 @@ The **reconstruction by name** needs the main-thread agent's **name**. This impl
 | A command's name is `<plugin>:<basename>`, or `<plugin>:<metadata key>` when a `source` resolves to the same path | REA observed | F-33 | same file |
 | A directory with no `.md` files and no `SKILL.md` in subdirectories is a warning, not an error | REA observed | F-33 | same file |
 | A command file over the byte limit is skipped with the target's wording | REA observed | F-33 | same file |
+| The marketplace source vocabulary is **ten** declarable types, **eleven** in the policy lists, and the two runtime-only ones the target's own switch accepts | REA observed | F-33 | `tests/contracts/plugin-protocol.test.ts` — the source-type tests |
+| The canonical form of a marketplace source is the target's own `K1`, and its description is the target's own `HPt` | REA observed | F-33 | same file — the canonical-form and description tests |
+| The plugin source vocabulary is **seven** named types, and the canonical kinds are the **eight** the target's cache names a directory after | REA observed | F-33 | same file — the plugin-source tests |
+| The plugin manifest declares **twenty-nine** keys in three groups, only `name` is required, and `defaultEnabled` defaults to **true** | REA observed | F-33 | same file — the manifest tests |
+| The frontmatter key sets are **42**, **22** and **4**, and all three schemas are **strict** | REA observed | F-33 | same file — the frontmatter tests |
+| The marketplace manifest declares **ten** keys, the catalogue entry is the whole plugin manifest plus the entry's own keys, `strict` defaults to **true**, an unparseable entry is **stubbed and kept**, and a nameless one is **dropped** | REA observed | F-33 | same file — the catalogue tests |
+| The autoupdater's outcomes, its four block types, its three skip reasons and its failure codes are the target's | REA observed | F-33 | same file — the autoupdater tests |
+| The autoupdater's classification of an operation outcome is the target's own | REA observed | F-33 | same file — the classification tests |
+| Every source that would reach a marketplace or install a plugin is **refused**, and the refusal **names the capability it needs** | **implementation choice** (the refusal itself; the capability each source needs is REA observed) | F-33 | same file — the refusal and capability tests |
+| Over a remote or relayed session only the **built-in** output styles may be picked, and the target's own note and the "a custom style" label are used | REA observed | F-33 | `tests/contracts/output-styles.test.ts` — the remote-session tests |
 
 ## The subagents — conformance
 
