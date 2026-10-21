@@ -89,6 +89,8 @@ import {
   sandboxHostMatches,
 } from '../../src/platform/sandbox/policy.js';
 
+import type { SettingsSource } from '../../src/config/tiers.js';
+
 /* -------------------------------------------------------------------------- */
 /* The catalogue                                                               */
 /* -------------------------------------------------------------------------- */
@@ -801,20 +803,20 @@ describe('the corporate proxy', () => {
   });
 
   it('reads the proxy-auth helper out of the settings tiers', () => {
-    const tiers = new Map<string, unknown>([
+    const tiers = new Map<SettingsSource, unknown>([
       ['userSettings', { proxyAuthHelper: 'get-token' }],
       ['projectSettings', { proxyAuthHelper: 'get-token' }],
     ]);
-    const config = readProxyAuthHelperConfig(tiers as never);
+    const config = readProxyAuthHelperConfig(tiers);
     expect(config.helper).toBe('get-token');
     expect(config.fromProjectOrLocal).toBe(true);
     expect(config.sources).toBe('personAndPolicy');
 
-    const policy = new Map<string, unknown>([
+    const policy = new Map<SettingsSource, unknown>([
       ['policySettings', { proxyAuthHelper: 'policy-token' }],
       ['userSettings', { proxyAuthHelper: 'user-token' }],
     ]);
-    const policyConfig = readProxyAuthHelperConfig(policy as never);
+    const policyConfig = readProxyAuthHelperConfig(policy);
     expect(policyConfig.helper).toBe('policy-token');
     expect(policyConfig.fromProjectOrLocal).toBe(false);
   });
@@ -827,8 +829,10 @@ describe('the corporate proxy', () => {
   });
 
   it('decides whether the proxy-auth helper may run', () => {
-    const userHelper = new Map<string, unknown>([['userSettings', { proxyAuthHelper: 'get-token' }]]);
-    const projectHelper = new Map<string, unknown>([
+    const userHelper = new Map<SettingsSource, unknown>([
+      ['userSettings', { proxyAuthHelper: 'get-token' }],
+    ]);
+    const projectHelper = new Map<SettingsSource, unknown>([
       ['userSettings', { proxyAuthHelper: 'get-token' }],
       ['projectSettings', { proxyAuthHelper: 'get-token' }],
     ]);

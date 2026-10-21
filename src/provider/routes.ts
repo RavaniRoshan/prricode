@@ -1850,7 +1850,7 @@ export interface ProxyAuthHelperConfig {
   readonly sources: 'personAndPolicy';
 }
 
-function tierHelper(tiers: ReadonlyMap<string, unknown>, source: string): string | undefined {
+function tierHelper(tiers: ReadonlyMap<SettingsSource, unknown>, source: SettingsSource): string | undefined {
   if (!tiers.has(source)) return undefined;
   const document = documentOf(tiers.get(source));
   if (typeof document !== 'object' || document === null) return undefined;
@@ -1869,7 +1869,7 @@ function tierHelper(tiers: ReadonlyMap<string, unknown>, source: string): string
  * helper does not.
  */
 export function readProxyAuthHelperConfig(
-  tiers: ReadonlyMap<string, unknown>,
+  tiers: ReadonlyMap<SettingsSource, unknown>,
   trustAccepted: () => boolean = () => false,
 ): ProxyAuthHelperConfig {
   const policy = tierHelper(tiers, 'policySettings');
