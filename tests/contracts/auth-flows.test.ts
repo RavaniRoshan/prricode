@@ -381,6 +381,15 @@ describe('the flow detector', () => {
     expect(flows).toContain('firstParty');
   });
 
+  it('does not report the local flow for the switches the pinned build ignores', () => {
+    // The environment-kind function returns the literal "prod", so the two
+    // switches never select the local endpoint table.
+    const flows = detectAuthFlows({
+      env: { USE_LOCAL_OAUTH: '1', USE_STAGING_OAUTH: '1' },
+    });
+    expect(flows).not.toContain('local');
+  });
+
   it('reports the SEP-990 flow when the IdP is configured', () => {
     const flows = detectAuthFlows({
       env: {},
@@ -548,6 +557,11 @@ describe('the first-party credential-kind discriminator', () => {
 
   it('counts a third-party session as signed in', () => {
     expect(classifyFirstPartyAuth({ thirdParty: true }).loggedIn).toBe(true);
+  });
+
+  it('counts a stored token as signed in, even with no token source', () => {
+    expect(classifyFirstPartyAuth({ hasToken: true }).loggedIn).toBe(true);
+    expect(classifyFirstPartyAuth({ hasToken: false }).loggedIn).toBe(false);
   });
 
   it('does not count a gateway session with no login as signed in', () => {

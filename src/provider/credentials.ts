@@ -905,6 +905,14 @@ export interface AuthFlowContext {
  * The first-party flow always applies: it is the route every run falls back to.
  * The other four apply when the environment, the managed settings or the
  * configuration says so.
+ *
+ * The **local** flow is decided by the three `CLAUDE_LOCAL_OAUTH_*_BASE`
+ * variables — the local endpoint table's own inputs. The two switches
+ * `USE_LOCAL_OAUTH` and `USE_STAGING_OAUTH` are **not** part of the rule: in
+ * the pinned build the environment-kind function returns the literal `"prod"`,
+ * so those two names appear only in the settings `env` allow-lists and never
+ * select the local table. Counting them would claim a behaviour the target
+ * does not have.
  */
 export function detectAuthFlows(context: AuthFlowContext = {}): AuthFlowKind[] {
   const env = context.env ?? {};
@@ -915,9 +923,7 @@ export function detectAuthFlows(context: AuthFlowContext = {}): AuthFlowKind[] {
   if (
     readEnvValue(env, 'CLAUDE_LOCAL_OAUTH_API_BASE') !== undefined ||
     readEnvValue(env, 'CLAUDE_LOCAL_OAUTH_APPS_BASE') !== undefined ||
-    readEnvValue(env, 'CLAUDE_LOCAL_OAUTH_CONSOLE_BASE') !== undefined ||
-    readEnvValue(env, 'USE_LOCAL_OAUTH') !== undefined ||
-    readEnvValue(env, 'USE_STAGING_OAUTH') !== undefined
+    readEnvValue(env, 'CLAUDE_LOCAL_OAUTH_CONSOLE_BASE') !== undefined
   ) {
     flows.push('local');
   }
@@ -1153,6 +1159,14 @@ export const FIRST_PARTY_AUTH_METHODS: readonly FirstPartyAuthMethod[] = Object.
 
 /** The input to the first-party credential-kind discriminator. */
 export interface FirstPartyAuthMethodInput {
+  /**
+   * Whether a stored token exists.
+   *
+   * This is the target's own `hasToken`, and it is **not** the same fact as
+   * the token *source*: a source names where a token comes from, and this says
+   * whether one is there.
+   */
+  hasToken?: boolean | undefined;
   /** Whether the session is served by a third party. */
   thirdParty?: boolean | undefined;
   /**
@@ -1166,7 +1180,13 @@ export interface FirstPartyAuthMethodInput {
   tokenSource?: string | undefined;
   /** The API-key source — `ANTHROPIC_API_KEY`, `apiKeyHelper`, `/login managed key`, or `none`. */
   apiKeySource?: string | undefined;
-  /** Whether the environment holds an `ANTHROPIC_API_KEY`. */
+  /**
+   * Whether the environment holds an `ANTHROPIC_API_KEY` **and** the key helper
+   * did not produce one.
+   *
+   * The target's own conjunction: an environment key that the helper also
+   * produces is not counted twice.
+   */
   environmentApiKey?: boolean | undefined;
   /** Whether the key helper is configured while the token source is `none`. */
   helperWithoutToken?: boolean | undefined;
@@ -1224,7 +1244,7 @@ export function classifyFirstPartyAuth(
 
   const loggedIn =
     input.gatewayWithoutLogin !== true &&
-    (tokenSource !== 'none' ||
+    (input.hasToken === true ||
       apiKeySource !== 'none' ||
       environmentApiKey ||
       input.thirdParty === true);
