@@ -189,6 +189,25 @@ export function parseOptions(
 /* -------------------------------------------------------------------------- */
 
 /**
+ * The native addon files a directory holds.
+ *
+ * The target's package ships **two** of them — `clipboard-napi.node` and
+ * `audio-capture.node` — as platform-specific optional dependencies, and the
+ * target's loader finds them beside the bundle.
+ *
+ * **This implementation ships none.** The artifact is one file and carries no
+ * native module, so an operation that would need one refuses and names the
+ * capability it would have needed. A build that emitted a `.node` file would
+ * break that claim, so the build fails when one appears.
+ *
+ * @param directory the directory to look in.
+ * @returns the native addon files it holds.
+ */
+export function nativeAddonFilesIn(directory: string): readonly string[] {
+  return readdirSync(directory).filter((entry) => entry.endsWith('.node'));
+}
+
+/**
  * Build the executable.
  *
  * @returns the exit code the build ends with.
@@ -251,6 +270,18 @@ export function build(options: BuildOptions): number {
   const emitted = readdirSync(options.outDir).filter(
     (entry) => entry !== options.name && !preexisting.has(entry),
   );
+  // **No native addon.** The target's package ships two, and this
+  // implementation ships none: the artifact is one file and carries no native
+  // module. A `.node` file beside the executable would break that claim, so
+  // the build fails and says so.
+  const emittedAddons = emitted.filter((entry) => entry.endsWith('.node'));
+  if (emittedAddons.length > 0) {
+    process.stderr.write(
+      `Error: the build emitted a native addon: ${JSON.stringify(emittedAddons)}. ` +
+        'This implementation ships no native addon.\n',
+    );
+    return 1;
+  }
   if (emitted.length > 0) {
     process.stderr.write(
       `Error: the build emitted more than the executable: ${JSON.stringify(emitted)}.\n`,
@@ -259,7 +290,9 @@ export function build(options: BuildOptions): number {
   }
 
   const megabytes = (details.size / (1024 * 1024)).toFixed(1);
-  process.stdout.write(`Built ${outFile} (${megabytes} MiB, one file, no host Node required).\n`);
+  process.stdout.write(
+    `Built ${outFile} (${megabytes} MiB, one file, no host Node required, no native addon).\n`,
+  );
   return 0;
 }
 
