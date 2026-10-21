@@ -205,6 +205,14 @@ import {
 } from '../../src/extensions/hooks/registry.js';
 import { effectiveHandlerType } from '../../src/extensions/hooks/schema.js';
 import {
+  EDITOR_DISPLAY_NAMES,
+  IDE_KINDS,
+  IDE_PLATFORMS,
+  IDE_REGISTRY,
+  IDE_REGISTRY_KEYS,
+  JETBRAINS_PRODUCT_DIRECTORIES,
+} from '../../src/integration/ide/registry.js';
+import {
   CHANNEL_CAPABILITY,
   CHANNEL_GATE_KINDS,
   CHANNEL_HARD_REVOCATION_KINDS,
@@ -498,6 +506,12 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   buildResultDocument,
   ZERO_USAGE,
   effectiveHandlerType,
+  EDITOR_DISPLAY_NAMES,
+  IDE_KINDS,
+  IDE_PLATFORMS,
+  IDE_REGISTRY,
+  IDE_REGISTRY_KEYS,
+  JETBRAINS_PRODUCT_DIRECTORIES,
   CHANNEL_CAPABILITY,
   CHANNEL_GATE_KINDS,
   CHANNEL_HARD_REVOCATION_KINDS,
@@ -4154,6 +4168,14 @@ export const SCENARIOS: readonly Scenario[] = [
     ]);
     expect(observe('the hold capacity', CROSS_SESSION_HOLD_CAPACITY)).toBe(100);
     expect(observe('the message tag', CROSS_SESSION_MESSAGE_TAG)).toBe('cross-session-message');
+    // The **IDE surface**: the eighteen IDEs, their kinds, the editor table
+    // and the JetBrains product directories.
+    expect(observe('the IDE registry', IDE_REGISTRY)).toHaveLength(18);
+    expect(observe('the IDE registry keys', IDE_REGISTRY_KEYS)).toHaveLength(18);
+    expect(observe('the IDE kinds', IDE_KINDS)).toEqual(['vscode', 'jetbrains']);
+    expect(observe('the IDE platforms', IDE_PLATFORMS)).toEqual(['macos', 'windows', 'linux']);
+    expect(Object.keys(observe('the editor display names', EDITOR_DISPLAY_NAMES))).toHaveLength(12);
+    expect(Object.keys(observe('the JetBrains product directories', JETBRAINS_PRODUCT_DIRECTORIES))).toHaveLength(15);
     return measured(
         'match',
         "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the scan reads a root one level deep and takes the fixed file name SKILL.md, the byte limit is a million, the reserved names are refused, a subagent definition\u0027s name comes from its frontmatter rather than its file name, a definition without a description is refused, and the name is validated the way the target validates it.” and the **plugin and marketplace protocol** is compared too: the ten marketplace source types and the eleventh the policy lists carry, the two runtime-only ones, the seven plugin source types and the eight canonical kinds, the twenty-nine manifest keys, the forty-two, twenty-two and four frontmatter keys, the ten catalogue-manifest keys, and the autoupdater's four outcomes, four block types, three skip reasons and sixty-seven failure codes and the **plugin and marketplace protocol** is compared too: the ten marketplace source types and the eleventh the policy lists carry, the two runtime-only ones, the seven plugin source types and the eight canonical kinds, the twenty-nine manifest keys, the forty-two, twenty-two and four frontmatter keys, the ten catalogue-manifest keys, and the autoupdater's four outcomes, four block types, three skip reasons and sixty-seven failure codes",
