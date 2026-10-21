@@ -1632,6 +1632,58 @@ export function isAnthropicFirstPartyHost(host: string): boolean {
   );
 }
 
+/**
+ * The reasons a host is **not probed** by the egress check.
+ *
+ * **Observed** — `EGRESS_NOT_PROBED`, `chunk-z6a1zj5w.js:671 000`. A host that
+ * matches one of these four cannot be probed, so the egress check reports the
+ * reason instead of a verdict.
+ */
+export const EGRESS_NOT_PROBED = Object.freeze({
+  wildcard: 'wildcard',
+  ipLiteral: 'ip-literal',
+  plainHttpViaProxy: 'plain http via proxy',
+  blockedAddress: 'link-local or cloud-metadata address',
+});
+
+/**
+ * Whether a reason is one the egress check does not probe for.
+ *
+ * **Observed** — `isEgressNotProbed`, `chunk-z6a1zj5w.js:671 050`.
+ */
+export function isEgressNotProbed(reason: string | undefined): boolean {
+  if (reason === undefined) return false;
+  const reasons: readonly string[] = Object.values(EGRESS_NOT_PROBED);
+  return reasons.includes(reason);
+}
+
+/**
+ * The host and port of an egress address.
+ *
+ * **Observed** — `egressHostPort`, `chunk-z6a1zj5w.js:671 100`: a cleartext
+ * address with no explicit port is `host:80`; every other address is its host.
+ */
+export function egressHostPort(address: string): string {
+  const { scheme, host } = splitEgressAddress(address);
+  return scheme === 'http' && !/:\d+$/.test(host) ? `${host}:80` : host;
+}
+
+/**
+ * The scheme and the host of an egress address.
+ *
+ * **Observed** — `splitEgressAddress`, `chunk-z6a1zj5w.js:671 160`. Only a
+ * cleartext address is split: its `http://` prefix is removed and the rest is
+ * the host. Every other address is reported as an `https:` one **whole** — the
+ * target does not strip a `https://` prefix here, because the addresses it
+ * handles are the ones {@link egressAddress} produces, and those carry no
+ * scheme unless they are cleartext.
+ */
+export function splitEgressAddress(address: string): { scheme: 'http' | 'https'; host: string } {
+  return address.startsWith('http://')
+    ? { scheme: 'http', host: address.slice('http://'.length) }
+    : { scheme: 'https', host: address };
+}
+
 /* -------------------------------------------------------------------------- */
 /* The corporate proxy                                                          */
 /* -------------------------------------------------------------------------- */
@@ -1830,6 +1882,56 @@ export function readProxyAuthHelperConfig(
     user !== undefined &&
     (project === user || local === user);
   return { helper, fromProjectOrLocal, trustAccepted, sources: 'personAndPolicy' };
+}
+
+/**
+ * The decision about the proxy-auth helper.
+ *
+ * `run` — the helper may be run. `reason` — why it may not, in the target's own
+ * words where the target has words for it.
+ */
+export interface ProxyAuthHelperDecision {
+  /** Whether the helper may run. */
+  readonly run: boolean;
+  /** Why the helper may not run. */
+  readonly reason?: string;
+}
+
+/**
+ * Decide whether the proxy-auth helper may run.
+ *
+ * **Observed** — the target's own rules, `chunk-3q7vcbxf.js:45 060` – `45 400`,
+ * and the CLI's message in `chunk-8659jdnp.js`. The rules, in the target's order:
+ *
+ *   1. without a helper there is nothing to run;
+ *   2. the helper runs **only** when `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER` is set;
+ *   3. a helper that came from a **project or a local** tier is **never** run:
+ *      the target's `sources` is always `"personAndPolicy"`, and the target
+ *      refuses such a helper outright.
+ *
+ * The target's own warning — "proxyAuthHelper configured in project/local
+ * settings but workspace trust not yet accepted — skipping" — is reachable only
+ * when the sources are **not** `"personAndPolicy"`, which the observed
+ * configuration never produces, so this implementation reports the CLI's message
+ * instead. The trust predicate is part of the configuration shape either way.
+ */
+export function decideProxyAuthHelper(
+  config: ProxyAuthHelperConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): ProxyAuthHelperDecision {
+  if (config.helper === undefined) {
+    return { run: false, reason: 'no proxy-auth helper is configured' };
+  }
+  if (!Object.hasOwn(env, PROXY_AUTH_HELPER_ENABLED_VARIABLE)) {
+    return {
+      run: false,
+      reason: `the proxy-auth helper is switched off by ${PROXY_AUTH_HELPER_ENABLED_VARIABLE}`,
+    };
+  }
+  if (config.fromProjectOrLocal) {
+    return { run: false, reason: PROXY_AUTH_HELPER_PROJECT_MESSAGE.trim() };
+  }
+  return { run: true };
 }
 
 /**

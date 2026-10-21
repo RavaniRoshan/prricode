@@ -38,6 +38,7 @@ import {
   EGRESS_CORE_GROUP_LABEL,
   EGRESS_ENTRY_GRAMMAR,
   EGRESS_HOSTS,
+  EGRESS_NOT_PROBED,
   EGRESS_SERVICE_KEYS,
   EGRESS_SERVICES,
   GATEWAY_INTERNAL_NETWORKS_ERROR_CODE,
@@ -47,8 +48,10 @@ import {
   PROXY_ENVIRONMENT_VARIABLES,
   PROXY_SETTING_REFUSED_MESSAGE,
   computeEgressRequirements,
+  decideProxyAuthHelper,
   dropPortScopedEgressEntries,
   egressAddress,
+  egressHostPort,
   egressHostsForService,
   egressRequirementLabel,
   egressServiceLabel,
@@ -58,6 +61,7 @@ import {
   installCorporateProxyAgent,
   isAnthropicFirstPartyHost,
   isAnthropicHost,
+  isEgressNotProbed,
   matchesNoProxy,
   parseEgressHostEntry,
   proxyAuthHelperTtl,
@@ -67,6 +71,7 @@ import {
   resolveEgressEndpoints,
   resolveNoProxy,
   resolveProxyUrl,
+  splitEgressAddress,
   stripEgressEntryPort,
   validateGatewayInternalNetworks,
   type EgressHostContext,
@@ -530,8 +535,7 @@ describe('the egress rules', () => {
     expect(byHost.get('*.sentry.io')).toBe('disableEssentialTelemetry');
   });
 
-  it('normalises an egress address and recognises the vendor hosts', () => {
-    expect(egressAddress('https://api.anthropic.com')).toBe('api.anthropic.com');
+  it('normalises an egress address and recognises the vendor hosts', () => {    expect(egressAddress('https://api.anthropic.com')).toBe('api.anthropic.com');
     expect(egressAddress('http://proxy.example.com:8080')).toBe('http://proxy.example.com:8080');
     expect(egressAddress(undefined)).toBeUndefined();
 
@@ -544,6 +548,35 @@ describe('the egress rules', () => {
     // a subdomain of one of them is a first-party host too.
     expect(isAnthropicFirstPartyHost('api.anthropic.com')).toBe(true);
     expect(isAnthropicFirstPartyHost('example.com')).toBe(false);
+  });
+
+  it('names the four reasons the egress check does not probe for', () => {
+    expect(EGRESS_NOT_PROBED.wildcard).toBe('wildcard');
+    expect(EGRESS_NOT_PROBED.ipLiteral).toBe('ip-literal');
+    expect(EGRESS_NOT_PROBED.plainHttpViaProxy).toBe('plain http via proxy');
+    expect(EGRESS_NOT_PROBED.blockedAddress).toBe(
+      'link-local or cloud-metadata address',
+    );
+    expect(isEgressNotProbed('wildcard')).toBe(true);
+    expect(isEgressNotProbed('something else')).toBe(false);
+    expect(isEgressNotProbed(undefined)).toBe(false);
+  });
+
+  it('splits an egress address into its scheme and its host', () => {
+    // Only a cleartext address is split; the target does not strip a
+    // `https://` prefix here, because the addresses it handles carry no
+    // scheme unless they are cleartext.
+    expect(splitEgressAddress('api.anthropic.com')).toEqual({
+      scheme: 'https',
+      host: 'api.anthropic.com',
+    });
+    expect(splitEgressAddress('http://proxy.example:8080')).toEqual({
+      scheme: 'http',
+      host: 'proxy.example:8080',
+    });
+    expect(egressHostPort('http://proxy.example')).toBe('proxy.example:80');
+    expect(egressHostPort('http://proxy.example:8080')).toBe('proxy.example:8080');
+    expect(egressHostPort('api.anthropic.com')).toBe('api.anthropic.com');
   });
 });
 
@@ -791,6 +824,42 @@ describe('the corporate proxy', () => {
       'a proxy helper set by this project is not run by this command\n',
     );
     expect(PROXY_SETTING_REFUSED_MESSAGE).toBe('Error: the proxy setting named above is refused.');
+  });
+
+  it('decides whether the proxy-auth helper may run', () => {
+    const userHelper = new Map<string, unknown>([['userSettings', { proxyAuthHelper: 'get-token' }]]);
+    const projectHelper = new Map<string, unknown>([
+      ['userSettings', { proxyAuthHelper: 'get-token' }],
+      ['projectSettings', { proxyAuthHelper: 'get-token' }],
+    ]);
+
+    // No helper at all.
+    expect(decideProxyAuthHelper(readProxyAuthHelperConfig(new Map()), {})).toEqual({
+      run: false,
+      reason: 'no proxy-auth helper is configured',
+    });
+
+    // The helper is present, but the switch is off.
+    expect(
+      decideProxyAuthHelper(readProxyAuthHelperConfig(userHelper), {}),
+    ).toMatchObject({ run: false });
+
+    // The switch is on and the helper came from the user tier: it may run.
+    expect(
+      decideProxyAuthHelper(readProxyAuthHelperConfig(userHelper), {
+        CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER: '1',
+      }),
+    ).toEqual({ run: true });
+
+    // A helper that came from a project tier is never run.
+    expect(
+      decideProxyAuthHelper(readProxyAuthHelperConfig(projectHelper), {
+        CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER: '1',
+      }),
+    ).toEqual({
+      run: false,
+      reason: 'a proxy helper set by this project is not run by this command',
+    });
   });
 
   it('refuses to install a corporate proxy agent, and names the capability', () => {

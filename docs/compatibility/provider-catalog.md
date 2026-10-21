@@ -433,6 +433,19 @@ The target's own statement (`chunk-z6a1zj5w.js:672 200`):
 
 **Implemented** — `parseEgressHostEntry`, `stripEgressEntryPort` and `dropPortScopedEgressEntries`. The port is 1–65535; a bare `*` may not carry a port; an entry with a scheme, a path or an IPv6 literal is refused; the host is lowercased.
 
+## The other helpers of the host-constant module
+
+The target's host-constant module (`pr`) carries a few more helpers that belong to this surface, and they are implemented here:
+
+| helper | what the target does | where | what this implementation does |
+|---|---|---|---|
+| `EGRESS_NOT_PROBED` | the four reasons a host is not probed for: `wildcard`, `ip-literal`, `plain http via proxy`, `link-local or cloud-metadata address` | `chunk-z6a1zj5w.js:671 000` | **implemented** — `EGRESS_NOT_PROBED`, `isEgressNotProbed` |
+| `egressHostPort` | a cleartext address with no explicit port is `host:80`; every other address is its host | `:671 100` | **implemented** — `egressHostPort` |
+| `splitEgressAddress` | only a cleartext address is split; every other address is an `https:` one **whole** | `:671 160` | **implemented** — `splitEgressAddress` |
+| `egressAddress` | a secure URL is reduced to its host, a cleartext URL keeps its scheme | `:671 250` | **implemented**, with one named gap — see the clone-choice labels |
+| `isAnthropicHost`, `isAnthropicFirstPartyHost` | the vendor's own host, and the first-party set (`anthropic.com`, `claude.ai`, `claude.com` and their subdomains) | `:667 930`, `:668 100` | **implemented** |
+| the **derived** cloud hosts — `vertexInferenceHost`, `bedrockRuntimeHost`, `mantleRuntimeHost`, `foundryResourceHost`, `bedrockControlPlaneHost`, `awsSsoOidcHost`, `awsSsoPortalHost`, `bedrockSsoHosts`, `bedrockHosts` | the regional hosts the cloud providers are reached at | `:671 280` – `:671 800` | **not re-implemented here** — the per-provider endpoint policy and the driver layer already own the regional hosts, and the milestone says not to do that work twice |
+
 ## The corporate proxy
 
 | part | what the target has | where | what this implementation does |
@@ -444,6 +457,7 @@ The target's own statement (`chunk-z6a1zj5w.js:672 200`):
 | the proxy-auth helper's setting | `proxyAuthHelper`, a shell command that prints a `Proxy-Authorization` value | `chunk-c9s0jh80.js:253 428` | **implemented** — the setting is already in `src/config/schema.ts`; its configuration shape is `readProxyAuthHelperConfig` |
 | the helper's configuration | `{helper, fromProjectOrLocal, trustAccepted, sources:"personAndPolicy"}`; the policy tier wins over the user tier; `fromProjectOrLocal` is true when the policy has none, the user has one, and the project or the local tier carries **the same** string | `chunk-8659jdnp.js` (the whole file) | **implemented** — `readProxyAuthHelperConfig` |
 | the helper's switch | the helper runs **only** when `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER` is set | `chunk-3q7vcbxf.js:45 060` | **implemented** — the variable is named by `PROXY_AUTH_HELPER_ENABLED_VARIABLE` |
+| whether the helper may run | no helper → nothing to run; the switch off → nothing to run; a helper that came from a **project or a local** tier → **never** run | `chunk-3q7vcbxf.js:45 220`, `chunk-8659jdnp.js` | **implemented** — `decideProxyAuthHelper` |
 | the helper's cache | five minutes by default; `CLAUDE_CODE_PROXY_AUTH_HELPER_TTL_MS` overrides it when it names a number that is not negative | `:45 100` | **implemented** — `PROXY_AUTH_HELPER_TTL_MS`, `proxyAuthHelperTtl` |
 | the two messages | `a proxy helper set by this project is not run by this command` and `Error: the proxy setting named above is refused.` | `chunk-8659jdnp.js` | **implemented** — `PROXY_AUTH_HELPER_PROJECT_MESSAGE`, `PROXY_SETTING_REFUSED_MESSAGE` |
 | the proxy agent | the target installs a proxy agent on the API client and a global dispatcher on the fetch client, and runs the helper to fill the `Proxy-Authorization` header | `:45 000` | **refused** — `installCorporateProxyAgent` throws `CorporateProxyCapabilityError`, naming the capability `an outbound HTTP proxy agent that can carry a Proxy-Authorization header` |
