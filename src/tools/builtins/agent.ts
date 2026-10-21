@@ -2,8 +2,8 @@
  * The `Agent` tool: hand a piece of work to a sub-agent.
  *
  * Evidence: the target's `Agent` tool, read out of the pinned build
- * (`chunk-1vypyz65.js:45778`, with its input schema at `chunk-1vypyz65.js:9970`
- * and its aliases at `chunk-k2x7dq66.js:986`), and the `CC-027` milestone of
+ * (`chunk-1vypyz65.js:45785`, with its input schema at `chunk-1vypyz65.js:11430`
+ * and its aliases at `chunk-k2x7dq66.js:376`), and the `CC-027` milestone of
  * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`.
  *
  * **The target's name for this tool is `Agent`, and `Task` is its alias.** The
@@ -19,10 +19,19 @@
  * target's own — `sonnet`, `opus`, `haiku` and `fable` — because those are the
  * data the implementation has to speak to.
  *
+ * **A `name` makes the spawn a teammate.** The target's `Agent` tool reads the
+ * `name` field as the signal: a named spawn is a **teammate** — an agent the
+ * session can address with `SendMessage` — and an unnamed one is an ordinary
+ * subagent. The name is validated by the target's own three rules (the shape,
+ * the `main` reservation, and the reserved-name-or-agent-id test), which this
+ * implementation reproduces in `src/agent/teamLedger.ts`.
+ *
  * **The delegation scheduler is not observed.** The audit says so outright, so the
  * implementation does not invent one: the tool delegates through a seam the
  * session supplies, and without that seam the call is a typed failure rather
- * than a silent no-op.
+ * than a silent no-op. The same is true of the **teammate runtime**: this
+ * implementation has no teammate service, so a named spawn refuses and names
+ * the capability it needed.
  *
  * The tool is **not** file-mutating: the observed file-mutating set is exactly
  * `["Edit", "Write", "NotebookEdit"]`. A sub-agent may write files, but the writes
@@ -38,6 +47,7 @@
 
 import { ToolExecutionError, TOOL_ERROR_CODES, type ToolDefinition } from '../registry.js';
 import type { ToolContext } from '../../permissions/decision.js';
+import { validateTeammateName } from '../../agent/teamLedger.js';
 
 import {
   checkToolPermissions,
@@ -103,7 +113,8 @@ export const AGENT_INPUT_SCHEMA = {
     },
     name: {
       type: 'string',
-      description: 'Name for the spawned agent.',
+      description:
+        'Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.',
     },
     isolation: {
       type: 'string',
@@ -160,10 +171,49 @@ export function createAgentTool(deps: BuiltinToolDeps): ToolDefinition<AgentInpu
         invalidCode: TOOL_ERROR_CODES.invalidInput,
       });
       if (!prompt.ok) return prompt;
+      const name = requireStringField(input, 'name', {
+        invalidCode: TOOL_ERROR_CODES.invalidInput,
+        allowEmpty: true,
+      });
+      if (!name.ok) return name;
+      if (name.value !== '') {
+        // The target's own three rules for a teammate's name.
+        const checked = validateTeammateName(name.value);
+        if (!checked.ok) {
+          return { ok: false, message: checked.message, errorCode: TOOL_ERROR_CODES.invalidInput };
+        }
+      }
       return { ok: true };
     },
 
     async execute(input, ctx: ToolContext) {
+      if (input.name !== undefined && input.name !== '') {
+        // A **named** spawn is a teammate in the target: an agent the session
+        // can address with `SendMessage`.
+        const spawn = deps.spawnTeammate;
+        if (spawn === undefined) {
+          throw new ToolExecutionError(
+            "The 'Agent' tool needs a teammate runtime to start a named agent, which this session does not have, so the call was refused.",
+            TOOL_ERROR_CODES.capabilityUnavailable,
+          );
+        }
+        const report = await spawn(
+          {
+            name: input.name,
+            prompt: input.prompt,
+            description: input.description,
+            model: input.model,
+            planModeRequired: false,
+            cwd: input.cwd,
+          },
+          ctx,
+        );
+        return {
+          type: 'text' as const,
+          text: report,
+          description: input.description,
+        };
+      }
       const delegate = deps.delegate;
       if (!delegate) {
         throw new ToolExecutionError(

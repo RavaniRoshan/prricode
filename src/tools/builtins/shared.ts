@@ -215,6 +215,29 @@ export interface BuiltinToolDeps {
   /** The delegate the `Task` tool runs a sub-agent through. */
   delegate?: (input: unknown, ctx: ToolContext) => Promise<string>;
   /**
+   * The runtime the `Agent` tool starts a **named** agent in.
+   *
+   * A named spawn is a **teammate** in the target: an agent the session can
+   * address with `SendMessage` while it runs. The target starts one in a
+   * terminal pane or in the session's own process.
+   *
+   * **This implementation has no teammate runtime** — no teammate service, no
+   * pane and no cross-session transport — so the seam is absent by default and
+   * a named spawn **refuses**, naming the capability it needed. The seam is
+   * here so that a session that *does* have one gets a real tool.
+   */
+  spawnTeammate?: (
+    input: {
+      name: string;
+      prompt: string;
+      description: string;
+      model?: 'sonnet' | 'opus' | 'haiku' | 'fable';
+      planModeRequired: boolean;
+      cwd?: string;
+    },
+    ctx: ToolContext,
+  ) => Promise<string>;
+  /**
    * The capabilities the newer tools need.
    *
    * **A capability is a seam, not a constant.** The browser, the language server,

@@ -2,7 +2,7 @@
 
 **Target:** the pinned reference build `2.1.303`, Linux x86-64, SHA-256 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`.
 **Source of truth:** [`docs/reverse-engineering/COVERAGE-AUDIT.md`](../reverse-engineering/COVERAGE-AUDIT.md) §2.8 "MCP, plugins, and hooks".
-**Owning tasks:** `CC-011` (MCP and the control surface), `CC-012` (hooks), `CC-013` (skills, subagents, plugins, marketplaces, IDE), `CC-011b` (the subagent definition lifecycle and the standalone skill scan).
+**Owning tasks:** `CC-011` (MCP and the control surface), `CC-012` (hooks), `CC-013` (skills, subagents, plugins, marketplaces, IDE), `CC-011b` (the subagent definition lifecycle and the standalone skill scan), `CC-034` (the agent-team surface).
 **Matrix rows:** F-28 … F-33 in [`feature-matrix.md`](feature-matrix.md).
 
 Every row names its **evidence class**: `REA observed`, `Documented only`, or `implementation choice`.
@@ -736,6 +736,128 @@ call five more. The full table, with the target's own timeouts, is in
 | `renamed for the product` | the target's product name inside the tool's own text — its login command, its process — was replaced by `PRRICODE`. The tool's **own name** was not: a tool's name is data | the five operator-tail descriptions; the reworked `SIGKILL_TIMEOUT_MS` message |
 | `not reproduced` | the target's own rule is recorded, and this implementation has **no counterpart** for it | `suppressesAlwaysAllowRule` — this implementation has no always-allow persistence |
 
+## The agent-team surface (CC-034)
+
+**The target has agent teams, and this implementation has no team backend.**
+The target ships a **teammate mode**, a **cross-session inbound** gate, a
+**name-collision ledger** and a **team lifecycle** around them. There is no
+account, no teammate service, no cross-session transport, no pane backend and
+no `it2` CLI here, so the surface is **recorded and shaped, never faked**: the
+mode's states, the ledger's rules, the inbound gate's policy and the
+lifecycle's record shapes are implemented, and every operation that would
+need a teammate runtime or a transport **refuses** with a typed failure that
+names the capability it needed.
+
+The reading is `/home/shiva/opt/reference-agent-rea/analysis/findings-agent-teams.md`;
+every claim there carries the target's own file and byte offset.
+
+### The teammate mode
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the states | `Iqs=["auto","tmux","iterm2","in-process"]` | `chunk-wwqhf5t7.js:893` | the same four, in the same order |
+| the default | `var TKn="in-process"` | `chunk-9hxmx5h0.js:735` | the same: `in-process`, **not** `auto` |
+| the setting | `teammateMode:()=>U(Iqs).optional().catch(void 0).describe("How spawned teammates execute (tmux, iterm2, in-process, auto)")` | `chunk-c9s0jh80.js:320848` | the same key and the same shape |
+| the capture | the CLI override wins; otherwise the settings value, and the default when the settings say nothing | `chunk-9hxmx5h0.js:1193` | the same |
+| the read before the capture | `Error("getTeammateModeFromSnapshot called before capture - this indicates an initialization bug")` | `chunk-9hxmx5h0.js:1439` | the same message, and the same refusal |
+| clearing the override | the clear **also sets** the mode | `chunk-9hxmx5h0.js:1051` | the same |
+| the CLI's own validation | a mode that is not one of the four becomes `undefined`, not an error | `chunk-081t8575.js:107996` | the same |
+| the CLI's own rule | `--agent-id`, `--agent-name` and `--team-name` must all be provided together | `chunk-081t8575.js:115213` | **not wired**: this implementation has no CLI team flags |
+| the headless rule | a non-interactive session is always in-process | `chunk-vqa3vv4s.js` | the same |
+| the `auto` rule | in-process unless the session is inside tmux or iTerm2, or the fallback is armed | `chunk-vqa3vv4s.js` | the same |
+| the backend detection | inside tmux → tmux; inside iTerm2 with `it2` → iTerm2; inside iTerm2 without `it2` but with tmux → tmux and `needsIt2Setup`; outside both with tmux → tmux | `chunk-vqa3vv4s.js:4245` onward | the same, and the selection is reproducible |
+| the explicit-iTerm2 failures | `teammateMode is set to "iterm2" but this session is not running inside iTerm2…` and `…but the it2 CLI is not reachable…` | `chunk-vqa3vv4s.js:4245`, `:4361` | the same messages, with the product name substituted |
+| the `auto` fallback | `Couldn't open a teammate pane — running in-process instead.` | `chunk-xbdsavh3.js:31375` | the same text and the same key (`teammate-auto-fallback`) |
+
+**The honest boundary.** The **detection** is the target's own and is
+reproducible. The **pane** is not: there is no tmux and no iTerm2 here, and no
+`it2` CLI, so a mode that names a pane backend **refuses** — with the
+capability named — and the `auto` mode takes the target's own in-process
+fallback.
+
+### The cross-session inbound gate
+
+The gate is one module in the target (`chunk-v01p0e5r.js`) and every rule below
+is read out of it.
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the values | `var FBt=["accept","hold","refuse"]` | `chunk-c9s0jh80.js:236597` | the same three |
+| the strictness order | `var f={accept:0,hold:1,refuse:2}` | `chunk-v01p0e5r.js:1377` | the same |
+| the resolution order | `policySettings`, `flagSettings`, `userSettings` — the first that defines the key wins | `chunk-v01p0e5r.js:2941` | the same |
+| the repository rule | a repository value replaces the resolved one **only when it is stricter**; an equal value only changes the attribution | `chunk-v01p0e5r.js:2941` | the same |
+| an unrecognised value in a **policy** source | it becomes `refuse` — the most restrictive reading | `chunk-c9s0jh80.js:427318` | the same |
+| an unrecognised value anywhere else | the key is dropped, and the resolved value becomes `hold` with the `invalid-setting` cause | `chunk-v01p0e5r.js:3487` | the same |
+| the default gate | the kill switch, then an explicit setting, then a **fail-closed** unknown mode, then the bypass class | `chunk-v01p0e5r.js:3816` | the same |
+| the mode-parity rule | the sender's class must **equal** the receiver's; a mismatch is held | `chunk-v01p0e5r.js:4277` | the same |
+| a sender that asserted no class | held only while the receiver bypasses prompts | `chunk-v01p0e5r.js:4277` | the same |
+| a message the session sent to itself | always accepted | `chunk-v01p0e5r.js:4277` | the same |
+| the hold buffer | **100** parked messages; the hundred-and-first evicts the oldest, settled as `expired` | `chunk-v01p0e5r.js:1377` | the same |
+| the receipts | `delivered`, `held`, `refused`, `expired`, `denied`, `dropped` | `chunk-v01p0e5r.js:5798`, `:9389` | the same six |
+| the approval outcomes | `delivered`, `dropped`, `dropped-by-guard`, `gone` | `chunk-v01p0e5r.js:9389` | the same four |
+| the hold causes | `managed-setting`, `repo-setting`, `invalid-setting`, `explicit-setting`, `mode-unknown`, `bypass-default`, `mode-mismatch`, `no-mode-asserted` | `chunk-v01p0e5r.js:1146` and the gate | the same eight |
+| the refuse causes | `opt-out`, `kill-switch` | `chunk-v01p0e5r.js:3582`, `:3750` | the same two |
+| the inbound message form | `<cross-session-message from="…" from-session="…" hop-chain="…" from-name="…" from-mode="…" from-plugin="…">` | `chunk-fvj2e8y8.js` | the same tag, the same six attributes, the same order, and the same parser |
+| the `isolatePeerMachines` rule | the setting asks, with the `safetyCheck` reason, when a message may reach another machine | `chunk-sy98zctw.js:51379` | **not wired**: this implementation has no Remote Control peer, so there is no cross-machine message to gate |
+
+**The honest boundary.** The **gate** is implemented. The **transport** is not:
+there is no socket, no bridge and no cloud peer here, so the operation that
+would carry a message to the receiving session **refuses** and names the
+capability it needed. A receipt of `delivered` means what the target's own log
+means by it — *released* — and the release is the gate's, not the transport's.
+
+### The name-collision ledger
+
+**The baseline record was wrong here**, and the correction is recorded in the
+findings file: `recordSource` carries the **request's source**, not a settle
+value, and `settle` has **six** values, not five.
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the reserved names | `main`, `team-lead`, `user`, `system` — compared after normalisation, so the test is spelling-insensitive | `chunk-jdykmg3v.js:3389`, `:9134` | the same four, and the same normalisation |
+| the agent-id shape | `^a(?:[\w-]{1,63}-)?[0-9a-f]{16}$` | `chunk-mtkqr4r9.js:354` | the same |
+| the name shape | `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` | `chunk-fvj2e8y8.js:2391` | the same, and the same three messages |
+| the unique-name rule | a colliding name takes `-2`, then `-3`; the comparison is case-insensitive | `chunk-xbdsavh3.js:20415` | the same |
+| the teammate id | `${name}@${team}` | `chunk-fvj2e8y8.js:2175` | the same |
+| the sanitisation | every `@` becomes a `-` | `chunk-qsxcbpmk.js:1531` | the same |
+| the settle values | `pre-decided`, `own-name`, `superseded`, `held`, `yielded`, **`kept`** | `chunk-4jsg44k7.js:3562216` | the same six |
+| the outcomes | `superseded`; `yielded` and `held` → `yielded`; `kept`, `own-name` and `pre-decided` → `kept` | `chunk-4jsg44k7.js:3563019` | the same |
+| the record sources | `collision`, `auto`, `user`, `peer`, `hook` — a collision or a peer request is recorded as a hook request | `chunk-4jsg44k7.js:3562193` | the same five |
+
+### The team lifecycle
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the team file | `<root>/teams/<slug>/config.json`, the slug being the name with every non-alphanumeric character turned into a `-` and lowercased | `chunk-qsxcbpmk.js:1463`, `:1576`, `:1613` | the same layout |
+| the inbox | `<root>/teams/<slug>/inboxes/<agent>.json` | `chunk-2pn9kb04.js:22932` | the same layout |
+| the member record | `{agentId, name, color, joinedAt, tmuxPaneId, subscriptions, …}` | `chunk-xbdsavh3.js:18951` | the same fields |
+| the control-character refusal | `Invalid name: control characters are not allowed in agent or team names` | `chunk-xbdsavh3.js:18951` | the same message |
+| the team context | `{teamName, teamFilePath, leadAgentId, teammates}` | `chunk-xbdsavh3.js` | the same fields |
+| the write | under a `config.json.lock`, with **five** attempts and a **50 ms** base backoff on `Unavailable`/`LockSuspect` | `chunk-qsxcbpmk.js:3751`, `:4431` | **recorded, not reproduced** — this implementation writes no team file |
+| the stale-removal guard | a member that was **re-added** after a removal started is not removed | `chunk-qsxcbpmk.js:6947` | **recorded, not reproduced** — there is no team file to remove a member from |
+| the teardown | every member with a pane is killed, and the team's directory is removed | `chunk-qsxcbpmk.js:8924`, `:9568` | **recorded, not reproduced** — there is no pane and no team directory |
+| the `TeammateIdle` payload | `{hook_event_name:"TeammateIdle", teammate_name, team_name}` | `chunk-4jsg44k7.js:3560929` | the same payload |
+| a named `Agent` spawn | a **named** spawn is a **teammate** — an agent the session can address with `SendMessage` | `chunk-1vypyz65.js:20202` | the same: the `Agent` tool routes a named spawn to the teammate path |
+
+### The refusals this milestone adds
+
+| the call | the refusal | the capability it names |
+|---|---|---|
+| a pane backend | `The teammate mode needs a tmux pane backend, which this session does not have, so the teammate was not spawned.` | a tmux (or iTerm2) pane backend |
+| the cross-session transport | `The cross-session inbound path needs a cross-session transport, which this session does not have, so the message was not delivered.` | a cross-session transport |
+| starting a teammate | `Starting a teammate needs a teammate runtime, which this session does not have, so the teammate was not started.` | a teammate runtime |
+| tearing a team down | `Tearing a team down needs a teammate runtime, which this session does not have, so the team was not torn down.` | a teammate runtime |
+| a named `Agent` spawn | `The 'Agent' tool needs a teammate runtime to start a named agent, which this session does not have, so the call was refused.` | a teammate runtime |
+
+### The clone-choice labels this milestone adds
+
+| Label | What it means | Which entries |
+|---|---|---|
+| `reproduced` | the state, the value, the name, the message, the rule and the shape are the target's own, and the product's name is the only substitution | the four teammate-mode states and the default; the three inbound values and the strictness order; the eight hold causes and the two refuse causes; the six settle values and the three outcomes; the five record sources; the four reserved names; the two name shapes; the unique-name rule; the teammate id; the team-file layout; the member record; the `TeammateIdle` payload; the `Agent` tool's `name` description and its three validation messages |
+| `refused` | the call ends in a typed failure that names the **capability** it needs and this session does not have | the pane backends; the cross-session transport; the teammate runtime (starting a teammate, tearing a team down, and a named `Agent` spawn) |
+| `recorded, not reproduced` | the surface is **named** and nothing here runs it | the team-file write and its lock and retry; the member operations; the teardown; the peer transport |
+| `not reproduced` | the target's own rule is recorded, and this implementation has **no counterpart** for it | the `--agent-id` / `--agent-name` / `--team-name` CLI trio — this implementation has no CLI team flags; the `isolatePeerMachines` gate — this implementation has no cross-machine peer |
+
 ## Conformance table
 
 | Claim | Evidence class | Matrix row | Pinned by |
@@ -883,5 +1005,50 @@ target's and the part that is this implementation's. The measured outcome is in
 | No runner description names the target's product | **implementation choice** (the substitution) | F-17 | same file — "names no target product name in any runner description" |
 | The "don't ask again" affordance does not persist an always-allow rule for the two write tools | **REA observed** (the target's flag) + **not reproduced** (this implementation has no always-allow persistence) | F-20 | — |
 | The runner's **process**, its **registration** and the `self-hosted-runner` **subcommand tree** are **not** shipped | **implementation choice** — the honest boundary | F-38 | — |
+
+## The agent team — conformance
+
+The agent-team surface was **absent from the coverage audit entirely**. It was
+closed by **reading the target's own source**, so the surface's facts are
+**REA observed**; the rows below name the part of each rule that is the
+target's and the part that is this implementation's.
+
+**The matrix row is not assigned yet.** The feature matrix and the compatibility
+report are the orchestrator's, and the surface is **not** a row of
+`feature-matrix.md` at the time of writing. The rows below therefore name
+**F-33** — the row that carries the target's **tool inventory**, and so the
+three team tools (`SendMessage`, `ListAgents` and `SubagentHandback`) — and the
+orchestrator may re-file the surface under a row of its own when it
+re-measures. The measured outcome is in [`results.md`](results.md).
+
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The teammate mode carries the target's **four** states and the target's **default** — `in-process`, not `auto` | **REA observed** | F-33 | `tests/contracts/agent-teams.test.ts` — "carries the target's four states and the target's default" |
+| The snapshot captures the **CLI override** before the settings value, and reading it before the capture is refused with the target's own message | **REA observed** | F-33 | same file — "captures the CLI override before the settings value", "refuses to report a mode before it has been captured" |
+| Clearing the CLI override **also sets** the mode | **REA observed** | F-33 | same file — "clears the CLI override and sets the mode" |
+| A headless session is always in-process, and `auto` is in-process outside tmux and iTerm2 | **REA observed** | F-33 | same file — "runs a non-interactive session in-process, whatever the mode says", "runs the auto mode in-process outside tmux and iTerm2" |
+| The backend detection is the target's own — tmux inside tmux, iTerm2 with `it2`, the tmux fallback with `needsIt2Setup`, and the two explicit-iTerm2 failures with the target's own messages | **REA observed** | F-33 | same file — the four backend-selection tests |
+| A pane backend **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "names the capability a pane backend needs when it refuses" |
+| The `auto` mode takes the target's own in-process fallback, with the target's notification text | **REA observed** (the text and the fallback) + **implementation choice** (that the fallback always applies here) | F-33 | same file — "falls back to in-process, with the target's own notification, when the mode is auto", "carries the target's own fallback notification" |
+| The reserved names are `main`, `team-lead`, `user` and `system`, and the test is spelling-insensitive | **REA observed** | F-33 | same file — "rejects the reserved names, in any spelling" |
+| A name with the shape of an **agent id** is refused, and the agent-id shape is the target's own | **REA observed** | F-33 | same file — "rejects a name that has the shape of an agent id" |
+| The `Agent` tool's `name` field carries the target's own description and the target's own three validation messages | **REA observed** | F-33 | same file — "carries the target's own description for the name field", "applies the target's own three rules to the name field" |
+| A colliding name takes `-2`, then `-3`, and the comparison is case-insensitive | **REA observed** | F-33 | same file — "suffixes a colliding name with -2, then -3" |
+| The teammate id is `${name}@${team}`, and the `@` is sanitised to a `-` | **REA observed** | F-33 | same file — "sanitises the name and builds the teammate id" |
+| The `settle` vocabulary is the target's **six** values and the outcome map is the target's three — the baseline record's list was short by one and mixed the two axes up | **REA observed** | F-33 | same file — "carries the target's six settle values and its three outcomes", "carries the target's record sources" |
+| The inbound setting resolves in the target's order, and a repository setting may only **tighten** | **REA observed** | F-33 | same file — "resolves the setting in the target's order", "lets a repository setting only tighten", "never lets a repository setting loosen a policy setting", "lets a repository setting tighten a policy setting" |
+| An unrecognised value becomes `refuse` in a policy source and `hold` everywhere else | **REA observed** | F-33 | same file — "turns an unrecognised value in a policy source into refuse", "turns an unrecognised value anywhere else into hold" |
+| The default gate accepts when the session prompts and holds when it bypasses, and the mode-parity rule holds a mismatched sender and a sender that asserted no class | **REA observed** | F-33 | same file — the five default-gate and mode-parity tests |
+| A message the session sent to itself is always accepted, and the setting's `refuse` refuses with the `opt-out` cause | **REA observed** | F-33 | same file — "accepts a message the session sent to itself", "refuses when the setting is refuse", "refuses when the kill switch is on" |
+| The hold buffer holds **100** messages and evicts the oldest as `expired` | **REA observed** | F-33 | same file — "parks a held message and reports the receipt", "evicts the oldest parked message when the buffer is full" |
+| An approved message is released with a `delivered` receipt and a denied one is dropped with a `denied` receipt | **REA observed** | F-33 | same file — "delivers an approved held message", "drops a denied held message with a denial receipt" |
+| The cross-session transport **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses to deliver a cross-session message, naming the capability it needs" |
+| The inbound message form is the target's own tag and its own six attributes, and the parser reads them back | **REA observed** | F-33 | same file — "carries the inbound message form", "reads nothing out of a text that is not an envelope" |
+| The team file and the inbox sit where the target puts them, under the configuration root | **REA observed** | F-33 | same file — "carries the target's team file layout" |
+| The identity reservation takes the unique name, builds the id, and refuses a control character with the target's own message | **REA observed** | F-33 | same file — "reserves the teammate identity the way the target does", "refuses a name that carries a control character" |
+| Starting a teammate and tearing a team down **refuse**, and both name the capability they needed | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses to spawn a teammate, naming the capability it needs", "refuses to tear a team down, naming the capability it needs" |
+| The `TeammateIdle` hook payload is the target's own | **REA observed** | F-33 | same file — "carries the target's TeammateIdle hook payload" |
+| A **named** `Agent` spawn is a teammate, and it refuses without a teammate runtime | **REA observed** (the named spawn is the target's) + **implementation choice** (the refusal) | F-33 | same file — "refuses a named spawn, naming the capability it needs", "starts a named agent through the teammate runtime the session supplies" |
+| The team file's **write**, its lock, its retry, the member operations and the teardown are **recorded, not reproduced** | **REA observed** (the rules) + **not reproduced** (this implementation writes no team file) | F-33 | — |
 
 
