@@ -362,3 +362,121 @@ Every row of this table is a **project extension**: the target has no such surfa
 **The target's `wd(model)` rule has two halves, and this implementation implements both.** The "no id for the selected route but one for `mantle`" half is the mantle fallback; the **Bedrock+Mantle `anthropic.*` override** — with both routes enabled, an `anthropic.*` model resolves to `mantle` — is implemented through the **enabled-flag set** the route layer hands in (`enabledRoutes`), and it is **off** when a caller supplies none, so the two-argument callers keep their behaviour.ot implemented**, because it needs the enabled-flag set, which the catalog API does not take. The wiring point is `resolveRouteForModel` in `src/provider/catalog.ts`; the code says so in the file header and on the function.
 
 **The "not served" predicate is the target's own.** The target's `provider_ids` has three states per route: a string (the route serves the model), `null` (the route does not) and an **absent** key (the target's literal does not carry it). The target's route selector tests `provider_ids[route] === null`, and an omitted key is **not** `null`: the target does not treat `claude-haiku-5-5` as unserved by `gateway`, and neither does this implementation. This implementation keeps the three states apart — `providerIds` carries the target's `null` verbatim, and `notServedOn` is the target's predicate, character for character. The two agree on **every** row of the built-in table.
+
+---
+
+# The endpoint catalogue and the corporate proxy
+
+**Target:** the pinned reference build `2.1.303`, Linux x86-64, SHA-256 `375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`.
+**Source of truth:** the target's own source, read out of the pinned build. Every claim below carries the file and the byte offset it was read at; the whole reading is in `/home/shiva/opt/reference-agent-rea/analysis/findings-endpoint-catalogue.md`.
+**Owning task:** `CC-038` in [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
+**Pinned by:** `tests/contracts/endpoint-catalogue.test.ts`.
+
+## What this surface is, and what it is not
+
+The **per-provider endpoint policy** above is one thing: the base-URL variables and the vendor-host pattern of each of the eight routes. The **endpoint catalogue** is a different thing: the table of **every host the product talks to**, the purpose each host serves, and the toggle that switches a whole service off. The target keeps it in the module `Jw` of `chunk-z6a1zj5w.js` — the **gateway** chunk — and it drives the target's *Egress Requirements* report.
+
+The **corporate proxy** is a third thing again: the `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` environment, the `proxyAuthHelper` setting, and the proxy agent the target installs on its HTTP clients. It lives in `chunk-3q7vcbxf.js`.
+
+**The honest boundary.** This implementation reaches the network through the provider driver. It has **no egress firewall**, **no catalogue of its own** and **no corporate proxy**. So:
+
+- the catalogue and the rules that decide on it are **reproduced as data and as pure functions** — the target's own eleven services, its own toggle keys, its own host constants, its own grammar;
+- the two **operations** that need a capability this implementation does not have — installing a corporate-proxy agent, and enforcing the egress firewall — **refuse**, and each refusal **names the capability it needed**;
+- **no firewall is faked**. The catalogue this implementation carries is the target's catalogue, transcribed; it is not an invented allowlist, and nothing here claims to filter a request.
+
+## The catalogue
+
+**Eleven services**, in the target's own declaration order (`chunk-z6a1zj5w.js:1 256 200` – `1 259 100`).
+
+| # | service | toggle | group | what it is for |
+|---|---|---|---|---|
+| 1 | `vm-bundle` | — | Core | the VM workspace bundle and the CLI binary |
+| 2 | `model-catalog` | — | Core | the signed model-catalog metadata, polled every 5–15 minutes |
+| 3 | `updater` | `disableAutoUpdates` | Auto-updates | the update feed and the binary releases |
+| 4 | `sentry` | `disableEssentialTelemetry` | Essential telemetry | crash and error reporting |
+| 5 | `datadog-rum` | `disableEssentialTelemetry` | Essential telemetry | performance timing |
+| 6 | `anthropic-telemetry` | `disableNonessentialTelemetry` | Nonessential telemetry | analytics events, and the usage telemetry the sandboxed agent sends |
+| 7 | `connector-favicons` | `disableNonessentialServices` | Nonessential services | connector favicons |
+| 8 | `artifact-sandbox` | `disableNonessentialServices` | Nonessential services | the artifact-preview iframe and its asset CDNs |
+| 9 | `mcp-app-sandbox` | `disableNonessentialServices` | Nonessential services | the MCP App widget iframe and the fonts it loads |
+| 10 | `spellcheck-dictionary` | `disableNonessentialServices` | Nonessential services | the Linux spellcheck dictionary and its redirect targets |
+| 11 | `dictation` | — | Core | the dictation service's `connect-src` source |
+
+**The endpoint record.** `{host, path?, pathSuffix?, exactPath?, followRedirects?, origin: "renderer"|"main"|"subprocess", purpose?, cspDirective?, cspScheme?, firewallAlso?, firewallAlsoPurpose?, undeliveredAs503?, platforms?}`.
+
+> **A discrepancy with the record.** `findings-untouched-surfaces.md` §G12 writes the field as `undeclaredAs503`. The target's own field name is **`undeliveredAs503`** (`chunk-z6a1zj5w.js:1 257 830`). This implementation uses the source's spelling, and the test pins it.
+
+## The rules that decide
+
+| rule | what the target does | where | what this implementation does |
+|---|---|---|---|
+| `resolveEndpoints` | calls the function form of a service's endpoints with the host context, then keeps an endpoint whose `platforms` list names the context's platform (an endpoint with no `platforms` is kept everywhere) | `chunk-z6a1zj5w.js:1 258 990` | **implemented** — `resolveEgressEndpoints` |
+| `hostsForService` | the endpoint's host **plus** its `firewallAlso` companions | `:1 259 100` | **implemented** — `egressHostsForService` |
+| `enabledServicesFromConfig` | a service with **no** toggle is always enabled; a service with a toggle is enabled until that toggle is on | `:1 259 400` | **implemented** — `enabledEgressServices` |
+| the toggle resolver | the nested form wins over the flat one (`autoUpdate.disabled` over `disableAutoUpdates`; `telemetry.disableEssential` over `disableEssentialTelemetry`), and the value must be **exactly** `true` | `:1 259 300` | **implemented** — `egressToggleDisabled` |
+| `firewallHostsForServices` | every enabled service's hosts, each paired with the service's toggle (or `null` for the core group) | `:1 259 600` | **implemented** — `firewallHostsForEgressServices` |
+| `subprocessHostsForServices` | the hosts of the `origin:"subprocess"` endpoints | `:1 259 800` | **implemented** — `egressSubprocessHosts` |
+| `rendererEgressRules` | the `origin:"renderer"` endpoints, reduced to `{host, path?, pathSuffix?, exactPath?, followRedirects?, undeliveredAs503?}` | `:1 259 950` | **implemented** — `rendererEgressRules` |
+| `serviceLabelForToggleKey` | the core label for a toggle that names no service; the first service's label for a toggle it names; nothing for an unknown toggle | `:1 260 200` | **implemented** — `egressServiceLabel` |
+| `computeEgressRequirements` | the enabled services' hosts, de-duplicated by host, each with the toggle that governs it (or `"core"`), **then** the managed fields whose `egressRequirements` name hosts | `:1 260 480` | **implemented for the service half** — `computeEgressRequirements`. The **managed-config half is not implemented**: this implementation has no managed-config field-meta table. The two producers the target declares for the fields this implementation's own settings document carries are implemented as `singleHostEgress` and `allowedEgressHostsRequirement`, and a caller supplies their output. |
+| `egressRequirementLabel` | the service label for a toggle key, the managed field's own label otherwise | `:1 260 900` | **implemented for the service half** — `egressRequirementLabel`; an unknown field key has no label here |
+
+## The host constants
+
+**Twenty-six** host constants, plus the domain lists, all read from the module `pr` in `chunk-z6a1zj5w.js` (offsets **667 780** – **672 300**): `VM_BUNDLE_HOST` `downloads.claude.ai`, `UPDATE_FEED_HOST` `releases.claude.com`, `ANTHROPIC_API_HOST` `api.anthropic.com`, `CLAUDE_AI_HOST` `claude.ai`, `GCS_SIGNED_URL_HOST` `storage.googleapis.com`, `PLATFORM_CLAUDE_HOST` `platform.claude.com`, `FAVICON_PROXY_HOST` `www.google.com`, `GSTATIC_WILDCARD` `*.gstatic.com`, `ARTIFACT_IFRAME_HOST` `www.claudeusercontent.com`, `FRAME_ARTIFACT_CONTENT_HOSTS` (2), `MCP_APP_SANDBOX_WILDCARD_HOST` `*.claudemcpcontent.com`, `MCP_APP_SANDBOX_BASE_HOST` `sandbox.claudemcpcontent.com`, `ANTHROPIC_ASSETS_HOST` `assets.claude.ai`, `SENTRY_WILDCARD_HOST` `*.sentry.io`, `SENTRY_INGEST_HOST` `o1158394.ingest.us.sentry.io`, `SPELLCHECK_DICTIONARY_HOST` `redirector.gvt1.com`, `SPELLCHECK_DICTIONARY_WILDCARD` `*.gvt1.com`, `MICROSOFT_LOGIN_HOST` `login.microsoftonline.com`, `GOOGLE_ACCOUNTS_HOST` `accounts.google.com`, `GOOGLE_OAUTH2_HOST` `oauth2.googleapis.com`, `GOOGLE_STS_HOST` `sts.googleapis.com`, `GOOGLE_IAMCRED_HOST` `iamcredentials.googleapis.com`, `DATADOG_INTAKE_HOSTS` (7), `VERTEX_AUTH_HOSTS` (4), `MINIMAL_EGRESS_DOMAINS` (4), `DEPENDENCY_INSTALL_DOMAINS` (**19**), `PYTHON_EXTENSION_RUNTIME_HOSTS` (4).
+
+## The egress-entry grammar
+
+The target's own statement (`chunk-z6a1zj5w.js:672 200`):
+
+> `` `*`, `localhost`, `host[:port]`, or `*.host[:port]` (port 1-65535; no port on bare `*`; no scheme, path, or IPv6 literal) ``
+
+**Implemented** — `parseEgressHostEntry`, `stripEgressEntryPort` and `dropPortScopedEgressEntries`. The port is 1–65535; a bare `*` may not carry a port; an entry with a scheme, a path or an IPv6 literal is refused; the host is lowercased.
+
+## The corporate proxy
+
+| part | what the target has | where | what this implementation does |
+|---|---|---|---|
+| the proxy variable | the **first** of `https_proxy`, `HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY` that holds a truthy value wins; the lower-case name comes first | `chunk-3q7vcbxf.js:42 592` | **implemented** — `resolveProxyUrl` |
+| the bypass list | `no_proxy` and `NO_PROXY`: `"*"` bypasses everything; otherwise both are used when they differ, and the one that is set when they agree | `:43 300` | **implemented** — `resolveNoProxy` |
+| the bypass matcher | the list is split on commas and whitespace; an entry with a colon is compared against `host:port`; an entry that starts with a dot matches the host itself or any name ending with it; any other entry must equal the host | `:43 450` | **implemented** — `matchesNoProxy` |
+| the invalid-proxy message | `Invalid proxy URL in <source>: "<value>" cannot be parsed as a URL.` / `Proxy settings must be a complete URL including the scheme, e.g. "http://proxy.example.com:8080".` / `Fix or unset <source> and restart <product>.` — the value's control characters are stripped first | `:42 790` | **implemented** — `proxyUrlError`. The last line names this implementation's product, because a **name** is not reproduced. |
+| the proxy-auth helper's setting | `proxyAuthHelper`, a shell command that prints a `Proxy-Authorization` value | `chunk-c9s0jh80.js:253 428` | **implemented** — the setting is already in `src/config/schema.ts`; its configuration shape is `readProxyAuthHelperConfig` |
+| the helper's configuration | `{helper, fromProjectOrLocal, trustAccepted, sources:"personAndPolicy"}`; the policy tier wins over the user tier; `fromProjectOrLocal` is true when the policy has none, the user has one, and the project or the local tier carries **the same** string | `chunk-8659jdnp.js` (the whole file) | **implemented** — `readProxyAuthHelperConfig` |
+| the helper's switch | the helper runs **only** when `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER` is set | `chunk-3q7vcbxf.js:45 060` | **implemented** — the variable is named by `PROXY_AUTH_HELPER_ENABLED_VARIABLE` |
+| the helper's cache | five minutes by default; `CLAUDE_CODE_PROXY_AUTH_HELPER_TTL_MS` overrides it when it names a number that is not negative | `:45 100` | **implemented** — `PROXY_AUTH_HELPER_TTL_MS`, `proxyAuthHelperTtl` |
+| the two messages | `a proxy helper set by this project is not run by this command` and `Error: the proxy setting named above is refused.` | `chunk-8659jdnp.js` | **implemented** — `PROXY_AUTH_HELPER_PROJECT_MESSAGE`, `PROXY_SETTING_REFUSED_MESSAGE` |
+| the proxy agent | the target installs a proxy agent on the API client and a global dispatcher on the fetch client, and runs the helper to fill the `Proxy-Authorization` header | `:45 000` | **refused** — `installCorporateProxyAgent` throws `CorporateProxyCapabilityError`, naming the capability `an outbound HTTP proxy agent that can carry a Proxy-Authorization header` |
+| the mTLS client certificate | `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE` | `:43 400` | **recorded, not implemented** — the target's client-certificate handling belongs to its HTTP client, which this implementation's driver layer owns |
+| the CCR agent proxy | `AGENT_PROXY_URL` / `AGENT_PROXY_AUTH_TOKEN` and the `CCR_AGENT_PROXY_*` family | `chunk-c4r14hjp.js:50 024` | **recorded, not implemented** — this is the **remote-session relay**, not the corporate proxy; it is a different surface, and this milestone does not implement it |
+
+## The sandbox network policy — the firewall's own side
+
+The target's sandbox runtime declares the `sandbox.network` block in `chunk-3rfnbzz0.js` (offsets **11 700** – **14 600**). The block's keys are the target's own: `allowedDomains`, `deniedDomains`, `deniedDomainReasons`, `strictAllowlist`, `deniedResolvedAddresses`, `allowUnixSockets`, `allowAllUnixSockets`, `allowLocalBinding`, `allowMachLookup`, `httpProxyPort`, `socksProxyPort`, `mitmProxy`, `filterRequest`, `tlsTerminate`, `parentProxy`.
+
+| rule | what the target does | where | what this implementation does |
+|---|---|---|---|
+| the host matcher | `*` covers every host; an entry that starts with `*.` covers a host that **ends with** the rest of the entry — so `*.corp.com` covers `a.corp.com` and `a.b.corp.com` but **not** `corp.com` — and it never covers an **address literal**; any other entry must equal the host | `chunk-ew44hcmm.js:21 523` | **implemented** — `sandboxHostMatches` |
+| the entry's port | the port is the text after the **last** colon, and it is a port only when it is 1–65535 | `:21 314` | **implemented** — `parseSandboxHostEntry` |
+| the port restriction | an entry that carries a port restricts itself to that port | `:21 900` | **implemented** — `sandboxHostEntryMatches` |
+| the deny list | the **deny** list wins over the allowlist — "Domains that are always blocked, even if matched by allowedDomains" | `chunk-3rfnbzz0.js:11 700` | **implemented** — `evaluateSandboxEgress` |
+| `deniedDomainReasons` | the reason is keyed by the **exact** entry string; an entry with no key uses a generic reason | `chunk-3rfnbzz0.js:11 700` | **implemented** — `evaluateSandboxEgress` |
+| `strictAllowlist` | a host that is not on the allowlist is denied "without consulting the ask callback" | `chunk-3rfnbzz0.js:11 700` | **implemented** — `evaluateSandboxEgress` returns `deny` in that case, and `ask` otherwise |
+| the merge across settings sources | `network.deniedDomains` is a **union**; every other member is taken **whole** from the highest source that sets it | `chunk-5gektv5j.js:5 899` | **implemented** — `mergeSandboxNetworkPolicies` |
+| the enforcement | the target filters the request inside the sandbox runtime, before it is dialled | — | **refused** — `enforceSandboxEgress` throws `EgressFirewallCapabilityError`, naming the capability `the sandbox runtime egress firewall (the domain filter, the deny list, the strict allowlist and the resolved-address check)` |
+
+## The clone-choice labels this milestone adds
+
+- The **catalogue** — the eleven services, their keys, their toggle keys, their group labels, their endpoints, their purposes, and the host constants — is **the target's own data**, REA observed, not an implementation choice. The only change is the two purpose strings and the core group label that name the target's product: this implementation names **PRRICODE** there, because a **name** is not reproduced and a **datum** is.
+- The **rules** — the endpoint resolution, the platform filter, the service enablement, the toggle resolution, the firewall-host list, the subprocess hosts, the renderer rules, the service labels, the egress requirements, the egress-entry grammar, the `no_proxy` matcher, the proxy-variable precedence, the helper's TTL and the helper's configuration shape — are **the target's own**, REA observed.
+- The **refusals** — the corporate-proxy agent and the egress-firewall enforcement — are **this implementation's own**, and each names the capability it needed.
+- The **managed-config half of `computeEgressRequirements`** is **not reproduced**: this implementation has no managed-config field-meta table. The two producers the target declares for the fields this implementation's own settings document carries — `singleHostEgress` and the `allowedEgressHosts` rule — **are** implemented, and a caller supplies their output.
+- The **credential-family refusal** in `egressAddress` is **not reproduced**: the target also refuses a URL whose authority matches one of the ten credential-family key patterns it declares. That table belongs to the credential-redaction surface, and this implementation refuses user information only. **A named gap.**
+- The **sandbox network block's** members that this implementation does not act on — `deniedResolvedAddresses`, `mitmProxy`, `filterRequest` and `parentProxy` — are **recorded, not implemented**: they need the sandbox runtime's own proxy, which this implementation does not have.
+- The **`gatewayInternalNetworks`** setting (the enterprise gateway's internal-network allowlist) is **recorded, not implemented**: it is an authentication surface, and `CC-037` closed the authentication flows.
+
+## What could not be established
+
+- **Where the catalogue is consumed.** The catalogue and `computeEgressRequirements` live in the target's **gateway** chunk, which the CLI loads dynamically (`chunk-9y799w6p.js`, the `gateway` sub-command's `import("./chunk-z6a1zj5w.js")`). The report the requirements feed — the *Egress Requirements* panel — is therefore a **desktop** surface, and its rendering is not in this milestone's scope.
+- **The `EGRESS_NOT_PROBED` reasons.** The target declares four — `wildcard`, `ip-literal`, `plain http via proxy`, `link-local or cloud-metadata address` (`chunk-z6a1zj5w.js:671 000`) — but the function that consumes them is not in the extracted tree, so the probe they belong to is **not established**.
+- **The target's own host-entry drop behaviour for the sandbox allowlist.** The `allowedEgressHosts` field's own description says an invalid entry is "dropped with a log warning"; the drop is implemented in the managed-config layer, which this implementation does not have.

@@ -1,9 +1,18 @@
 /**
- * Provider route selection and the per-provider endpoint policy.
+ * Provider route selection, the per-provider endpoint policy, the **endpoint
+ * catalogue** and the **corporate-proxy** surface.
  *
  * Evidence: `docs/reverse-engineering/COVERAGE-AUDIT.md` §2.1 (Providers and model
  * catalogs) — the route set, the dispatch order of the target's route selector
  * (`xe()` in `chunk-w4f5s3e0.js`), and the per-provider endpoint-policy literal (`E`).
+ *
+ * The **endpoint catalogue** and the **corporate proxy** are a different surface
+ * from the per-provider policy, and they are read out of the target's own source
+ * rather than from the audit — every claim carries a file and a byte offset in
+ * `/home/shiva/opt/reference-agent-rea/analysis/findings-endpoint-catalogue.md`.
+ * The milestone is `CC-038` of
+ * `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`; the
+ * conformance table is `docs/compatibility/provider-catalog.md`.
  *
  * What is **observed** and reproduced here:
  *
@@ -78,6 +87,7 @@
  */
 
 import {
+  documentOf,
   effectiveSource,
   resolveTopLevelKey,
   type SettingsSource,
@@ -709,4 +719,1162 @@ export function resolveBaseUrl(
   // vendor-trusted without consulting the host pattern (the Foundry default is
   // a `{resource}` template that the driver layer resolves).
   return { baseUrl: fallback, isVendorHost: isSecureBaseUrl(fallback), ...reported };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The endpoint catalogue                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The **endpoint catalogue**: the table of every host the product talks to, the
+ * purpose each host serves, and the toggle that switches the service off.
+ *
+ * **Observed.** The target's own module is `Jw` in `chunk-z6a1zj5w.js` (the
+ * gateway chunk), starting at byte offset **1 253 389**; the catalogue literal
+ * `EGRESS_SERVICES` runs from offset **1 256 200** to **1 259 100**. The host
+ * constants it is built from live in the module `pr` in the same file, at offset
+ * **663 198**.
+ *
+ * The catalogue is **data**, and it is the target's data: the eleven services,
+ * their keys, their toggle keys, their group labels, their endpoint hosts, their
+ * paths, their origins, their CSP directives, their `firewallAlso` companions and
+ * the platform a service is restricted to. The only thing this implementation
+ * changes is the target's own product name in the two purpose strings that name
+ * it — a name is not reproduced; a datum is.
+ */
+
+/** Where a request to an endpoint is made from. */
+export type EgressOrigin = 'renderer' | 'main' | 'subprocess';
+
+/**
+ * The four toggles a catalogue service can be switched off by.
+ *
+ * The target's `toggleKey` values, exactly (`chunk-z6a1zj5w.js:1 256 200`).
+ */
+export type EgressToggleKey =
+  | 'disableAutoUpdates'
+  | 'disableEssentialTelemetry'
+  | 'disableNonessentialTelemetry'
+  | 'disableNonessentialServices';
+
+/** The eleven services the catalogue holds. */
+export type EgressServiceKey =
+  | 'vm-bundle'
+  | 'model-catalog'
+  | 'updater'
+  | 'sentry'
+  | 'datadog-rum'
+  | 'anthropic-telemetry'
+  | 'connector-favicons'
+  | 'artifact-sandbox'
+  | 'mcp-app-sandbox'
+  | 'spellcheck-dictionary'
+  | 'dictation';
+
+/** One endpoint of the catalogue. */
+export interface EgressEndpoint {
+  /** The host the request goes to. */
+  readonly host: string;
+  /** The path prefix, when the endpoint names one. */
+  readonly path?: string;
+  /** The path suffix, when the endpoint names one. */
+  readonly pathSuffix?: string;
+  /** Whether the path must match exactly. */
+  readonly exactPath?: boolean;
+  /** Whether redirects are followed. */
+  readonly followRedirects?: boolean;
+  /** Where the request is made from. */
+  readonly origin: EgressOrigin;
+  /** What the endpoint is for, in the target's own words. */
+  readonly purpose?: string;
+  /** The CSP directive the endpoint belongs to. */
+  readonly cspDirective?: string | readonly string[];
+  /** The CSP scheme, for a `connect-src` endpoint that carries one. */
+  readonly cspScheme?: string;
+  /** The hosts the firewall must also allow for this endpoint. */
+  readonly firewallAlso?: readonly string[];
+  /** What the `firewallAlso` hosts are for. */
+  readonly firewallAlsoPurpose?: string;
+  /**
+   * Whether an endpoint that is not declared is answered with a 503.
+   *
+   * The target spells this `undeliveredAs503` (`chunk-z6a1zj5w.js:1 257 830`).
+   */
+  readonly undeliveredAs503?: boolean;
+  /** The platforms the endpoint exists on; every platform when absent. */
+  readonly platforms?: readonly string[];
+}
+
+/**
+ * The context a service's endpoints are resolved against.
+ *
+ * The target's "host context" (`asHostContext`, `chunk-z6a1zj5w.js:1 253 900`): a
+ * plain string is shorthand for `{anthropicHost}`.
+ */
+export interface EgressHostContext {
+  /** The host the first-party API is reached at. */
+  readonly anthropicHost?: string;
+  /** The host the artifact preview iframe is served from. */
+  readonly artifactIframeHost?: string;
+  /** Whether the update feed is read from the updates host. */
+  readonly updateViaUpdatesHost?: boolean;
+  /** The dictation service's connect-src source, when there is one. */
+  readonly dictationCsp?: { readonly host: string; readonly scheme: string } | null;
+  /** The platform the endpoints are resolved for. */
+  readonly platform?: string;
+}
+
+/** One service of the catalogue. */
+export interface EgressService {
+  /** The service's key. */
+  readonly key: EgressServiceKey;
+  /**
+   * The toggle that switches the service off, or `null` when the service is
+   * always on.
+   */
+  readonly toggleKey: EgressToggleKey | null;
+  /** The group the service is listed under. */
+  readonly label: string;
+  /** The service's endpoints, or the function that computes them. */
+  readonly endpoints:
+    | readonly EgressEndpoint[]
+    | ((context: EgressHostContext) => readonly EgressEndpoint[]);
+}
+
+/**
+ * The group label of the services that are always on.
+ *
+ * The target's own text (`chunk-z6a1zj5w.js:1 253 500`) names the product, so
+ * this implementation names its own: a **name** is not reproduced, a datum is.
+ */
+export const EGRESS_CORE_GROUP_LABEL = 'Core (VM bundle + PRRICODE CLI binary)';
+
+/**
+ * The host constants the catalogue and the egress rules are built from.
+ *
+ * **Observed** — the module `pr` in `chunk-z6a1zj5w.js`, offsets **667 780** –
+ * **672 300**.
+ */
+export const EGRESS_HOSTS = Object.freeze({
+  VM_BUNDLE_HOST: 'downloads.claude.ai',
+  UPDATE_FEED_HOST: 'releases.claude.com',
+  ANTHROPIC_API_HOST: 'api.anthropic.com',
+  CLAUDE_AI_HOST: 'claude.ai',
+  GCS_SIGNED_URL_HOST: 'storage.googleapis.com',
+  PLATFORM_CLAUDE_HOST: 'platform.claude.com',
+  FAVICON_PROXY_HOST: 'www.google.com',
+  GSTATIC_WILDCARD: '*.gstatic.com',
+  ARTIFACT_IFRAME_HOST: 'www.claudeusercontent.com',
+  FRAME_ARTIFACT_CONTENT_HOSTS: Object.freeze([
+    '*.frame.claudeusercontent.com',
+    '*.frame.staging.claudeusercontent.com',
+  ]),
+  MCP_APP_SANDBOX_WILDCARD_HOST: '*.claudemcpcontent.com',
+  MCP_APP_SANDBOX_BASE_HOST: 'sandbox.claudemcpcontent.com',
+  ANTHROPIC_ASSETS_HOST: 'assets.claude.ai',
+  SENTRY_WILDCARD_HOST: '*.sentry.io',
+  SENTRY_INGEST_HOST: 'o1158394.ingest.us.sentry.io',
+  SPELLCHECK_DICTIONARY_HOST: 'redirector.gvt1.com',
+  SPELLCHECK_DICTIONARY_WILDCARD: '*.gvt1.com',
+  MICROSOFT_LOGIN_HOST: 'login.microsoftonline.com',
+  GOOGLE_ACCOUNTS_HOST: 'accounts.google.com',
+  GOOGLE_OAUTH2_HOST: 'oauth2.googleapis.com',
+  GOOGLE_STS_HOST: 'sts.googleapis.com',
+  GOOGLE_IAMCRED_HOST: 'iamcredentials.googleapis.com',
+  DATADOG_INTAKE_HOSTS: Object.freeze([
+    'browser-intake-datadoghq.com',
+    'browser-intake-us3-datadoghq.com',
+    'browser-intake-us5-datadoghq.com',
+    'browser-intake-ap1-datadoghq.com',
+    'browser-intake-ap2-datadoghq.com',
+    'browser-intake-datadoghq.eu',
+    'browser-intake-ddog-gov.com',
+  ]),
+  VERTEX_AUTH_HOSTS: Object.freeze([
+    'oauth2.googleapis.com',
+    'sts.googleapis.com',
+    'accounts.google.com',
+    'iamcredentials.googleapis.com',
+  ]),
+});
+
+/**
+ * The domains the smallest possible egress needs.
+ *
+ * **Observed** — `chunk-z6a1zj5w.js:667 780`.
+ */
+export const MINIMAL_EGRESS_DOMAINS: readonly string[] = Object.freeze([
+  '*.anthropic.com',
+  'anthropic.com',
+  'claude.com',
+  '*.claude.com',
+]);
+
+/**
+ * The hosts a package install may reach.
+ *
+ * **Observed** — `chunk-z6a1zj5w.js:671 990`. This is what the catalogue's
+ * `allowedEgressHosts` requirement names when the list is the wildcard `*`.
+ */
+export const DEPENDENCY_INSTALL_DOMAINS: readonly string[] = Object.freeze([
+  'registry.npmjs.org',
+  'npmjs.com',
+  'www.npmjs.com',
+  'npmjs.org',
+  'www.npmjs.org',
+  'yarnpkg.com',
+  'registry.yarnpkg.com',
+  'pypi.org',
+  'files.pythonhosted.org',
+  'pythonhosted.org',
+  'github.com',
+  'objects.githubusercontent.com',
+  'archive.ubuntu.com',
+  'security.ubuntu.com',
+  'crates.io',
+  'index.crates.io',
+  'static.crates.io',
+  'playwright.download.prss.microsoft.com',
+  'cdn.playwright.dev',
+]);
+
+/**
+ * The hosts a Python extension's runtime may reach.
+ *
+ * **Observed** — `chunk-z6a1zj5w.js:671 900`.
+ */
+export const PYTHON_EXTENSION_RUNTIME_HOSTS: readonly string[] = Object.freeze([
+  'github.com',
+  'objects.githubusercontent.com',
+  'pypi.org',
+  'files.pythonhosted.org',
+]);
+
+/**
+ * The catalogue itself — **eleven** services, in the target's declaration order.
+ *
+ * **Observed** — `chunk-z6a1zj5w.js:1 256 200` – `1 259 100`.
+ */
+export const EGRESS_SERVICES: readonly EgressService[] = Object.freeze([
+  {
+    key: 'vm-bundle',
+    toggleKey: null,
+    label: EGRESS_CORE_GROUP_LABEL,
+    endpoints: [
+      {
+        host: EGRESS_HOSTS.VM_BUNDLE_HOST,
+        origin: 'main',
+        purpose:
+          'VM workspace bundle and PRRICODE CLI binary, fetched in the background or at session start',
+      },
+    ],
+  },
+  {
+    key: 'model-catalog',
+    toggleKey: null,
+    label: EGRESS_CORE_GROUP_LABEL,
+    endpoints: [
+      {
+        host: EGRESS_HOSTS.VM_BUNDLE_HOST,
+        origin: 'main',
+        purpose: 'PRRICODE model catalog (signed picker metadata), polled every 5–15 minutes',
+      },
+    ],
+  },
+  {
+    key: 'updater',
+    toggleKey: 'disableAutoUpdates',
+    label: 'Auto-updates',
+    endpoints: (context) =>
+      context.updateViaUpdatesHost
+        ? [
+            {
+              host: EGRESS_HOSTS.UPDATE_FEED_HOST,
+              path: '/api/desktop/',
+              pathSuffix: '/update',
+              origin: 'main',
+              purpose: 'Update feed',
+            },
+            {
+              host: EGRESS_HOSTS.VM_BUNDLE_HOST,
+              path: '/releases/',
+              followRedirects: true,
+              origin: 'main',
+              purpose: 'Update binaries',
+            },
+          ]
+        : [
+            {
+              host: context.anthropicHost ?? EGRESS_HOSTS.CLAUDE_AI_HOST,
+              path: '/api/desktop/',
+              pathSuffix: '/update',
+              origin: 'renderer',
+              purpose: 'Update feed',
+            },
+            {
+              host: EGRESS_HOSTS.ANTHROPIC_API_HOST,
+              path: '/api/desktop/',
+              pathSuffix: '/update',
+              origin: 'renderer',
+              purpose:
+                'Update feed (releases.claude.com when updateViaUpdatesHost is set)',
+            },
+            {
+              host: EGRESS_HOSTS.VM_BUNDLE_HOST,
+              path: '/releases/',
+              followRedirects: true,
+              origin: 'main',
+              purpose: 'Update binaries',
+            },
+          ],
+  },
+  {
+    key: 'sentry',
+    toggleKey: 'disableEssentialTelemetry',
+    label: 'Essential telemetry',
+    endpoints: [
+      {
+        host: EGRESS_HOSTS.SENTRY_WILDCARD_HOST,
+        origin: 'renderer',
+        purpose: 'Crash and error reporting',
+        firewallAlso: ['*.ingest.us.sentry.io'],
+      },
+      {
+        host: 'sentry.io',
+        origin: 'renderer',
+        purpose: 'Crash and error reporting',
+      },
+    ],
+  },
+  {
+    key: 'datadog-rum',
+    toggleKey: 'disableEssentialTelemetry',
+    label: 'Essential telemetry',
+    endpoints: (context) => [
+      {
+        host: context.anthropicHost ?? EGRESS_HOSTS.CLAUDE_AI_HOST,
+        path: '/api/v2/rum',
+        exactPath: true,
+        origin: 'renderer',
+        cspDirective: [],
+        undeliveredAs503: true,
+        purpose: 'Performance timing',
+      },
+      ...EGRESS_HOSTS.DATADOG_INTAKE_HOSTS.map((host) => ({
+        host,
+        origin: 'renderer' as const,
+        purpose: 'Performance timing',
+      })),
+    ],
+  },
+  {
+    key: 'anthropic-telemetry',
+    toggleKey: 'disableNonessentialTelemetry',
+    label: 'Nonessential telemetry',
+    endpoints: (context) => [
+      {
+        host: context.anthropicHost ?? EGRESS_HOSTS.CLAUDE_AI_HOST,
+        path: '/api/event_logging/',
+        origin: 'renderer',
+        purpose: 'Analytics events',
+      },
+      {
+        host: EGRESS_HOSTS.ANTHROPIC_API_HOST,
+        path: '/api/event_logging/',
+        origin: 'subprocess',
+        purpose: 'PRRICODE usage telemetry, sent from inside the agent sandbox',
+      },
+    ],
+  },
+  {
+    key: 'connector-favicons',
+    toggleKey: 'disableNonessentialServices',
+    label: 'Nonessential services',
+    endpoints: [
+      {
+        host: EGRESS_HOSTS.FAVICON_PROXY_HOST,
+        path: '/s2/favicons',
+        followRedirects: true,
+        origin: 'renderer',
+        cspDirective: 'img-src',
+        purpose: 'Connector favicons',
+      },
+      {
+        host: EGRESS_HOSTS.GSTATIC_WILDCARD,
+        path: '/faviconV2',
+        origin: 'renderer',
+        cspDirective: 'img-src',
+        purpose: 'Connector favicons',
+      },
+    ],
+  },
+  {
+    key: 'artifact-sandbox',
+    toggleKey: 'disableNonessentialServices',
+    label: 'Nonessential services',
+    endpoints: (context) => [
+      {
+        host: context.artifactIframeHost ?? EGRESS_HOSTS.ARTIFACT_IFRAME_HOST,
+        origin: 'renderer',
+        cspDirective: 'frame-src',
+        purpose: 'Artifact preview iframe',
+        firewallAlso: ['cdnjs.cloudflare.com', 'fonts.googleapis.com', 'cdn.jsdelivr.net'],
+        firewallAlsoPurpose: 'Artifact preview asset CDNs',
+      },
+    ],
+  },
+  {
+    key: 'mcp-app-sandbox',
+    toggleKey: 'disableNonessentialServices',
+    label: 'Nonessential services',
+    endpoints: [
+      {
+        host: EGRESS_HOSTS.MCP_APP_SANDBOX_WILDCARD_HOST,
+        origin: 'renderer',
+        cspDirective: 'frame-src',
+        purpose: 'MCP App widget iframe',
+        firewallAlso: [EGRESS_HOSTS.ANTHROPIC_ASSETS_HOST],
+        firewallAlsoPurpose: 'Fonts loaded by MCP App widget iframes',
+      },
+    ],
+  },
+  {
+    key: 'spellcheck-dictionary',
+    toggleKey: 'disableNonessentialServices',
+    label: 'Nonessential services',
+    endpoints: [
+      {
+        host: EGRESS_HOSTS.SPELLCHECK_DICTIONARY_HOST,
+        origin: 'main',
+        platforms: ['linux'],
+        purpose: 'Spellcheck dictionary download (Linux)',
+        firewallAlso: [EGRESS_HOSTS.SPELLCHECK_DICTIONARY_WILDCARD],
+        firewallAlsoPurpose: 'Redirect targets of the spellcheck dictionary download (Linux)',
+      },
+    ],
+  },
+  {
+    key: 'dictation',
+    toggleKey: null,
+    label: EGRESS_CORE_GROUP_LABEL,
+    endpoints: (context) =>
+      context.dictationCsp
+        ? [
+            {
+              host: context.dictationCsp.host,
+              origin: 'renderer',
+              cspDirective: 'connect-src',
+              cspScheme: context.dictationCsp.scheme,
+            },
+          ]
+        : [],
+  },
+]);
+
+/**
+ * The service keys, in the target's declaration order.
+ *
+ * The target's `egressServiceKeys` is `Object.keys(EGRESS_SERVICES)`, so the order
+ * is the object's own.
+ */
+export const EGRESS_SERVICE_KEYS: readonly EgressServiceKey[] = Object.freeze(
+  EGRESS_SERVICES.map((service) => service.key),
+);
+
+/** The service of a key, or `undefined` for a key that is not one of the eleven. */
+export function egressServiceFor(key: EgressServiceKey): EgressService | undefined {
+  return EGRESS_SERVICES.find((service) => service.key === key);
+}
+
+/**
+ * The endpoints of a service, resolved against a host context.
+ *
+ * **Observed** — `resolveEndpoints`, `chunk-z6a1zj5w.js:1 258 990`. A service
+ * whose endpoints are a function is called with the context; the result is then
+ * filtered by the context's `platform`, and an endpoint that names no platform is
+ * kept on every platform.
+ */
+export function resolveEgressEndpoints(
+  key: EgressServiceKey,
+  context: EgressHostContext | string = {},
+): readonly EgressEndpoint[] {
+  const service = egressServiceFor(key);
+  if (service === undefined) return [];
+  const hostContext: EgressHostContext =
+    typeof context === 'string' ? { anthropicHost: context } : context;
+  const endpoints =
+    typeof service.endpoints === 'function' ? service.endpoints(hostContext) : service.endpoints;
+  const platform = hostContext.platform;
+  if (platform === undefined) return endpoints;
+  return endpoints.filter(
+    (endpoint) => endpoint.platforms === undefined || endpoint.platforms.includes(platform),
+  );
+}
+
+/**
+ * The hosts a service needs, **including** the `firewallAlso` companions.
+ *
+ * **Observed** — `hostsForService`, `chunk-z6a1zj5w.js:1 259 100`.
+ */
+export function egressHostsForService(
+  key: EgressServiceKey,
+  context: EgressHostContext | string = {},
+): string[] {
+  return resolveEgressEndpoints(key, context).flatMap((endpoint) => [
+    endpoint.host,
+    ...(endpoint.firewallAlso ?? []),
+  ]);
+}
+
+/**
+ * The configuration the catalogue's toggles are read from.
+ *
+ * The target reads the **managed** configuration, which carries the nested
+ * `autoUpdate.disabled` and `telemetry.disable*` forms as well as the flat
+ * `disable*` forms. This implementation's settings document carries the same two
+ * forms, so the shape is the target's.
+ */
+export interface EgressConfig {
+  readonly autoUpdate?: {
+    readonly disabled?: unknown;
+    readonly viaUpdatesHost?: unknown;
+  };
+  readonly telemetry?: {
+    readonly disableEssential?: unknown;
+    readonly disableNonessential?: unknown;
+    readonly disableNonessentialServices?: unknown;
+  };
+  readonly workspace?: {
+    readonly userContentRendererUrl?: string;
+  };
+  readonly disableAutoUpdates?: unknown;
+  readonly disableEssentialTelemetry?: unknown;
+  readonly disableNonessentialTelemetry?: unknown;
+  readonly disableNonessentialServices?: unknown;
+}
+
+/**
+ * The host context a configuration and a context together make.
+ *
+ * **Observed** — the target's `computeEgressRequirements` builds the context
+ * itself (`chunk-z6a1zj5w.js:1 260 480`): the update feed comes from
+ * `autoUpdate.viaUpdatesHost`, and the artifact iframe host is the egress
+ * address of `workspace.userContentRendererUrl`. A caller that names a value in
+ * the context keeps it.
+ */
+export function resolveEgressContext(
+  config: EgressConfig,
+  context: EgressHostContext | string = {},
+): EgressHostContext {
+  const hostContext: EgressHostContext =
+    typeof context === 'string' ? { anthropicHost: context } : context;
+  const updateViaUpdatesHost =
+    hostContext.updateViaUpdatesHost ?? (config.autoUpdate?.viaUpdatesHost === true ? true : undefined);
+  const artifactIframeHost =
+    hostContext.artifactIframeHost ?? egressAddress(config.workspace?.userContentRendererUrl);
+  return {
+    ...hostContext,
+    ...(updateViaUpdatesHost === undefined ? {} : { updateViaUpdatesHost }),
+    ...(artifactIframeHost === undefined ? {} : { artifactIframeHost }),
+  };
+}
+
+/**
+ * Whether a toggle is switched on.
+ *
+ * **Observed** — the target's own resolver, `chunk-z6a1zj5w.js:1 259 300`. The
+ * nested form wins over the flat one (`autoUpdate.disabled` over
+ * `disableAutoUpdates`, `telemetry.disableEssential` over
+ * `disableEssentialTelemetry`), and the value must be **exactly** `true`: a
+ * truthy string or a number does not switch a service off.
+ */
+export function egressToggleDisabled(config: EgressConfig, toggleKey: EgressToggleKey): boolean {
+  switch (toggleKey) {
+    case 'disableAutoUpdates':
+      return (config.autoUpdate?.disabled ?? config.disableAutoUpdates) === true;
+    case 'disableEssentialTelemetry':
+      return (
+        (config.telemetry?.disableEssential ?? config.disableEssentialTelemetry) === true
+      );
+    case 'disableNonessentialTelemetry':
+      return (
+        (config.telemetry?.disableNonessential ?? config.disableNonessentialTelemetry) === true
+      );
+    case 'disableNonessentialServices':
+      return (
+        (config.telemetry?.disableNonessentialServices ?? config.disableNonessentialServices) ===
+        true
+      );
+  }
+}
+
+/**
+ * The services a configuration leaves enabled.
+ *
+ * **Observed** — `enabledServicesFromConfig`, `chunk-z6a1zj5w.js:1 259 400`. A
+ * service with **no** toggle is always enabled; a service with a toggle is
+ * enabled until that toggle is switched on.
+ */
+export function enabledEgressServices(config: EgressConfig): EgressServiceKey[] {
+  return EGRESS_SERVICE_KEYS.filter((key) => {
+    const toggleKey = egressServiceFor(key)?.toggleKey ?? null;
+    return toggleKey === null || !egressToggleDisabled(config, toggleKey);
+  });
+}
+
+/**
+ * One host of the firewall list, with the toggle that governs it.
+ *
+ * The toggle is `null` for a service that has none — the target's "core" group.
+ */
+export interface EgressFirewallHost {
+  readonly host: string;
+  readonly toggleKey: EgressToggleKey | null;
+}
+
+/**
+ * The hosts the firewall must allow, for the services a configuration leaves
+ * enabled.
+ *
+ * **Observed** — `firewallHostsForServices`, `chunk-z6a1zj5w.js:1 259 600`.
+ */
+export function firewallHostsForEgressServices(
+  config: EgressConfig,
+  context: EgressHostContext | string = {},
+): EgressFirewallHost[] {
+  const hostContext = resolveEgressContext(config, context);
+  return enabledEgressServices(config).flatMap((key) => {
+    const toggleKey = egressServiceFor(key)?.toggleKey ?? null;
+    return egressHostsForService(key, hostContext).map((host) => ({ host, toggleKey }));
+  });
+}
+
+/**
+ * The hosts the **subprocess** (the agent inside the sandbox) may reach.
+ *
+ * **Observed** — `subprocessHostsForServices`, `chunk-z6a1zj5w.js:1 259 800`.
+ */
+export function egressSubprocessHosts(
+  config: EgressConfig,
+  context: EgressHostContext | string = {},
+): string[] {
+  const hostContext = resolveEgressContext(config, context);
+  return enabledEgressServices(config).flatMap((key) =>
+    resolveEgressEndpoints(key, hostContext)
+      .filter((endpoint) => endpoint.origin === 'subprocess')
+      .map((endpoint) => endpoint.host),
+  );
+}
+
+/**
+ * One egress rule of the renderer.
+ */
+export interface RendererEgressRule {
+  readonly host: string;
+  readonly path?: string;
+  readonly pathSuffix?: string;
+  readonly exactPath?: boolean;
+  readonly followRedirects?: boolean;
+  readonly undeliveredAs503?: boolean;
+}
+
+/**
+ * The **renderer** egress rules of a list of services.
+ *
+ * **Observed** — `rendererEgressRules`, `chunk-z6a1zj5w.js:1 259 950`. The rule
+ * keeps only the fields the renderer needs; the purpose, the CSP directive and
+ * the `firewallAlso` companions are not part of a rule.
+ */
+export function rendererEgressRules(
+  services: readonly EgressServiceKey[],
+  context: EgressHostContext | string = {},
+): RendererEgressRule[] {
+  return services.flatMap((key) =>
+    resolveEgressEndpoints(key, context)
+      .filter((endpoint) => endpoint.origin === 'renderer')
+      .map((endpoint) => ({
+        host: endpoint.host,
+        ...(endpoint.path === undefined ? {} : { path: endpoint.path }),
+        ...(endpoint.pathSuffix === undefined ? {} : { pathSuffix: endpoint.pathSuffix }),
+        ...(endpoint.exactPath === undefined ? {} : { exactPath: endpoint.exactPath }),
+        ...(endpoint.followRedirects === undefined
+          ? {}
+          : { followRedirects: endpoint.followRedirects }),
+        ...(endpoint.undeliveredAs503 === undefined
+          ? {}
+          : { undeliveredAs503: endpoint.undeliveredAs503 }),
+      })),
+  );
+}
+
+/**
+ * The group label a toggle key is listed under.
+ *
+ * **Observed** — `serviceLabelForToggleKey`, `chunk-z6a1zj5w.js:1 260 200`. The
+ * core label is the label of a toggle that names no service, and a toggle that
+ * names none has no label at all.
+ */
+export function egressServiceLabel(toggleKey: EgressToggleKey | null): string | undefined {
+  if (toggleKey === null) return EGRESS_CORE_GROUP_LABEL;
+  for (const key of EGRESS_SERVICE_KEYS) {
+    const service = egressServiceFor(key);
+    if (service?.toggleKey === toggleKey) return service.label;
+  }
+  return undefined;
+}
+
+/**
+ * The label an egress requirement is reported under.
+ *
+ * **Observed** — `egressRequirementLabel`, `chunk-z6a1zj5w.js:1 260 900`. The
+ * target resolves a requirement's field key to the **service** label when the key
+ * is a toggle key, and to the managed field's own label otherwise; this
+ * implementation has no managed-config field-meta table, so a key that is
+ * neither yields no label.
+ */
+export function egressRequirementLabel(fieldKey: string): string | undefined {
+  if (fieldKey === 'core') return EGRESS_CORE_GROUP_LABEL;
+  return egressServiceLabel(fieldKey as EgressToggleKey);
+}
+
+/**
+ * One host an egress requirement names.
+ */
+export interface EgressRequirement {
+  readonly host: string;
+  readonly fieldKey: string;
+}
+
+/**
+ * The hosts the deployment must be able to reach.
+ *
+ * **Observed** — `computeEgressRequirements`, `chunk-z6a1zj5w.js:1 260 480`. The
+ * target walks the enabled services and then the **managed** fields whose
+ * `egressRequirements` name hosts, and it de-duplicates by host, keeping the
+ * first field key that named a host.
+ *
+ * **What this implementation does not reproduce.** The target's second half walks
+ * the managed-configuration field-meta table, which this implementation does not
+ * have: the two producers the target declares for the fields this
+ * implementation's own settings document carries — `singleHostEgress` and the
+ * `allowedEgressHosts` rule — are implemented as
+ * {@link singleHostEgress} and {@link allowedEgressHostsRequirement}, and a
+ * caller supplies their output.
+ */
+export function computeEgressRequirements(
+  config: EgressConfig,
+  context: EgressHostContext | string = {},
+  managedRequirements: readonly EgressRequirement[] = [],
+): EgressRequirement[] {
+  const hostContext = resolveEgressContext(config, context);
+  const seen = new Set<string>();
+  const requirements: EgressRequirement[] = [];
+  const add = (host: string, fieldKey: string): void => {
+    if (host === '' || seen.has(host)) return;
+    seen.add(host);
+    requirements.push({ host, fieldKey });
+  };
+  for (const entry of firewallHostsForEgressServices(config, hostContext)) {
+    add(entry.host, entry.toggleKey ?? 'core');
+  }
+  for (const entry of managedRequirements) {
+    add(entry.host, entry.fieldKey);
+  }
+  return requirements;
+}
+
+/**
+ * The one host a URL-valued egress field requires.
+ *
+ * **Observed** — `singleHostEgress`, `chunk-z6a1zj5w.js:692 000`.
+ */
+export function singleHostEgress(value: string | undefined): string[] {
+  const address = egressAddress(value);
+  return address === undefined ? [] : [address];
+}
+
+/**
+ * The hosts the `allowedEgressHosts` field requires.
+ *
+ * **Observed** — `chunk-z6a1zj5w.js:1 045 400`. A list that includes the
+ * wildcard `*` requires the whole dependency-install domain list; any other list
+ * requires **itself**.
+ */
+export function allowedEgressHostsRequirement(hosts: readonly string[] | undefined): string[] {
+  if (hosts === undefined) return [];
+  return hosts.includes('*') ? [...DEPENDENCY_INSTALL_DOMAINS] : [...hosts];
+}
+
+/* -------------------------------------------------------------------------- */
+/* The egress-address helpers                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The grammar an egress host entry follows.
+ *
+ * **Observed** — `EGRESS_ENTRY_GRAMMAR`, `chunk-z6a1zj5w.js:672 200`.
+ */
+export const EGRESS_ENTRY_GRAMMAR =
+  '`*`, `localhost`, `host[:port]`, or `*.host[:port]` (port 1-65535; no port on bare `*`; no scheme, path, or IPv6 literal)';
+
+/** A parsed egress host entry. */
+export interface EgressHostEntry {
+  /** The host, lowercased. */
+  readonly host: string;
+  /** The port, when the entry carries one. */
+  readonly port?: number;
+}
+
+const EGRESS_HOST_LABEL = /^[a-z0-9_-]+(?:\.[a-z0-9_-]+)*$/i;
+const EGRESS_PORT = /^[1-9][0-9]{0,4}$/;
+
+/**
+ * Parse an egress host entry.
+ *
+ * **Observed** — `parseEgressHostEntry`, `chunk-z6a1zj5w.js:672 250`. The entry
+ * is `*`, `localhost`, `host[:port]` or `*.host[:port]`; the port is 1–65535; a
+ * bare `*` may **not** carry a port; and an entry with a scheme, a path or an
+ * IPv6 literal is refused.
+ */
+export function parseEgressHostEntry(entry: string): EgressHostEntry | null {
+  let host = entry;
+  let port: number | undefined;
+  const separator = entry.lastIndexOf(':');
+  if (separator !== -1) {
+    const text = entry.slice(separator + 1);
+    if (!EGRESS_PORT.test(text)) return null;
+    const value = Number(text);
+    if (value > 65535) return null;
+    port = value;
+    host = entry.slice(0, separator);
+  }
+  if (host === '*') return port === undefined ? { host } : null;
+  const bare = host.startsWith('*.') ? host.slice(2) : host;
+  const acceptable = bare === 'localhost' || (EGRESS_HOST_LABEL.test(bare) && bare.includes('.'));
+  if (!acceptable) return null;
+  return port === undefined ? { host: host.toLowerCase() } : { host: host.toLowerCase(), port };
+}
+
+/**
+ * The host of an egress entry, without its port.
+ *
+ * **Observed** — `stripEgressEntryPort`, `chunk-z6a1zj5w.js:672 400`. An entry
+ * that does not parse is returned unchanged.
+ */
+export function stripEgressEntryPort(entry: string): string {
+  return parseEgressHostEntry(entry)?.host ?? entry;
+}
+
+/**
+ * The entries that do **not** carry a port.
+ *
+ * **Observed** — `dropPortScopedEgressEntries`, `chunk-z6a1zj5w.js:672 460`. An
+ * entry that parses with a port is dropped; an entry that does not parse at all
+ * is kept, unless it carries a colon.
+ */
+export function dropPortScopedEgressEntries(entries: readonly string[]): string[] {
+  return entries.filter((entry) => {
+    const parsed = parseEgressHostEntry(entry);
+    if (parsed !== null) return parsed.port === undefined;
+    return !entry.includes(':');
+  });
+}
+
+/**
+ * The host of a URL, for an egress list.
+ *
+ * **Observed** — `egressAddress`, `chunk-z6a1zj5w.js:671 250`. A cleartext URL
+ * keeps its scheme, so the list says `http://host`; a secure URL is reduced to
+ * its host. A value that is not a URL, or a URL that carries user information,
+ * yields nothing.
+ *
+ * **A named gap.** The target also refuses a URL whose authority matches one of
+ * the ten credential-family key patterns it declares (`sk-ant-`, `sk-…`,
+ * `xoxp-`, `gh…_`, `github_pat_`, `sk_live_`, `AIza`, a signed token, …). That
+ * table belongs to the credential-redaction surface, and this implementation
+ * refuses user information only.
+ */
+export function egressAddress(value: string | undefined): string | undefined {
+  if (typeof value !== 'string' || value === '') return undefined;
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return undefined;
+  }
+  if (url.username !== '' || url.password !== '') return undefined;
+  if (url.host === '') return undefined;
+  return url.protocol === 'http:' ? `http://${url.host}` : url.host;
+}
+
+/**
+ * Whether a host is the API vendor's own.
+ *
+ * **Observed** — `isAnthropicHost`, `chunk-z6a1zj5w.js:667 930`.
+ */
+export function isAnthropicHost(host: string): boolean {
+  const name = host.replace(/\.$/, '').toLowerCase();
+  return name === 'anthropic.com' || name.endsWith('.anthropic.com');
+}
+
+/**
+ * Whether a host is one of the first-party hosts.
+ *
+ * **Observed** — `isAnthropicFirstPartyHost`, `chunk-z6a1zj5w.js:668 100`: the
+ * host is `anthropic.com`, `claude.ai` or `claude.com`, or a subdomain of one
+ * of them.
+ */
+export function isAnthropicFirstPartyHost(host: string): boolean {
+  const name = host.replace(/\.$/, '').toLowerCase();
+  return ['anthropic.com', 'claude.ai', 'claude.com'].some(
+    (domain) => name === domain || name.endsWith(`.${domain}`),
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* The corporate proxy                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The environment variables a proxy URL is read from, **in the target's order**.
+ *
+ * **Observed** — `chunk-3q7vcbxf.js:42 592`. The lower-case name comes first, so
+ * `https_proxy` beats `HTTPS_PROXY`, which beats `http_proxy`, which beats
+ * `HTTP_PROXY`.
+ */
+export const PROXY_ENVIRONMENT_VARIABLES: readonly string[] = Object.freeze([
+  'https_proxy',
+  'HTTPS_PROXY',
+  'http_proxy',
+  'HTTP_PROXY',
+]);
+
+/**
+ * The proxy URL the environment names, and the variable that named it.
+ *
+ * **Observed** — `L2`, `chunk-3q7vcbxf.js:42 620`. The first variable that holds
+ * a **truthy** value wins; an empty value counts as unset.
+ */
+export function resolveProxyUrl(
+  env: NodeJS.ProcessEnv = process.env,
+): { value: string; source: string } | undefined {
+  for (const name of PROXY_ENVIRONMENT_VARIABLES) {
+    if (!Object.hasOwn(env, name)) continue;
+    const value = env[name];
+    if (typeof value !== 'string' || value === '') continue;
+    return { value, source: name };
+  }
+  return undefined;
+}
+
+/**
+ * The bypass list the environment names.
+ *
+ * **Observed** — `zze` and `EUr`, `chunk-3q7vcbxf.js:43 300`. A list of `"*"`
+ * bypasses every host; otherwise the lower-case and the upper-case variable are
+ * **both** used when they differ, and the one that is set when they agree.
+ */
+export function resolveNoProxy(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const lower = env['no_proxy'];
+  const upper = env['NO_PROXY'];
+  if (lower === '*' || upper === '*') return '*';
+  if (lower && upper && lower !== upper) return `${lower},${upper}`;
+  return lower || upper;
+}
+
+/**
+ * Whether a URL is covered by a bypass list.
+ *
+ * **Observed** — `e_`, `chunk-3q7vcbxf.js:43 450`. The list is split on commas
+ * and whitespace; an entry that carries a colon is compared against
+ * `host:port`; an entry that starts with a dot matches the host itself or any
+ * name **ending** with it; any other entry must equal the host.
+ *
+ * **The difference from the sandbox allowlist.** Here a leading `*` is **not** a
+ * wildcard, and a bare entry is an **exact** match.
+ */
+export function matchesNoProxy(url: string, noProxy: string | undefined): boolean {
+  if (!noProxy) return false;
+  if (noProxy === '*') return true;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const secure = parsed.protocol === 'https:' || parsed.protocol === 'wss:';
+  const port = parsed.port !== '' ? parsed.port : secure ? '443' : '80';
+  const key = `${host}:${port}`;
+  return noProxy
+    .split(/[,\s]+/)
+    .filter((entry) => entry.length > 0)
+    .some((raw) => {
+      const entry = raw.toLowerCase().trim();
+      if (entry.includes(':')) return key === entry;
+      if (entry.startsWith('.')) return host === entry.slice(1) || host.endsWith(entry);
+      return host === entry;
+    });
+}
+
+/**
+ * The target's own message for a proxy URL that cannot be parsed.
+ *
+ * **Observed** — `E1t`, `chunk-3q7vcbxf.js:42 790`. The value's control
+ * characters are stripped before it is quoted. The last line names the product,
+ * so this implementation names its own.
+ */
+export function proxyUrlError(source: string, value: string): string {
+  const shown = value.replace(/\p{Cc}/gu, '');
+  return (
+    `Invalid proxy URL in ${source}: "${shown}" cannot be parsed as a URL.\n` +
+    'Proxy settings must be a complete URL including the scheme, e.g. "http://proxy.example.com:8080".\n' +
+    `Fix or unset ${source} and restart PRRICODE.`
+  );
+}
+
+/**
+ * How long a proxy-auth helper's value is cached, in milliseconds.
+ *
+ * **Observed** — `Pr` and `vr`, `chunk-3q7vcbxf.js:45 100`: the environment
+ * variable wins when it names a number that is not negative, and the default is
+ * five minutes.
+ */
+export const PROXY_AUTH_HELPER_TTL_MS = 300000;
+
+/**
+ * The cache lifetime of a proxy-auth helper's value.
+ *
+ * **Observed** — `vr`, `chunk-3q7vcbxf.js:45 130`.
+ */
+export function proxyAuthHelperTtl(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['CLAUDE_CODE_PROXY_AUTH_HELPER_TTL_MS'];
+  if (raw === undefined) return PROXY_AUTH_HELPER_TTL_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return PROXY_AUTH_HELPER_TTL_MS;
+  return value;
+}
+
+/**
+ * The environment variable that switches the proxy-auth helper on.
+ *
+ * **Observed** — `Gze`, `chunk-3q7vcbxf.js:45 060`: without it, the helper is
+ * never run, whatever the settings say.
+ */
+export const PROXY_AUTH_HELPER_ENABLED_VARIABLE = 'CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER';
+
+/**
+ * The message the target prints when a **project** set the proxy-auth helper.
+ *
+ * **Observed** — `chunk-8659jdnp.js` (the whole file).
+ */
+export const PROXY_AUTH_HELPER_PROJECT_MESSAGE =
+  'a proxy helper set by this project is not run by this command\n';
+
+/**
+ * The message the target prints when the proxy setting is refused.
+ *
+ * **Observed** — `chunk-8659jdnp.js` (the whole file).
+ */
+export const PROXY_SETTING_REFUSED_MESSAGE = 'Error: the proxy setting named above is refused.';
+
+/**
+ * The proxy-auth helper's configuration.
+ *
+ * **Observed** — `chunk-8659jdnp.js` (the whole file). The helper is the
+ * **policy** tier's, or the **user** tier's; it is flagged as coming from a
+ * project or a local tier when the policy tier has none, the user tier has one,
+ * and the project or the local tier carries **the same** string.
+ */
+export interface ProxyAuthHelperConfig {
+  /** The shell command that prints the `Proxy-Authorization` value. */
+  readonly helper?: string;
+  /** Whether the helper came from a project or a local tier. */
+  readonly fromProjectOrLocal: boolean;
+  /** Whether the workspace trust that the helper needs has been accepted. */
+  readonly trustAccepted: () => boolean;
+  /** Where the helper may come from. */
+  readonly sources: 'personAndPolicy';
+}
+
+function tierHelper(tiers: ReadonlyMap<string, unknown>, source: string): string | undefined {
+  if (!tiers.has(source)) return undefined;
+  const document = documentOf(tiers.get(source));
+  if (typeof document !== 'object' || document === null) return undefined;
+  const record = document as Record<string, unknown>;
+  if (!Object.hasOwn(record, 'proxyAuthHelper')) return undefined;
+  const value = record['proxyAuthHelper'];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Read the proxy-auth helper's configuration out of the settings tiers.
+ *
+ * **Observed** — `chunk-8659jdnp.js`. The policy tier wins over the user tier,
+ * and a project or local tier that carries the **same** helper is what makes the
+ * helper "from a project or a local tier" — a project that carries a *different*
+ * helper does not.
+ */
+export function readProxyAuthHelperConfig(
+  tiers: ReadonlyMap<string, unknown>,
+  trustAccepted: () => boolean = () => false,
+): ProxyAuthHelperConfig {
+  const policy = tierHelper(tiers, 'policySettings');
+  const user = tierHelper(tiers, 'userSettings');
+  const project = tierHelper(tiers, 'projectSettings');
+  const local = tierHelper(tiers, 'localSettings');
+  const helper = policy ?? user;
+  const fromProjectOrLocal =
+    policy === undefined &&
+    user !== undefined &&
+    (project === user || local === user);
+  return { helper, fromProjectOrLocal, trustAccepted, sources: 'personAndPolicy' };
+}
+
+/**
+ * The capability a corporate proxy needs.
+ *
+ * This implementation reaches the network through the provider driver, and it has
+ * **no corporate proxy**: no outbound proxy agent, no `Proxy-Authorization`
+ * header, and no proxy-auth helper. The refusal names what is missing.
+ */
+export const CORPORATE_PROXY_CAPABILITY =
+  'an outbound HTTP proxy agent that can carry a Proxy-Authorization header';
+
+/**
+ * The refusal a corporate-proxy operation raises.
+ *
+ * The pattern is the one the IDE surface uses: the refusal names the capability
+ * the operation needed, so a reader can tell what is missing.
+ */
+export class CorporateProxyCapabilityError extends Error {
+  /** The stable code of the refusal. */
+  readonly code = 'corporate_proxy_unavailable';
+
+  /** The capability the operation needed. */
+  readonly capability: string;
+
+  constructor(capability: string, operation: string) {
+    super(
+      `${operation} needs ${capability}, which this session does not have, so it was not attempted.`,
+    );
+    this.name = 'CorporateProxyCapabilityError';
+    this.capability = capability;
+  }
+}
+
+/**
+ * Install the corporate proxy's agents on the HTTP client.
+ *
+ * **This implementation's** entry point, and the one that **refuses**. The target
+ * installs a proxy agent on the API client and a global dispatcher on the fetch
+ * client, and it runs the proxy-auth helper to fill the `Proxy-Authorization`
+ * header. This implementation has no corporate proxy, so the operation refuses
+ * and names the capability it needed.
+ */
+export function installCorporateProxyAgent(
+  _env: NodeJS.ProcessEnv = process.env,
+): never {
+  throw new CorporateProxyCapabilityError(CORPORATE_PROXY_CAPABILITY, 'Installing a corporate proxy');
 }

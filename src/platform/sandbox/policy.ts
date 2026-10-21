@@ -98,6 +98,8 @@
  * the boundary below the kernel.
  */
 
+import { isIP } from 'node:net';
+
 import { splitShellCommand, stripRedirections, stripWrappers } from '../../permissions/shell.js';
 
 /** The platforms this implementation's sandbox backend implements. */
@@ -125,6 +127,60 @@ export interface SandboxFilesystemPolicy {
 }
 
 /**
+ * The network policy of the `sandbox.network` block — the **egress firewall**'s
+ * own configuration.
+ *
+ * **Observed.** The target's sandbox runtime declares the block in
+ * `chunk-3rfnbzz0.js` (offsets **11 700** – **14 600**); every member below is
+ * the target's own key, and the target's own description of each is quoted in
+ * the conformance document (`docs/compatibility/provider-catalog.md`).
+ *
+ * The members that carry a **value** are optional; the two lists and the
+ * booleans that decide are given a value of their own, so that a caller never
+ * has to distinguish "unset" from "empty".
+ */
+export interface SandboxNetworkPolicy {
+  /** The hosts the sandbox may reach. */
+  readonly allowedDomains: readonly string[];
+  /** The hosts the sandbox may never reach, whatever the allowlist says. */
+  readonly deniedDomains: readonly string[];
+  /** Why a denied entry is denied, keyed by the exact entry string. */
+  readonly deniedDomainReasons: Readonly<Record<string, string>>;
+  /** Whether a host outside the allowlist is denied instead of asked for. */
+  readonly strictAllowlist: boolean;
+  /** Whether only the managed settings may supply the allowlist. */
+  readonly allowManagedDomainsOnly: boolean;
+  /** The port of an external HTTP proxy that replaces the local one. */
+  readonly httpProxyPort?: number;
+  /** The port of an external SOCKS proxy that replaces the local one. */
+  readonly socksProxyPort?: number;
+  /** Whether the proxy terminates TLS in process. */
+  readonly tlsTerminate: boolean;
+  /** The Unix sockets the sandbox may reach. */
+  readonly allowUnixSockets: readonly string[];
+  /** Whether every Unix socket is allowed. */
+  readonly allowAllUnixSockets: boolean;
+  /** Whether the sandbox may bind a local port. */
+  readonly allowLocalBinding: boolean;
+  /** The Mach services the sandbox may look up. */
+  readonly allowMachLookup: readonly string[];
+}
+
+/** The network policy this implementation uses when a settings document says nothing. */
+export const DEFAULT_SANDBOX_NETWORK_POLICY: SandboxNetworkPolicy = Object.freeze({
+  allowedDomains: Object.freeze([]) as readonly string[],
+  deniedDomains: Object.freeze([]) as readonly string[],
+  deniedDomainReasons: Object.freeze({}) as Readonly<Record<string, string>>,
+  strictAllowlist: false,
+  allowManagedDomainsOnly: false,
+  tlsTerminate: false,
+  allowUnixSockets: Object.freeze([]) as readonly string[],
+  allowAllUnixSockets: false,
+  allowLocalBinding: false,
+  allowMachLookup: Object.freeze([]) as readonly string[],
+});
+
+/**
  * The sandbox policy.
  *
  * The five members are the target's `sandbox` block, in the order the audit names
@@ -144,6 +200,14 @@ export interface SandboxPolicy {
   readonly excludedCommands: readonly string[];
   /** The filesystem policy of the `sandbox.filesystem` block. */
   readonly filesystem?: SandboxFilesystemPolicy;
+  /**
+   * The network policy of the `sandbox.network` block.
+   *
+   * **Observed** — the target's sandbox runtime declares the block in
+   * `chunk-3rfnbzz0.js`; this is the **egress firewall**'s configuration, and the
+   * rules that decide on it are implemented below.
+   */
+  readonly network?: SandboxNetworkPolicy;
 }
 
 /** The policy this implementation uses when a settings document says nothing. */
@@ -382,6 +446,7 @@ export function readSandboxPolicy(settings: unknown): SandboxPolicy {
 export function parseSandboxPolicy(block: unknown): SandboxPolicy {
   if (!isRecord(block)) return DEFAULT_SANDBOX_POLICY;
   const filesystem = readFilesystemPolicy(block['filesystem']);
+  const network = readNetworkPolicy(block['network']);
   return {
     enabled: readBoolean(block, 'enabled') ?? DEFAULT_SANDBOX_POLICY.enabled,
     enabledPlatforms:
@@ -394,7 +459,60 @@ export function parseSandboxPolicy(block: unknown): SandboxPolicy {
     excludedCommands:
       readStringArray(block, 'excludedCommands') ?? DEFAULT_SANDBOX_POLICY.excludedCommands,
     ...(filesystem === undefined ? {} : { filesystem }),
+    ...(network === undefined ? {} : { network }),
   };
+}
+
+/**
+ * Read the `sandbox.network` block.
+ *
+ * A block with the wrong type is ignored rather than trusted: the settings file is
+ * caller-supplied data, and a malformed block must not become a malformed policy.
+ * A list that is not an array of strings is dropped, and the rest of the block is
+ * kept.
+ */
+function readNetworkPolicy(block: unknown): SandboxNetworkPolicy | undefined {
+  if (!isRecord(block)) return undefined;
+  return {
+    allowedDomains: readStringArray(block, 'allowedDomains') ?? DEFAULT_SANDBOX_NETWORK_POLICY.allowedDomains,
+    deniedDomains: readStringArray(block, 'deniedDomains') ?? DEFAULT_SANDBOX_NETWORK_POLICY.deniedDomains,
+    deniedDomainReasons: readStringRecord(block, 'deniedDomainReasons'),
+    strictAllowlist: readBoolean(block, 'strictAllowlist') ?? DEFAULT_SANDBOX_NETWORK_POLICY.strictAllowlist,
+    allowManagedDomainsOnly:
+      readBoolean(block, 'allowManagedDomainsOnly') ??
+      DEFAULT_SANDBOX_NETWORK_POLICY.allowManagedDomainsOnly,
+    ...(readPort(block, 'httpProxyPort') === undefined
+      ? {}
+      : { httpProxyPort: readPort(block, 'httpProxyPort') }),
+    ...(readPort(block, 'socksProxyPort') === undefined
+      ? {}
+      : { socksProxyPort: readPort(block, 'socksProxyPort') }),
+    tlsTerminate: readBoolean(block, 'tlsTerminate') ?? DEFAULT_SANDBOX_NETWORK_POLICY.tlsTerminate,
+    allowUnixSockets: readStringArray(block, 'allowUnixSockets') ?? DEFAULT_SANDBOX_NETWORK_POLICY.allowUnixSockets,
+    allowAllUnixSockets:
+      readBoolean(block, 'allowAllUnixSockets') ??
+      DEFAULT_SANDBOX_NETWORK_POLICY.allowAllUnixSockets,
+    allowLocalBinding:
+      readBoolean(block, 'allowLocalBinding') ?? DEFAULT_SANDBOX_NETWORK_POLICY.allowLocalBinding,
+    allowMachLookup: readStringArray(block, 'allowMachLookup') ?? DEFAULT_SANDBOX_NETWORK_POLICY.allowMachLookup,
+  };
+}
+
+/**
+ * Read the `sandbox.network` block out of a settings document.
+ *
+ * The document's `sandbox.network` carries the policy. A document without one
+ * yields the default policy.
+ *
+ * **Observed** — the target's own block, `chunk-3rfnbzz0.js:11 700` – `14 600`.
+ */
+export function readSandboxNetworkPolicy(settings: unknown): SandboxNetworkPolicy {
+  if (!isRecord(settings)) return DEFAULT_SANDBOX_NETWORK_POLICY;
+  if (!Object.hasOwn(settings, 'sandbox')) return DEFAULT_SANDBOX_NETWORK_POLICY;
+  const sandbox = settings['sandbox'];
+  if (!isRecord(sandbox)) return DEFAULT_SANDBOX_NETWORK_POLICY;
+  if (!Object.hasOwn(sandbox, 'network')) return DEFAULT_SANDBOX_NETWORK_POLICY;
+  return readNetworkPolicy(sandbox['network']) ?? DEFAULT_SANDBOX_NETWORK_POLICY;
 }
 
 /**
@@ -449,4 +567,292 @@ function readStringArray(source: Record<string, unknown>, key: string): string[]
   if (!Array.isArray(value)) return undefined;
   if (!value.every((entry) => typeof entry === 'string')) return undefined;
   return [...(value as string[])];
+}
+
+/** Read a string-valued record member of an object, if it has one. */
+function readStringRecord(
+  source: Record<string, unknown>,
+  key: string,
+): Readonly<Record<string, string>> {
+  if (!Object.hasOwn(source, key)) return {};
+  const value = source[key];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+  const entries: Record<string, string> = {};
+  for (const [name, reason] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof reason !== 'string') continue;
+    entries[name] = reason;
+  }
+  return entries;
+}
+
+/** Read a TCP port member of an object, if it has a usable one. */
+function readPort(source: Record<string, unknown>, key: string): number | undefined {
+  if (!Object.hasOwn(source, key)) return undefined;
+  const value = source[key];
+  if (typeof value !== 'number' || !Number.isInteger(value)) return undefined;
+  if (value < 1 || value > 65535) return undefined;
+  return value;
+}
+
+/* -------------------------------------------------------------------------- */
+/* The egress firewall's own rules                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One entry of a host list, split into its host and its port.
+ *
+ * **Observed** — the target's sandbox runtime's `kee`, `chunk-ew44hcmm.js:21 314`.
+ */
+export interface SandboxHostEntry {
+  /** The host pattern, as the entry spells it. */
+  readonly hostPattern: string;
+  /** The port, when the entry carries one. */
+  readonly port?: number;
+}
+
+/** Strip the brackets an IPv6 literal is written with. */
+function stripBrackets(host: string): string {
+  return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+}
+
+/** The port an entry names, when it names a usable one. */
+function entryPort(text: string): number | undefined {
+  if (!/^[1-9][0-9]{0,4}$/.test(text)) return undefined;
+  const value = Number(text);
+  return value > 65535 ? undefined : value;
+}
+
+/**
+ * Split a host-list entry into its host and its port.
+ *
+ * **Observed** — the target's sandbox runtime's `kee`, `chunk-ew44hcmm.js:21 314`.
+ * The port is the text after the **last** colon, and it is a port only when it
+ * is a number from 1 to 65535. A bracketed IPv6 literal is split at the bracket;
+ * an unbracketed one (which carries several colons) is a host with no port.
+ */
+export function parseSandboxHostEntry(entry: string): SandboxHostEntry {
+  if (entry.startsWith('[')) {
+    const close = entry.indexOf(']');
+    if (close === -1) return { hostPattern: entry };
+    const host = stripBrackets(entry.slice(1, close)).toLowerCase().replace(/\.$/, '');
+    const rest = entry.slice(close + 1);
+    if (rest === '') return { hostPattern: host };
+    const port = entryPort(rest.startsWith(':') ? rest.slice(1) : '');
+    return port === undefined ? { hostPattern: entry } : { hostPattern: host, port };
+  }
+  const separator = entry.lastIndexOf(':');
+  if (separator === -1) return { hostPattern: entry };
+  if (entry.indexOf(':') !== separator) {
+    // More than one colon: an unbracketed IPv6 literal, which carries no port.
+    return { hostPattern: stripBrackets(entry).toLowerCase().replace(/\.$/, '') };
+  }
+  const port = entryPort(entry.slice(separator + 1));
+  if (port === undefined) return { hostPattern: entry };
+  return { hostPattern: entry.slice(0, separator), port };
+}
+
+/**
+ * Whether a host is covered by a host-list entry.
+ *
+ * **Observed** — the target's sandbox runtime's `A8e`, `chunk-ew44hcmm.js:21 523`.
+ *
+ *   - the entry `*` covers every host;
+ *   - an entry that starts with `*.` covers a host that **ends with** the rest of
+ *     the entry — so `*.corp.com` covers `a.corp.com` and `a.b.corp.com` but
+ *     **not** `corp.com` — and it never covers an **address literal**;
+ *   - any other entry must equal the host, case-insensitively.
+ */
+export function sandboxHostMatches(host: string, pattern: string): boolean {
+  const name = host.toLowerCase();
+  if (pattern === '*') return true;
+  if (pattern.startsWith('*.')) {
+    if (isIP(stripBrackets(name)) !== 0) return false;
+    return name.endsWith(`.${pattern.slice(2).toLowerCase()}`);
+  }
+  return name === pattern.toLowerCase();
+}
+
+/**
+ * Whether a host and a port are covered by a host-list entry.
+ *
+ * **Observed** — the target's sandbox runtime's `izn`, `chunk-ew44hcmm.js:21 900`.
+ * An entry that carries a port restricts itself to that port.
+ */
+export function sandboxHostEntryMatches(host: string, port: number, entry: string): boolean {
+  const parsed = parseSandboxHostEntry(entry);
+  if (parsed.port !== undefined && parsed.port !== port) return false;
+  return sandboxHostMatches(host, parsed.hostPattern);
+}
+
+/** The entry of a list that covers a host and a port, if one does. */
+function matchingEntry(
+  entries: readonly string[],
+  host: string,
+  port: number,
+): string | undefined {
+  return entries.find((entry) => sandboxHostEntryMatches(host, port, entry));
+}
+
+/**
+ * The decision about one egress request.
+ *
+ * `allow` — the host is on the allowlist. `deny` — the host is on the deny list,
+ * or the allowlist is strict and the host is not on it. `ask` — the host is not
+ * on the allowlist and the policy does not deny it outright.
+ */
+export interface SandboxEgressDecision {
+  /** What the policy says about the request. */
+  readonly outcome: 'allow' | 'deny' | 'ask';
+  /** Whether the request may go out. */
+  readonly allowed: boolean;
+  /** Why, in the target's own spirit. */
+  readonly reason?: string;
+}
+
+/**
+ * Decide whether a request may leave the sandbox.
+ *
+ * **Observed.** The target's own rule (`chunk-3rfnbzz0.js:11 700`) is that the
+ * **deny** list wins over the allowlist — "Domains that are always blocked, even
+ * if matched by allowedDomains" — and that `strictAllowlist` denies a host that
+ * is not on the allowlist "without consulting the ask callback".
+ *
+ * The `deniedDomainReasons` map is keyed by the **exact** entry string, so a
+ * reason that names a different spelling of the same host never fires.
+ */
+export function evaluateSandboxEgress(
+  target: { host: string; port: number },
+  policy: SandboxNetworkPolicy,
+): SandboxEgressDecision {
+  const { host, port } = target;
+  const denied = matchingEntry(policy.deniedDomains, host, port);
+  if (denied !== undefined) {
+    const reason = policy.deniedDomainReasons[denied];
+    return {
+      outcome: 'deny',
+      allowed: false,
+      reason: reason ?? `the host ${host} is on the denied list (${denied})`,
+    };
+  }
+  if (matchingEntry(policy.allowedDomains, host, port) !== undefined) {
+    return { outcome: 'allow', allowed: true };
+  }
+  if (policy.strictAllowlist) {
+    return {
+      outcome: 'deny',
+      allowed: false,
+      reason: `the host ${host} is not in the allowlist, and the strict allowlist denies it`,
+    };
+  }
+  return {
+    outcome: 'ask',
+    allowed: false,
+    reason: `the host ${host} is not in the allowlist`,
+  };
+}
+
+/**
+ * Merge the network policies of several settings sources.
+ *
+ * **Observed** — the target's sandbox-option merge, `chunk-5gektv5j.js:5 899`:
+ * `network.deniedDomains` is a **union** across the sources, and every other
+ * member is taken **whole** from the highest source that sets it.
+ */
+export function mergeSandboxNetworkPolicies(
+  policies: readonly SandboxNetworkPolicy[],
+): SandboxNetworkPolicy {
+  const deniedDomains: string[] = [];
+  let allowedDomains: readonly string[] = DEFAULT_SANDBOX_NETWORK_POLICY.allowedDomains;
+  let deniedDomainReasons: Readonly<Record<string, string>> =
+    DEFAULT_SANDBOX_NETWORK_POLICY.deniedDomainReasons;
+  let strictAllowlist = DEFAULT_SANDBOX_NETWORK_POLICY.strictAllowlist;
+  let allowManagedDomainsOnly = DEFAULT_SANDBOX_NETWORK_POLICY.allowManagedDomainsOnly;
+  let httpProxyPort: number | undefined;
+  let socksProxyPort: number | undefined;
+  let tlsTerminate = DEFAULT_SANDBOX_NETWORK_POLICY.tlsTerminate;
+  let allowUnixSockets: readonly string[] = DEFAULT_SANDBOX_NETWORK_POLICY.allowUnixSockets;
+  let allowAllUnixSockets = DEFAULT_SANDBOX_NETWORK_POLICY.allowAllUnixSockets;
+  let allowLocalBinding = DEFAULT_SANDBOX_NETWORK_POLICY.allowLocalBinding;
+  let allowMachLookup: readonly string[] = DEFAULT_SANDBOX_NETWORK_POLICY.allowMachLookup;
+
+  for (const policy of policies) {
+    allowedDomains = policy.allowedDomains;
+    deniedDomains.push(...policy.deniedDomains);
+    deniedDomainReasons = { ...deniedDomainReasons, ...policy.deniedDomainReasons };
+    strictAllowlist = policy.strictAllowlist;
+    allowManagedDomainsOnly = policy.allowManagedDomainsOnly;
+    httpProxyPort = policy.httpProxyPort;
+    socksProxyPort = policy.socksProxyPort;
+    tlsTerminate = policy.tlsTerminate;
+    allowUnixSockets = policy.allowUnixSockets;
+    allowAllUnixSockets = policy.allowAllUnixSockets;
+    allowLocalBinding = policy.allowLocalBinding;
+    allowMachLookup = policy.allowMachLookup;
+  }
+
+  return {
+    allowedDomains,
+    deniedDomains: [...new Set(deniedDomains)],
+    deniedDomainReasons,
+    strictAllowlist,
+    allowManagedDomainsOnly,
+    ...(httpProxyPort === undefined ? {} : { httpProxyPort }),
+    ...(socksProxyPort === undefined ? {} : { socksProxyPort }),
+    tlsTerminate,
+    allowUnixSockets,
+    allowAllUnixSockets,
+    allowLocalBinding,
+    allowMachLookup,
+  };
+}
+
+/**
+ * The capability the target's egress firewall needs.
+ *
+ * This implementation has a host-side sandbox proxy of its own, but it does not
+ * have the target's **egress firewall**: the sandbox runtime's domain filter,
+ * its deny list, its strict allowlist, its resolved-address check, its MITM
+ * proxy and its TLS termination. The refusal names what is missing.
+ */
+export const EGRESS_FIREWALL_CAPABILITY =
+  'the sandbox runtime egress firewall (the domain filter, the deny list, the strict allowlist and the resolved-address check)';
+
+/**
+ * The refusal an egress-firewall operation raises.
+ *
+ * The pattern is the one the IDE surface uses: the refusal names the capability
+ * the operation needed, so a reader can tell what is missing.
+ */
+export class EgressFirewallCapabilityError extends Error {
+  /** The stable code of the refusal. */
+  readonly code = 'egress_firewall_unavailable';
+
+  /** The capability the operation needed. */
+  readonly capability: string;
+
+  constructor(capability: string, operation: string) {
+    super(
+      `${operation} needs ${capability}, which this session does not have, so it was not attempted.`,
+    );
+    this.name = 'EgressFirewallCapabilityError';
+    this.capability = capability;
+  }
+}
+
+/**
+ * Enforce the egress firewall for one request.
+ *
+ * **This implementation's** entry point, and the one that **refuses**. The target
+ * enforces the firewall inside the sandbox runtime, where the request is
+ * filtered before it is dialled. This implementation has no such filter, so the
+ * operation refuses and names the capability it needed.
+ */
+export function enforceSandboxEgress(
+  _target: { host: string; port: number },
+  _policy: SandboxNetworkPolicy,
+): never {
+  throw new EgressFirewallCapabilityError(
+    EGRESS_FIREWALL_CAPABILITY,
+    'Enforcing the sandbox egress firewall',
+  );
 }
