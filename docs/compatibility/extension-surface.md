@@ -227,6 +227,12 @@ the file and the offset it came from. The full record, with the method and the
 discrepancies against the earlier sweep, is
 `/home/shiva/opt/reference-agent-rea/analysis/findings-marketplace.md`.
 
+The claims below are pinned by **`tests/contracts/plugin-protocol.test.ts`**. The
+compatibility harness's own probe for the matrix row that carries them
+(`tests/compatibility/scenarios.ts`) does not measure them yet — that file is
+the orchestrator's, and the row is re-measured when this milestone's report is
+regenerated.
+
 ### The marketplace source types — ten, and eleven in the policy lists
 
 The target's schema is a **discriminated union** on the key `source`
