@@ -2190,6 +2190,14 @@ describe('the slash-command registry', () => {
     expect(result?.stdout).toContain('Records');
   });
 
+  it('runs the output-style command and lists the styles', async () => {
+    const result = await runSlashCommand('/output-style', slashContext());
+
+    expect(result?.exitCode).toBe(0);
+    expect(result?.stdout).toContain('Available styles:');
+    expect(result?.stdout).toContain('- Concise');
+  });
+
   it('refuses a command whose capability is missing, and names the capability', async () => {
     const result = await runSlashCommand('/teleport', slashContext());
 
@@ -2202,7 +2210,7 @@ describe('the slash-command registry', () => {
 
   it('refuses every command it does not run, and names a capability for each', async () => {
     const refusals = SLASH_COMMANDS.filter(
-      (command) => !['help', 'version', 'model', 'status', 'usage', 'context', 'config', 'skill-doctor', 'skills', 'clear', 'compact', 'resume', 'provider', 'catalog'].includes(command.name),
+      (command) => !['help', 'version', 'model', 'status', 'usage', 'context', 'config', 'output-style', 'skill-doctor', 'skills', 'clear', 'compact', 'resume', 'provider', 'catalog'].includes(command.name),
     );
 
     expect(refusals.length).toBeGreaterThan(80);

@@ -58,6 +58,12 @@
  */
 
 import { loadSettings } from '../../config/loader.js';
+import {
+  DEFAULT_OUTPUT_STYLE_NAME,
+  allOutputStyles,
+  currentOutputStyle,
+  writeOutputStyleSetting,
+} from '../../config/outputStyles.js';
 import { mergeMergedSettings } from '../../config/tiers.js';
 import { createSkillRegistry } from '../../extensions/skills/registry.js';
 import { RESTRICT_PERSONAL_CONFIG_ENV } from '../../permissions/decision.js';
@@ -72,7 +78,7 @@ import {
   type LoadedManagerState,
   type ManagerCommandOptions,
 } from './manager.js';
-import { failure, PROVIDER_EXTENSION_LABEL, renderTable, usageError, type CommandResult } from './shared.js';
+import { errorMessageOf, failure, PROVIDER_EXTENSION_LABEL, renderTable, usageError, type CommandResult } from './shared.js';
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                              */
@@ -476,7 +482,6 @@ const MISSING_CAPABILITIES: ReadonlyMap<string, string> = new Map([
   ['mcp', 'MCP server manager'],
   ['memory', 'memory editor'],
   ['mobile', 'mobile client to pair with'],
-  ['output-style', 'output styles'],
   ['passes', 'referral programme'],
   ['pause-memory', 'account memory service'],
   ['permissions', 'permission-rule editor'],
@@ -654,6 +659,8 @@ async function dispatch(
       return contextCommand(context);
     case 'config':
       return configCommand(context);
+    case 'output-style':
+      return outputStyleCommand(args, context);
     case 'skill-doctor':
       return skillDoctorCommand(context);
     case 'skills':
@@ -820,6 +827,63 @@ function contextCommand(context: SlashCommandContext): CommandResult {
   ];
   const lines = renderTable(['Measure', 'Value'], rows);
   return { exitCode: 0, stdout: `${lines.join('\n')}\n`, stderr: '' };
+}
+
+/**
+ * The output styles, and the active one.
+ *
+ * The target's `/output-style` "List output styles or switch to one". This
+ * implementation lists the **built-in** styles and the **file** styles, and
+ * saves the choice to the project's **local** settings file — `.claude/settings.local.json`
+ * — the way the target does.
+ *
+ * The target's own wording is used: the list, the unknown-style line, the
+ * already-set line and the set line.
+ */
+async function outputStyleCommand(
+  args: readonly string[],
+  context: SlashCommandContext,
+): Promise<CommandResult> {
+  const styles = await allOutputStyles({ cwd: context.cwd, configRoot: context.configDir });
+  const settings = loadSettings({
+    cwd: context.cwd,
+    configDir: context.configDir,
+    restricted: context.env[RESTRICT_PERSONAL_CONFIG_ENV] !== undefined,
+  });
+  const current = currentOutputStyle(mergeMergedSettings(settings.tiers) as Record<string, unknown>);
+
+  const wanted = args.join(' ').trim();
+  if (wanted === '') {
+    const rows = styles.map((style) => {
+      const marker = style.name === current ? ' (current)' : '';
+      return style.description === ''
+        ? `- ${style.name}${marker}`
+        : `- ${style.name}${marker}: ${style.description}`;
+    });
+    const head = `Output style: ${current === DEFAULT_OUTPUT_STYLE_NAME ? current : current}`;
+    return {
+      exitCode: 0,
+      stdout: `${head}\n\nAvailable styles:\n${rows.join('\n')}\n\nUsage: /output-style <style>\n`,
+      stderr: '',
+    };
+  }
+
+  const chosen = styles.find((style) => style.name.toLowerCase() === wanted.toLowerCase());
+  if (chosen === undefined) {
+    const names = styles.map((style) => style.name).join(', ');
+    return usageError(`Unknown output style "${wanted}". Available styles: ${names}`);
+  }
+
+  if (chosen.name === current) {
+    return { exitCode: 0, stdout: `Output style is already ${chosen.name}\n`, stderr: '' };
+  }
+
+  try {
+    await writeOutputStyleSetting(context.cwd, chosen.name);
+  } catch (error) {
+    return failure(`Could not save output style: ${errorMessageOf(error)}`);
+  }
+  return { exitCode: 0, stdout: `Output style set to ${chosen.name}\n`, stderr: '' };
 }
 
 /**
