@@ -205,6 +205,26 @@ import {
 } from '../../src/extensions/hooks/registry.js';
 import { effectiveHandlerType } from '../../src/extensions/hooks/schema.js';
 import {
+  AUTOUPDATE_BLOCK_TYPES,
+  AUTOUPDATE_FAILURE_CODES,
+  AUTOUPDATE_SKIP_REASONS,
+  PLUGIN_UPDATE_OUTCOMES,
+} from '../../src/extensions/plugins/autoupdate.js';
+import { MARKETPLACE_MANIFEST_KEYS } from '../../src/extensions/plugins/catalogue.js';
+import {
+  MARKETPLACE_NPM_NOT_IMPLEMENTED,
+  MARKETPLACE_POLICY_SOURCE_TYPES,
+  MARKETPLACE_RUNTIME_SOURCE_TYPES,
+  MARKETPLACE_SOURCE_TYPES,
+} from '../../src/extensions/plugins/marketplaceSources.js';
+import { PLUGIN_MANIFEST_KEYS } from '../../src/extensions/plugins/manifestSchema.js';
+import { PLUGIN_SOURCE_KINDS, PLUGIN_SOURCE_TYPES } from '../../src/extensions/plugins/pluginSources.js';
+import {
+  AGENT_FRONTMATTER_KEYS,
+  OUTPUT_STYLE_FRONTMATTER_KEYS,
+  SKILL_FRONTMATTER_KEYS,
+} from '../../src/extensions/plugins/frontmatterSchema.js';
+import {
   AGENT_ORIGINATED_CONTROL_SUBTYPES,
   HOST_CONTROL_REQUEST_SUBTYPES,
   controlRequestDirectionError,
@@ -450,6 +470,21 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   buildResultDocument,
   ZERO_USAGE,
   effectiveHandlerType,
+  AUTOUPDATE_BLOCK_TYPES,
+  AUTOUPDATE_FAILURE_CODES,
+  AUTOUPDATE_SKIP_REASONS,
+  PLUGIN_UPDATE_OUTCOMES,
+  MARKETPLACE_MANIFEST_KEYS,
+  MARKETPLACE_NPM_NOT_IMPLEMENTED,
+  MARKETPLACE_POLICY_SOURCE_TYPES,
+  MARKETPLACE_RUNTIME_SOURCE_TYPES,
+  MARKETPLACE_SOURCE_TYPES,
+  PLUGIN_MANIFEST_KEYS,
+  PLUGIN_SOURCE_KINDS,
+  PLUGIN_SOURCE_TYPES,
+  AGENT_FRONTMATTER_KEYS,
+  OUTPUT_STYLE_FRONTMATTER_KEYS,
+  SKILL_FRONTMATTER_KEYS,
   DEFAULT_SEVERITY_THRESHOLDS,
   DEFAULT_SITE_CONFIG,
   SEVERITY_BY_MODEL,
@@ -3959,9 +3994,59 @@ export const SCENARIOS: readonly Scenario[] = [
       ]);
       const discovered = observe('the discovered subagents', agents.discover());
       expect(discovered.map((item) => item.name)).toEqual(['reviewer']);
-      return measured(
+      // The **plugin and marketplace protocol**: the source vocabularies, the
+    // manifest, the frontmatter, the catalogue and the autoupdater.
+    expect(observe('the marketplace source types', MARKETPLACE_SOURCE_TYPES)).toEqual([
+      'url',
+      'github',
+      'git',
+      'npm',
+      'file',
+      'directory',
+      'skills-dir',
+      'hostPattern',
+      'pathPattern',
+      'settings',
+    ]);
+    expect(observe('the policy source types', MARKETPLACE_POLICY_SOURCE_TYPES)).toHaveLength(11);
+    expect(observe('the runtime source types', MARKETPLACE_RUNTIME_SOURCE_TYPES)).toEqual([
+      'claudeai',
+      'pluginDirectory',
+    ]);
+    expect(observe('the npm refusal', MARKETPLACE_NPM_NOT_IMPLEMENTED)).toBe(
+      'NPM marketplace sources not yet implemented',
+    );
+    expect(observe('the plugin source types', PLUGIN_SOURCE_TYPES)).toEqual([
+      'npm',
+      'url',
+      'github',
+      'git-subdir',
+      'archive',
+      'command',
+      'unsupported',
+    ]);
+    expect(observe('the plugin source kinds', PLUGIN_SOURCE_KINDS)).toEqual([
+      'local',
+      'npm',
+      'github',
+      'git',
+      'subdir',
+      'archive',
+      'command',
+      'unknown',
+    ]);
+    expect(observe('the manifest keys', PLUGIN_MANIFEST_KEYS)).toHaveLength(29);
+    expect(observe('the catalogue manifest keys', MARKETPLACE_MANIFEST_KEYS)).toHaveLength(10);
+    expect(observe('the skill frontmatter keys', SKILL_FRONTMATTER_KEYS)).toHaveLength(42);
+    expect(observe('the agent frontmatter keys', AGENT_FRONTMATTER_KEYS)).toHaveLength(22);
+    expect(observe('the output-style frontmatter keys', OUTPUT_STYLE_FRONTMATTER_KEYS)).toHaveLength(4);
+    expect(observe('the update outcomes', PLUGIN_UPDATE_OUTCOMES)).toHaveLength(4);
+    expect(observe('the block types', AUTOUPDATE_BLOCK_TYPES)).toHaveLength(4);
+    expect(observe('the skip reasons', AUTOUPDATE_SKIP_REASONS)).toHaveLength(3);
+    expect(observe('the failure codes', AUTOUPDATE_FAILURE_CODES)).toHaveLength(67);
+    return measured(
         'match',
-        "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the scan reads a root one level deep and takes the fixed file name SKILL.md, the byte limit is a million, the reserved names are refused, a subagent definition\u0027s name comes from its frontmatter rather than its file name, a definition without a description is refused, and the name is validated the way the target validates it.",
+        "This implementation parses a plugin manifest and rules an IDE action, and the standalone skill scan and the subagent catalogue now match the target: the scan reads a root one level deep and takes the fixed file name SKILL.md, the byte limit is a million, the reserved names are refused, a subagent definition\u0027s name comes from its frontmatter rather than its file name, a definition without a description is refused, and the name is validated the way the target validates it.” and the **plugin and marketplace protocol** is compared too: the ten marketplace source types and the eleventh the policy lists carry, the two runtime-only ones, the seven plugin source types and the eight canonical kinds, the twenty-nine manifest keys, the forty-two, twenty-two and four frontmatter keys, the ten catalogue-manifest keys, and the autoupdater's four outcomes, four block types, three skip reasons and sixty-seven failure codes and the **plugin and marketplace protocol** is compared too: the ten marketplace source types and the eleventh the policy lists carry, the two runtime-only ones, the seven plugin source types and the eight canonical kinds, the twenty-nine manifest keys, the forty-two, twenty-two and four frontmatter keys, the ten catalogue-manifest keys, and the autoupdater's four outcomes, four block types, three skip reasons and sixty-seven failure codes",
       );
     },
   },
