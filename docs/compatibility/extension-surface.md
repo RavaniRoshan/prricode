@@ -860,6 +860,146 @@ value, and `settle` has **six** values, not five.
 | `recorded, not reproduced` | the surface is **named** and nothing here runs it | the team-file write and its lock and retry; the member operations; the teardown; the peer transport |
 | `not reproduced` | the target's own rule is recorded, and this implementation has **no counterpart** for it | the `--agent-id` / `--agent-name` / `--team-name` CLI trio — this implementation has no CLI team flags; the `isolatePeerMachines` gate — this implementation has no cross-machine peer |
 
+## The MCP channels surface (CC-035)
+
+**The target has MCP channels, and this implementation has no channel
+transport.** A server declares a `claude/channel` capability and pushes
+**inbound** messages; the target's gate decides what happens to one. There is
+no server that pushes here, no admission pipeline in a live session and no
+channel registry, so the surface is **recorded and shaped, never faked**: the
+capability's form, the message form, the admission decisions, the
+`--channels` grammar, the allowlist and the permission relay's rules are
+implemented, and every operation that would need a live channel-capable server
+**refuses** with a typed failure that names the capability it needed.
+
+The reading is
+`/home/shiva/opt/reference-agent-rea/analysis/findings-mcp-channels.md`; every
+claim there carries the target's own file and byte offset. The target's whole
+surface is **one module** (`chunk-sgtr8b3g.js` in the pinned build), and the
+semantic names come from the barrel that re-exports it
+(`chunk-5fg1q3cj.js`).
+
+### The count is the record's, corrected
+
+**The baseline record listed seven admission-decision kinds, and the
+milestone brief said six. The target's gate holds eight.** The record omitted
+`capability` — the **first** check the gate makes.
+
+The eight kinds were read by extracting the gate's body and enumerating every
+`kind:"…"` literal in it, then pairing each with the `reason:` literal in the
+same `return`. The gate has no other `kind:` literal, and the target's own
+`isChannelGateHardRevocation` predicate names four of the eight explicitly —
+a second, independent confirmation that there are more than six.
+
+### The capability and the methods
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the message capability | `function _ot(e){return!!e?.experimental?.["claude/channel"]}` | `chunk-mdxktt4k.js:11` | the same name, and the same **truthiness** read |
+| the permission capability | `ikt(r.capabilities,"claude/channel") && ikt(r.capabilities,"claude/channel/permission")` | `chunk-hct0ak23.js:6029` | the same two names, and the same **both-or-neither** rule |
+| the message method | `notifications/claude/channel` | `chunk-sgtr8b3g.js:1159` | the same |
+| the permission request method | `notifications/claude/channel/permission_request` | `chunk-sgtr8b3g.js:1400` | the same |
+| the permission answer method | `notifications/claude/channel/permission` | `chunk-sgtr8b3g.js:1268` | the same |
+| the message params | `{content: string, meta?: Record<string, string>}` | `chunk-sgtr8b3g.js:1159` | the same, and the same refusal for a non-string member |
+| the answer params | `{request_id: string, behavior: "allow" \| "deny"}` | `chunk-sgtr8b3g.js:1314` | the same |
+| the request the client sends | `{request_id, tool_name, description, input_preview}` | `chunk-7h94ekrj.js:44183` | the same four members; the two bounded ones are **recorded**, not reproduced |
+| the answer's two outcomes | `allow` accepts the call; `deny` rejects it with `Denied via channel <server>` | `chunk-7h94ekrj.js:44183` | the same two outcomes |
+
+### The admission decisions
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the kinds | **eight** — `capability`, `era`, `provider`, `disabled`, `policy`, `session`, `marketplace`, `allowlist` | `chunk-sgtr8b3g.js:2606`–`:4162` | the same eight, in the same order |
+| the order | capability → era → provider → disabled → policy → session → marketplace → allowlist | `chunk-sgtr8b3g.js:2552` | the same, and the order is load-bearing: the **first** failing check is the one reported |
+| the hard revocations | `provider`, `disabled`, `capability`, `era` | `chunk-sgtr8b3g.js:1986` | the same four |
+| the soft kinds | `policy`, `session`, `marketplace`, `allowlist` | `chunk-sgtr8b3g.js:2552` | the same four; a soft skip **preserves** a handler that was already registered, and a hard one **removes** it |
+| the capability reason | `server did not declare claude/channel capability` | `chunk-sgtr8b3g.js:2624` | the same text |
+| the era reason | `connection negotiated a modern protocol revision with no unsolicited notification path` | `chunk-sgtr8b3g.js:2731` | the same text |
+| the provider reason | `channels are not available on third-party providers` | `chunk-sgtr8b3g.js:2888` | the same text |
+| the disabled reason | `channels feature is not currently available` | `chunk-sgtr8b3g.js:2996` | the same text |
+| the policy reason | `channels not enabled by org policy (set channelsEnabled: true in managed settings)` | `chunk-sgtr8b3g.js:3122` | the same text |
+| the session reason | `server <name> not in --channels list for this session` | `chunk-sgtr8b3g.js:3275` | the same text |
+| the marketplace reason | `you asked for plugin:<name>@<marketplace> but the installed plugin is <…>` | `chunk-sgtr8b3g.js:3458` | the same text |
+| the allowlist reasons | `… is not on your org's approved channels list (set allowedChannelPlugins in managed settings)` and `… is not on the approved channels allowlist (use --dangerously-load-development-channels for local dev)` | `chunk-sgtr8b3g.js:3867`, `:4179` | the same two texts, and the same split between the org list and the ledger list |
+
+### The session list
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the entries | `{kind:"server", name}` and `{kind:"plugin", name, marketplace, dev?}` | `chunk-081t8575.js:129110` | the same two shapes |
+| the value grammar | `plugin:<name>@<marketplace>` and `server:<name>` — a value **must** be tagged | `chunk-081t8575.js:129110` | the same, and the same refusal |
+| the fatal message | `<flag> entries must be tagged: <values>` followed by the two grammar lines | `chunk-081t8575.js:129110` | the same text, and the message names the flag |
+| the flags | `--channels` and `--dangerously-load-development-channels`, both **value-taking** and **repeatable** | `chunk-0y0ptpy9.js:1106`, `:2667` | the flags stay the CLI's, and the CLI's own refusal stands (see the boundary below) |
+| the plugin-provided server's name | `plugin:<pluginName>:<serverKey>` | `chunk-4jsg44k7.js:2736862` | the same, and a plugin entry matches the **plugin name** — the server key is not part of the match |
+| the bare server entry | a bare server entry needs the development flag to be exempt from the allowlist | `chunk-sgtr8b3g.js:4162` | the same |
+
+### The message form
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the envelope | `<channel source="<server>" <meta…>>` … `</channel>` | `chunk-sgtr8b3g.js:1483`, `chunk-kmrt4q1v.js:9623` | the same tag, the same attribute order, and the same parser-free shape |
+| the meta-key rule | `/^[a-zA-Z_][a-zA-Z0-9_]*$/` | `chunk-sgtr8b3g.js:1454` | the same rule, and the same **drop** (not an error) |
+| the drop warning | `[channel] <server>: dropped <n> meta key(s) that don't match <rule>: <keys>` | `chunk-sgtr8b3g.js:1483` | the same text, with the count and the names |
+| the attribute escaping | `"` → `&quot;` and `'` → `&apos;`, and nothing else | `chunk-estvrnfh.js:24402` | the same |
+| the body | the body cannot open a nested `<channel>` envelope | `chunk-sgtr8b3g.js:1483` | the same effect; the target neutralises **every** recognised tag, and this implementation neutralises the `channel` tag only — a named implementation choice |
+| the delivery | the message becomes a **queued prompt** (`priority: "next"`, `isMeta: true`, `origin: {kind:"channel", server}`, `skipSlashCommands` and `skipAttachments` both true) | `chunk-6bp7hdav.js:1604464` | **recorded, not reproduced** — there is no queue here |
+
+### The allowlist and the policy
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the effective list | the org's list wins when it is **set** — **even when it is empty**, which allows nothing; otherwise the ledger list | `chunk-sgtr8b3g.js:1896` | the same, including the empty-org-list rule |
+| the ledger | the growth-book value `tengu_harbor_ledger`, parsed as `{marketplace, plugin}`; a parse failure yields an empty list | `chunk-1gmref8w.js:847` | **recorded, not reproduced** — the ledger is server-side |
+| the setting | `channelsEnabled` — a boolean, and the only value an organisation may set in managed settings is `false` | `chunk-c9s0jh80.js:311876`, `:185839` | the same key, and the same shape |
+| the second setting | `allowedChannelPlugins` — `{marketplace, plugin}` or the string `"<plugin>@<marketplace>"` | `chunk-c9s0jh80.js:312196`, `:241208` | the same key and the same two forms |
+| the policy block | a first-party `team` or `enterprise` session needs `channelsEnabled: true`; any other session needs it too; absent managed settings do **not** block | `chunk-sgtr8b3g.js:2069` | the same rule |
+| the feature switch | the growth-book flag `tengu_harbor` and the entitlement `allow_channels` | `chunk-1gmref8w.js:942`, `:1006` | **recorded, not reproduced** — both are server-side |
+
+### The permission relay
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the request id | five characters of `abcdefghijkmnopqrstuvwxyz` — twenty-five letters, no `l` — derived deterministically from `${toolUseId}:${agentId}` by an FNV-1a hash, retried with `:0`…`:9` until the result holds none of the blocked substrings | `chunk-hct0ak23.js:1335`, `:957` | the same alphabet, the same derivation, and the same blocked list |
+| the id's case | the id is matched **case-insensitively**, when it is registered and when it is resolved | `chunk-hct0ak23.js:6227` | the same |
+| an unknown answer | dropped — `no pending entry — stale or unknown ID` | `chunk-6bp7hdav.js:1604991` | the same: the resolve reports `false` |
+| a drawn-twice id | dropped with `Channel permission relay: a request ID was drawn twice in one session; channel replies with that ID are ignored — answer in the terminal` | `chunk-hct0ak23.js:6227` | the same, and the same warning |
+| the eligible servers | connected, in the `--channels` list, declaring **both** capabilities, registered by the permission prompt, and **not** a modern-era connection | `chunk-hct0ak23.js:6029` | the same five conditions |
+| the outcome | `allow` accepts the call; `deny` rejects it and reports `Denied via channel <server>` | `chunk-7h94ekrj.js:44183` | the same two outcomes |
+
+### The plugin manifest
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the key | `channels` — an array of `{server, displayName?, userConfig?}`, and the object is **strict** | `chunk-c9s0jh80.js:95232` | the same key and the same shape |
+| the server member | a non-empty string naming a key of the plugin's own `mcpServers` | `chunk-c9s0jh80.js:95232` | the same |
+| the scaffold | the target writes a plugin scaffold whose server declares `experimental: { 'claude/channel': {} }` and whose `instructions` say that a reply must go through the plugin's own reply tool | `chunk-d5fv7pr3.js:31780` | **recorded, not reproduced** — the scaffold is a writer, and this implementation writes no plugin |
+
+### The honest boundary
+
+| the call | the refusal | the capability it names |
+|---|---|---|
+| registering a server's channel notifications | `Registering MCP channel notifications needs a channel-capable MCP server connection, which this session does not have, so the channel was not registered.` | a channel-capable MCP server connection |
+| asking a channel to answer a permission request | `Requesting a permission over an MCP channel needs a channel-capable MCP server connection, which this session does not have, so the request was not sent.` | a channel-capable MCP server connection |
+
+**The CLI's own refusal stands.** `--channels` and
+`--dangerously-load-development-channels` are already refused by the run with
+the message *"it names the channels of the session, and this implementation has
+none"*. That refusal is still true: this milestone adds the **shapes**, and a
+shape is not a transport. The milestone's file list does not include the CLI,
+and the flag's behaviour there is `CC-031`'s.
+
+**Nothing is faked.** There is no stub that pretends a server pushed a
+message, no fake queue and no invented transport.
+
+### The clone-choice labels this milestone adds
+
+| Label | What it means | Which entries |
+|---|---|---|
+| `reproduced` | the name, the value, the shape, the message, the rule and the order are the target's own, and the product's name is the only substitution | the two capability names; the three method names; the eight decision kinds and their eight reasons; the four hard revocations; the message params and the answer params; the meta-key rule and the drop warning; the envelope's tag and attribute order; the attribute escaping; the session list's two entry shapes; the value grammar and the fatal message; the allowlist's two sources and the empty-org-list rule; the policy block's rule; the request id's alphabet and derivation; the relay's case-insensitive matching and its two drops |
+| `refused` | the call ends in a typed failure that names the **capability** it needs and this session does not have | registering a server's channel notifications; asking a channel to answer a permission request |
+| `recorded, not reproduced` | the surface is **named** and nothing here runs it | the queued-prompt delivery; the permission request's bounded `description` and `input_preview`; the growth-book ledger; the `tengu_harbor` feature switch and the `allow_channels` entitlement; the plugin scaffold the target writes; the `channel_enable` request |
+| `not reproduced` | the target's own rule is recorded, and this implementation has **no counterpart** for it | the CLI's two flags — they stay `CC-031`'s refusal; the `tengu_quiet_elephant` session's random request ids — the derivation is implemented, the *draw* is the target's |
+
 ## Conformance table
 
 | Claim | Evidence class | Matrix row | Pinned by |
@@ -1057,3 +1197,40 @@ re-measures. The measured outcome is in [`results.md`](results.md).
 | The team file's **write**, its lock, its retry, the member operations and the teardown are **recorded, not reproduced** | **REA observed** (the rules) + **not reproduced** (this implementation writes no team file) | F-33 | — |
 
 
+
+## The MCP channels — conformance
+
+The channels surface was **absent from the coverage audit entirely**. It was
+closed by **reading the target's own source**, so the surface's facts are
+**REA observed**; the rows below name the part of each rule that is the
+target's and the part that is this implementation's.
+
+**The matrix row is not assigned yet.** The feature matrix and the compatibility
+report are the orchestrator's, and the surface is **not** a row of
+`feature-matrix.md` at the time of writing. The rows below therefore name
+**F-30** — the row that carries the target's **MCP transport** — and the
+orchestrator may re-file the surface under a row of its own when it
+re-measures. The measured outcome is in [`results.md`](results.md).
+
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The two capability names are `claude/channel` and `claude/channel/permission`, and the second is **separate** — a server that declares only the first is not eligible for the permission relay | **REA observed** | F-30 | `tests/contracts/mcp-channels.test.ts` — "names the two capabilities the target declares", "reads a server that declares no channel capability as declaring none" |
+| The three method names are the target's own | **REA observed** | F-30 | same file — "names the three methods the target uses" |
+| The admission decisions are **eight** kinds, in the target's order, and the milestone brief's six and the baseline record's seven were both wrong | **REA observed** | F-30 | same file — "holds exactly eight kinds, in the target's order" |
+| The four hard revocations are `provider`, `disabled`, `capability` and `era`, and the other four are soft | **REA observed** | F-30 | same file — "holds exactly four hard revocations", "tells the hard revocations from the soft ones" |
+| The gate runs the checks in the target's order, and the **first** failing check is the one reported | **REA observed** | F-30 | same file — "checks the capability before anything else" |
+| Each of the eight reasons is the target's own text | **REA observed** | F-30 | same file — the eight per-kind tests |
+| The policy block's rule is the target's own — a first-party `team` or `enterprise` session needs `channelsEnabled: true`, any other session needs it too, and absent managed settings do not block | **REA observed** | F-30 | same file — the four policy-block tests |
+| The `--channels` values must be tagged, and an untagged value is fatal with the target's own message, which names the flag | **REA observed** | F-30 | same file — the four grammar tests |
+| The message form is the target's own, and a member of the wrong type is refused | **REA observed** | F-30 | same file — "reads a message that carries content", "refuses a message with no content", "refuses a meta member that is not a string" |
+| The answer form is the target's own, and a behaviour that is not `allow` or `deny` is refused | **REA observed** | F-30 | same file — "reads a permission answer", "refuses a permission answer that is not one of the two behaviours" |
+| The meta-key rule is the target's own, and a key that does not match is **dropped** rather than refused | **REA observed** | F-30 | same file — "splits the meta keys on the identifier rule" |
+| The envelope is the target's own tag with the target's attribute order and the target's escaping | **REA observed** | F-30 | same file — "wraps a message in the channel envelope", "escapes the attribute values" |
+| A body cannot open a nested `<channel>` envelope | **REA observed** (the effect) + **implementation choice** (this implementation neutralises the `channel` tag only; the target neutralises every recognised tag) | F-30 | same file — "escapes a channel opener in the body" |
+| The effective allowlist prefers the org's list when it is **set**, **even when it is empty**, and falls back to the ledger otherwise | **REA observed** | F-30 | same file — the three allowlist tests |
+| The request id is five characters of the target's twenty-five-letter alphabet, derived deterministically from the tool use id and the agent id | **REA observed** | F-30 | same file — the three request-id tests |
+| The relay matches the id case-insensitively, drops an answer for an unknown id, and drops a cancelled one | **REA observed** | F-30 | same file — "resolves an answer against the pending request", "drops an answer for an unknown request id", "drops an answer after the request was cancelled" |
+| Registering a server's channel notifications **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-30 | same file — "refuses to register notifications and names the capability" |
+| Asking a channel to answer a permission request **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-30 | same file — "refuses to request a permission and names the capability" |
+| The queued-prompt delivery, the permission request's bounded members, the growth-book ledger, the feature switch and the plugin scaffold are **recorded, not reproduced** | **REA observed** (the rules) + **not reproduced** (nothing here runs them) | F-30 | — |
+| The two CLI flags stay `CC-031`'s refusal | **not reproduced** (this implementation has no channel session) | F-30 | — |
