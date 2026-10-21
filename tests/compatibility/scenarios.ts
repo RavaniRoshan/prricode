@@ -205,6 +205,14 @@ import {
 } from '../../src/extensions/hooks/registry.js';
 import { effectiveHandlerType } from '../../src/extensions/hooks/schema.js';
 import {
+  DEPENDENCY_INSTALL_DOMAINS,
+  EGRESS_ENTRY_GRAMMAR,
+  EGRESS_HOSTS,
+  EGRESS_NOT_PROBED,
+  EGRESS_SERVICE_KEYS,
+  EGRESS_SERVICES,
+} from '../../src/provider/routes.js';
+import {
   AUTH_CREDENTIALS,
   AUTH_FLOW_KINDS,
   AUTH_FLOWS,
@@ -516,6 +524,12 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   buildResultDocument,
   ZERO_USAGE,
   effectiveHandlerType,
+  DEPENDENCY_INSTALL_DOMAINS,
+  EGRESS_ENTRY_GRAMMAR,
+  EGRESS_HOSTS,
+  EGRESS_NOT_PROBED,
+  EGRESS_SERVICE_KEYS,
+  EGRESS_SERVICES,
   AUTH_CREDENTIALS,
   AUTH_FLOW_KINDS,
   AUTH_FLOWS,
@@ -1720,7 +1734,15 @@ export const SCENARIOS: readonly Scenario[] = [
         const adapter = observe('the route adapter', driverFor(route));
         expect(adapter).toMatchObject({ route });
       }
-      return measured('match', "The eight route names and their adapters are reproduced exactly.");
+      // The **endpoint catalogue**: the services, the host constants, the
+    // grammar and the not-probed reasons.
+    expect(observe('the egress services', EGRESS_SERVICES)).toHaveLength(11);
+    expect(observe('the egress service keys', EGRESS_SERVICE_KEYS)).toHaveLength(11);
+    expect(Object.keys(observe('the egress hosts', EGRESS_HOSTS))).toHaveLength(24);
+    expect(observe('the dependency-install domains', DEPENDENCY_INSTALL_DOMAINS).length).toBeGreaterThan(0);
+    expect(observe('the egress grammar', EGRESS_ENTRY_GRAMMAR)).toBeDefined();
+    expect(Object.keys(observe('the not-probed reasons', EGRESS_NOT_PROBED))).toHaveLength(4);
+    return measured('match', "The eight route names and their adapters are reproduced exactly.");
     },
   },
   {
