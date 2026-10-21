@@ -1,0 +1,202 @@
+# The handoff
+
+**Everything you need to continue the reverse engineering, in one place.** This file is
+written for whoever picks the work up next — a session that has just started, or one
+that has been running for hours. It states the goal, the bar the goal has to clear, the
+state of the work, and the discipline the host requires.
+
+---
+
+## 1. The goal, and the bar it has to clear
+
+> **The reverse engineering of the target is complete** when every surface the target has
+> is **enumerated**, every entry is **classified** — observed with a file and an offset,
+> or named as a gap with a reason — and nothing the target has is **unaccounted for**.
+
+That is a claim that can be checked, and it is checked. `scripts/verify-rea.ts`
+re-derives the target's own inventories from its source and **fails** when the target has
+an entry the record does not name:
+
+```bash
+bun run scripts/verify-rea.ts            # the check
+bun run scripts/verify-rea.ts --derive   # print the inventories
+bun run scripts/verify-rea.ts --write    # regenerate the record from the derivation
+```
+
+It covers **twelve** surfaces, and it runs in **seconds** at **fifty megabytes**:
+
+| surface | entries |
+|---|---|
+| the tool registry | 85 |
+| the browser tool bundle | 22 |
+| the telemetry vocabulary | 3 554 |
+| the environment-variable surface | 1 274 |
+| the settings document | 183 |
+| the hook event matrix | 33 |
+| the command-line flags — seven sets | 85 / 45 / 14 / 11 / 10 / 6 / 3 |
+
+**The record is generated from the derivation** (`--write`), so it cannot drift from the
+target. The matrix's own totals are derived the same way (`--write-matrix`), and a test
+fails when the matrix and the report disagree.
+
+**A verifier that cannot run is not a check.** That is why the tree-wide scans are handed
+to `grep` (a few megabytes, in C) and this process holds only the four chunks a
+per-chunk derivation reads. Do not move that work back into this process.
+
+---
+
+## 2. Where the work stands
+
+**41 of 56 milestones closed.** The compatibility report reads:
+
+| outcome | rows |
+|---|---|
+| `match` | **34** |
+| `partial` | 0 |
+| `mismatch` | 4 |
+| `not-tested` | 3 |
+| `unknown` | 1 |
+
+**2 179 tests green**, `npx tsc --noEmit` clean.
+
+The **one** remaining `unknown` is `F-36`, the whole-image native inventory: three
+attempts timed out (330 s, 360 s, 900 s) and the audit says it is **not closable by
+effort**. Name it and move on.
+
+The four `mismatch` rows are `F-02` (four named differences in what a headless run
+writes), `F-32` (the target's site-configuration bundle, which this implementation does
+not ship), `F-34` and `F-35` (the **mechanism**: the target's sandbox helper and
+supervisor are native ELF programs, and this implementation's are in-process — the
+behaviour is the target's, the mechanism is not).
+
+The three `not-tested` rows are the **project's own extensions** — the multi-provider
+manager, the credential-as-reference model, the manager's surfaces — for which the target
+has no counterpart at all.
+
+### The milestones still open
+
+`CC-020` (the divergence layer — **awaits the owner's specification** and stays last),
+`CC-026` (nearly done), `CC-028` (the remaining small surfaces), and `CC-032`–`CC-042`
+(the untouched surfaces: the browser — **done**, `CC-033` the self-hosted runner, `CC-034`
+the agent teams, `CC-035` the MCP channels, `CC-036` the IDE integration, `CC-037` the
+auth flows, `CC-038` the endpoint catalogue, `CC-039` the native addons, `CC-040` the
+marketplace protocol, `CC-041` the remaining surfaces, `CC-042` the reference
+catalogues).
+
+---
+
+## 3. The two rules that bind every change
+
+### The naming rule
+
+**The target's product name appears nowhere in this repository** — not in a string, not
+in a comment, not in a document. `tests/contracts/naming.test.ts` enforces it over every
+text file under `src/`, `tests/`, `docs/` and `scripts/`.
+
+**The target's *data* keeps its names**, because this implementation has to speak to it:
+the model ids (`claude-haiku-5-5`, `anthropic.claude-*`), the API hosts
+(`claude.ai/api`, `claude.googleapis.com`), the environment variables
+(`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CONFIG_DIR`), the configuration root (`~/.claude`),
+the memory file (`CLAUDE.md`), the MCP proxy header (`x-claude-ai-proxy`), the settings
+**key names** (a settings file is an interface — a clone that renamed a key would reject a
+file the target accepts), and the **tool names** (the model calls them by name).
+
+> **A name is forbidden. A datum is not.**
+
+What PRRICODE says **about itself** is PRRICODE's own: the approval dialog's third
+option, the assistant's screen-reader gutter, the theme's role names, the prose in the
+settings document.
+
+### The honest-report rule
+
+A difference of any kind from an **observed** target behaviour is a `mismatch` — never a
+`partial`. A `match` requires that nothing in the row's contract is left uncompared. A
+project requirement with no target counterpart is `not-tested`, not a `match`. The report
+is generated by `scripts/regenerate-report.ts` from the harness, and a test fails when
+the two disagree.
+
+**This rule has already caught two of my own mistakes**, and both are worth knowing:
+
+- `F-38` was a `mismatch` on the strength of the **audit's** wrong sentence, not of the
+  implementation. The target's boolean flags consume **nothing**; the audit had
+  described the *optional-value* set while calling it the boolean set. The audit was
+  corrected against the target's own parser.
+- `F-32`'s prose claimed the per-model severity thresholds were "implemented here".
+  They are not: the target ships them in a **site-configuration bundle** this
+  implementation does not have at all. The row now says what is true.
+
+**Read the source before you trust the record.** The sweep's record has been wrong more
+than once: the browser tool is `javascript_tool` and not `javascript_exec` (the latter is
+the value of its own `action` argument), and the record's placement implied the opposite
+of the truth about the browser tools and the blanket-allow list.
+
+---
+
+## 4. The discipline the host requires
+
+**This host is a WSL guest with about 7.5 GiB, and it has been restarting on its own
+every few minutes.** A run that takes the memory down takes the *session* down with it,
+and work that is not committed is work that is lost. So:
+
+1. **Measure before you run.** `/usr/bin/time -f "PEAK %M KB in %e s" <command>`. A
+   command that is going to cost a gigabyte should be found before it is run for real.
+2. **Do not run two heavy things at once.** One implementer here at a time, plus at most
+   one other agent on the machine.
+3. **Do not put a large tree in this process.** `grep` does the scanning; this process
+   holds the answers.
+4. **Bound every loop.** A chunk of minified bundles is one enormous line, and an
+   unbounded scan over it is how the last two gigabytes were spent.
+5. **Commit early and often.** Every milestone ends with a commit, and the push follows.
+
+---
+
+## 5. How a milestone is worked
+
+1. **Read** the target's source, and record it — every claim with a file and a byte
+   offset. The findings live outside the repository, in
+   `/home/shiva/opt/reference-agent-rea/analysis/findings-*.md`.
+2. **Write the failing test**, confirm it fails, then implement, then confirm it passes.
+3. **Update the conformance document** for the surface.
+4. **Commit** — with the paths named explicitly. Never `git add -A`, never a broad
+   `git add src/ tests/`, never a bare `git commit`. **Three sessions have been bitten by
+   this**, and two of them were mine: a broad `git add` once swept an in-flight
+   implementer's file into my commit.
+5. **Tick the milestone** in the plan and the ledger.
+
+The plan is `docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`
+— 56 milestones, each with its steps, its files and its notes. The ledger is
+`docs/PROGRESS.md`. The behavioural authority is
+`docs/reverse-engineering/COVERAGE-AUDIT.md`, whose §8 lists **the surfaces this audit
+did not cover** — that list is the work list.
+
+**Read the target's source with the windowed reader**, which streams:
+
+```bash
+python3 /home/shiva/opt/reference-agent-rea/analysis/peek.py \
+  ../extracted-patched/chunk-<id>.js --context <offset> <width>
+```
+
+`grep` with `-r .` works over the tree; `--include` **does not work in this
+environment**.
+
+**Read with a parser, not a pattern.** Two implementers found that a pattern-based
+reading of a minified registry disagreed with a parser-based reading — one said 92 slash
+commands where the truth was 100. Where a value is a minified identifier, resolve it
+**through the import graph, in the chunk that uses it**: an identifier is only unique
+inside its own module, and an **imported** binding is an alias, so the import is
+followed first.
+
+---
+
+## 6. What is waiting for the owner
+
+**The sandbox defaults.** The target's sandbox is **off** when `sandbox.enabled` is
+absent, a missing backend runs the shell **unconfined**, and the unsandboxed-escape flag
+is **live**. This implementation's defaults are stricter on all three. Matching the target
+exactly is a one-line change that makes the product *less* safe by default, so it belongs
+in the divergence layer and it is **recorded** in
+`docs/compatibility/sandbox-surface.md` rather than hidden.
+
+**`CC-020`, the divergence layer**, waits for the owner's specification and stays last.
+The first layer — the true clone, visuals included — is what the rest of this file is
+about.
