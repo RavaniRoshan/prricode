@@ -50,7 +50,7 @@
 | F-24 | Sessions | Session storage layout and transcript format | observed | REA observed | `~/.claude` 55-subdirectory listing; JSONL transcripts under a `projects` subtree; `transcriptSource` of `ccr-api` / `local-jsonl` |  implemented | CC-009 | `tests/contracts/session-store.test.ts` |
 | F-25 | Sessions | Resume semantics | observed | REA observed | the **selection** is established — a session id or an exact title, the ambiguity error listing the candidates with their modification times, the attach short-circuit, `--resume-session-at` with its drop guard, and the structured resumed state; the **store-level ordering rule** inside the lookup is observed too — the candidates it skips and the modification-time-then-creation-time order — and one difference remains: a live background candidate is reported where the target drops it |  implemented | CC-009 | `tests/contracts/session-resume.test.ts` |
 | F-26 | Sessions | Cross-restart prompt carry-over | observed | REA observed | outcomes `sent`, `bound`, `altered`, `no_row`, `job_has_run`, `too_old`, `future_dated` |  implemented | CC-009 | `tests/contracts/session-store.test.ts` |
-| F-27 | Sessions | Compaction |  unknown | — |  the target's own compaction behaviour was **never established**: the audit records the compaction trigger conditions as unknown and the compaction/fallback ordering as not resolved, so there is nothing observed to compare this against |  implemented | CC-009 | `tests/contracts/session-resume.test.ts` |
+| F-27 | Sessions | Compaction | observed | REA observed | the target's compaction behaviour is established by source reading and reproduced: the **trigger** (the context window less the output reserve less the margin, with the four levels the target's own decision has, and the percentage override lowering the threshold and never raising it); the **boundary** (a marker record that hangs off the last dropped record, located by the link and never by a count, with the summary the model's own, unchanged, and never produced locally); the **summary's shape** (the target's preamble, the summary normalised out of its `<analysis>`/`<summary>` tags, and the resume guidance); the **projection** (the summary, then the replacement, then the kept tail, then the attachments, then the hook results); and the **fallback ordering** (the target's own ladder, from the cached prefix to giving up) |  implemented | CC-023 | `tests/contracts/compaction.test.ts` |
 | F-28 | Extensions | MCP control-request surface | observed | REA observed | 23 handled subtypes in `chunk-0j25qbd0.js`; MCP callback absence error text |  implemented | CC-011 | `tests/contracts/mcp-control.test.ts` |
 | F-29 | Extensions | Directional control-request policy | observed | REA observed | rejection table in `chunk-081t8575.js` |  implemented | CC-011 | `tests/contracts/mcp-control.test.ts` |
 | F-30 | Extensions | MCP transport and batching | observed | REA observed | stdio spawn with `shell: false`; `MCP_SERVER_CONNECTION_BATCH_SIZE` 3, `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` 20; `initialize`/`tools/list`/`tools/call` |  implemented | CC-011 | `tests/contracts/mcp-manager.test.ts` |
@@ -69,8 +69,8 @@
 
 | Status | Count |
 |---|---|
-| observed | 37 |
-| unknown | 2 |
+| observed | 38 |
+| unknown | 1 |
 | project requirement | 1 |
 
 `F-27` is counted as **unknown** rather than observed: the target's own compaction behaviour was never established, so there is nothing observed for this implementation to be compared against.

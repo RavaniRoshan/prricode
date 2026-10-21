@@ -74,6 +74,20 @@ import {
   type ParsedRunArgs,
 } from '../../src/cli/args.js';
 import { ZERO_USAGE, buildResultDocument } from '../../src/cli/headless.js';
+import {
+  AUTO_COMPACT_OUTPUT_RESERVE,
+  AUTO_COMPACT_THRESHOLD_MARGIN,
+  COMPACT_FALLBACK_ORDER,
+  COMPACT_ROUTER_ORDER,
+  COMPACT_SUMMARY_PREAMBLE,
+  autoCompactDecision,
+  autoCompactThreshold,
+  compact as compactEvents,
+  compactSummaryContent,
+  compactSummaryPrompt,
+  normaliseCompactSummary,
+  projectCompactedContext,
+} from '../../src/session/compaction.js';
 import { providerCommand } from '../../src/cli/commands/provider.js';
 import { catalogCommand } from '../../src/cli/commands/catalog.js';
 import { groupToolCalls, toolCallsFrom, scheduleToolCalls, scheduleToolCallsWithRegistry} from '../../src/agent/dispatch.js';
@@ -427,6 +441,18 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   signingScope,
   buildResultDocument,
   ZERO_USAGE,
+  AUTO_COMPACT_OUTPUT_RESERVE,
+  AUTO_COMPACT_THRESHOLD_MARGIN,
+  COMPACT_FALLBACK_ORDER,
+  COMPACT_ROUTER_ORDER,
+  COMPACT_SUMMARY_PREAMBLE,
+  autoCompactDecision,
+  autoCompactThreshold,
+  compactEvents,
+  compactSummaryContent,
+  compactSummaryPrompt,
+  normaliseCompactSummary,
+  projectCompactedContext,
   // The configuration.
   SETTINGS_SOURCES,
   TOP_LEVEL_KEY_ORDER,
@@ -3086,8 +3112,8 @@ export const SCENARIOS: readonly Scenario[] = [
     title: 'F-27 compaction',
     command: reproduce('F-27 compaction'),
     pinning: {
-      file: 'tests/contracts/session-resume.test.ts',
-      title: 'skips the pre-compact prefix when reading and does not delete it from the file',
+      file: 'tests/contracts/compaction.test.ts',
+      title: 'marks the boundary with a record that hangs off the last dropped record',
     },
     probe: async () => {
       // The compaction is a **boundary marker**, not a deletion, and the summary
@@ -3097,22 +3123,115 @@ export const SCENARIOS: readonly Scenario[] = [
         { v: SESSION_SCHEMA_VERSION, t: 'assistant_message', ts: 2, id: 'm2', text: 'two' },
         { v: SESSION_SCHEMA_VERSION, t: 'user_message', ts: 3, id: 'm3', text: 'three' },
       ];
+      // The **trigger**: the threshold is the context window less the output
+      // reserve less the margin, and the decision has four levels.
+      const window = { contextWindow: 200_000, maxOutputTokens: 8_192 };
+      const threshold = observe('the compaction threshold', autoCompactThreshold(window));
+      expect(threshold).toBe(200_000 - 8_192 - AUTO_COMPACT_THRESHOLD_MARGIN);
+      expect(
+        observe(
+          'the threshold with a larger output budget',
+          autoCompactThreshold({ contextWindow: 200_000, maxOutputTokens: 64_000 }),
+        ),
+      ).toBe(200_000 - AUTO_COMPACT_OUTPUT_RESERVE - AUTO_COMPACT_THRESHOLD_MARGIN);
+      expect(observe('the level below the threshold', autoCompactDecision(threshold - 20_001, window).level)).toBe(
+        'ok',
+      );
+      expect(observe('the level at the threshold', autoCompactDecision(threshold, window).level)).toBe(
+        'compact',
+      );
+      // The percentage override lowers the threshold and never raises it.
+      expect(
+        observe('the overridden threshold', autoCompactThreshold({ ...window, percentOverride: 50 })),
+      ).toBe(Math.min(Math.floor((200_000 - 8_192) * 0.5), 200_000 - 8_192 - AUTO_COMPACT_THRESHOLD_MARGIN));
+      expect(
+        observe('the raised override', autoCompactThreshold({ ...window, percentOverride: 100 })),
+      ).toBe(threshold);
+      // And auto-compaction that is switched off never compacts.
+      expect(
+        observe(
+          'the level with auto-compaction off',
+          autoCompactDecision(threshold + 1_000, { ...window, enabled: false }).level,
+        ),
+      ).not.toBe('compact');
+
+      // The **boundary** is located by the link the marker carries, and the
+      // summary is the model's own, unchanged.
       const compacted = await observeCall(
         'the compacted events',
-        compact,
-        [events, { keepLast: 1, summary: 'the summary' }],
+        compactEvents,
+        [events, { keepLast: 1, summary: 'the summary', ts: 5_000, id: 'cmp_1' }],
       );
-      expect(compacted).toMatchObject({ summary: 'the summary' });
       expect(compacted.events[0]?.t).toBe('compaction');
       expect(compacted.events).toHaveLength(2);
+      expect((compacted.events[0] as { parentId?: string }).parentId).toBe('m2');
+      expect((compacted.events[0] as { replacedFrom?: number }).replacedFrom).toBe(2);
+      expect(compacted.events[0]?.id).toBe('cmp_1');
+      expect(compacted.summary).toBe('the summary');
+      // A summary is never produced locally, and no boundary is marked when
+      // nothing would be dropped.
       const withoutSummary = observe(
         'the events without a summary',
-        compact(events, { keepLast: 1 }),
+        compactEvents(events, { keepLast: 1 }),
       );
+      expect(withoutSummary.summary).toBeUndefined();
       expect(withoutSummary.events).toEqual(events);
+      expect(
+        observe('the events with nothing dropped', compactEvents(events, { keepLast: 3, summary: 's' }).events),
+      ).toEqual(events);
+
+      // The **summary's shape**: the preamble, the normalised summary, and the
+      // resume guidance.
+      expect(
+        observe('the normalised summary', normaliseCompactSummary('<analysis>x</analysis><summary>the summary</summary>')),
+      ).toBe('Summary:\nthe summary');
+      const content = observe('the summary content', compactSummaryContent('<summary>the summary</summary>'));
+      expect(content).toContain(COMPACT_SUMMARY_PREAMBLE);
+      expect(content).toContain('the summary');
+      expect(
+        observe('the summary prompt', compactSummaryPrompt()),
+      ).toContain('TEXT ONLY');
+
+      // The **projection**: the summary, then the replacement, then the kept
+      // tail, then the attachments, then the hook results.
+      const projected = observe(
+        'the projected context',
+        projectCompactedContext({
+          summary: [{ role: 'user', content: 'the summary' }],
+          replacement: [{ role: 'user', content: 'the replacement' }],
+          kept: [{ role: 'user', content: 'the tail' }],
+          attachments: [{ role: 'user', content: 'the attachment' }],
+          hookResults: [{ role: 'user', content: 'the hook result' }],
+        }),
+      );
+      expect(projected.map((message) => message.content)).toEqual([
+        'the summary',
+        'the replacement',
+        'the tail',
+        'the attachment',
+        'the hook result',
+      ]);
+
+      // The **fallback ordering** is the target's own ladder.
+      expect(observe('the fallback order', COMPACT_FALLBACK_ORDER)).toEqual([
+        'the_cached_prefix',
+        'a_fresh_request',
+        'the_next_model_in_the_ladder',
+        'the_refusals_fallback_model',
+        'dropping_the_head',
+        'giving_up',
+      ]);
+      expect(observe('the router order', COMPACT_ROUTER_ORDER)).toEqual([
+        'disabled',
+        'below_the_threshold',
+        'the_fixed_prefix_alone_is_over_the_threshold',
+        'the_rapid_refill_breaker',
+        'the_reactive_path',
+        'the_core_path',
+      ]);
       return measured(
-        'unknown',
-        "This implementation implements the boundary marker and the summary model, but the target's own compaction behaviour was never established: the audit records the compaction trigger conditions as unknown and its ordering as not resolved, so there is nothing observed to compare this against.",
+        'match',
+        "The target's compaction behaviour is established and reproduced: the **trigger** is the context window less the output reserve less the margin, with the four levels the target's own decision has, and the percentage override lowers the threshold and never raises it; the **boundary** is a marker record that hangs off the last dropped record, located by the link and never by a count, and the summary is the model's own, unchanged — never produced locally; the **summary's shape** is the target's preamble, the summary normalised out of its analysis and summary tags, and the resume guidance; the **projection** is the summary, then the replacement, then the kept tail, then the attachments, then the hook results; and the **fallback ordering** is the target's own ladder, from the cached prefix to giving up.",
       );
     },
   },
