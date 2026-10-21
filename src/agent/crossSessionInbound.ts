@@ -828,6 +828,56 @@ export function parseCrossSessionEnvelope(text: string): CrossSessionEnvelope | 
 }
 
 /**
+ * The envelope a **teammate** receives a message in.
+ *
+ * The target wraps a message that arrives in a teammate's inbox in a
+ * `<teammate-message>` tag, and the tag carries the sender's id, its colour
+ * and the summary the recipient's human sees first.
+ */
+export interface TeammateMessageEnvelope {
+  /** The sender's id. */
+  teammateId: string;
+  /** The sender's colour. */
+  color?: string;
+  /** The one-line summary the recipient's human sees first. */
+  summary?: string;
+  /** Whether the message's provenance could not be verified. */
+  unverified?: boolean;
+  /** The message itself. */
+  body: string;
+}
+
+/**
+ * Format a teammate-message envelope.
+ *
+ * The attribute order is the target's own: `teammate_id`, `color`, `summary`,
+ * `verified`.
+ */
+export function formatTeammateMessageEnvelope(envelope: TeammateMessageEnvelope): string {
+  const attributes: string[] = [`teammate_id="${escapeAttributeValue(envelope.teammateId)}"`];
+  if (envelope.color !== undefined && envelope.color !== '') {
+    attributes.push(`color="${escapeAttributeValue(envelope.color)}"`);
+  }
+  if (envelope.summary !== undefined && envelope.summary !== '') {
+    attributes.push(`summary="${escapeAttributeValue(envelope.summary)}"`);
+  }
+  if (envelope.unverified === true) attributes.push('verified="false"');
+  return `<${TEAMMATE_MESSAGE_TAG} ${attributes.join(' ')}>\n${envelope.body}\n</${TEAMMATE_MESSAGE_TAG}>`;
+}
+
+/**
+ * Escape the characters an attribute value may not carry.
+ */
+function escapeAttributeValue(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+/**
  * Whether a value is one of the two permission-mode classes.
  */
 export function isPermissionModeClass(value: unknown): value is CrossSessionPermissionClass {

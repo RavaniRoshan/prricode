@@ -62,6 +62,7 @@ import {
   CROSS_SESSION_HOLD_CAPACITY,
   CrossSessionInbound,
   formatCrossSessionEnvelope,
+  formatTeammateMessageEnvelope,
   parseCrossSessionEnvelope,
   permissionModeClass,
   resolveCrossSessionInbound,
@@ -568,6 +569,23 @@ describe('the cross-session inbound gate', () => {
   it('reads nothing out of a text that is not an envelope', () => {
     expect(parseCrossSessionEnvelope('just some text')).toBeUndefined();
   });
+
+  it('carries the teammate-message form the target uses for an inbox entry', () => {
+    // chunk-2pn9kb04.js:31586 — the delivered envelope.
+    const text = formatTeammateMessageEnvelope({
+      teammateId: 'researcher@default',
+      color: 'blue',
+      summary: 'the report is ready',
+      unverified: true,
+      body: 'the report',
+    });
+    expect(text).toContain('<teammate-message');
+    expect(text).toContain('teammate_id="researcher@default"');
+    expect(text).toContain('color="blue"');
+    expect(text).toContain('summary="the report is ready"');
+    expect(text).toContain('verified="false"');
+    expect(text).toContain('the report');
+  });
 });
 
 describe('the Agent tool', () => {
@@ -749,5 +767,47 @@ describe('the team lifecycle', () => {
       teammate_name: 'researcher',
       team_name: 'default',
     });
+  });
+
+  it('runs the lifecycle when the session supplies a teammate runtime', async () => {
+    const started: string[] = [];
+    const stopped: string[] = [];
+    const tornDown: string[] = [];
+    const lifecycle = new TeamLifecycle({
+      teamName: 'default',
+      configRoot: '/home/u/.claude',
+      runtime: {
+        start: async (request) => {
+          started.push(request.name);
+          return `${request.name}@default`;
+        },
+        stop: async (agentId) => {
+          stopped.push(agentId);
+        },
+        teardown: async (teamName) => {
+          tornDown.push(teamName);
+        },
+      },
+    });
+
+    const outcome = await lifecycle.spawn({ name: 'researcher', color: 'blue' });
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.identity.name).toBe('researcher');
+      expect(outcome.identity.agentId).toBe('researcher@default');
+      expect(outcome.teammate.state).toBe('running');
+    }
+    expect(started).toEqual(['researcher']);
+
+    const context = lifecycle.context();
+    expect(context.teamName).toBe('default');
+    expect(context.teamFilePath).toBe('/home/u/.claude/teams/default/config.json');
+    expect(Object.keys(context.teammates)).toEqual(['researcher']);
+
+    expect(lifecycle.markIdle('researcher@default')).toBe(true);
+    expect(lifecycle.list()[0]?.state).toBe('idle');
+
+    await lifecycle.teardown();
+    expect(tornDown).toEqual(['default']);
   });
 });
