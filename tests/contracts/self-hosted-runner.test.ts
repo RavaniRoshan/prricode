@@ -399,6 +399,36 @@ describe('the self-hosted runner surface', () => {
     );
   });
 
+  it('applies the target own fallbacks and bounds', () => {
+    // The two durations whose hold "cannot be disabled": a zero falls back to
+    // the default, and the target's own code is `St(name) || default`.
+    const grace = readSelfHostedRunnerEnvironment({
+      SELF_HOSTED_RUNNER_BG_RESULT_GRACE_MS: '0',
+      SELF_HOSTED_RUNNER_POST_TURN_SETTLE_MS: '0',
+    });
+    expect(grace.values.SELF_HOSTED_RUNNER_BG_RESULT_GRACE_MS).toBe(30000);
+    expect(grace.values.SELF_HOSTED_RUNNER_POST_TURN_SETTLE_MS).toBe(7000);
+
+    // The other durations take a zero as "never".
+    const never = readSelfHostedRunnerEnvironment({
+      SELF_HOSTED_RUNNER_SESSION_IDLE_MS: '0',
+      SELF_HOSTED_RUNNER_MAX_LIFETIME_MS: '0',
+    });
+    expect(never.values.SELF_HOSTED_RUNNER_SESSION_IDLE_MS).toBe(0);
+    expect(never.values.SELF_HOSTED_RUNNER_MAX_LIFETIME_MS).toBe(0);
+
+    // The retire-at is a Unix timestamp in whole seconds, a safe integer in
+    // [1e9, 1e11]; anything else reads as "never".
+    const retire = readSelfHostedRunnerEnvironment({
+      SELF_HOSTED_RUNNER_RETIRE_AT: '1800000000',
+    });
+    expect(retire.values.SELF_HOSTED_RUNNER_RETIRE_AT).toBe(1800000000);
+    const outOfRange = readSelfHostedRunnerEnvironment({
+      SELF_HOSTED_RUNNER_RETIRE_AT: '1800000',
+    });
+    expect(outOfRange.values.SELF_HOSTED_RUNNER_RETIRE_AT).toBe(0);
+  });
+
   it('names the four environment variables the target refuses or ignores', () => {
     expect(SELF_HOSTED_RUNNER_REFUSED_ENVIRONMENT_VARIABLES.map((entry) => entry.name)).toEqual([
       'SELF_HOSTED_RUNNER_SIGKILL_TIMEOUT_MS',

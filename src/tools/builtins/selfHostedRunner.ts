@@ -671,6 +671,14 @@ export interface SelfHostedRunnerEnvSpec {
   default?: string | number | boolean;
   /** The values the target accepts, for an enum. */
   values?: readonly string[];
+  /**
+   * Whether a value of **zero** falls back to the default.
+   *
+   * Two of the target's durations work this way: the background-result grace
+   * and the post-turn settle. The target's own help text says the hold
+   * "cannot be disabled", and its code is `St(name) || default`.
+   */
+  zeroFallsBack?: boolean;
   /** The target's own validation message, when it has one. */
   message?: string;
   /** Where the target reads it. */
@@ -697,6 +705,7 @@ export const SELF_HOSTED_RUNNER_ENVIRONMENT_VARIABLES: readonly SelfHostedRunner
       name: 'SELF_HOSTED_RUNNER_BG_RESULT_GRACE_MS',
       kind: 'duration-ms',
       default: 30000,
+      zeroFallsBack: true,
       readAt: 'chunk-56g9kk6e.js:140361',
     },
     {
@@ -837,6 +846,7 @@ export const SELF_HOSTED_RUNNER_ENVIRONMENT_VARIABLES: readonly SelfHostedRunner
       name: 'SELF_HOSTED_RUNNER_POST_TURN_SETTLE_MS',
       kind: 'duration-ms',
       default: 7000,
+      zeroFallsBack: true,
       readAt: 'chunk-56g9kk6e.js:140412',
     },
     {
@@ -1082,11 +1092,24 @@ function resolveEnvValue(spec: SelfHostedRunnerEnvSpec, raw: string): EnvResolut
       }
       return { ok: true, value };
     }
-    case 'duration-ms':
+    case 'duration-ms': {
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value <= 0) {
+        if (spec.zeroFallsBack === true && spec.default !== undefined) {
+          return { ok: true, value: spec.default };
+        }
+        return { ok: true, value: 0 };
+      }
+      return { ok: true, value: Math.min(value, 2147483647) };
+    }
     case 'epoch-seconds': {
       const value = Number(raw);
-      if (!Number.isFinite(value) || value <= 0) return { ok: true, value: 0 };
-      return { ok: true, value: Math.min(value, 2147483647) };
+      // The target's own bound: a Unix timestamp in whole seconds, a safe
+      // integer in `[1e9, 1e11]`. Anything else is "never".
+      if (!Number.isSafeInteger(value) || value < 1e9 || value > 100000000000) {
+        return { ok: true, value: 0 };
+      }
+      return { ok: true, value };
     }
     case 'label': {
       const value = raw.trim();
