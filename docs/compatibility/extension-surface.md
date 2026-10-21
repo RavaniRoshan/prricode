@@ -838,6 +838,7 @@ value, and `settle` has **six** values, not five.
 | the teardown | every member with a pane is killed, and the team's directory is removed | `chunk-qsxcbpmk.js:8924`, `:9568` | **recorded, not reproduced** — there is no pane and no team directory |
 | the `TeammateIdle` payload | `{hook_event_name:"TeammateIdle", teammate_name, team_name}` | `chunk-4jsg44k7.js:3560929` | the same payload |
 | a named `Agent` spawn | a **named** spawn is a **teammate** — an agent the session can address with `SendMessage` | `chunk-1vypyz65.js:20202` | the same: the `Agent` tool routes a named spawn to the teammate path |
+| the named spawn's result text | `Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)` and the two lines that follow it | `chunk-1vypyz65.js:46339` | the same text |
 
 ### The refusals this milestone adds
 
@@ -1049,6 +1050,7 @@ re-measures. The measured outcome is in [`results.md`](results.md).
 | Starting a teammate and tearing a team down **refuse**, and both name the capability they needed | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses to spawn a teammate, naming the capability it needs", "refuses to tear a team down, naming the capability it needs" |
 | The `TeammateIdle` hook payload is the target's own | **REA observed** | F-33 | same file — "carries the target's TeammateIdle hook payload" |
 | A **named** `Agent` spawn is a teammate, and it refuses without a teammate runtime | **REA observed** (the named spawn is the target's) + **implementation choice** (the refusal) | F-33 | same file — "refuses a named spawn, naming the capability it needs", "starts a named agent through the teammate runtime the session supplies" |
+| The named spawn's **result text** is the target's own | **REA observed** | F-33 | same file — "starts a named agent through the teammate runtime the session supplies" |
 | The team file's **write**, its lock, its retry, the member operations and the teardown are **recorded, not reproduced** | **REA observed** (the rules) + **not reproduced** (this implementation writes no team file) | F-33 | — |
 
 

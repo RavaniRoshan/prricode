@@ -236,7 +236,7 @@ export interface BuiltinToolDeps {
       cwd?: string;
     },
     ctx: ToolContext,
-  ) => Promise<string>;
+  ) => Promise<{ agentId: string; name: string }>;
   /**
    * The capabilities the newer tools need.
    *

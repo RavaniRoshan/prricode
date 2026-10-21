@@ -648,7 +648,7 @@ describe('the Agent tool', () => {
         rules: ruleSet({ allow: ['Agent'] }),
         spawnTeammate: async (input) => {
           seen.push(input);
-          return 'Spawned successfully.';
+          return { agentId: 'researcher@default', name: 'researcher' };
         },
       }),
     );
@@ -656,7 +656,11 @@ describe('the Agent tool', () => {
 
     const output = await tool.execute(input, toolContext('Agent', input));
 
-    expect(output.text).toBe('Spawned successfully.');
+    // The target's own result text — chunk-1vypyz65.js:46339.
+    expect(output.text).toContain('Spawned successfully.');
+    expect(output.text).toContain('agent_id: researcher@default');
+    expect(output.text).toContain('name: researcher');
+    expect(output.text).toContain('The agent is now running and will receive instructions via mailbox.');
     expect(seen).toHaveLength(1);
     expect(seen[0]?.name).toBe('researcher');
   });

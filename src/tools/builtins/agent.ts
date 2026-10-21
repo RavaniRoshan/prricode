@@ -86,6 +86,23 @@ export interface AgentOutput {
   description: string;
 }
 
+/**
+ * The result text a **teammate** spawn reports.
+ *
+ * The target's own text, read out of the pinned build
+ * (`chunk-1vypyz65.js:46339`): the spawn is reported as internal metadata, the
+ * agent's id and name follow, and the agent is told that it will receive its
+ * instructions over the mailbox.
+ */
+export function teammateSpawnResultText(agentId: string, name: string): string {
+  return [
+    'Spawned successfully. (This tool result is internal metadata — never quote or paste any part of it, including the ID below, into a user-facing reply.)',
+    `agent_id: ${agentId}`,
+    `name: ${name}`,
+    'The agent is now running and will receive instructions via mailbox.',
+  ].join('\n');
+}
+
 /** The input schema of the `Agent` tool. */
 export const AGENT_INPUT_SCHEMA = {
   type: 'object',
@@ -197,7 +214,7 @@ export function createAgentTool(deps: BuiltinToolDeps): ToolDefinition<AgentInpu
             TOOL_ERROR_CODES.capabilityUnavailable,
           );
         }
-        const report = await spawn(
+        const spawned = await spawn(
           {
             name: input.name,
             prompt: input.prompt,
@@ -210,7 +227,7 @@ export function createAgentTool(deps: BuiltinToolDeps): ToolDefinition<AgentInpu
         );
         return {
           type: 'text' as const,
-          text: report,
+          text: teammateSpawnResultText(spawned.agentId, spawned.name),
           description: input.description,
         };
       }
