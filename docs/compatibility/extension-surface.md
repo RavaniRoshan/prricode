@@ -397,7 +397,8 @@ and the rest) belong to the **checkpoint** surface, not to plugins.
 
 The failure codes are the target's own — the codes its failure-code map carries
 (`chunk-4420d0hq.js:8161`), the entry-helper codes
-(`chunk-p9jh4s48.js:25526`), and the ones the plugin surface raises elsewhere.
+(`chunk-p9jh4s48.js:25526`), and the ones the plugin surface raises elsewhere:
+**67** in all.
 
 **This implementation.** `src/extensions/plugins/autoupdate.ts` carries the
 vocabularies and the classification, and the target's own error text for a
