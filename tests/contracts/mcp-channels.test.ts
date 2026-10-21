@@ -37,15 +37,19 @@ import {
   CHANNEL_PERMISSION_METHOD,
   CHANNEL_PERMISSION_REQUEST_METHOD,
   ChannelPermissionRelay,
+  ChannelRegistration,
   ChannelTransportUnavailableError,
+  channelMetaDropWarning,
   declaresChannelCapability,
   deriveChannelRequestId,
+  findChannelEntry,
   formatChannelMessage,
   gateChannelServer,
   getEffectiveChannelAllowlist,
   isChannelGateHardRevocation,
   isChannelsPolicyBlocked,
   parseChannelEntries,
+  parseChannelPluginId,
   readChannelMessageParams,
   readChannelPermissionParams,
   registerChannelNotifications,
@@ -523,6 +527,63 @@ describe('the channel message form', () => {
       '<\\channel source="other">',
     );
   });
+
+  it('names the dropped meta keys in the warning', () => {
+    const { dropped } = splitChannelMeta({ chat_id: '1', 'bad-key': '2' });
+    expect(channelMetaDropWarning('my-server', dropped)).toBe(
+      '[channel] my-server: dropped 1 meta key(s) that don\'t match ' +
+        '^[a-zA-Z_][a-zA-Z0-9_]*$: bad-key',
+    );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The entry lookup                                                            */
+/* -------------------------------------------------------------------------- */
+
+describe('the channel entry lookup', () => {
+  it('finds a server entry on the exact name', () => {
+    expect(findChannelEntry('my-server', [{ kind: 'server', name: 'my-server' }])).toEqual({
+      kind: 'server',
+      name: 'my-server',
+    });
+  });
+
+  it('does not find a server entry on another name', () => {
+    expect(findChannelEntry('other-server', [{ kind: 'server', name: 'my-server' }])).toBeUndefined();
+  });
+
+  it('finds a plugin entry on the plugin name of a plugin-provided server', () => {
+    const entry: ChannelEntry = { kind: 'plugin', name: 'telegram', marketplace: 'anthropic' };
+    expect(findChannelEntry('plugin:telegram:my-server', [entry])).toBe(entry);
+  });
+
+  it('covers every server the plugin provides', () => {
+    const entry: ChannelEntry = { kind: 'plugin', name: 'telegram', marketplace: 'anthropic' };
+    expect(findChannelEntry('plugin:telegram:other-server', [entry])).toBe(entry);
+  });
+
+  it('does not find a plugin entry under another plugin', () => {
+    const entry: ChannelEntry = { kind: 'plugin', name: 'telegram', marketplace: 'anthropic' };
+    expect(findChannelEntry('plugin:signal:my-server', [entry])).toBeUndefined();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The plugin id                                                               */
+/* -------------------------------------------------------------------------- */
+
+describe('the channel plugin id', () => {
+  it('splits at the last at sign', () => {
+    expect(parseChannelPluginId('telegram@anthropic')).toEqual({
+      name: 'telegram',
+      marketplace: 'anthropic',
+    });
+  });
+
+  it('reads an id with no at sign as a name with no marketplace', () => {
+    expect(parseChannelPluginId('telegram')).toEqual({ name: 'telegram' });
+  });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -571,6 +632,15 @@ describe('the channel permission relay', () => {
     );
   });
 
+  it('derives the ids the target\'s own derivation derives', () => {
+    // The target's FNV-1a rendered into the twenty-five-letter alphabet. The
+    // values were re-derived independently, from the target's own source
+    // text, before they were checked against this implementation.
+    expect(deriveChannelRequestId('toolu_123', 'agent-1')).toBe('varwy');
+    expect(deriveChannelRequestId('toolu_01ABCDEF', 'main')).toBe('znebm');
+    expect(deriveChannelRequestId('x', 'y')).toBe('vzpxq');
+  });
+
   it('resolves an answer against the pending request', () => {
     const relay = new ChannelPermissionRelay();
     const seen: unknown[] = [];
@@ -589,6 +659,171 @@ describe('the channel permission relay', () => {
     const cancel = relay.onResponse('abc', () => undefined);
     cancel();
     expect(relay.resolve('abc', 'allow', 'my-server')).toBe(false);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The registration lifecycle                                                  */
+/* -------------------------------------------------------------------------- */
+
+describe('the channel registration lifecycle', () => {
+  it('registers a server the gate admitted', () => {
+    const registration = new ChannelRegistration();
+    const outcome = registration.apply('my-server', { action: 'register' });
+    expect(outcome.action).toBe('registered');
+    expect(outcome.log).toBe('Channel notifications registered');
+    expect(registration.isRegistered('my-server')).toBe(true);
+  });
+
+  it('removes a hard revocation', () => {
+    const registration = new ChannelRegistration();
+    registration.apply('my-server', { action: 'register' });
+    const outcome = registration.apply('my-server', {
+      action: 'skip',
+      kind: 'provider',
+      reason: 'channels are not available on third-party providers',
+    });
+    expect(outcome.action).toBe('removed');
+    expect(registration.isRegistered('my-server')).toBe(false);
+  });
+
+  it('preserves a soft skip of a server that was registered', () => {
+    const registration = new ChannelRegistration();
+    registration.apply('my-server', { action: 'register' });
+    const outcome = registration.apply('my-server', {
+      action: 'skip',
+      kind: 'policy',
+      reason: 'channels not enabled by org policy (set channelsEnabled: true in managed settings)',
+    });
+    expect(outcome.action).toBe('preserved');
+    expect(outcome.log).toBe(
+      'Channel gate says skip:policy but was previously registered — preserving handler',
+    );
+    expect(outcome.warning).toBeUndefined();
+    expect(registration.isRegistered('my-server')).toBe(true);
+  });
+
+  it('skips a soft skip of a server that was not registered', () => {
+    const registration = new ChannelRegistration();
+    const outcome = registration.apply('my-server', {
+      action: 'skip',
+      kind: 'session',
+      reason: 'server my-server not in --channels list for this session',
+    });
+    expect(outcome.action).toBe('skipped');
+    expect(outcome.log).toBe(
+      'Channel notifications skipped: server my-server not in --channels list for this session',
+    );
+  });
+
+  it('never warns for the capability and session kinds', () => {
+    const registration = new ChannelRegistration();
+    expect(
+      registration.apply('my-server', {
+        action: 'skip',
+        kind: 'capability',
+        reason: 'server did not declare claude/channel capability',
+      }).warning,
+    ).toBeUndefined();
+    expect(
+      registration.apply('my-server', {
+        action: 'skip',
+        kind: 'session',
+        reason: 'server my-server not in --channels list for this session',
+      }).warning,
+    ).toBeUndefined();
+  });
+
+  it('warns once per kind', () => {
+    const registration = new ChannelRegistration();
+    const decision = {
+      action: 'skip',
+      kind: 'provider',
+      reason: 'channels are not available on third-party providers',
+    } as const;
+    const first = registration.apply('my-server', decision, { kind: 'server', name: 'my-server' });
+    expect(first.warning).toEqual({
+      key: 'channels-blocked-provider',
+      text: 'Channels are not available on Bedrock, Vertex, or Foundry',
+      priority: 'high',
+      color: 'warning',
+      timeoutMs: 12000,
+    });
+    expect(
+      registration.apply('other-server', decision, { kind: 'server', name: 'other-server' })
+        .warning,
+    ).toBeUndefined();
+  });
+
+  it('does not warn for a blocked server that is not in the session list', () => {
+    const registration = new ChannelRegistration();
+    const outcome = registration.apply('my-server', {
+      action: 'skip',
+      kind: 'provider',
+      reason: 'channels are not available on third-party providers',
+    });
+    expect(outcome.warning).toBeUndefined();
+  });
+
+  it('warns per server for the era kind', () => {
+    const registration = new ChannelRegistration();
+    const decision = {
+      action: 'skip',
+      kind: 'era',
+      reason: 'connection negotiated a modern protocol revision with no unsolicited notification path',
+    } as const;
+    const first = registration.apply('my-server', decision, { kind: 'server', name: 'my-server' });
+    expect(first.warning?.key).toBe('channels-blocked-era-my-server');
+    expect(first.warning?.text).toBe(
+      'Channel messages from "my-server" are unavailable: this connection\'s protocol version has no channel delivery path',
+    );
+    expect(
+      registration.apply('other-server', decision, { kind: 'server', name: 'other-server' }).warning
+        ?.key,
+    ).toBe('channels-blocked-era-other-server');
+  });
+
+  it('names the org\'s own policy in the warning', () => {
+    const registration = new ChannelRegistration();
+    const outcome = registration.apply(
+      'my-server',
+      {
+        action: 'skip',
+        kind: 'policy',
+        reason: 'channels not enabled by org policy (set channelsEnabled: true in managed settings)',
+      },
+      { kind: 'server', name: 'my-server' },
+    );
+    expect(outcome.warning?.text).toBe(
+      'Channels are not enabled for your org · have an administrator set channelsEnabled: true in managed settings',
+    );
+  });
+
+  it('names the feature being unavailable in the warning', () => {
+    const registration = new ChannelRegistration();
+    const outcome = registration.apply(
+      'my-server',
+      {
+        action: 'skip',
+        kind: 'disabled',
+        reason: 'channels feature is not currently available',
+      },
+      { kind: 'server', name: 'my-server' },
+    );
+    expect(outcome.warning?.text).toBe('Channels are not currently available');
+  });
+
+  it('shows the gate\'s own reason for the marketplace and allowlist kinds', () => {
+    const registration = new ChannelRegistration();
+    const outcome = registration.apply('my-server', {
+      action: 'skip',
+      kind: 'marketplace',
+      reason: 'you asked for plugin:telegram@anthropic but the installed plugin is from an unknown source',
+    });
+    expect(outcome.warning?.text).toBe(
+      'you asked for plugin:telegram@anthropic but the installed plugin is from an unknown source',
+    );
+    expect(outcome.warning?.key).toBe('channels-blocked-marketplace');
   });
 });
 

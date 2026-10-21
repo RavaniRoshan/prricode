@@ -109,7 +109,11 @@ export const CHANNEL_PERMISSION_CAPABILITY = 'claude/channel/permission';
  */
 export function declaresChannelCapability(capabilities: unknown, capability: string): boolean {
   const experimental = readRecord(readRecord(capabilities)?.['experimental']);
-  return Boolean(experimental?.[capability]);
+  if (experimental === undefined) return false;
+  // The capability name is looked up in a plain object, so the lookup is
+  // guarded: a name like `__proto__` must not reach the prototype chain.
+  if (!Object.hasOwn(experimental, capability)) return false;
+  return Boolean(experimental[capability]);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -918,6 +922,164 @@ export class ChannelPermissionRelay {
   /** The number of pending requests. */
   get pendingCount(): number {
     return this.#pending.size;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* The registration lifecycle                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The warning the target shows when a server's channel is blocked.
+ *
+ * The target's own toast: a **high** priority warning, in the warning
+ * colour, that lives for twelve seconds.
+ */
+export interface ChannelWarning {
+  /** The toast's key — one per kind, so the same warning is not shown twice. */
+  key: string;
+  /** The text the user reads. */
+  text: string;
+  /** The priority. */
+  priority: 'high';
+  /** The colour. */
+  color: 'warning';
+  /** How long the warning lives, in milliseconds. */
+  timeoutMs: number;
+}
+
+/** What happened to a server's channel handlers. */
+export type ChannelRegistrationAction = 'registered' | 'preserved' | 'removed' | 'skipped';
+
+/** The outcome of applying one gate decision. */
+export interface ChannelRegistrationOutcome {
+  /** What happened to the server's handlers. */
+  action: ChannelRegistrationAction;
+  /** The log line the target writes. */
+  log: string;
+  /** The warning to show, when one is due. */
+  warning?: ChannelWarning;
+}
+
+/** How long the target's warning lives. */
+const CHANNEL_WARNING_TIMEOUT_MS = 12000;
+
+/**
+ * The registration state.
+ *
+ * The target's own lifecycle, read out of the registration site:
+ *
+ *   - a **register** installs the handlers and adds the server to the
+ *     registered set;
+ *   - a **hard revocation** removes the handlers and drops the server from
+ *     the set;
+ *   - a **soft** skip of a server that was already registered **preserves**
+ *     the handlers;
+ *   - a skip of a server that was not registered leaves nothing behind;
+ *   - the warning is shown **once per kind**.
+ *
+ * This class tracks the state and decides what the warning should say. It
+ * installs nothing: there is no channel transport here.
+ */
+export class ChannelRegistration {
+  readonly #registered = new Set<string>();
+  readonly #warned = new Set<string>();
+
+  /** The servers whose handlers are registered. */
+  registeredServers(): readonly string[] {
+    return [...this.#registered];
+  }
+
+  /** Whether a server's handlers are registered. */
+  isRegistered(serverName: string): boolean {
+    return this.#registered.has(serverName);
+  }
+
+  /**
+   * Apply one gate decision.
+   *
+   * The `sessionEntry` is the session's entry for the server, when it has
+   * one; the target shows the warning for a blocked server only when the
+   * server is in the session's list.
+   */
+  apply(
+    serverName: string,
+    decision: ChannelGateDecision,
+    sessionEntry?: ChannelEntry,
+  ): ChannelRegistrationOutcome {
+    if (decision.action === 'register') {
+      this.#registered.add(serverName);
+      return { action: 'registered', log: 'Channel notifications registered' };
+    }
+
+    const hard = isChannelGateHardRevocation(decision.kind);
+    const wasRegistered = this.#registered.has(serverName);
+
+    if (hard) {
+      this.#registered.delete(serverName);
+      return {
+        action: 'removed',
+        log: `Channel notifications skipped: ${decision.reason}`,
+        warning: this.#warning(serverName, decision, sessionEntry),
+      };
+    }
+
+    if (wasRegistered) {
+      return {
+        action: 'preserved',
+        log: `Channel gate says skip:${decision.kind} but was previously registered — preserving handler`,
+      };
+    }
+
+    return {
+      action: 'skipped',
+      log: `Channel notifications skipped: ${decision.reason}`,
+      warning: this.#warning(serverName, decision, sessionEntry),
+    };
+  }
+
+  /**
+   * The warning a skip is due, when it is due.
+   *
+   * The target's rule: the `capability` and `session` kinds never warn, the
+   * warning is shown **once** per kind, and it is shown for a `marketplace`
+   * or an `allowlist` skip and for any other skip of a server that is in the
+   * session's list.
+   */
+  #warning(
+    serverName: string,
+    decision: ChannelGateDecision,
+    sessionEntry?: ChannelEntry,
+  ): ChannelWarning | undefined {
+    if (decision.action !== 'skip') return undefined;
+    const kind = decision.kind;
+    if (kind === 'capability' || kind === 'session') return undefined;
+    if (kind !== 'marketplace' && kind !== 'allowlist' && sessionEntry === undefined) {
+      return undefined;
+    }
+
+    const dedupeKey = kind === 'era' ? `era:${serverName}` : kind;
+    if (this.#warned.has(dedupeKey)) return undefined;
+    this.#warned.add(dedupeKey);
+
+    const text =
+      kind === 'disabled'
+        ? 'Channels are not currently available'
+        : kind === 'provider'
+          ? 'Channels are not available on Bedrock, Vertex, or Foundry'
+          : kind === 'policy'
+            ? 'Channels are not enabled for your org · have an administrator set channelsEnabled: true in managed settings'
+            : kind === 'era'
+              ? `Channel messages from "${serverName}" are unavailable: this connection's protocol version has no channel delivery path`
+              : decision.reason;
+
+    return {
+      key: kind === 'era' ? `channels-blocked-era-${serverName}` : `channels-blocked-${kind}`,
+      text,
+      priority: 'high',
+      color: 'warning',
+      timeoutMs: CHANNEL_WARNING_TIMEOUT_MS,
+    };
   }
 }
 

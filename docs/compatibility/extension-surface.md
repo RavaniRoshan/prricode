@@ -966,6 +966,25 @@ a second, independent confirmation that there are more than six.
 | the eligible servers | connected, in the `--channels` list, declaring **both** capabilities, registered by the permission prompt, and **not** a modern-era connection | `chunk-hct0ak23.js:6029` | the same five conditions |
 | the outcome | `allow` accepts the call; `deny` rejects it and reports `Denied via channel <server>` | `chunk-7h94ekrj.js:44183` | the same two outcomes |
 
+### The registration lifecycle
+
+The target registers a server's channel handlers in three places — on
+**connect**, on **reconnect**, and on the `channel_enable` request — and the
+rules it applies there are the same. This implementation carries the **rules**;
+it installs nothing, because there is no channel transport here.
+
+| what | the target's own statement | where | this implementation |
+|---|---|---|---|
+| the register branch | `Channel notifications registered`, and the server joins the registered set | `chunk-6bp7hdav.js:1604464` | the same |
+| a hard revocation | the handlers are removed — `notifications/claude/channel` **and** `notifications/claude/channel/permission` — and the server leaves the registered set | `chunk-6bp7hdav.js:1605579` | the same: the state is tracked, and nothing is installed |
+| a soft skip of a registered server | `Channel gate says skip:<kind> but was previously registered — preserving handler` — and the handlers stay | `chunk-6bp7hdav.js:1605579` | the same |
+| the skip log | `Channel notifications skipped: <reason>` | `chunk-6bp7hdav.js:1605579` | the same |
+| the warning's dedupe | the warning is shown **once per kind**; the `era` kind is deduped **per server** | `chunk-6bp7hdav.js:1605579` | the same |
+| the warning's condition | the `capability` and `session` kinds never warn, and any other kind warns only when the server is in the session's list — except `marketplace` and `allowlist`, which always warn | `chunk-6bp7hdav.js:1605579` | the same |
+| the warning's shape | a **high** priority warning, in the warning colour, for **12 000 ms** | `chunk-6bp7hdav.js:1605868` | the same |
+| the warning's key | `channels-blocked-<kind>`, and `channels-blocked-era-<server>` for the era kind | `chunk-6bp7hdav.js:1605868` | the same |
+| the reconnect | the gate runs again and the handlers are re-installed: `Channel notifications re-registered after reconnect` | `chunk-e7w77ts3.js:729115` | the same rule, applied by the same state |
+
 ### The plugin manifest
 
 | what | the target's own statement | where | this implementation |
@@ -995,7 +1014,7 @@ message, no fake queue and no invented transport.
 
 | Label | What it means | Which entries |
 |---|---|---|
-| `reproduced` | the name, the value, the shape, the message, the rule and the order are the target's own, and the product's name is the only substitution | the two capability names; the three method names; the eight decision kinds and their eight reasons; the four hard revocations; the message params and the answer params; the meta-key rule and the drop warning; the envelope's tag and attribute order; the attribute escaping; the session list's two entry shapes; the value grammar and the fatal message; the allowlist's two sources and the empty-org-list rule; the policy block's rule; the request id's alphabet and derivation; the relay's case-insensitive matching and its two drops |
+| `reproduced` | the name, the value, the shape, the message, the rule and the order are the target's own, and the product's name is the only substitution | the two capability names; the three method names; the eight decision kinds and their eight reasons; the four hard revocations; the message params and the answer params; the meta-key rule and the drop warning; the envelope's tag and attribute order; the attribute escaping; the session list's two entry shapes; the value grammar and the fatal message; the allowlist's two sources and the empty-org-list rule; the policy block's rule; the request id's alphabet and derivation; the relay's case-insensitive matching and its two drops; the registration lifecycle's four outcomes, its three log lines and its warning's shape, condition and key |
 | `refused` | the call ends in a typed failure that names the **capability** it needs and this session does not have | registering a server's channel notifications; asking a channel to answer a permission request |
 | `recorded, not reproduced` | the surface is **named** and nothing here runs it | the queued-prompt delivery; the permission request's bounded `description` and `input_preview`; the growth-book ledger; the `tengu_harbor` feature switch and the `allow_channels` entitlement; the plugin scaffold the target writes; the `channel_enable` request |
 | `not reproduced` | the target's own rule is recorded, and this implementation has **no counterpart** for it | the CLI's two flags — they stay `CC-031`'s refusal; the `tengu_quiet_elephant` session's random request ids — the derivation is implemented, the *draw* is the target's |
@@ -1230,6 +1249,8 @@ re-measures. The measured outcome is in [`results.md`](results.md).
 | The effective allowlist prefers the org's list when it is **set**, **even when it is empty**, and falls back to the ledger otherwise | **REA observed** | F-30 | same file — the three allowlist tests |
 | The request id is five characters of the target's twenty-five-letter alphabet, derived deterministically from the tool use id and the agent id | **REA observed** | F-30 | same file — the three request-id tests |
 | The relay matches the id case-insensitively, drops an answer for an unknown id, and drops a cancelled one | **REA observed** | F-30 | same file — "resolves an answer against the pending request", "drops an answer for an unknown request id", "drops an answer after the request was cancelled" |
+| The registration lifecycle's four outcomes are the target's own — registered, removed, preserved and skipped — and a hard revocation removes the handlers while a soft skip of a registered server preserves them | **REA observed** | F-30 | same file — "registers a server the gate admitted", "removes a hard revocation", "preserves a soft skip of a server that was registered", "skips a soft skip of a server that was not registered" |
+| The warning's condition, its once-per-kind dedupe, its per-server dedupe for the era kind, its four texts, its key and its twelve-second life are the target's own | **REA observed** | F-30 | same file — the six warning tests |
 | Registering a server's channel notifications **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-30 | same file — "refuses to register notifications and names the capability" |
 | Asking a channel to answer a permission request **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-30 | same file — "refuses to request a permission and names the capability" |
 | The queued-prompt delivery, the permission request's bounded members, the growth-book ledger, the feature switch and the plugin scaffold are **recorded, not reproduced** | **REA observed** (the rules) + **not reproduced** (nothing here runs them) | F-30 | — |
