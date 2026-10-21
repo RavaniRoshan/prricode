@@ -286,3 +286,907 @@ export function setKeychainBackend(backend: KeychainBackend | null): void {
 export function currentKeychainBackend(): KeychainBackend {
   return keychainBackend;
 }
+
+// ---------------------------------------------------------------------------
+// The five authentication flows
+// ---------------------------------------------------------------------------
+
+/**
+ * The **five** authentication flows the target has.
+ *
+ * **REA observed.** The target's own command tree, its own modules and its own
+ * endpoint tables carry five distinct sign-in paths, and they are not five
+ * spellings of one path: they differ in who issues the credential, in what the
+ * credential is, in where it is stored, and in what the flow needs in order to
+ * run.
+ *
+ *   - `firstParty` — a sign-in against the first-party authorization endpoint
+ *     (`https://claude.com/cai/oauth/authorize` and
+ *     `https://platform.claude.com/oauth/authorize`), yielding an OAuth access
+ *     token and a refresh token;
+ *   - `local` — the same machine against the **local** endpoint table
+ *     (`CLAUDE_LOCAL_OAUTH_API_BASE` and friends), which is a different
+ *     client id, a different token endpoint and a different credential file
+ *     suffix;
+ *   - `mcp` — a per-server OAuth sign-in, driven by the server's own RFC 8414
+ *     metadata, whose credential is stored under the server's own name;
+ *   - `sep990` — the XAA (SEP-990) IdP OIDC sign-in, whose credential is an
+ *     `id_token` from a third-party identity provider;
+ *   - `hostDeviceOrg` — the credential the **host application** hands over, the
+ *     **trusted device** enrollment, and the **organization** sign-in pin.
+ *
+ * Evidence: `chunk-1kkch1sj.js` (first party), `chunk-dvjkd4rv.js` (local),
+ * `chunk-f2n7zke5.js` and `chunk-f8pz14g5.js` (MCP), `chunk-3kc8svea.js`
+ * (SEP-990), `chunk-grnjpsdz.js` and `chunk-c9s0jh80.js` (host/device/org).
+ */
+export type AuthFlowKind = 'firstParty' | 'local' | 'mcp' | 'sep990' | 'hostDeviceOrg';
+
+/** The five flows, in the order this implementation names them. */
+export const AUTH_FLOW_KINDS: readonly AuthFlowKind[] = Object.freeze([
+  'firstParty',
+  'local',
+  'mcp',
+  'sep990',
+  'hostDeviceOrg',
+] as const);
+
+/**
+ * The credential kinds the five flows carry.
+ *
+ * **REA observed** — each kind is a record the target actually stores or a
+ * variable it actually reads.
+ */
+export type AuthCredentialKind =
+  /** An OAuth access token and its refresh token. */
+  | 'oauth'
+  /** An API key. */
+  | 'apiKey'
+  /** The `id_token` a SEP-990 identity provider issues. */
+  | 'idToken'
+  /** The client secret a SEP-990 identity provider expects. */
+  | 'clientSecret'
+  /** A credential the host application supplies through an environment variable. */
+  | 'hostEnv'
+  /** A trusted-device token. */
+  | 'trustedDevice'
+  /** A session-ingress token. */
+  | 'sessionIngress'
+  /** An MCP server's own OAuth token. */
+  | 'mcpOAuth';
+
+/** Where a credential of that kind lives. */
+export type AuthCredentialStorage =
+  /** The target's credential file, `<configDir>/.credentials.json`. */
+  | 'credentialsFile'
+  /** The OS credential store. */
+  | 'keychain'
+  /** An environment variable. */
+  | 'environment'
+  /** A settings document. */
+  | 'settings';
+
+/**
+ * One credential kind, and where it lives.
+ *
+ * A descriptor names a credential; it never holds one. The `recordKey` is the
+ * key the target writes into its credential store, and the
+ * `environmentVariable` is the variable the target reads the credential from.
+ */
+export interface AuthCredentialDescriptor {
+  kind: AuthCredentialKind;
+  storage: AuthCredentialStorage;
+  /** The key the target writes into its credential store, when it has one. */
+  recordKey?: string;
+  /** The environment variable the target reads the credential from, when it has one. */
+  environmentVariable?: string;
+}
+
+/**
+ * The credential kinds, with the target's own record keys and variable names.
+ *
+ * **REA observed.** The record keys come from the target's own credential
+ * store: `claudeAiOauth` for the OAuth record, `mcpXaaIdp` for the cached
+ * `id_token`s, `mcpXaaIdpConfig` for the IdP client secrets, and
+ * `trustedDeviceToken` for the device token.
+ *
+ * The trusted-device variable is `CLAUDE_TRUSTED_DEVICE_TOKEN` — **not**
+ * `CLAUDE_CODE_TRUSTED_DEVICE_TOKEN`. The untouched-surface record has the
+ * wrong name, and the name is load-bearing: it is the variable the target
+ * reads, so an implementation that used the other spelling would never see the
+ * token.
+ */
+export const AUTH_CREDENTIALS: readonly AuthCredentialDescriptor[] = Object.freeze([
+  {
+    kind: 'oauth',
+    storage: 'credentialsFile',
+    recordKey: 'claudeAiOauth',
+    environmentVariable: 'CLAUDE_CODE_OAUTH_TOKEN',
+  },
+  { kind: 'apiKey', storage: 'environment', environmentVariable: 'ANTHROPIC_API_KEY' },
+  {
+    kind: 'idToken',
+    storage: 'credentialsFile',
+    recordKey: 'mcpXaaIdp',
+  },
+  {
+    kind: 'clientSecret',
+    storage: 'keychain',
+    recordKey: 'mcpXaaIdpConfig',
+    environmentVariable: 'MCP_XAA_IDP_CLIENT_SECRET',
+  },
+  {
+    kind: 'hostEnv',
+    storage: 'environment',
+    environmentVariable: 'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+  },
+  {
+    kind: 'trustedDevice',
+    storage: 'credentialsFile',
+    recordKey: 'trustedDeviceToken',
+    environmentVariable: 'CLAUDE_TRUSTED_DEVICE_TOKEN',
+  },
+  {
+    kind: 'sessionIngress',
+    storage: 'environment',
+    environmentVariable: 'CLAUDE_SESSION_INGRESS_TOKEN_FILE',
+  },
+  { kind: 'mcpOAuth', storage: 'credentialsFile', recordKey: 'mcpOauth' },
+] as const);
+
+/**
+ * One authentication flow, as the target has it.
+ *
+ * The `states` are the states of the target's own state machine for that flow.
+ * The `requiredCapability` is what this implementation needs in order to run
+ * the flow — and it needs none of them, so every flow refuses.
+ */
+export interface AuthFlowDescriptor {
+  kind: AuthFlowKind;
+  /** The names the target itself uses for the flow. */
+  targetNames: readonly string[];
+  /** The credential kinds the flow can produce. */
+  credentialKinds: readonly AuthCredentialKind[];
+  /** The states of the flow's state machine. */
+  states: readonly string[];
+  /** The capability this implementation needs in order to run the flow. */
+  requiredCapability: string;
+  /** The refusal the flow carries. */
+  refusal: string;
+}
+
+/**
+ * The states of the first-party sign-in machine.
+ *
+ * **REA observed** in `chunk-50adnhax.js`: the states the interactive `/login`
+ * machine moves through.
+ */
+export const FIRST_PARTY_AUTH_STATES: readonly string[] = Object.freeze([
+  'idle',
+  'ready_to_start',
+  'console_method',
+  'platform_setup',
+  'waiting_for_login',
+  'polling',
+  'about_to_retry',
+  'success',
+  'storage_failed',
+  'error',
+  'account_on_hold',
+  'confirm_account',
+] as const);
+
+/** The states of the SEP-990 sign-in machine. */
+export const SEP990_AUTH_STATES: readonly string[] = Object.freeze([
+  'url_input',
+  'connecting',
+  'trust_prompt',
+  'polling',
+  'token_cached',
+  'error',
+] as const);
+
+/** The states of the MCP sign-in machine. */
+export const MCP_AUTH_STATES: readonly string[] = Object.freeze([
+  'server_not_found',
+  'server_pending_approval',
+  'server_rejected',
+  'server_config_error',
+  'unsupported_transport',
+  'anthropic_hosted',
+  'claudeai_proxy',
+  'no_login_required',
+  'awaiting_redirect',
+  'cancelled',
+  'succeeded',
+] as const);
+
+/** The states of the host / device / org machine. */
+export const HOST_DEVICE_ORG_AUTH_STATES: readonly string[] = Object.freeze([
+  'host_managed',
+  'device_enrollment_required',
+  'device_enrollment_disabled',
+  'org_pinned',
+  'not_applicable',
+] as const);
+
+/**
+ * The five flows, with their credential kinds and their states.
+ *
+ * The **first-party** and **local** flows share their states: they are the same
+ * machine over two different endpoint tables, and the target switches between
+ * the tables rather than between two machines.
+ */
+export const AUTH_FLOWS: Readonly<Record<AuthFlowKind, AuthFlowDescriptor>> = Object.freeze({
+  firstParty: {
+    kind: 'firstParty',
+    targetNames: ['claude auth login', 'claude auth status', 'claude auth logout', 'setup-token'],
+    credentialKinds: ['oauth', 'apiKey'],
+    states: FIRST_PARTY_AUTH_STATES,
+    requiredCapability: 'oauth-authorization-code',
+    refusal:
+      'the first-party sign-in needs the capability "oauth-authorization-code": an OAuth ' +
+      'authorization-code exchange with a registered OAuth client and a browser to complete ' +
+      'it. This build ships no OAuth client and no browser, so the sign-in cannot be performed.',
+  },
+  local: {
+    kind: 'local',
+    targetNames: ['local OAuth endpoint table', 'USE_LOCAL_OAUTH', 'USE_STAGING_OAUTH'],
+    credentialKinds: ['oauth', 'apiKey'],
+    states: FIRST_PARTY_AUTH_STATES,
+    requiredCapability: 'local-oauth-server',
+    refusal:
+      'the local sign-in needs the capability "local-oauth-server": a local OAuth server ' +
+      '(CLAUDE_LOCAL_OAUTH_API_BASE, CLAUDE_LOCAL_OAUTH_APPS_BASE, CLAUDE_LOCAL_OAUTH_CONSOLE_BASE) ' +
+      'and a client registered with it. This build ships neither, so the sign-in cannot be performed.',
+  },
+  mcp: {
+    kind: 'mcp',
+    targetNames: ['claude mcp login', 'claude mcp logout'],
+    credentialKinds: ['mcpOAuth', 'oauth'],
+    states: MCP_AUTH_STATES,
+    requiredCapability: 'mcp-server-oauth-registration',
+    refusal:
+      'the MCP sign-in needs the capability "mcp-server-oauth-registration": the server\'s own ' +
+      'OAuth registration (its RFC 8414 metadata) and a browser to complete the redirect. This ' +
+      'build ships neither, so the sign-in cannot be performed.',
+  },
+  sep990: {
+    kind: 'sep990',
+    targetNames: ['claude mcp xaa setup', 'claude mcp xaa login', 'claude mcp xaa show', 'claude mcp xaa clear'],
+    credentialKinds: ['idToken', 'clientSecret'],
+    states: SEP990_AUTH_STATES,
+    requiredCapability: 'oidc-identity-provider',
+    refusal:
+      'the SEP-990 sign-in needs the capability "oidc-identity-provider": an OIDC identity ' +
+      'provider to discover and to issue an id_token. This build ships none, so the sign-in ' +
+      'cannot be performed.',
+  },
+  hostDeviceOrg: {
+    kind: 'hostDeviceOrg',
+    targetNames: ['CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CLAUDE_TRUSTED_DEVICE_TOKEN', 'forceLoginMethod'],
+    credentialKinds: ['hostEnv', 'trustedDevice', 'oauth'],
+    states: HOST_DEVICE_ORG_AUTH_STATES,
+    requiredCapability: 'host-application-or-enrolled-device',
+    refusal:
+      'the host sign-in needs the capability "host-application-or-enrolled-device": the host ' +
+      'application that launched the agent to supply a credential, or a device enrolled with ' +
+      'the organization. This build has neither, so the sign-in cannot be performed.',
+  },
+});
+
+/**
+ * The refusal a flow carries when it is invoked without the capability it needs.
+ *
+ * **This implementation has no account and no login.** There is no OAuth
+ * client, no device flow, no OIDC provider and no token store here, so every
+ * flow refuses — and every refusal names the capability it needed, so a reader
+ * knows exactly what is missing rather than being told that "login failed".
+ */
+export interface AuthFlowRefusal {
+  kind: AuthFlowKind;
+  /** The capability the flow needed. */
+  capability: string;
+  /** The message the refusal carries. */
+  message: string;
+}
+
+/**
+ * Begin a flow — and refuse it.
+ *
+ * The function never performs a sign-in. It reports the refusal the flow
+ * carries, which names the capability that is missing.
+ */
+export function beginAuthFlow(kind: AuthFlowKind): AuthFlowRefusal {
+  const flow = AUTH_FLOWS[kind];
+  if (!flow) {
+    throw new Error(`unknown authentication flow: ${JSON.stringify(kind)}`);
+  }
+  return { kind: flow.kind, capability: flow.requiredCapability, message: flow.refusal };
+}
+
+// ---------------------------------------------------------------------------
+// The discriminators
+// ---------------------------------------------------------------------------
+
+/**
+ * The login methods the target can be pinned to.
+ *
+ * **REA observed** — `forceLoginMethod` is an enum of exactly three names
+ * (`chunk-c9s0jh80.js`): `"claudeai"` for the subscription, `"console"`
+ * for Console billing, and `"gateway"` for the Cloud gateway device flow.
+ */
+export type LoginMethod = 'claudeai' | 'console' | 'gateway';
+
+/** The three login methods. */
+export const LOGIN_METHODS: readonly LoginMethod[] = Object.freeze([
+  'claudeai',
+  'console',
+  'gateway',
+] as const);
+
+/** The input to the login-method discriminator. */
+export interface LoginMethodInput {
+  /**
+   * The forced method the machine **resolves** to.
+   *
+   * The target reads it from a resolver that returns `"gateway"` when the host
+   * application manages the machine, and otherwise returns the declared method
+   * **except** `"gateway"`, which it suppresses. When this field is absent the
+   * resolver is computed from `declared` and `hostManaged`.
+   */
+  forced?: LoginMethod | undefined;
+  /** The forced method the managed settings **declare**. */
+  declared?: LoginMethod | undefined;
+  /** Whether the host application manages this machine. */
+  hostManaged?: boolean | undefined;
+  /** The `--console` flag. */
+  console?: boolean | undefined;
+  /** The `--claudeai` flag. */
+  claudeai?: boolean | undefined;
+}
+
+/** What the login-method discriminator decided. */
+export interface LoginMethodDecision {
+  /** The method the sign-in uses. */
+  method: LoginMethod;
+  /** Whether a method was forced, rather than taken from the flags. */
+  forced: boolean;
+  /**
+   * Whether the declared method and the chosen one **disagree**.
+   *
+   * The target computes this by comparing the sign-in's "this is the
+   * subscription" flag against the declared method's own answer to the same
+   * question, and it uses the answer to decide whether the organization pin
+   * still applies.
+   */
+  contradicted: boolean;
+}
+
+/**
+ * Resolve the forced login method.
+ *
+ * **REA observed** — the target's resolver returns `"gateway"` when the host
+ * application manages the machine, and otherwise returns the declared method
+ * **except** `"gateway"`, which it suppresses: a machine that is not
+ * host-managed cannot sign in through a Cloud gateway.
+ */
+export function resolveForcedLoginMethod(
+  declared?: LoginMethod | undefined,
+  hostManaged = false,
+): LoginMethod | undefined {
+  if (hostManaged) return 'gateway';
+  return declared === 'gateway' ? undefined : declared;
+}
+
+/**
+ * Decide which login method a sign-in uses.
+ *
+ * The forced method wins over the flags; without one, `--console` selects the
+ * Console method and everything else selects the subscription method.
+ */
+export function classifyLoginMethod(input: LoginMethodInput): LoginMethodDecision {
+  const resolved =
+    input.forced !== undefined
+      ? input.forced
+      : resolveForcedLoginMethod(input.declared, input.hostManaged === true);
+  const chosen: LoginMethod = resolved ?? (input.console === true ? 'console' : 'claudeai');
+  const loginWithClaudeAi = resolved !== undefined ? resolved === 'claudeai' : input.console !== true;
+  const contradicted =
+    input.declared !== undefined && loginWithClaudeAi !== (input.declared === 'claudeai');
+  return { method: chosen, forced: resolved !== undefined, contradicted };
+}
+
+/** The kinds of MCP server the target's own classifier produces. */
+export type McpServerAuthKind =
+  /** A connector whose credentials live on the vendor's own site. */
+  | 'claudeai-proxy'
+  /** A server whose transport has no OAuth at all. */
+  | 'unsupported-transport'
+  /** A server the vendor hosts itself. */
+  | 'anthropic-hosted'
+  /** An ordinary remote server with its own OAuth. */
+  | 'oauth';
+
+/**
+ * The hosts the target refuses local OAuth against.
+ *
+ * **REA observed** — `chunk-f8pz14g5.js` carries exactly three, and a feature
+ * flag (`tengu_mcp_local_oauth_blocked_hosts`) may replace the list.
+ */
+export const MCP_BLOCKED_LOCAL_OAUTH_HOSTS: readonly string[] = Object.freeze([
+  'microsoft365.mcp.claude.com',
+  'gmail.mcp.claude.com',
+  'gcal.mcp.claude.com',
+] as const);
+
+/** The shape of an MCP server record the classifiers read. */
+export interface McpServerShape {
+  /** The transport: `stdio`, `sse`, `http`, or `claudeai-proxy`. */
+  type: string;
+  /** The remote URL, for a remote server. */
+  url?: string | undefined;
+  /** The static headers, for a remote server. */
+  headers?: Record<string, string> | undefined;
+  /** The configuration scope the record came from. */
+  scope?: string | undefined;
+}
+
+/** The result of the MCP server classifier. */
+export interface McpServerAuthDecision {
+  kind: McpServerAuthKind;
+  /** The transport, for an unsupported one. */
+  transport?: string;
+  /** The refusal, for a vendor-hosted server. */
+  message?: string;
+}
+
+/** Normalise a host the way the target's blocked-host set does. */
+function normalizeHost(host: string): string {
+  return host.toLowerCase().replace(/\.$/, '');
+}
+
+/**
+ * Classify an MCP server, the way the target's own classifier does.
+ *
+ * **REA observed** — `chunk-f8pz14g5.js`:
+ *
+ *   1. a `claudeai-proxy` server is a connector;
+ *   2. a server whose transport is neither `sse` nor `http` has no OAuth at
+ *      all, and the transport is reported with it;
+ *   3. a server on one of the blocked hosts is hosted by the vendor;
+ *   4. anything else is an ordinary OAuth server.
+ */
+export function classifyMcpServerAuth(
+  name: string,
+  server: McpServerShape,
+): McpServerAuthDecision {
+  if (server.type === 'claudeai-proxy') {
+    return { kind: 'claudeai-proxy' };
+  }
+  if (server.type !== 'sse' && server.type !== 'http') {
+    return { kind: 'unsupported-transport', transport: server.type ?? 'stdio' };
+  }
+  if (isBlockedMcpHost(server.url)) {
+    return { kind: 'anthropic-hosted', message: anthropicHostedMessage(name, server.scope) };
+  }
+  return { kind: 'oauth' };
+}
+
+/** Whether a URL is on one of the blocked hosts. */
+export function isBlockedMcpHost(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const host = normalizeHost(new URL(url).hostname);
+    return MCP_BLOCKED_LOCAL_OAUTH_HOSTS.some((blocked) => normalizeHost(blocked) === host);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The vendor-hosted server's refusal.
+ *
+ * The target appends a removal hint when the record's scope is one a user can
+ * remove it from, and it caps the whole message at 1024 characters.
+ */
+export function anthropicHostedMessage(name: string, scope?: string): string {
+  const base =
+    `"${name}" is Anthropic-hosted and doesn't support local OAuth. ` +
+    'Connect it via Settings → Connectors on claude.ai (requires `claude login`), ' +
+    "then it'll be available here automatically.";
+  const removable = scope === 'local' || scope === 'project' || scope === 'user';
+  if (!removable) return base;
+  const withHint = `${base} Remove the stale entry with: \`claude mcp remove ${name}\``;
+  return [...withHint].length <= 1024 ? withHint : base;
+}
+
+/**
+ * The sources of a credential an MCP server can use.
+ *
+ * **REA observed** — `chunk-f2n7zke5.js`. Each non-`none` value means there is
+ * **no login to perform**: the server already has a credential.
+ */
+export type McpAuthSource =
+  /** The configuration carries an `Authorization` header. */
+  | 'static_auth_header'
+  /** The first-party credential authenticates it. */
+  | 'first_party_auth'
+  /** The stored design credential authenticates it. */
+  | 'first_party_design_auth'
+  /** Nothing else supplies one. */
+  | 'none';
+
+/** The facts the MCP auth-source classifier reads. */
+export interface McpAuthSourceInput {
+  /** Whether the active route is the first-party one. */
+  firstPartyRoute?: boolean | undefined;
+  /** Whether a first-party access token exists. */
+  hasFirstPartyToken?: boolean | undefined;
+  /** Whether a stored design credential exists. */
+  hasDesignCredential?: boolean | undefined;
+}
+
+/** The first-party host the target's own check admits. */
+const FIRST_PARTY_MCP_HOST = 'api.anthropic.com';
+
+/** The first-party paths the target's own check admits. */
+const FIRST_PARTY_MCP_PATHS: readonly string[] = Object.freeze([
+  '/v1/design/',
+  '/v1/claude/test/',
+  '/v1/pages/mcp',
+] as const);
+
+/** Whether a URL is one the first-party credential authenticates. */
+export function isFirstPartyMcpUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
+    if (parsed.host !== FIRST_PARTY_MCP_HOST) return false;
+    return FIRST_PARTY_MCP_PATHS.some((prefix) =>
+      prefix.endsWith('/') ? parsed.pathname.startsWith(prefix) : parsed.pathname === prefix,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a URL is a first-party **design** URL. */
+export function isDesignMcpUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return isFirstPartyMcpUrl(url) && parsed.pathname.startsWith('/v1/design/');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decide where an MCP server's credential comes from.
+ *
+ * **REA observed** — the target checks the static header first, then the
+ * first-party credential, then the design credential.
+ */
+export function classifyMcpAuthSource(
+  server: McpServerShape,
+  input: McpAuthSourceInput = {},
+): McpAuthSource {
+  const headers = server.headers ?? {};
+  if (Object.keys(headers).some((name) => name.toLowerCase() === 'authorization')) {
+    return 'static_auth_header';
+  }
+  if (input.firstPartyRoute === true && isFirstPartyMcpUrl(server.url)) {
+    if (input.hasFirstPartyToken === true) return 'first_party_auth';
+    if (isDesignMcpUrl(server.url) && input.hasDesignCredential === true) {
+      return 'first_party_design_auth';
+    }
+  }
+  return 'none';
+}
+
+/** The context the flow detector reads. */
+export interface AuthFlowContext {
+  /** The environment. */
+  env?: NodeJS.ProcessEnv | undefined;
+  /** The login method the managed settings pin. */
+  forceLoginMethod?: LoginMethod | undefined;
+  /** The organization UUID the managed settings pin. */
+  forceLoginOrgUUID?: string | readonly string[] | undefined;
+  /** The SEP-990 IdP record, when one is configured. */
+  xaaIdp?: { issuer: string; clientId: string; callbackPort?: number } | undefined;
+  /** The MCP servers that could need a sign-in. */
+  mcpServers?: readonly McpServerShape[] | undefined;
+}
+
+/**
+ * Decide which of the five flows apply.
+ *
+ * The first-party flow always applies: it is the route every run falls back to.
+ * The other four apply when the environment, the managed settings or the
+ * configuration says so.
+ */
+export function detectAuthFlows(context: AuthFlowContext = {}): AuthFlowKind[] {
+  const env = context.env ?? {};
+  const flows: AuthFlowKind[] = [];
+
+  flows.push('firstParty');
+
+  if (
+    readEnvValue(env, 'CLAUDE_LOCAL_OAUTH_API_BASE') !== undefined ||
+    readEnvValue(env, 'CLAUDE_LOCAL_OAUTH_APPS_BASE') !== undefined ||
+    readEnvValue(env, 'CLAUDE_LOCAL_OAUTH_CONSOLE_BASE') !== undefined ||
+    readEnvValue(env, 'USE_LOCAL_OAUTH') !== undefined ||
+    readEnvValue(env, 'USE_STAGING_OAUTH') !== undefined
+  ) {
+    flows.push('local');
+  }
+
+  if (context.mcpServers !== undefined && context.mcpServers.length > 0) {
+    flows.push('mcp');
+  }
+
+  if (context.xaaIdp !== undefined) {
+    flows.push('sep990');
+  }
+
+  if (
+    readEnvValue(env, 'CLAUDE_CODE_HOST_AUTH_ENV_VAR') !== undefined ||
+    readEnvValue(env, 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST') !== undefined ||
+    readEnvValue(env, 'CLAUDE_TRUSTED_DEVICE_TOKEN') !== undefined ||
+    context.forceLoginOrgUUID !== undefined ||
+    context.forceLoginMethod === 'gateway'
+  ) {
+    flows.push('hostDeviceOrg');
+  }
+
+  return flows;
+}
+
+// ---------------------------------------------------------------------------
+// The validation the target performs
+// ---------------------------------------------------------------------------
+
+/**
+ * The endpoints `CLAUDE_CODE_CUSTOM_OAUTH_URL` may point at.
+ *
+ * **REA observed** — `chunk-dvjkd4rv.js` carries exactly three.
+ */
+export const APPROVED_CUSTOM_OAUTH_URLS: readonly string[] = Object.freeze([
+  'https://beacon.claude-ai.staging.ant.dev',
+  'https://claude.fedstart.com',
+  'https://claude-staging.fedstart.com',
+] as const);
+
+/** The loopback hosts a plain-`http` issuer is allowed on. */
+const LOOPBACK_HOSTS: readonly string[] = Object.freeze([
+  'localhost',
+  '127.0.0.1',
+  '[::1]',
+] as const);
+
+/**
+ * Check a SEP-990 issuer.
+ *
+ * The target requires `https:` — except on loopback, where a local identity
+ * provider runs without a certificate.
+ */
+export function validateXaaIssuer(issuer: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(issuer);
+  } catch {
+    return `Error: --issuer must be a valid URL (got "${issuer}")`;
+  }
+  if (parsed.protocol === 'https:') return undefined;
+  if (parsed.protocol === 'http:' && LOOPBACK_HOSTS.includes(parsed.hostname)) return undefined;
+  return `Error: --issuer must use https:// (got "${parsed.protocol}//${parsed.host}")`;
+}
+
+/** Check a fixed loopback callback port. */
+export function validateCallbackPort(port: unknown): string | undefined {
+  if (port === undefined || port === null) return undefined;
+  if (typeof port !== 'number' || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    return 'Error: --callback-port must be an integer in [1, 65535]';
+  }
+  return undefined;
+}
+
+/**
+ * Check the IdP client secret.
+ *
+ * The secret is read from the **environment**, never from the command line, so
+ * asking for it without the variable set is an error.
+ */
+export function validateXaaClientSecret(
+  requested: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (!requested) return undefined;
+  if (readEnvValue(env, 'MCP_XAA_IDP_CLIENT_SECRET') === undefined) {
+    return 'Error: --client-secret requires MCP_XAA_IDP_CLIENT_SECRET env var';
+  }
+  return undefined;
+}
+
+/** Check that the XAA feature is enabled at all. */
+export function validateXaaEnabled(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (readEnvValue(env, 'CLAUDE_CODE_ENABLE_XAA') === undefined) {
+    return 'Error: --xaa requires CLAUDE_CODE_ENABLE_XAA=1 in your environment';
+  }
+  return undefined;
+}
+
+/** The input to the `--xaa` requirement check. */
+export interface XaaServerRequirements {
+  /** Whether `--xaa` was passed at all. */
+  enabled: boolean;
+  /** The `--client-id` value. */
+  clientId?: string | undefined;
+  /** Whether `--client-secret` was passed. */
+  clientSecret?: boolean | undefined;
+  /** Whether the SEP-990 IdP is configured. */
+  idpConfigured?: boolean | undefined;
+}
+
+/**
+ * Check what an `--xaa` server is still missing.
+ *
+ * The target lists the missing pieces in a fixed order and refuses with all of
+ * them at once.
+ */
+export function validateXaaServerRequirements(
+  input: XaaServerRequirements,
+): string | undefined {
+  if (!input.enabled) return undefined;
+  const missing: string[] = [];
+  if (!input.clientId) missing.push('--client-id');
+  if (!input.clientSecret) missing.push('--client-secret');
+  if (input.idpConfigured !== true) {
+    missing.push("'claude mcp xaa setup' (settings.xaaIdp not configured)");
+  }
+  if (missing.length === 0) return undefined;
+  return `Error: --xaa requires: ${missing.join(', ')}`;
+}
+
+/**
+ * Check the mutually exclusive login flags.
+ *
+ * The target refuses `--console` together with `--claudeai` before anything
+ * else happens.
+ */
+export function validateLoginFlags(input: {
+  console?: boolean | undefined;
+  claudeai?: boolean | undefined;
+}): string | undefined {
+  if (input.console === true && input.claudeai === true) {
+    return 'Error: --console and --claudeai cannot be used together.';
+  }
+  return undefined;
+}
+
+/**
+ * Check a custom OAuth endpoint.
+ *
+ * The target admits exactly three, and refuses anything else with the message
+ * below.
+ */
+export function validateCustomOAuthUrl(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  const trimmed = url.replace(/\/+$/, '');
+  if (APPROVED_CUSTOM_OAUTH_URLS.includes(trimmed)) return undefined;
+  return 'CLAUDE_CODE_CUSTOM_OAUTH_URL is not an approved endpoint.';
+}
+
+/**
+ * Check the scopes that must accompany a refresh token.
+ *
+ * A refresh token is useless without the scopes it was issued with, so the
+ * target refuses to use one alone.
+ */
+export function validateRefreshTokenScopes(scopes: string | undefined): string | undefined {
+  if (scopes !== undefined && scopes.trim() !== '') return undefined;
+  return (
+    'CLAUDE_CODE_OAUTH_SCOPES is required when using CLAUDE_CODE_OAUTH_REFRESH_TOKEN.\n' +
+    'Set it to the space-separated scopes the refresh token was issued with\n' +
+    '(e.g. "user:inference" or "user:profile user:inference user:sessions:claude_code user:mcp_servers").'
+  );
+}
+
+/**
+ * Check a sign-in that came back from the authorization server.
+ *
+ * The target refuses a sign-in that cannot be used, and refuses it for one of
+ * three reasons, in this order: no inference access, no refresh token, or no
+ * expiry to refresh on time.
+ */
+export function validateSignInScopes(
+  scopes: readonly string[],
+  hasRefreshToken: boolean,
+  expiresAt: number | null | undefined,
+): string | undefined {
+  if (!scopes.includes('user:inference')) {
+    return "The organization didn't grant inference access to this sign-in, so PRRICODE can't use it.";
+  }
+  if (!hasRefreshToken) {
+    return 'The sign-in came back without a refresh token, so it would stop working within hours. Try again.';
+  }
+  if (expiresAt === null || expiresAt === undefined || !Number.isFinite(expiresAt)) {
+    return "The sign-in came back without the token's expiry, so it can't be refreshed on time. Try again.";
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// The pure helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalise an issuer the way the target keys its SEP-990 cache.
+ *
+ * **REA observed** — the target strips the trailing slashes from the path,
+ * lower-cases the host and re-serialises; when the issuer does not parse, it
+ * strips the trailing slashes from the raw text and leaves the rest alone.
+ */
+export function authIssuerKey(issuer: string): string {
+  try {
+    const url = new URL(issuer);
+    url.pathname = url.pathname.replace(/\/+$/, '');
+    url.host = url.host.toLowerCase();
+    return url.toString();
+  } catch {
+    return issuer.replace(/\/+$/, '');
+  }
+}
+
+/**
+ * Read the expiry out of an `id_token`, in milliseconds.
+ *
+ * Returns `undefined` when the token carries no usable `exp` — the caller then
+ * applies the fallback.
+ */
+export function idTokenExpiryMs(jwt: string): number | undefined {
+  const parts = jwt.split('.');
+  if (parts.length !== 3) return undefined;
+  try {
+    const payload: unknown = JSON.parse(
+      Buffer.from(parts[1] as string, 'base64url').toString('utf8'),
+    );
+    if (typeof payload !== 'object' || payload === null) return undefined;
+    const exp = (payload as { exp?: unknown }).exp;
+    return typeof exp === 'number' ? exp * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The expiry to cache an `id_token` under.
+ *
+ * The target falls back to **one hour** when the token carries no `exp`.
+ */
+export function idTokenCacheExpiryMs(jwt: string, now: number = Date.now()): number {
+  return idTokenExpiryMs(jwt) ?? now + 3_600_000;
+}
+
+/**
+ * The margin the target keeps before it treats a cached `id_token` as expired.
+ *
+ * A token with less than a minute left is treated as absent.
+ */
+export const ID_TOKEN_EXPIRY_MARGIN_MS = 60_000;
+
+/**
+ * Whether a cached `id_token` is still usable.
+ *
+ * The target returns `undefined` for a token with less than the margin left,
+ * so a near-expiry token is treated as absent.
+ */
+export function isCachedIdTokenUsable(
+  entry: { expiresAt: number; idToken: string } | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!entry) return false;
+  if (entry.expiresAt - now <= ID_TOKEN_EXPIRY_MARGIN_MS) return false;
+  return entry.idToken !== '';
+}

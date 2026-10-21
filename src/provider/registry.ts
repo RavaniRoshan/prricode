@@ -69,11 +69,15 @@ import {
   credentialStatus,
   currentKeychainBackend,
   isCredentialRef,
+  type AuthFlowKind,
+  type AuthFlowRefusal,
   type CredentialRef,
   type ResolvedCredential,
 } from './credentials.js';
+import { beginAuthFlow } from './credentials.js';
 
 export type { CredentialRef, ResolvedCredential } from './credentials.js';
+export type { AuthFlowKind, AuthFlowRefusal } from './credentials.js';
 export type { ProviderRoute } from './routes.js';
 
 /**
@@ -109,6 +113,19 @@ export interface Connection {
    * guard refuses to deliver the credential and names the host.
    */
   allowUntrustedEndpoint?: boolean;
+  /**
+   * The authentication flow that supplies this connection's credential.
+   *
+   * **REA observed**, as a *name*: the target has five distinct sign-in paths
+   * (`firstParty`, `local`, `mcp`, `sep990` and `hostDeviceOrg`), and a
+   * connection's credential comes from exactly one of them.
+   *
+   * **This implementation has no account and no login**, so a connection that
+   * names a flow is refused when its credential is resolved: the refusal names
+   * the capability the flow needed. A connection that names no flow is
+   * untouched — the credential still resolves exactly as it did before.
+   */
+  authFlow?: AuthFlowKind;
 }
 
 /**
@@ -408,6 +425,22 @@ export function assertCredentialDelivery(
 }
 
 /**
+ * The refusal a connection's authentication flow carries.
+ *
+ * A connection that names **no** flow is never refused: the credential model
+ * this implementation already had is untouched, and the refusal only ever
+ * applies to a connection that asked for a sign-in it cannot have.
+ *
+ * A connection that names a flow is refused, because this build has no OAuth
+ * client, no device flow, no OIDC provider and no token store. The refusal
+ * names the capability the flow needed.
+ */
+export function connectionAuthRefusal(conn: Connection): AuthFlowRefusal | undefined {
+  if (conn.authFlow === undefined) return undefined;
+  return beginAuthFlow(conn.authFlow);
+}
+
+/**
  * Resolve a credential reference to a value.
  *
  * **Module-private on purpose.** This is this implementation's single resolution point:
@@ -476,6 +509,13 @@ export async function resolveConnectionCredential(
   conn: Connection,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ResolvedCredential> {
+  // The authentication flow comes first: a connection that needs a sign-in
+  // this build cannot perform must not even look at the credential, and the
+  // refusal has to name the capability that is missing.
+  const refusal = connectionAuthRefusal(conn);
+  if (refusal) {
+    throw new Error(refusal.message);
+  }
   assertCredentialDelivery(conn, env);
   return resolveCredential(conn.credential, env);
 }
