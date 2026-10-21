@@ -406,6 +406,8 @@ The **corporate proxy** is a third thing again: the `HTTPS_PROXY` / `HTTP_PROXY`
 
 > **A discrepancy with the record.** `findings-untouched-surfaces.md` §G12 writes the field as `undeclaredAs503`. The target's own field name is **`undeliveredAs503`** (`chunk-z6a1zj5w.js:1 257 830`). This implementation uses the source's spelling, and the test pins it.
 
+**The catalogue was cross-checked with a parser, not with a pattern.** Two scripts read the target's own source with a brace/string-aware scanner — `verify-catalogue.py` for the `EGRESS_SERVICES` literal and `verify-hosts.py` for the `pr` module's constants — and diff the result against this implementation's own exported catalogue. The comparison covers every field of every endpoint (`host`, `origin`, `path`, `pathSuffix`, `exactPath`, `followRedirects`, `undeliveredAs503`, `cspDirective`, `platforms`, `firewallAlso`) and the service order, the toggle keys and the group labels. **The result is `PROBLEMS: 0` for both.** The scripts live beside the findings, in `/home/shiva/opt/reference-agent-rea/analysis/`.
+
 ## The rules that decide
 
 | rule | what the target does | where | what this implementation does |
