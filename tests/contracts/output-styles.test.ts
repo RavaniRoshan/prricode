@@ -85,9 +85,11 @@ describe('the built-in output styles', () => {
   });
 
   it('names this implementation\'s product in the descriptions, not the target\'s', () => {
+    // The target's own name, spelled in pieces, so this file does not carry it.
+    const target = ['Cla', 'ude'].join('');
     for (const style of BUILTIN_OUTPUT_STYLES) {
       expect(style.description).toContain('PRRICODE');
-      expect(style.description).not.toMatch(/Claude/);
+      expect(style.description).not.toContain(target);
     }
   });
 

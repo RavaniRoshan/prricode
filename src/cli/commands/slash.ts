@@ -803,7 +803,7 @@ function usageCommand(context: SlashCommandContext): CommandResult {
     ['Answers', `${answers}`],
     ['Tool calls', `${calls}`],
     ['Compactions', `${compactions}`],
-    ['Cost', 'not measured: this implementation does not price a session'],
+    ['Cost', 'not measured: this implementation\'s session transcript does not carry the token usage'],
     ['Plan usage', 'not shown: this implementation has no plan service'],
   ];
   const lines = renderTable(['Statistic', 'Value'], rows);

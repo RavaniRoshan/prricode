@@ -96,6 +96,13 @@
 import { randomUUID } from 'node:crypto';
 
 import type { AgentRuntime, TurnPermissionDenial, TurnUsage } from '../agent/loop.js';
+import { builtinCatalog } from '../provider/catalog.js';
+import {
+  catalogCostsOf,
+  costOf,
+  type ModelCostRecord,
+  type ModelUsage as ProviderModelUsage,
+} from '../provider/cost.js';
 import { toolResultId, type SessionEvent } from '../session/event.js';
 
 import type { HeadlessEvent } from './output.js';
@@ -295,6 +302,64 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The cost of a turn, and the per-model record the result document carries.
+ *
+ * The target prices the turn out of the **catalog**, and a model the catalog does
+ * not know leaves the cost **unmeasured** — the target records
+ * `tengu_unknown_model_cost` and says so.
+ */
+export function costOfTurn(
+  model: string,
+  usage: TurnUsage | undefined,
+): { totalCostUsd: number; modelUsage: Record<string, ModelUsage> } {
+  if (usage === undefined) return { totalCostUsd: 0, modelUsage: {} };
+
+  const costs = catalogCostsOf(builtinCatalog, model);
+  if (costs === undefined) return { totalCostUsd: 0, modelUsage: {} };
+
+  const providerUsage: ProviderModelUsage = {
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cache_creation_input_tokens: usage.cacheCreationInputTokens,
+    cache_read_input_tokens: usage.cacheReadInputTokens,
+  };
+  const cost = costOf(costs, providerUsage);
+
+  const record: ModelCostRecord = {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadInputTokens: usage.cacheReadInputTokens,
+    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+    webSearchRequests: 0,
+    costUSD: cost,
+    contextWindow: 0,
+    maxOutputTokens: 0,
+    canonicalModel: model,
+    provider: '',
+    costBasis: 'list',
+  };
+
+  return { totalCostUsd: cost, modelUsage: { [model]: toModelUsage(record) } };
+}
+
+/** The target's `modelUsage` member, from the ledger's record. */
+function toModelUsage(record: ModelCostRecord): ModelUsage {
+  return {
+    inputTokens: record.inputTokens,
+    outputTokens: record.outputTokens,
+    cacheReadInputTokens: record.cacheReadInputTokens,
+    cacheCreationInputTokens: record.cacheCreationInputTokens,
+    webSearchRequests: record.webSearchRequests,
+    costUSD: record.costUSD,
+    contextWindow: record.contextWindow,
+    maxOutputTokens: record.maxOutputTokens,
+    canonicalModel: record.canonicalModel,
+    provider: record.provider,
+    costBasis: record.costBasis,
+  };
+}
+
+/**
  * Build the result document.
  *
  * The **common** members, then the **variant** members, then `type`,
@@ -318,6 +383,10 @@ export function buildResultDocument(input: {
   numTurns: number;
   /** The token usage the run spent. */
   usage: HeadlessUsage;
+  /** The cost the run incurred, in US dollars. */
+  totalCostUsd?: number;
+  /** The usage, per model. */
+  modelUsage?: Record<string, ModelUsage>;
   /** The calls a permission rule refused. */
   permissionDenials: PermissionDenial[];
   /** The document's id. */
@@ -329,9 +398,9 @@ export function buildResultDocument(input: {
     num_turns: input.numTurns,
     stop_reason: input.stopReason,
     session_id: input.sessionId,
-    total_cost_usd: 0,
+    total_cost_usd: input.totalCostUsd ?? 0,
     usage: input.usage,
-    modelUsage: {} as Record<string, ModelUsage>,
+    modelUsage: input.modelUsage ?? ({} as Record<string, ModelUsage>),
     permission_denials: input.permissionDenials,
   };
   const variant = input.isError
@@ -413,6 +482,7 @@ export async function* runHeadless(options: HeadlessOptions): AsyncIterable<Head
     durationMs: Math.max(0, now() - startedAt),
     numTurns: turn.numTurns ?? 0,
     usage: usageOf(turn.usage),
+    ...costOfTurn(options.model, turn.usage),
     permissionDenials: denialsOf(turn.permissionDenials),
     uuid: randomUUID(),
   });
