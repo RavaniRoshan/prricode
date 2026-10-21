@@ -69,6 +69,7 @@ import { createSkillRegistry } from '../../extensions/skills/registry.js';
 import { RESTRICT_PERSONAL_CONFIG_ENV } from '../../permissions/decision.js';
 import { builtinCatalog, findModel, listModels } from '../../provider/catalog.js';
 import type { ProviderRegistry } from '../../provider/registry.js';
+import { REWIND_MISSING_CAPABILITY } from '../../session/checkpoints.js';
 import type { SessionEvent } from '../../session/event.js';
 import { resolveSessionTarget, type SessionStore } from '../../session/store.js';
 
@@ -498,7 +499,7 @@ const MISSING_CAPABILITIES: ReadonlyMap<string, string> = new Map([
   ['remote-env', 'cloud environment'],
   ['rename', 'title for the conversation'],
   ['restart', 'restart of the process'],
-  ['rewind', 'checkpoints'],
+  ['rewind', REWIND_MISSING_CAPABILITY],
   ['sandbox', 'sandbox configuration editor'],
   ['scroll-speed', 'terminal scroll-speed setting'],
   ['session', 'cloud session'],
