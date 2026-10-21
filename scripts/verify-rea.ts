@@ -39,7 +39,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -59,6 +60,10 @@ const SETTINGS_CHUNK = 'chunk-c9s0jh80.js';
 const ENVIRONMENT_CHUNK = 'chunk-68z1nb51.js';
 const PARSER_CHUNK = 'chunk-0y0ptpy9.js';
 const BROWSER_CHUNK = 'chunk-g8377zgj.js';
+const BROWSER_LIST_CHUNK = 'chunk-epgd1mgh.js';
+
+/** A counter, so two concurrent scans never share a temporary file. */
+let grepCounter = 0;
 
 /**
  * Run `grep` over the extracted tree and return its lines.
@@ -68,12 +73,31 @@ const BROWSER_CHUNK = 'chunk-g8377zgj.js';
  * happen there.
  */
 function grepTree(pattern: string): string[] {
-  const result = spawnSync('grep', ['-rhoHP', pattern, '.', '--', '*.js'], {
-    cwd: EXTRACTED,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  const text = result.stdout ?? '';
+  // `grep` writes to a **file**, and the file is read afterwards. Capturing its
+  // output through a pipe costs the parent a buffer of its own, and the parent
+  // is the process that has to stay small.
+  const target = path.join(os.tmpdir(), `prricode-grep-${process.pid}-${grepCounter++}.txt`);
+  const handle = openSync(target, 'w');
+  try {
+    spawnSync('grep', ['-rhoHP', pattern, '.'], {
+      cwd: EXTRACTED,
+      stdio: ['ignore', handle, 'ignore'],
+    });
+  } finally {
+    closeSync(handle);
+  }
+  let text = '';
+  try {
+    text = readFileSync(target, 'utf8');
+  } catch {
+    text = '';
+  } finally {
+    try {
+      unlinkSync(target);
+    } catch {
+      // The temporary file is already gone; nothing to clean up.
+    }
+  }
   if (text === '') return [];
   return text.split('\n').filter((line: string) => line !== '');
 }
@@ -95,14 +119,17 @@ function readChunk(base: string): string | undefined {
  */
 function deriveToolSites(): Map<string, string[]> {
   const sites = new Map<string, string[]>();
-  for (const line of grepTree('Qt\\(\\{[^}]{0,200}name:("[A-Za-z][A-Za-z0-9_-]*"|[A-Za-z_$][A-Za-z0-9_$]*)')) {
+  for (const line of grepTree('Qt\\(\\{.{0,400}?name:("[A-Za-z][A-Za-z0-9_-]*"|[A-Za-z_$][A-Za-z0-9_$]*)')) {
     const separator = line.indexOf(':');
     if (separator === -1) continue;
-    const file = line.slice(0, separator);
+    const file = line.slice(0, separator).replace(/^\.\//, '');
     const match = /name:("[A-Za-z][A-Za-z0-9_-]*"|[A-Za-z_$][A-Za-z0-9_$]*)/.exec(line.slice(separator));
     if (match === null) continue;
-    const expression = (match[1] ?? '').replace(/^"|"$/g, '');
-    if (expression === '') continue;
+    // The capture keeps its quotes: a **literal** name is quoted, and an
+    // identifier is not. Stripping the quotes first would lose the difference,
+    // and an identifier would be recorded as if it were a name.
+    const expression = match[1] ?? '';
+    if (expression === '' || expression === '""') continue;
     const list = sites.get(file) ?? [];
     list.push(expression);
     sites.set(file, list);
@@ -144,10 +171,10 @@ function collectValues(needed: ReadonlySet<string>): {
   if (needed.size === 0) return { values, imports };
   const alternation = [...needed].map((id) => id.replace(/\$/g, '\\$')).join('|');
 
-  for (const line of grepTree(`\\b(${alternation})="[^"]*"`)) {
+  for (const line of grepTree(`\\b(${alternation})="[^"]{0,200}"`)) {
     const separator = line.indexOf(':');
     if (separator === -1) continue;
-    const file = line.slice(0, separator);
+    const file = line.slice(0, separator).replace(/^\.\//, '');
     const match = /\b([A-Za-z_$][A-Za-z0-9_$]*)="([^"]*)"/.exec(line.slice(separator));
     if (match === null) continue;
     const chunk = values.get(file) ?? new Map<string, string>();
@@ -156,10 +183,10 @@ function collectValues(needed: ReadonlySet<string>): {
     values.set(file, chunk);
   }
 
-  for (const line of grepTree('import\\{[^}]*\\}from"\\./(chunk-[A-Za-z0-9]+\\.js)"')) {
+  for (const line of grepTree('import\\{[^}]{0,2000}\\}from"\\./(chunk-[A-Za-z0-9]+\\.js)"')) {
     const separator = line.indexOf(':');
     if (separator === -1) continue;
-    const file = line.slice(0, separator);
+    const file = line.slice(0, separator).replace(/^\.\//, '');
     const match = /import\{([^}]*)\}from"\.\/(chunk-[A-Za-z0-9]+\.js)"/.exec(line.slice(separator));
     if (match === null) continue;
     const chunk = imports.get(file) ?? new Map<string, [string, string]>();
@@ -206,8 +233,8 @@ function deriveTools(
   const names = new Set<string>();
   for (const [chunk, expressions] of sites) {
     for (const expression of expressions) {
-      if (/^[A-Za-z][A-Za-z0-9_-]*$/.test(expression)) {
-        names.add(expression);
+      if (expression.startsWith('"')) {
+        names.add(expression.replace(/^"|"$/g, ''));
         continue;
       }
       const value = resolve(values, imports, chunk, expression);
@@ -335,21 +362,35 @@ function deriveHookEvents(): Set<string> {
  */
 function deriveBrowserTools(): Set<string> {
   const names = new Set<string>();
-  const text = readChunk(BROWSER_CHUNK);
-  if (text === undefined) return names;
-  const at = text.indexOf('yNe=[{name:');
-  if (at === -1) return names;
-  const open = text.indexOf('[', at);
-  for (const expression of nameExpressionsOfObjectArray(text, open)) {
-    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(expression)) {
-      const resolved = new RegExp(
-        `(?:^|[^A-Za-z0-9_$])${expression.replace(/\$/g, '\\$')}\\s*=\\s*"([^"]+)"`,
-      ).exec(text);
-      if (resolved === null) continue;
-      names.add(resolved[1] ?? '');
-      continue;
+  // The target ships the bundle's names **twice**: once as a list of strings
+  // in one chunk, and once as a list of tool objects in another. The string
+  // list is read here, because a chunk of minified tool objects does not
+  // balance under a brace scanner and a derivation that cannot be trusted is
+  // worse than none.
+  const listed = readChunk(BROWSER_LIST_CHUNK);
+  if (listed !== undefined) {
+    for (const collection of collectionsIn(listed, 10)) {
+      const members = collection.members;
+      if (!members.includes('read_page') || !members.includes('navigate')) continue;
+      for (const member of members) names.add(member);
     }
-    names.add(expression);
+  }
+  // The bundle's **first** tool is named by a minified identifier, and it is
+  // resolved against the chunk that uses it.
+  const bundle = readChunk(BROWSER_CHUNK);
+  if (bundle !== undefined) {
+    const at = bundle.indexOf('yNe=[{name:');
+    if (at !== -1) {
+      const opening = bundle.slice(at, at + 400);
+      const match = /name:([A-Za-z_$][A-Za-z0-9_$]*)/.exec(opening);
+      const identifier = match?.[1];
+      if (identifier !== undefined) {
+        const resolved = new RegExp(
+          `(?:^|[^A-Za-z0-9_$])${identifier.replace(/\$/g, '\\$')}\\s*=\\s*"([^"]+)"`,
+        ).exec(bundle);
+        if (resolved !== null) names.add(resolved[1] ?? '');
+      }
+    }
   }
   return names;
 }
@@ -416,21 +457,51 @@ function main(): number {
     return 0;
   }
 
+  const profile = process.env.PRRICODE_PROFILE === '1';
+  const mark = (label: string): void => {
+    if (!profile) return;
+    const usage = process.memoryUsage();
+    process.stdout.write(
+      `  ${label}: rss ${(usage.rss / 1048576).toFixed(0)} MB, heap ${(usage.heapUsed / 1048576).toFixed(0)} MB\n`,
+    );
+  };
   const sites = deriveToolSites();
+  mark('the tool sites');
   const needed = new Set<string>();
   for (const expressions of sites.values()) {
     for (const expression of expressions) {
-      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(expression)) needed.add(expression);
+      if (!expression.startsWith('"') && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(expression)) {
+        needed.add(expression);
+      }
     }
   }
+  mark('the needed identifiers');
   const { values, imports } = collectValues(needed);
+  mark('the values and the imports');
   const tools = deriveTools(sites, values, imports);
+  // The target's own **tool-set arrays** — the permission layer's lists — name
+  // tools the factory does not define at that site, and a run of tool-shaped
+  // names is a tool set when most of its members are already known.
+  for (const run of grepTree('"[A-Z][A-Za-z0-9]{2,29}"(,"[A-Z][A-Za-z0-9]{2,29}"){2,}')) {
+    const members = [...run.matchAll(/"([A-Z][A-Za-z0-9]{2,29})"/g)].map((m) => m[1] ?? '');
+    if (members.length < 3) continue;
+    const known = members.filter((member) => tools.has(member)).length;
+    if (known < 2) continue;
+    for (const member of members) tools.add(member);
+  }
+  mark('the tools');
   const browserTools = deriveBrowserTools();
+  mark('the browser tools');
   const telemetry = deriveTelemetry();
+  mark('the telemetry');
   const environment = deriveEnvironment(deriveDirectEnvironment());
+  mark('the environment');
   const settings = deriveSettings();
+  mark('the settings');
   const hookEvents = deriveHookEvents();
+  mark('the hook events');
   const flagSets = deriveFlagSets();
+  mark('the flag sets');
 
   const sections: { heading: string; note: string; entries: string[] }[] = [
     {

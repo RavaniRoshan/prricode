@@ -813,12 +813,19 @@ The record is `/home/shiva/opt/reference-agent-rea/analysis/findings-untouched-s
 **The inventory is now generated and checked.** `docs/reverse-engineering/SURFACE-INVENTORY.md`
 is produced by `scripts/verify-rea.ts --write` from the target's own source, and
 `scripts/verify-rea.ts` re-derives it and **fails** when the target has an entry the
-record does not name. It currently re-derives the **tool registry** (88 names), the
-**telemetry vocabulary** (3 084 events), the **environment-variable surface** (1 273
-names), the **settings document** (183 keys), the **hook event matrix** (33 events) and
-the **command-line flag vocabulary** — in its **seven** sets: 85 value-taking, 45 boolean,
-14 optional-value, 11 repeatable, 10 command tokens, 6 session subcommands and 3 carve-out
-flags — and all of them are fully accounted for.
+record does not name. It currently re-derives the **tool registry** (85 names), the **browser tool bundle**
+(22 names), the **telemetry vocabulary** (3 554 events), the **environment-variable
+surface** (1 274 names), the **settings document** (183 keys), the **hook event matrix**
+(33 events) and the **command-line flag vocabulary** — in its **seven** sets: 85
+value-taking, 45 boolean, 14 optional-value, 11 repeatable, 10 command tokens, 6 session
+subcommands and 3 carve-out flags — and all of them are fully accounted for.
+
+**Two counts moved when the derivation was made faithful.** The telemetry vocabulary is
+**3 554** events and not 3 084: the earlier figure came from a scan that stopped at the
+first quote, and a faithful literal scan finds every event the target emits. The tool
+registry is **85** and not 88: the three extra names the earlier figure carried were
+names the target's *tool-set arrays* list but its factory does not define at that site,
+and a registry is a record of definitions.
 
 The hook-event list is the fourth surface re-derived **after** its implementation was
 written, and it matched **exactly**: the same 33 events, with the target's own

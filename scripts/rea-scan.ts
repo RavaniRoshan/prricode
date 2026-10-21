@@ -69,7 +69,10 @@ export function endOfObject(text: string, at: number): number {
   if (text[at] !== '{') return -1;
   let depth = 0;
   let index = at;
-  while (index < text.length) {
+  // A **bound**: a chunk whose braces do not balance must not cost an
+  // unbounded scan, and the bound is generous enough for any real literal.
+  const limit = Math.min(text.length, at + 8 * 1024 * 1024);
+  while (index < limit) {
     const character = text[index];
     if (character === '"' || character === "'" || character === '`') {
       index = endOfString(text, index);
@@ -351,7 +354,8 @@ export function elementsOfArray(text: string, at: number): string[] {
   let depth = 0;
   let index = at;
   let end = -1;
-  while (index < text.length) {
+  const limit = Math.min(text.length, at + 8 * 1024 * 1024);
+  while (index < limit) {
     const character = text[index];
     if (character === '"' || character === "'" || character === '`') {
       index = endOfString(text, index);
@@ -443,6 +447,9 @@ export function nameExpressionsOfObjectArray(text: string, at: number): string[]
     }
     if (character === '{') {
       const literalEnd = endOfObject(text, index);
+      // An object that does not balance would send the index backwards, and
+      // the scan would run from the beginning for ever.
+      if (literalEnd === -1) break;
       const slice = text.slice(index, literalEnd);
       const literal = /[{,]\s*name\s*:\s*"([^"]+)"/.exec(slice);
       if (literal !== null) {
