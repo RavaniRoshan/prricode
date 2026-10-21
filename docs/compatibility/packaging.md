@@ -14,6 +14,7 @@
 |---|---|---|
 | `dist/prricode` | **one** executable: the bundled CLI **and** the runtime it needs | project requirement |
 | `<configDir>/` | the configuration directory: settings, session transcripts, the multi-provider manager's state | `REA observed` (the storage root is `~/.claude`, audit §2.6) |
+| **no native addon** | the artifact carries **no** `.node` file; the two surfaces that would use one refuse and name the capability they needed | project requirement — see [the native addons](#the-native-addons) |
 
 The executable carries its **own runtime**, so it needs **neither** the host's Node **nor** the host's `node_modules`. The build emits **one file** — the executable — and the test asserts both halves of the claim:
 
@@ -57,6 +58,44 @@ The previous artifact **with the same name** is removed **before** the build, so
 The plan's file list does not name an entry script, and **none existed**: `src/cli/command.ts` exports `runCommand`, but nothing in the repository called it, and a compiled binary needs a file Bun can turn into an executable. `scripts/entry.ts` is that file, and it is **thin** — it reads the command line, resolves the configuration directory, and leaves the process with the command's exit code. Every other behaviour belongs to `src/`.
 
 The file is **also a module**: its functions are exported and the packaging test imports them. The CLI runs only when the file is the **program** — `import.meta.main` is true for the module the process was started with, under Bun and under Node, and false for a module that was imported — so importing the file runs **nothing**.
+
+## The native addons
+
+**The target ships two native addons. This implementation ships none.**
+
+The target's package carries **two** platform-specific native objects beside its
+bundle — a **clipboard** addon and an **audio capture** addon — and its loader
+finds them there. The artifact this project builds is **one file** and carries
+neither, so the two surfaces that would use them **refuse**, each naming the
+capability it would have needed.
+
+| | The target | This implementation |
+|---|---|---|
+| The native objects | **two** — `clipboard-napi.node` (1 072 864 B) and `audio-capture.node` (492 368 B), both `ELF 64-bit LSB shared object, x86-64`, stripped | **none** |
+| How they are found | `import.meta.require` of the file beside the bundle, then **four** vendored per-architecture paths; the attempt is **cached, including a failure**, and the loader answers `null` rather than throwing | the same loader, the same candidate order, the same cached attempt — and it answers `null` on every machine, because there is nothing to find |
+| The clipboard addon's exports | **two** — `setLinuxClipboardText` (synchronous, answers a boolean) and `getLinuxClipboardText` (asynchronous, answers a promise) | the two names are carried, and the operations that would call them **refuse** |
+| The audio addon's exports | **eight** — `isPlaying`, `isRecording`, `stopPlayback`, `startPlayback`, `stopRecording`, `startRecording`, `writePlaybackData`, `microphoneAuthorizationStatus` | the eight names are carried; the operations **refuse**, and the queries keep the target's own absent-values (`false`, and **`0`** for the authorization status) |
+| The build | the package carries the two files | the build **fails** when a `.node` file appears beside the artifact |
+
+**The mechanism differs, and the report records it separately from the
+behaviour.** The target's clipboard is a Rust `napi-rs` addon over
+`wl-clipboard-rs` and `x11rb`; its audio capture is a Rust `napi-rs` addon over
+ALSA. Nothing in this repository pretends to be either, and nothing shells out
+to a clipboard or an audio binary to imitate one.
+
+**The gaps this leaves, named.** The target's own fallbacks are **not**
+implemented here, and the surface says so rather than pretending:
+
+| The target's fallback | What it is | This implementation |
+|---|---|---|
+| `wl-copy`, `xclip`, `xsel` | the commands the target writes and reads the clipboard with when the addon is not the mechanism | **not implemented** — the clipboard write and the clipboard read refuse |
+| the OSC 52 terminal copy | the escape sequence the target emits so the **terminal's** clipboard holds the text | **not implemented** |
+| `arecord`, and SoX's `rec` | the recorders the target falls back to when the native audio addon is absent | **not implemented** — the native recording refuses |
+| the voice stream | the websocket the target transcribes the recording over | **not implemented** — a different surface, and out of this milestone's scope |
+
+The **conformance table** for the surface itself is
+[`extension-surface.md`](extension-surface.md); the **evidence** is
+`/home/shiva/opt/reference-agent-rea/analysis/findings-native-addons.md`.
 
 ## The install path
 
@@ -118,28 +157,36 @@ The plan's Step 3 requires every `node:` API the code uses to be **re-validated 
 
 ### The modules `src/` imports
 
-79 import statements across 39 files. **Ten** modules, and **all ten** are supported:
+104 import statements across 55 files. **Eleven** modules, and **all eleven** are supported:
 
 | Module | Imports | The members `src/` uses | Bun `1.4.3` |
 |---|---|---|---|
-| `node:path` | 24 | `join`, `resolve`, `basename`, `dirname`, `sep`, `relative`, `normalize`, `isAbsolute`, `parse` | supported |
-| `node:fs` | 21 | `chmodSync`, `closeSync`, `constants`, `createReadStream`, `existsSync`, `lstatSync`, `mkdirSync`, `mkdtempSync`, `openSync`, `readFileSync`, `readdirSync`, `readlinkSync`, `realpathSync`, `rmSync`, `rmdirSync`, `statSync`, `unlinkSync`, `writeFileSync` | supported |
-| `node:fs/promises` | 11 | `access`, `appendFile`, `mkdir`, `readFile`, `readdir`, `stat`, `writeFile` | supported |
-| `node:crypto` | 9 | `createHash`, `createHmac`, `randomBytes`, `randomUUID` | supported |
-| `node:os` | 5 | `homedir`, `tmpdir` | supported |
-| `node:child_process` | 5 | `execFile`, `spawn`, `spawnSync` (and the `ChildProcess` / `SpawnOptions` types) | supported |
+| `node:path` | 33 | `join`, `resolve`, `basename`, `dirname`, `sep`, `relative`, `normalize`, `isAbsolute`, `parse`, `extname` (and the default import) | supported |
+| `node:fs` | 21 | `chmodSync`, `closeSync`, `constants`, `createReadStream`, `existsSync`, `lstatSync`, `mkdirSync`, `mkdtempSync`, `openSync`, `readFileSync`, `readdirSync`, `readlinkSync`, `realpathSync`, `rmSync`, `rmdirSync`, `statSync`, `unlinkSync`, `writeFileSync` (and the `Dirent` / `Stats` types) | supported |
+| `node:fs/promises` | 16 | `access`, `appendFile`, `mkdir`, `readFile`, `readdir`, `stat`, `writeFile` | supported |
+| `node:crypto` | 13 | `createHash`, `createHmac`, `randomBytes`, `randomUUID` | supported |
+| `node:os` | 8 | `homedir`, `tmpdir` (and the default import) | supported |
+| `node:child_process` | 7 | `execFile`, `spawn`, `spawnSync` (and the `ChildProcess` / `SpawnOptions` types) | supported |
+| `node:net` | 2 | `isIP` (and the default import) | supported |
+| `node:module` | 1 | `createRequire` — the native-addon loader's `require` | supported |
 | `node:util` | 1 | `promisify` | supported |
-| `node:net` | 1 | `createServer` | supported |
-| `node:http` | 1 | `createServer` | supported |
+| `node:http` | 1 | the default import | supported |
 | `node:dns/promises` | 1 | `lookup` | supported |
 
 The build scripts (`scripts/build.ts`, `scripts/entry.ts`) add `node:url` (`fileURLToPath`) on top of `node:child_process`, `node:fs` and `node:path`. `node:url` is supported.
+
+> **The counts are a snapshot of the tree at this milestone.** They were last
+> recounted when the native-addon milestone added `node:module` — the loader's
+> `createRequire` — and every row above was **re-verified under Bun `1.4.3`**
+> at that moment: every module was imported, every member `src/` uses was
+> looked up, and the four modules `src/` imports through their **default**
+> export were looked up through it. Nothing was missing.
 
 ### The modules the plan names, and the ones `src/` does not use
 
 Every one of these **imports cleanly under Bun `1.4.3`**, and none of them is imported by `src/`:
 
-`node:https` · `node:url` · `node:zlib` · `node:worker_threads` · `node:readline` · `node:stream` · `node:tty` · `node:assert` · `node:events` · `node:buffer` · `node:process` · `node:timers` · `node:module`
+`node:https` · `node:url` · `node:zlib` · `node:worker_threads` · `node:readline` · `node:stream` · `node:tty` · `node:assert` · `node:events` · `node:buffer` · `node:process` · `node:timers`
 
 **No module `src/` imports is unsupported by Bun, and no module the plan names is unsupported.** The audit found nothing to change.
 
@@ -183,6 +230,7 @@ This implementation therefore imports **no** SQLite API at all, and the packaged
 | The **first-run report** | names the configuration directory on the first run | the target records no first-run behaviour; the report is this implementation's |
 | The **fake-provider seam** (`--fake-provider <url>`) | points a packaged run at a **loopback** fake provider | a packaging convenience, not a product feature. It is **loopback-only** — a value naming any other host is **refused** with exit code `2` — and it **resolves no credential**, so a request that leaves through it carries no `x-api-key` and no `authorization` header. The test asserts both. It is an **option** and not an environment variable: an ambient variable is something a caller may set without meaning to, and this one rewrites where the provider request goes. It is a **packaging** option: the packaging entry takes it out of the command line **before** this implementation's argument parser sees it, so this implementation's own `--help` does not list it. |
 | The **packaging path** (`bun build --compile`) | one self-contained executable | the target ships as an npm package |
+| The **absence of a native addon** | the artifact carries no `.node` file, and the two surfaces that would use one refuse | the target's package carries two native objects; a native module is a **mechanism** this project does not ship. The **shapes** are reproduced — the inventory, the loader, the candidate paths, the own-property guard — and the operations refuse, naming the capability they needed. |
 
 **One wording, two surfaces.** The two surfaces that label the extension carry **the same sentence**. The `--help` says *"The multi-provider manager is a project extension, not part of the reference agent. It is reached through the /provider command."* and the manager's own output says *"The multi-provider manager is a project extension, not part of the reference agent."* The first sentence comes from the shared `PROVIDER_EXTENSION_NOTICE` in `src/cli/commands/shared.ts` on **both** surfaces, so the claim itself cannot drift; the trailing sentence — *"It is reached through the /provider command."* — is a literal in the help, so that part still can. The shared constant is `PROVIDER_EXTENSION_NOTICE` in `src/cli/commands/shared.ts`, and the packaged `--help` in `src/cli/command.ts` imports it, so both surfaces carry the identical first sentence.
 
@@ -196,6 +244,7 @@ This implementation therefore imports **no** SQLite API at all, and the packaged
 - **The interactive terminal UI inside the packaged binary.** The UI module (`src/ui/app.ts`) exists, but `runCommand` does not call it, so a packaged run without `--print` reports that the interactive terminal UI is not implemented. This is a `src/` matter, not a packaging one.
 - **The sandbox inside the packaged binary.** The sandbox code is bundled (the artifact carries the launcher, the Landlock status and the bubblewrap backend), but the sandbox was **not exercised by an automated test** through the packaged binary in this milestone — it *is* exercisable, and a manual run drives a real `tool_use` → `Bash` → bubblewrap → stdout round trip — it is covered by `tests/security/sandbox.test.ts` against the library.
 - **The MCP transport inside the packaged binary.** It is bundled; it was not exercised through the packaged binary.
+- **The native addons inside the packaged binary.** There are none: the artifact carries no `.node` file, and the build fails if one appears beside it. The **loader** is bundled and runs — it walks the target's candidate paths and answers `null` — but there is nothing for it to find, and the operations that would use an addon refuse rather than reach for a stand-in.
 
 ## How to reproduce
 

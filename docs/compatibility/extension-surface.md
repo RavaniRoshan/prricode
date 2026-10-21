@@ -1399,3 +1399,123 @@ Where the target's own fields are present they win; the port comes from the
 | Asking an IDE for diagnostics **refuses**, and the refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses to ask an IDE for diagnostics, and names the capability" |
 | Installing the extension **refuses**, and the refusal names the capability it needed and the IDE it was about | **implementation choice** (the refusal; the capability is REA observed) | F-33 | same file — "refuses to install the extension, and names the capability" |
 | The IDE bridge's **action validation** and the default transport's **loopback refusal** remain this implementation's own | **implementation choice** | F-33 | `tests/contracts/extensions.test.ts` — the IDE action and IDE transport tests |
+
+## The native addons (CC-039)
+
+The target's payload holds **exactly two** native objects, and the coverage
+audit never mentions either of them: they are separate ELF files, so the
+whole-image native inventory that timed out (row `F-36`) would not have
+covered them either.
+
+**Evidence.** The extraction manifest's own `kind` field, parsed as JSON —
+`extraction-manifest-patched.json` → `files[]` — gives **2 686** payload files:
+2 433 `JS (bun)`, 143 `data`, 79 `markdown`, 24 `text`, 5 `JavaScript` and
+**2 `ELF x86-64`**. The two are `clipboard-napi.node` (1 072 864 B,
+`sha256 4881da9229654a04bdec176cb70c818b872dd6bc74aaa881f021dbe20cdcbea7`)
+and `audio-capture.node` (492 368 B,
+`sha256 4bf312cbbc81f577d5ed0bcdcba803bfaa219c05ac4a1cca729ec81628561e88`).
+The full record, every claim with a file and a byte offset, is
+`/home/shiva/opt/reference-agent-rea/analysis/findings-native-addons.md`.
+
+**The loaders.** Both addons are loaded by a lazy `import.meta.require` of the
+file beside the bundle, with **four** vendored per-architecture paths behind
+it, and the **attempt is cached — including a failure** — so a machine with no
+addon never tries again. The loader **never throws**: it answers `null`.
+
+**The exports.** The clipboard addon carries **two** — `setLinuxClipboardText`
+(synchronous, answers a boolean) and `getLinuxClipboardText` (asynchronous,
+answers a promise). The audio addon carries **eight** — `isPlaying`,
+`isRecording`, `stopPlayback`, `startPlayback`, `stopRecording`,
+`startRecording`, `writePlaybackData` and `microphoneAuthorizationStatus`, in
+that registration order. Both are Rust `napi-rs` 2.16.17 addons; the
+clipboard one drives `wl-clipboard-rs` and `x11rb`, the audio one drives
+ALSA.
+
+### The surface, part by part
+
+| The part of the surface | What the target has | Where it came from | What this implementation does | |
+|---|---|---|---|---|
+| the inventory | **two** native addons — a clipboard and an audio capture — with their file names, their sizes and their digests | `extraction-manifest-patched.json` → `files[]`, `kind: "ELF x86-64"` | the same two, as data | **implemented** |
+| the export sets | **two** and **eight** names, in the target's own registration order | `clipboard-napi.node:73781`/`:74390`; `audio-capture.node:42291`, `:42421`, `:43811`, `:47315`, `:47760`, `:47774`, `:48813`, `:49294` | the same names, as data | **implemented** |
+| the loader | the packaged copy, then **four** vendored paths; the attempt is cached, including a failure; `null` rather than a throw | `chunk-v57qk004.js:653`, `chunk-vjnh31ch.js:704`, `chunk-yp10c36w.js:1994` | the same loader, the same order, the same cached attempt — and `null` on every machine, because there is nothing to find | **implemented** |
+| the export lookup | the target reads an export off the loaded object | `chunk-yp10c36w.js:6555`, `:8259` | the **own-property** guard: an export the object only inherits is not the addon's export | **implemented** (the guard) |
+| the clipboard probe | `wl-copy` → `xclip` → `xsel` → **`addon`** → `none`, and the addon is **demoted after one failed write** | `chunk-yp10c36w.js:3738`, `:4115` | the same five-way decision, the same demotion rule | **implemented** |
+| the clipboard status | `not_linux` \| `not_probed` \| the tool's name \| `none` | `chunk-yp10c36w.js:4699` | the same four answers | **implemented** |
+| the clipboard write | the target writes through the mechanism the probe chose, and the addon write answers a boolean | `chunk-yp10c36w.js:6555` | **refuses** — names *a native clipboard addon* | **refused** |
+| the clipboard read | the target reads through the mechanism the probe chose, strips the trailing newline, and answers `null` when there is no display | `chunk-yp10c36w.js:8259` | **refuses** — names *a native clipboard addon* | **refused** |
+| the audio wrapper | **nine** functions, and each has the target's own answer when the addon is absent: `false` for the three queries, nothing for the two stops, and **`0`** for the microphone authorization status | `chunk-vjnh31ch.js:1048`–`:1505` | the same nine, and the same absent-values | **implemented** |
+| the audio recording | the target calls `startRecording` with **two** callbacks and answers a boolean | `chunk-mhdmymcx.js:5292` | **refuses** — names *a native audio capture addon* | **refused** |
+| the microphone permission rule | **no native addon → the request is granted**; an addon that starts a recording → granted; an addon that does not → refused | `chunk-mhdmymcx.js:3653` | the same rule, plus this implementation's own first question: **no capture path at all → refused**, and the refusal names the capability | **implemented** |
+| the `/voice` option parsing | `hold` \| `tap` \| `off`; the empty argument means **no mode**; anything else is invalid; the rejection quotes the **trimmed** argument | `chunk-v47hn89x.js:3865`, `:4371` | the same parser and the same message | **implemented** |
+| the packaging | the target's package carries the two `.node` files | the manifest, as above | the artifact carries **none**, and the build **fails** when a `.node` file appears beside it | **implemented** (the check) |
+
+### The honest boundary
+
+**This implementation ships no native addon**, and nothing in it pretends
+otherwise. A native module is a **mechanism** difference — the target's
+clipboard is a Rust addon over Wayland and X11, and its audio capture is a
+Rust addon over ALSA — and the report records the mechanism separately from
+the behaviour.
+
+The **shapes** are reproduced and the **operations refuse**:
+
+- the inventory, the loader, the candidate paths, the cached attempt, the
+  own-property guard, the clipboard probe and its status vocabulary, the audio
+  wrapper's nine operations and their absent-values, the microphone permission
+  rule and the `/voice` option parsing are **the target's own**;
+- the operations that would need an addon **refuse**, and each refusal names
+  the capability it would have needed — *a native clipboard addon* and *a native
+  audio capture addon*;
+- **nothing shells out** to a clipboard or an audio binary to stand in for an
+  addon, and no stub pretends to be one.
+
+**The target's own fallbacks are not implemented, and the surface says so
+rather than pretending:**
+
+| The target's fallback | What it is | Here |
+|---|---|---|
+| `wl-copy`, `xclip`, `xsel` | the commands the target writes and reads the clipboard with when the addon is not the mechanism | **not implemented** |
+| the OSC 52 terminal copy | the escape sequence the target emits so the **terminal's** clipboard holds the text | **not implemented** |
+| `arecord`, and SoX's `rec` | the recorders the target falls back to when the native audio addon is absent | **not implemented** |
+| the voice stream | the websocket the target transcribes the recording over | **not implemented** — a different surface |
+| the voice availability probes | `checkVoiceDependencies` and `checkRecordingAvailability`, with the target's seven reasons | **not implemented** — they belong to the voice surface, and without a recorder they could only report a host diagnosis this implementation has no use for |
+
+### The clone-choice labels this milestone adds
+
+| Label | What it means | Which entries |
+|---|---|---|
+| **implemented** | the shape is read, validated and reproduced — the target's own names, values, rules and orders | the **two** addons of the inventory, their file names, sizes and digests; the **two** and **eight** export names, in the target's registration order; the loader, its candidate order and its cached attempt; the own-property guard on an export; the clipboard probe's five-way decision and the demotion rule; the clipboard status vocabulary; the audio wrapper's nine operations and their absent-values; the microphone permission rule; the `/voice` option parsing and its message; the packaging check |
+| **refused** | the operation is understood, and the refusal names the **capability** it needs and this implementation does not have | the clipboard write; the clipboard read; the native audio recording; the native audio playback |
+
+The refusals are **return values**, not exceptions: a caller reads the
+capability and knows what would have to exist for the operation to run.
+
+### Conformance table
+
+**The matrix row is not assigned yet.** The feature matrix and the
+compatibility report are the orchestrator's, and the surface is **not** a row of
+`feature-matrix.md` at the time of writing. The rows below therefore name
+**F-36** — the row that carries the target's **native inventory** — and the
+orchestrator may re-file the surface under a row of its own when it
+re-measures. The native **addons** are the part of that inventory this
+milestone establishes; the **whole-image** inventory stays `unknown`, because
+three whole-image attempts timed out (330 s, 360 s, 900 s) and the audit says
+it is not closable by effort. The measured outcome is in
+[`results.md`](results.md).
+
+| Claim | Evidence class | Matrix row | Pinned by |
+| --- | --- | --- | --- |
+| The target's payload holds exactly **two** native objects, and the manifest's `kind` field says so | **REA observed** | F-36 | `tests/contracts/native-addons.test.ts` — "names exactly the two addons the target ships" |
+| The clipboard addon carries exactly **two** exports, and the audio addon exactly **eight**, in the target's registration order | **REA observed** | F-36 | same file — "carries the clipboard addon own two exports", "carries the audio addon own eight exports, in the registration order" |
+| The candidate paths are the packaged copy and **four** vendored paths, in the target's order, and the `-musl` variant is added only on Linux | **REA observed** | F-36 | same file — "offers the packaged copy first and the vendored paths in the target order", "drops the musl variant away from linux, as the target does" |
+| The attempt is **cached, including a failure**, and the loader never throws | **REA observed** | F-36 | same file — "caches the attempt, so a failure is not retried", "returns null when the addon is not there, and never throws" |
+| An export is read only when the loaded object **owns** it | **REA observed** (the target reads the export) + **implementation choice** (the guard) | F-36 | same file — "refuses an export the object only inherits" |
+| The clipboard probe is a five-way decision, and the addon is demoted after one failed write | **REA observed** | F-36 | same file — "prefers wl-copy when a wayland display and the command are there", "prefers xclip over xsel, and needs a display for either", "falls to the addon when the external tools are not there", "demotes the addon after one failed write", "keeps the addon after a successful write" |
+| The clipboard status is `not_linux` \| `not_probed` \| the tool's name \| `none` | **REA observed** | F-36 | same file — "reports the four statuses the target reports" |
+| The clipboard write and the clipboard read **refuse**, and each refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-36 | same file — "refuses the write and names the capability it would need", "refuses the read and names the capability it would need" |
+| The audio wrapper's nine operations keep the target's own absent-values, and the microphone authorization status is **`0`** | **REA observed** | F-36 | same file — "returns the target own zero for the microphone authorization status", "reports that the native audio addon is not available" |
+| The audio recording and the audio playback **refuse**, and each refusal names the capability it needed | **implementation choice** (the refusal; the capability is REA observed) | F-36 | same file — "refuses every operation that needs the addon", "names the capability the recording refuses for" |
+| The microphone permission rule is the target's own: **no native addon → granted**, a recording that started → granted, a recording that did not → refused | **REA observed** | F-36 | same file — "grants when there is no native microphone to authorize", "grants when the native recording started", "refuses when the native recording did not start" |
+| The rule asks this implementation's own first question — **no capture path at all → refused** | **implementation choice** | F-36 | same file — "refuses when there is no capture path at all" |
+| The `/voice` option parsing is the target's own — `hold` \| `tap` \| `off`, the empty argument means no mode, and the rejection quotes the trimmed argument | **REA observed** | F-36 | same file — "accepts the three modes the target accepts", "trims and lower-cases the argument", "reads an empty argument as no mode at all", "rejects anything else", "uses the target own rejection message" |
+| The repository and the packaged artifact ship **no** native addon, and the build fails when one appears | **implementation choice** | F-36 | same file — "ships no native addon in this repository"; `scripts/build.ts` — `nativeAddonFilesIn` |
