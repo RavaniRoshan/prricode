@@ -2350,14 +2350,54 @@ not act on.
 
 **Files:** Create the browser tool modules; Modify `src/tools/registry.ts`; Modify the permission rules; Modify the tests; Modify `docs/compatibility/extension-surface.md`.
 
-- [ ] **Step 1: Read the surface from the source** and record it — the names, the shape,
+**Result:** the browser surface is established and carried. The target's **second** tool
+bundle — **22** tools — with the target's own names, descriptions, input schemas, titles,
+result caps, the two tool groups, the **safe subset** (a *different* set from the groups:
+five always-safe tools and three more that are safe unless they change something), the
+timeouts and the transport, plus the `OfferChromeSetup` tool.
+
+**Every tool refuses, and names the capability it needs.** There is no browser here — no
+extension, no native host, no socket, no bridge, no tab group, no setup card — so a tool
+that pretended to drive one would be a lie told to the model. Each refusal is typed
+(`capabilityUnavailable`) and names the capability: *a connected browser extension*, or
+*the browser extension account connection* for the three selection tools.
+
+**The record was wrong, and the source settled it.** The tool is **`javascript_tool`**,
+not `javascript_exec` — the latter is the **value of the tool's own `action` argument**,
+and two of the target's own modules agree on `javascript_tool`. The record's offsets were
+approximate but pointed at the right code, and one of its placements was wrong: the list it
+cited is the target's **always-allow** list, and **no** browser tool is in it — the browser
+tools are excluded from every blanket allow, which is the opposite of what the placement
+implied.
+
+**Two things the record did not carry, and they are what make the groups mean something:**
+the **safe subset** predicate, and the **transport** — a local Unix socket to the browser's
+native-messaging host, a length-prefixed JSON frame after a local pairing handshake, or a
+WebSocket bridge.
+
+**One thing the target itself gets wrong, recorded rather than resolved:** its **own two
+implementations of the same hook disagree** — one says a whole-tool allow is always
+ignored, the other says only for the safe tools.
+
+**Four of the target's own rules are not implemented**, and each is named with its reason:
+the non-web-URL denial, the unresolvable-tab denial, the domain rule and the blanket-allow
+exclusion each judge a site or a tab, and this implementation has neither.
+
+**The embedded second implementation** — the `.mjs` asset stack — is recorded in the
+findings and the conformance document. It is not vendored: a second browser implementation
+nobody can reach is not an implementation.
+
+**Verified.** Twenty new tests, and the suite is green.
+
+
+- [x] **Step 1: Read the surface from the source** and record it — the names, the shape,
   the behaviour, the file and the offset for every claim.
-- [ ] **Step 2: Write the failing test** for what the reading established.
-- [ ] **Step 3: Implement** it, and the rules that govern it.
-- [ ] **Step 4: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 5: Update the conformance documents and the report** — the surface is named,
+- [x] **Step 2: Write the failing test** for what the reading established.
+- [x] **Step 3: Implement** it, and the rules that govern it.
+- [x] **Step 4: Run it to verify it passes** — expected: PASS.
+- [x] **Step 5: Update the conformance documents and the report** — the surface is named,
   and the report says what was compared.
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
   ```bash
   git add src tests/contracts docs/compatibility
   git commit -m "feat: the browser surface"

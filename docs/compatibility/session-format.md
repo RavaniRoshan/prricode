@@ -188,12 +188,54 @@ The target **drops** a candidate that is itself live and lets the walk continue,
 
 ## Compaction
 
+**The target's compaction behaviour was established by reading the target's own
+bundle** — the REA record is
+`/home/shiva/opt/reference-agent-rea/analysis/findings-compaction.md`, and every
+claim in it carries the file and the byte offset it was read from. The audit's
+row `F-27` was `unknown`; it is `REA observed` now.
+
 Compaction is a **boundary marker, not a deletion**.
 
 - The pre-compact prefix is **skipped** when reading and stays in the file.
 - The summary is produced by the provider and passed in; this implementation never generates one locally.
 - The boundary is located by the marker's **parent link** on the branch's record chain — not by an index — so a non-message record in the compacted prefix cannot shift it.
 - The marker's parent may be a non-message record; the check is against the whole chain.
+
+### The five things the target does
+
+| | the target | this implementation |
+|---|---|---|
+| **the trigger** | a **token count**: `contextWindow − min(maxOutputTokens, 20000) − 13000`, evaluated **once per query, before the first request**. The environment variable `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` may lower it and never raises it. The switch is the `autoCompactEnabled` setting (on by default) and the `DISABLE_COMPACT` / `DISABLE_AUTO_COMPACT` environment variables. | **reproduced** — `src/session/compaction.ts` (`autoCompactThreshold`, `autoCompactDecision`, `estimateConversationTokens`); the runtime evaluates it before the first request of a turn |
+| **the boundary** | a **marker row** (`type:"system"`, `subtype:"compact_boundary"`, `content:"Conversation compacted"`) that links to the last pre-compact message; the prefix is skipped on read and never deleted | the **semantics** are reproduced — a marker record that links to the last record of the prefix, and a prefix that is skipped and never deleted. The **record** is this implementation's own (`t:"compaction"`): the target's transcript format is internal and changes between versions, so this implementation versions its own |
+| **the summary** | a **user** message, `isCompactSummary`, whose content is the target's preamble, the summary the model produced (normalised out of its `<analysis>`/`<summary>` tags) and the target's resume guidance. It is produced by a **separate one-turn request** whose tools are stripped and which is never written to the transcript | **reproduced** — `compactSummaryContent`, `compactSummaryPrompt`, `COMPACT_SUMMARY_SYSTEM_PROMPT`; the request is `src/agent/loop.ts`'s |
+| **the projection** | `[boundary, …summary, …replacement, …kept, …attachments, …hookResults]` — a fixed order | **reproduced** — `projectCompactedContext`; the boundary is a record rather than a message, so the message order is the summary, the replacement, the kept tail, the attachments, the hook results |
+| **the fallback ordering** | the cached prefix → a fresh request → the next model in the fallback ladder → the refusal's fallback model → dropping the head of the conversation (at most three times) → giving up; the failure is counted, and at three consecutive failures the circuit breaker opens | **reproduced** as the ladder of `COMPACT_FALLBACK_ORDER` and `COMPACT_ROUTER_ORDER`, and as the **head-dropping retry** (`compactRetryMessages`, with the target's `[earlier conversation truncated for compaction retry]` marker). The steps that belong to the target's model-fallback and precompute machinery are not implemented |
+
+### Where the summary lives
+
+The **record** keeps the summary the **model** produced, unchanged. The
+**message** the model receives — the target's preamble, the normalised summary
+and the target's resume guidance — is built where the context becomes the
+request (`compactedContext`). The two are not the same thing: the record is
+this implementation's own vocabulary, and the message is the target's data.
+
+### What is not reproduced, and why
+
+- The **boundary row's own members** (`compactMetadata` with `trigger`,
+  `preTokens`, `postTokens`, `durationMs`, `cumulativeDroppedTokens` and the
+  preserved tail's `preservedMessages`) are not carried: this implementation's
+  record vocabulary is versioned independently of the target's, and the target's
+  format is internal and changes between versions.
+- The **reactive path** — the one that keeps a tail, and the one the
+  "prompt is too long" refusal takes — is not implemented. The **core** path
+  is, and the core path keeps **no tail**: the whole pre-compact conversation
+  is replaced by the summary.
+- The **hooks** (`PreCompact` may block the compaction, `PostCompact` runs
+  after it) and the **precompute** path were read but are not implemented.
+
+**Pinned by:** `tests/contracts/compaction.test.ts` — the trigger, the summary,
+the boundary, the projection and the ladder; `tests/contracts/session-resume.test.ts`
+— the boundary and the projection into the request.
 
 ## The content replacement
 
@@ -253,8 +295,12 @@ The store is append-only, the last row per id wins, and a prompt is not delivere
 | A live background session is **dropped** and the lookup carries on with the next candidate; the session a candidate was **continued into** is reported and stops the lookup; and the live list that cannot be read changes the rule | REA observed | F-25 | same file — "drops a session that is live in the background rather than reporting it", "carries on with the next candidate after dropping a live one", "stops the lookup and reports the session a candidate was continued into", "skips every session carrying a session kind or a continued-in id when the live list cannot be read" |
 | The interrupted turn is detected by the backward walk | REA observed | F-25 | `tests/contracts/session-resume.test.ts` — the two interrupted-turn tests |
 | A `tool_use` is answered by the `tool_result` with the same id, and the pending id is removed on arrival | REA observed | F-25 | `tests/contracts/session-resume.test.ts` — "pairs a tool_result with the tool_call it answers", "keeps a tool call whose result never arrived pending" |
-| The compaction boundary skips the prefix and does not delete it, and the boundary is located by the parent link | REA observed (the mechanism) + implementation choice (the model) | F-27 | `tests/contracts/session-resume.test.ts` — the compaction tests |
+| The compaction boundary skips the prefix and does not delete it, and the boundary is located by the parent link | REA observed (the mechanism) + implementation choice (the record) | F-27 | `tests/contracts/session-resume.test.ts` — the compaction tests |
 | The summary is passed in, never generated locally | REA observed | F-27 | `tests/contracts/session-resume.test.ts` — "never produces a summary locally" |
+| The trigger is a token count — `contextWindow − min(maxOutputTokens, 20000) − 13000` — evaluated before the first request of a turn, and the four levels are `ok`, `warn`, `compact` and `blocked` | REA observed | F-27 | `tests/contracts/compaction.test.ts` — "the compaction trigger" |
+| The summary the model receives is the target's **summary message**: the preamble, the summary normalised out of its `<analysis>`/`<summary>` tags, and the resume guidance | REA observed | F-27 | `tests/contracts/session-resume.test.ts` — "projects the summary the model receives as the target's summary message" |
+| The projection's order is the summary, the replacement, the kept tail, the attachments and the hook results | REA observed | F-27 | `tests/contracts/compaction.test.ts` — "the projection" |
+| The fallback ladder is the target's, and a prompt-too-long retry drops the **head** of the conversation and marks the truncation with the target's marker | REA observed | F-27 | `tests/contracts/compaction.test.ts` — "the fallback ordering" |
 | The carried-prompt vocabulary is exactly the seven names, the bound check is enforced, and a prompt is not delivered twice | REA observed (the vocabulary) + implementation choice (the semantics) | F-26 | `tests/contracts/session-store.test.ts` — the carried-prompt tests |
 | The telemetry event names are the target's | REA observed | F-26 | same file — "emits the target's telemetry event with the outcome" |
 | A transcript path names a session by the **last** session-id segment it holds | implementation choice | F-24 | `tests/contracts/cli-surface.test.ts` — "scans a path for a session-id segment" |
