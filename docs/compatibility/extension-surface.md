@@ -725,20 +725,16 @@ call five more. The full table, with the target's own timeouts, is in
 | the CLI tree | `self-hosted-runner` and its five subcommands — `orchestrator`, `setup`, `doctor`, `code-sign`, `decode-token` | **not shipped**: there is no runner to orchestrate, set up, diagnose, sign or decode |
 | the gate | the nine tools exist only while the setup wizard's **one-way** latch is open | **not reproduced**: the tools are registered, and the latch has no counterpart here |
 
-### The clone's own choices on this surface
+### The clone-choice labels this milestone adds
 
-- The **refusal** is this implementation's own. The target has a runner, so the
-  target never refuses; here the refusal is a typed `capabilityUnavailable` that
-  names the capability the tool needed.
-- The **capability names** are this implementation's own.
-- The **input validation** is this implementation's own: it checks the target's
-  schema — the required fields, the types, the bounds and the strictness — and
-  reports the typed codes the rest of this implementation reports.
-- The **environment-variable reader** is this implementation's own. The target's
-  reader lives inside the runner's own process, and the runner does not exist
-  here; what is reproduced is the *contract*.
-- The **product's own name** replaces the target's where the target's own text
-  names it, and nowhere else.
+| Label | What it means | Which entries |
+|---|---|---|
+| `reproduced` | the name, the description, the input schema, the result shape, the endpoint, the Admin-UI path, the flag and the default are the target's own, and the product's name is the only substitution | the nine tools; the thirty-seven environment variables the runner reads |
+| `refused` | the tool exists, with the target's name, its schema and its permission rules, and the call ends in a typed failure that names the **capability** the tool needs and this session does not have | all **nine** tools |
+| `recorded, not reproduced` | the surface is **named** — the protocol, the registration, the lifecycle, the metric names, the CLI tree — and nothing here runs it | the runner's ten protocol calls; the five account-side endpoints; the CLI subcommand tree; the metric prefix and the two dropped gauges |
+| `not shipped` | the thing does not exist here at all, and its absence is stated rather than stubbed | the runner process; the registration; the `self-hosted-runner` subcommand tree |
+| `renamed for the product` | the target's product name inside the tool's own text — its login command, its process — was replaced by `PRRICODE`. The tool's **own name** was not: a tool's name is data | the five operator-tail descriptions; the reworked `SIGKILL_TIMEOUT_MS` message |
+| `not reproduced` | the target's own rule is recorded, and this implementation has **no counterpart** for it | `suppressesAlwaysAllowRule` — this implementation has no always-allow persistence |
 
 ## Conformance table
 
