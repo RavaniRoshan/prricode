@@ -125,7 +125,32 @@ export interface SlashCommand {
    * so, everywhere they surface.
    */
   readonly extension: boolean;
+  /**
+   * The message the UI shows while a **prompt** command's prompt is built.
+   *
+   * The target's own value, for the target's own prompt commands.
+   */
+  readonly progressMessage?: string;
+  /** The length of the prompt's content. */
+  readonly contentLength?: number;
+  /** Where the command came from. */
+  readonly source?: PromptCommandSource;
+  /** Whether the model may invoke the command on its own. */
+  readonly disableModelInvocation?: boolean;
+  /** The name the UI shows, when it differs from the command's name. */
+  readonly userFacingName?: string;
+  /** The policy the command is gated on, when it is gated on one. */
+  readonly policyGate?: { readonly policy: string };
+  /** What the command needs of the session. */
+  readonly requires?: { readonly workspace?: boolean };
 }
+
+/**
+ * Where a **prompt** command came from.
+ *
+ * The target's own vocabulary (`chunk-4jsg44k7.js:2207432`).
+ */
+export type PromptCommandSource = 'builtin' | 'plugin' | 'mcp' | 'memoryStore' | 'bundled';
 
 /* -------------------------------------------------------------------------- */
 /* The registry                                                                */
@@ -146,6 +171,13 @@ interface TargetCommandDefinition {
   readonly argumentHint?: string;
   readonly offset: number;
   readonly hidden?: boolean;
+  readonly progressMessage?: string;
+  readonly contentLength?: number;
+  readonly source?: PromptCommandSource;
+  readonly disableModelInvocation?: boolean;
+  readonly userFacingName?: string;
+  readonly policyGate?: { readonly policy: string };
+  readonly requires?: { readonly workspace?: boolean };
 }
 
 /**
@@ -175,7 +207,17 @@ const TARGET_DEFINITIONS: readonly TargetCommandDefinition[] = [
   { name: 'color', type: 'local', description: 'Set the prompt bar color for this session', argumentHint: '[red|blue|green|yellow|purple|orange|pink|cyan|default]', offset: 1675197 },
   { name: 'copy', type: 'local-jsx', description: "Copy PRRICODE's last response to clipboard (or /copy N for the Nth-latest)", offset: 1675477 },
   { name: 'desktop', type: 'local-jsx', description: 'Continue the current session in PRRICODE Desktop', aliases: ['app'], offset: 1675688 },
-  { name: 'commit-push-pr', type: 'prompt', description: 'Commit, push, and open a PR', offset: 1680337 },
+  {
+    name: 'commit-push-pr',
+    type: 'prompt',
+    description: 'Commit, push, and open a PR',
+    offset: 1680337,
+    progressMessage: 'creating commit and PR',
+    contentLength: 0,
+    source: 'builtin',
+    disableModelInvocation: false,
+    userFacingName: 'commit-push-pr',
+  },
   { name: 'compact', type: 'local', description: 'Free up context by summarizing the conversation so far', argumentHint: '<optional custom summarization instructions>', offset: 1680970 },
   { name: 'autocompact', type: 'local-jsx', description: 'Set how full the context gets before auto-summarizing', argumentHint: '[auto|<tokens>]', offset: 1681288 },
   { name: 'autocompact', type: 'local', description: 'Configure the auto-compact window size', argumentHint: '[auto|<tokens>]', offset: 1681512 },
@@ -193,7 +235,17 @@ const TARGET_DEFINITIONS: readonly TargetCommandDefinition[] = [
   { name: 'ide', type: 'local-jsx', description: 'Manage IDE integrations and show status', argumentHint: '[open]', offset: 1684388 },
   { name: 'import', type: 'local-jsx', description: 'Import config from another AI coding agent', argumentHint: '[codex|gemini|cursor] [--dry-run]', offset: 1685427 },
   { name: 'import', type: 'local', description: 'Import config from another AI coding agent', offset: 1685626 },
-  { name: 'init', type: 'prompt', description: 'Initialize a new CLAUDE.md file with codebase documentation', offset: 1710438 },
+  {
+    name: 'init',
+    type: 'prompt',
+    description: 'Initialize a new CLAUDE.md file with codebase documentation',
+    offset: 1710438,
+    progressMessage: 'analyzing your codebase',
+    contentLength: 0,
+    source: 'builtin',
+    disableModelInvocation: false,
+    userFacingName: 'init',
+  },
   { name: 'keybindings', type: 'local', description: 'Open your keyboard shortcuts file', offset: 1710831 },
   { name: 'design-consent', type: 'local', description: 'Grant PRRICODE agent access to your Design projects', offset: 1711037 },
   { name: 'design-revoke', type: 'local', description: 'Revoke PRRICODE agent access to your Design projects', offset: 1711253 },
@@ -220,7 +272,19 @@ const TARGET_DEFINITIONS: readonly TargetCommandDefinition[] = [
   { name: 'skills', type: 'local-jsx', description: 'List available skills', offset: 1715905 },
   { name: 'status', type: 'local-jsx', description: 'Show PRRICODE status including version, model, account, API connectivity, and tool statuses', offset: 1716040 },
   { name: 'tasks', type: 'local-jsx', description: 'View and manage everything running in the background', aliases: ['bashes'], offset: 1716229 },
-  { name: 'team-onboarding', type: 'prompt', description: 'Help teammates ramp on PRRICODE with a guide from your usage', offset: 1728733 },
+  {
+    name: 'team-onboarding',
+    type: 'prompt',
+    description: 'Help teammates ramp on PRRICODE with a guide from your usage',
+    offset: 1728733,
+    progressMessage: 'scanning usage data',
+    contentLength: 0,
+    source: 'builtin',
+    disableModelInvocation: true,
+    userFacingName: 'team-onboarding',
+    policyGate: { policy: 'allow_team_onboarding' },
+    requires: { workspace: true },
+  },
   { name: 'teleport', type: 'local-jsx', description: 'Send this session to the cloud, or resume one from claude.ai', aliases: ['tp'], offset: 1729848 },
   { name: 'terminal-setup', type: 'local-jsx', description: 'Check terminal setup (Shift+Enter is natively supported in <Terminal>)', offset: 1750833 },
   { name: 'ultraplan', type: 'local-jsx', description: 'Draft an editable plan in a cloud session', argumentHint: '<prompt>', offset: 2176592 },
@@ -275,13 +339,36 @@ const TARGET_DEFINITIONS: readonly TargetCommandDefinition[] = [
   { name: 'low-priority', type: 'local', description: 'Continue now at lower priority after reaching your session limit; run again to stop', offset: 2194269 },
   { name: 'limit-reset', type: 'local-jsx', description: 'Reset your session limit now and keep working; once a week, still counts toward your weekly limit', offset: 2198975 },
   { name: 'claim-credit', type: 'local', description: 'Open the page of the offer shown at start-up', offset: 2199245 },
-  { name: 'statusline', type: 'prompt', description: "Set up PRRICODE's status line UI", offset: 2199474 },
+  {
+    name: 'statusline',
+    type: 'prompt',
+    description: "Set up PRRICODE's status line UI",
+    offset: 2199474,
+    progressMessage: 'setting up statusLine',
+    contentLength: 0,
+    source: 'builtin',
+    disableModelInvocation: true,
+    userFacingName: 'statusline',
+    requires: { workspace: true },
+  },
   { name: 'effort', type: 'local-jsx', description: 'Set effort level for model usage', argumentHint: '[low|medium|high|xhigh|max|auto]', offset: 2200547 },
   { name: 'effort', type: 'local', description: 'Set effort level for model usage', argumentHint: '[low|medium|high|xhigh|max|auto]', offset: 2200739 },
   { name: 'wellbeing', type: 'local-jsx', description: 'Configure optional break reminders and quiet-hours nudges', aliases: ['breaks', 'break-reminder', 'downtime'], offset: 2200983 },
   { name: 'focus', type: 'local-jsx', description: 'Toggle focus view: just your prompt, summary, and response', offset: 2201202 },
   { name: 'focus', type: 'local', description: 'Toggle focus view: just your prompt, summary, and response', argumentHint: '[on|off]', offset: 2202790 },
-  { name: 'insights', type: 'prompt', description: 'Generate a report analyzing your PRRICODE sessions', offset: 2204406 },
+  {
+    name: 'insights',
+    type: 'prompt',
+    description: 'Generate a report analyzing your PRRICODE sessions',
+    offset: 2204406,
+    progressMessage: 'analyzing your sessions',
+    contentLength: 0,
+    source: 'builtin',
+    disableModelInvocation: true,
+    userFacingName: 'insights',
+    policyGate: { policy: 'allow_insights' },
+    requires: { workspace: true },
+  },
 ];
 
 /**
@@ -1047,6 +1134,17 @@ function toCommand(definition: TargetCommandDefinition, extension = false): Slas
     ...(extension ? {} : { offset: definition.offset }),
     hidden: definition.hidden ?? false,
     extension,
+    ...(definition.progressMessage === undefined
+      ? {}
+      : { progressMessage: definition.progressMessage }),
+    ...(definition.contentLength === undefined ? {} : { contentLength: definition.contentLength }),
+    ...(definition.source === undefined ? {} : { source: definition.source }),
+    ...(definition.disableModelInvocation === undefined
+      ? {}
+      : { disableModelInvocation: definition.disableModelInvocation }),
+    ...(definition.userFacingName === undefined ? {} : { userFacingName: definition.userFacingName }),
+    ...(definition.policyGate === undefined ? {} : { policyGate: definition.policyGate }),
+    ...(definition.requires === undefined ? {} : { requires: definition.requires }),
   };
 }
 
