@@ -465,6 +465,20 @@ The target's sandbox runtime declares the `sandbox.network` block in `chunk-3rfn
 | the merge across settings sources | `network.deniedDomains` is a **union**; every other member is taken **whole** from the highest source that sets it | `chunk-5gektv5j.js:5 899` | **implemented** — `mergeSandboxNetworkPolicies` |
 | the enforcement | the target filters the request inside the sandbox runtime, before it is dialled | — | **refused** — `enforceSandboxEgress` throws `EgressFirewallCapabilityError`, naming the capability `the sandbox runtime egress firewall (the domain filter, the deny list, the strict allowlist and the resolved-address check)` |
 
+## The enterprise gateway's internal-network allowlist
+
+The `gatewayInternalNetworks` setting names the **public blocks** the organisation numbers its internal network from, so that a gateway inside one of them is reachable. The record (§G12) points at `chunk-c9s0jh80.js:338 751` — that is where the **settings schema** catches an invalid value and substitutes the unreadable stand-in. The **validator** is elsewhere: `chunk-dt3pd9ft.js:148 943` (`nh`).
+
+**The target's rules, in its own order.**
+
+1. a list that carries the stand-in `(unreadable)` is refused outright;
+2. every entry is an IPv4 block written as **first-address/prefix**, with a prefix of at least `/8` and at most `/32`;
+3. no entry may overlap the private, the shared, the documentation or the reserved address space;
+4. the list carries **at most four** blocks;
+5. no two entries overlap each other.
+
+**Implemented** — `validateGatewayInternalNetworks`, with the target's own reason texts and the target's own message `gatewayInternalNetworks in managed settings <reason>.` The ranges the target declares are `GATEWAY_PRIVATE_NETWORKS` (6), `GATEWAY_SHARED_NETWORKS` (5, of which 3 are the documentation ranges), `GATEWAY_DOCUMENTATION_NETWORKS` (3) and `GATEWAY_RESERVED_NETWORKS` (3).
+
 ## The clone-choice labels this milestone adds
 
 - The **catalogue** — the eleven services, their keys, their toggle keys, their group labels, their endpoints, their purposes, and the host constants — is **the target's own data**, REA observed, not an implementation choice. The only change is the two purpose strings and the core group label that name the target's product: this implementation names **PRRICODE** there, because a **name** is not reproduced and a **datum** is.
@@ -473,7 +487,7 @@ The target's sandbox runtime declares the `sandbox.network` block in `chunk-3rfn
 - The **managed-config half of `computeEgressRequirements`** is **not reproduced**: this implementation has no managed-config field-meta table. The two producers the target declares for the fields this implementation's own settings document carries — `singleHostEgress` and the `allowedEgressHosts` rule — **are** implemented, and a caller supplies their output.
 - The **credential-family refusal** in `egressAddress` is **not reproduced**: the target also refuses a URL whose authority matches one of the ten credential-family key patterns it declares. That table belongs to the credential-redaction surface, and this implementation refuses user information only. **A named gap.**
 - The **sandbox network block's** members that this implementation does not act on — `deniedResolvedAddresses`, `mitmProxy`, `filterRequest` and `parentProxy` — are **recorded, not implemented**: they need the sandbox runtime's own proxy, which this implementation does not have.
-- The **`gatewayInternalNetworks`** setting (the enterprise gateway's internal-network allowlist) is **recorded, not implemented**: it is an authentication surface, and `CC-037` closed the authentication flows.
+- The **`gatewayInternalNetworks`** setting (the enterprise gateway's internal-network allowlist) is **implemented**: the validator is the target's own, with the target's reason texts, and the CIDR containment helper it uses is the target's own `H2` (`chunk-3q7vcbxf.js:35 560`) — which lives in the **proxy** module, so the two surfaces share it. The sign-in decision the list feeds — whether a gateway inside a listed block is accepted over a direct connection, and only when this machine's own address is inside the same block — is **not** implemented: it is the `/login` flow, and `CC-037` closed the authentication flows.
 
 ## What could not be established
 

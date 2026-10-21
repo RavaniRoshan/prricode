@@ -1878,3 +1878,262 @@ export function installCorporateProxyAgent(
 ): never {
   throw new CorporateProxyCapabilityError(CORPORATE_PROXY_CAPABILITY, 'Installing a corporate proxy');
 }
+
+/* -------------------------------------------------------------------------- */
+/* The enterprise gateway's internal-network allowlist                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The stand-in the target puts in a list it could not read.
+ *
+ * **Observed** — `chunk-c9s0jh80.js`: `kFr = "(unreadable)"`. The
+ * `gatewayInternalNetworks` setting carries it when its value could not be
+ * parsed, and the gateway sign-in then refuses.
+ */
+export const GATEWAY_INTERNAL_NETWORKS_UNREADABLE = '(unreadable)';
+
+/**
+ * The shortest prefix a gateway block may carry.
+ *
+ * **Observed** — `chunk-dt3pd9ft.js:148 950` (`ed = 8`).
+ */
+export const GATEWAY_INTERNAL_NETWORKS_MIN_PREFIX = 8;
+
+/**
+ * The most blocks a gateway list may carry.
+ *
+ * **Observed** — `chunk-dt3pd9ft.js:148 950` (`z_ = 4`).
+ */
+export const GATEWAY_INTERNAL_NETWORKS_MAX_BLOCKS = 4;
+
+/**
+ * The private address space a gateway block may not overlap.
+ *
+ * **Observed** — `chunk-dt3pd9ft.js:149 500` (`Zu`).
+ */
+export const GATEWAY_PRIVATE_NETWORKS: readonly string[] = Object.freeze([
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  '127.0.0.0/8',
+  '169.254.0.0/16',
+  '100.64.0.0/10',
+]);
+
+/**
+ * The documentation ranges a gateway block may not overlap.
+ *
+ * **Observed** — `chunk-dt3pd9ft.js:149 500` (`th`).
+ */
+export const GATEWAY_DOCUMENTATION_NETWORKS: readonly string[] = Object.freeze([
+  '192.0.2.0/24',
+  '198.51.100.0/24',
+  '203.0.113.0/24',
+]);
+
+/**
+ * The shared address space a gateway block may not overlap.
+ *
+ * **Observed** — `chunk-dt3pd9ft.js:149 500` (`Cx`): the two ranges that VPN
+ * and NAT64 clients use locally, plus the documentation ranges.
+ */
+export const GATEWAY_SHARED_NETWORKS: readonly string[] = Object.freeze([
+  '198.18.0.0/15',
+  '192.0.0.0/24',
+  ...GATEWAY_DOCUMENTATION_NETWORKS,
+]);
+
+/**
+ * The reserved address space a gateway block may not overlap.
+ *
+ * **Observed** — `chunk-dt3pd9ft.js:149 500` (`j_`).
+ */
+export const GATEWAY_RESERVED_NETWORKS: readonly string[] = Object.freeze([
+  '0.0.0.0/8',
+  '192.88.99.0/24',
+  '224.0.0.0/4',
+]);
+
+/**
+ * The error code the target raises for an invalid gateway network list.
+ *
+ * **Observed** — `chunk-dt3pd9ft.js:148 950`.
+ */
+export const GATEWAY_INTERNAL_NETWORKS_ERROR_CODE = 'gateway login: invalid gatewayInternalNetworks';
+
+/**
+ * The result of validating a gateway network list.
+ *
+ * The target **throws**; this implementation returns the shape, so a caller can
+ * report the target's own reason without catching an exception.
+ */
+export interface GatewayInternalNetworksResult {
+  /** Whether the list is usable. */
+  readonly ok: boolean;
+  /** The validated blocks, in the target's order, de-duplicated. */
+  readonly networks: readonly string[];
+  /** The target's own reason, when the list is not usable. */
+  readonly reason?: string;
+  /** The target's own message, when the list is not usable. */
+  readonly message?: string;
+}
+
+/** The bytes of a dotted-quad IPv4 address, or `undefined` when it is not one. */
+function ipv4Bytes(address: string): number[] | undefined {
+  const parts = address.split('.');
+  if (parts.length !== 4) return undefined;
+  const bytes: number[] = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return undefined;
+    if (part.length > 1 && part.startsWith('0')) return undefined;
+    const value = Number.parseInt(part, 10);
+    if (value > 255) return undefined;
+    bytes.push(value);
+  }
+  return bytes;
+}
+
+/** Whether the first `prefix` bits of two byte strings are equal. */
+function bytesMatch(left: readonly number[], right: readonly number[], prefix: number): boolean {
+  const wholeBytes = prefix >> 3;
+  for (let index = 0; index < wholeBytes; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  const spareBits = prefix & 7;
+  if (spareBits === 0) return true;
+  const mask = (255 << (8 - spareBits)) & 255;
+  return ((left[wholeBytes] ?? 0) & mask) === ((right[wholeBytes] ?? 0) & mask);
+}
+
+/**
+ * Whether an address is inside a block.
+ *
+ * **Observed** — the target's `H2`, `chunk-3q7vcbxf.js:35 560`. The block is
+ * `address/prefix`; the prefix must be a number, the block's address must
+ * parse, and the first `prefix` bits of the two addresses must be equal.
+ *
+ * **The scope.** The target's helper also understands IPv6; the gateway list is
+ * IPv4 only (the target requires `isIPv4` of the address part), so this
+ * implementation parses IPv4 only.
+ */
+export function cidrContains(block: string, address: string): boolean {
+  const separator = block.lastIndexOf('/');
+  if (separator < 0) return false;
+  const prefixText = block.slice(separator + 1);
+  if (!/^\d+$/.test(prefixText)) return false;
+  const prefix = Number.parseInt(prefixText, 10);
+  const base = ipv4Bytes(block.slice(0, separator));
+  if (base === undefined) return false;
+  const target = ipv4Bytes(address);
+  if (target === undefined) return false;
+  const bits = base.length * 8;
+  if (prefix < 0 || prefix > bits) return false;
+  return bytesMatch(target, base, prefix);
+}
+
+/** The address part of a block — the target's `nt`, the text before the first "/". */
+function blockAddress(block: string): string {
+  const separator = block.indexOf('/');
+  return separator === -1 ? block : block.slice(0, separator);
+}
+
+/**
+ * Validate the enterprise gateway's internal-network list.
+ *
+ * **Observed** — the target's `nh`, `chunk-dt3pd9ft.js:148 943`. The rules, in
+ * the target's own order:
+ *
+ *   1. a list that carries the unreadable stand-in is refused outright;
+ *   2. every entry is an IPv4 block written as **first-address/prefix**, with a
+ *      prefix of at least /8 and at most /32;
+ *   3. no entry may overlap the private, the shared, the documentation or the
+ *      reserved address space;
+ *   4. the list may carry at most four blocks;
+ *   5. no two entries may overlap each other.
+ *
+ * The target's own reason texts are reproduced verbatim; the target's own
+ * message is `gatewayInternalNetworks in managed settings <reason>.`
+ */
+export function validateGatewayInternalNetworks(
+  entries: readonly string[] | undefined,
+): GatewayInternalNetworksResult {
+  const fail = (reason: string): GatewayInternalNetworksResult => ({
+    ok: false,
+    networks: [],
+    reason,
+    message: `gatewayInternalNetworks in managed settings ${reason}.`,
+  });
+
+  if (entries === undefined) return { ok: true, networks: [] };
+  if (entries.includes(GATEWAY_INTERNAL_NETWORKS_UNREADABLE)) {
+    return fail('is not a list of CIDR strings; sign-in is refused until it is fixed');
+  }
+
+  const networks: string[] = [];
+  for (const raw of entries) {
+    const entry = raw.trim();
+    const [address = '', prefixText = ''] = entry.split('/');
+    const prefix = Number(prefixText);
+    const value = address
+      .split('.')
+      .reduce((accumulator, part) => accumulator * 256 + Number(part), 0);
+    const parses = ipv4Bytes(address) !== undefined;
+    const inside = parses && cidrContains(entry, address);
+    const canonical = Number.isFinite(prefix) && value % 2 ** (32 - prefix) === 0;
+    if (!parses || !inside || prefix < GATEWAY_INTERNAL_NETWORKS_MIN_PREFIX || !canonical) {
+      return fail(
+        `entry "${entry}" is not an IPv4 block written as first-address/prefix, ` +
+          `/${GATEWAY_INTERNAL_NETWORKS_MIN_PREFIX} to /32 (like 203.0.113.0/24, but your own)`,
+      );
+    }
+    const block = `${address}/${prefix}`;
+    const overlap = [
+      ...GATEWAY_PRIVATE_NETWORKS,
+      ...GATEWAY_SHARED_NETWORKS,
+      ...GATEWAY_RESERVED_NETWORKS,
+    ].find((candidate) => cidrContains(candidate, address) || cidrContains(block, blockAddress(candidate)));
+    if (overlap !== undefined) {
+      if (GATEWAY_PRIVATE_NETWORKS.includes(overlap)) {
+        return fail(
+          `entry "${entry}" overlaps private address space (${overlap}), where /login accepts a ` +
+            'gateway without this key; declare only the public block your network is numbered from',
+        );
+      }
+      if (GATEWAY_DOCUMENTATION_NETWORKS.includes(overlap)) {
+        return fail(
+          `entry "${entry}" overlaps ${overlap}, a documentation example range that is no one's network`,
+        );
+      }
+      if (GATEWAY_RESERVED_NETWORKS.includes(overlap)) {
+        return fail(
+          `entry "${entry}" overlaps ${overlap}, reserved address space no network is numbered from`,
+        );
+      }
+      return fail(
+        `entry "${entry}" overlaps ${overlap}, which VPN and NAT64 clients use locally`,
+      );
+    }
+    networks.push(block);
+  }
+
+  const unique = [...new Set(networks)];
+  if (unique.length > GATEWAY_INTERNAL_NETWORKS_MAX_BLOCKS) {
+    return fail(
+      `lists ${unique.length} blocks; at most ${GATEWAY_INTERNAL_NETWORKS_MAX_BLOCKS} are accepted`,
+    );
+  }
+  for (let index = 0; index < unique.length; index += 1) {
+    const entry = unique[index];
+    if (entry === undefined) continue;
+    const other = unique.find(
+      (candidate, candidateIndex) =>
+        candidateIndex > index &&
+        (cidrContains(candidate, blockAddress(entry)) || cidrContains(entry, blockAddress(candidate))),
+    );
+    if (other !== undefined) {
+      return fail(`entries "${entry}" and "${other}" overlap; list disjoint blocks`);
+    }
+  }
+
+  return { ok: true, networks: unique };
+}

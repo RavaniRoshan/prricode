@@ -40,6 +40,7 @@ import {
   EGRESS_HOSTS,
   EGRESS_SERVICE_KEYS,
   EGRESS_SERVICES,
+  GATEWAY_INTERNAL_NETWORKS_ERROR_CODE,
   MINIMAL_EGRESS_DOMAINS,
   PROXY_AUTH_HELPER_PROJECT_MESSAGE,
   PROXY_AUTH_HELPER_TTL_MS,
@@ -67,6 +68,7 @@ import {
   resolveNoProxy,
   resolveProxyUrl,
   stripEgressEntryPort,
+  validateGatewayInternalNetworks,
   type EgressHostContext,
   type EgressServiceKey,
 } from '../../src/provider/routes.js';
@@ -588,6 +590,109 @@ describe('the egress-entry grammar', () => {
     expect(
       dropPortScopedEgressEntries(['example.com', 'example.com:443', 'other.com:8443', 'nonsense']),
     ).toEqual(['example.com', 'nonsense']);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The enterprise gateway's internal-network allowlist                          */
+/* -------------------------------------------------------------------------- */
+
+describe("the enterprise gateway's internal-network allowlist", () => {
+  it('accepts a public block and returns it in the canonical form', () => {
+    const result = validateGatewayInternalNetworks(['8.8.8.0/24']);
+    expect(result.ok).toBe(true);
+    expect(result.networks).toEqual(['8.8.8.0/24']);
+    expect(result.reason).toBeUndefined();
+  });
+
+  it('accepts an empty list and an absent one', () => {
+    expect(validateGatewayInternalNetworks([]).ok).toBe(true);
+    expect(validateGatewayInternalNetworks(undefined).ok).toBe(true);
+    expect(validateGatewayInternalNetworks(undefined).networks).toEqual([]);
+  });
+
+  it('refuses a list that could not be read', () => {
+    const result = validateGatewayInternalNetworks(['(unreadable)']);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe(
+      'is not a list of CIDR strings; sign-in is refused until it is fixed',
+    );
+    expect(result.message).toBe(
+      'gatewayInternalNetworks in managed settings is not a list of CIDR strings; sign-in is refused until it is fixed.',
+    );
+  });
+
+  it('refuses a block that is not a first-address /prefix in /8../32', () => {
+    const expected =
+      'entry "8.8.8.5/24" is not an IPv4 block written as first-address/prefix, ' +
+      '/8 to /32 (like 203.0.113.0/24, but your own)';
+    expect(validateGatewayInternalNetworks(['8.8.8.5/24']).reason).toBe(expected);
+    expect(validateGatewayInternalNetworks(['8.8.8.0/7']).reason).toContain(
+      'entry "8.8.8.0/7" is not an IPv4 block',
+    );
+    expect(validateGatewayInternalNetworks(['8.8.8.0/33']).reason).toContain(
+      'entry "8.8.8.0/33" is not an IPv4 block',
+    );
+    expect(validateGatewayInternalNetworks(['not-an-address/24']).reason).toContain(
+      'is not an IPv4 block',
+    );
+  });
+
+  it('refuses a block that overlaps the private address space', () => {
+    expect(validateGatewayInternalNetworks(['10.0.0.0/8']).reason).toBe(
+      'entry "10.0.0.0/8" overlaps private address space (10.0.0.0/8), where /login accepts a ' +
+        'gateway without this key; declare only the public block your network is numbered from',
+    );
+    expect(validateGatewayInternalNetworks(['100.64.0.0/10']).reason).toContain(
+      'overlaps private address space (100.64.0.0/10)',
+    );
+  });
+
+  it('refuses a block that overlaps a documentation, a shared or a reserved range', () => {
+    expect(validateGatewayInternalNetworks(['192.0.2.0/24']).reason).toBe(
+      'entry "192.0.2.0/24" overlaps 192.0.2.0/24, a documentation example range that is no one\'s network',
+    );
+    expect(validateGatewayInternalNetworks(['198.18.0.0/15']).reason).toBe(
+      'entry "198.18.0.0/15" overlaps 198.18.0.0/15, which VPN and NAT64 clients use locally',
+    );
+    expect(validateGatewayInternalNetworks(['0.0.0.0/8']).reason).toBe(
+      'entry "0.0.0.0/8" overlaps 0.0.0.0/8, reserved address space no network is numbered from',
+    );
+    // A reserved range whose prefix is shorter than /8 is refused by the
+    // prefix rule first, which is the target's own order.
+    expect(validateGatewayInternalNetworks(['224.0.0.0/4']).reason).toContain(
+      'is not an IPv4 block written as first-address/prefix',
+    );
+  });
+
+  it('refuses more than four blocks', () => {
+    const result = validateGatewayInternalNetworks([
+      '8.8.8.0/24',
+      '9.9.9.0/24',
+      '11.11.11.0/24',
+      '12.12.12.0/24',
+      '13.13.13.0/24',
+    ]);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('lists 5 blocks; at most 4 are accepted');
+  });
+
+  it('refuses two blocks that overlap each other', () => {
+    const result = validateGatewayInternalNetworks(['8.8.0.0/16', '8.8.4.0/24']);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('entries "8.8.0.0/16" and "8.8.4.0/24" overlap; list disjoint blocks');
+  });
+
+  it('de-duplicates a repeated block', () => {
+    const result = validateGatewayInternalNetworks(['8.8.8.0/24', '8.8.8.0/24']);
+    expect(result.ok).toBe(true);
+    expect(result.networks).toEqual(['8.8.8.0/24']);
+  });
+
+  it('names the code the target raises for an invalid list', () => {
+    expect(GATEWAY_INTERNAL_NETWORKS_ERROR_CODE).toBe(
+      'gateway login: invalid gatewayInternalNetworks',
+    );
   });
 });
 
