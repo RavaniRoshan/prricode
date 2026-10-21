@@ -35,11 +35,14 @@ import {
   AUTH_CREDENTIALS,
   AUTH_FLOW_KINDS,
   AUTH_FLOWS,
+  CREDENTIAL_STORAGE_BACKENDS,
   CREDENTIAL_STORE,
   FIRST_PARTY_AUTH_METHODS,
   LOGIN_METHODS,
   MCP_BLOCKED_LOCAL_OAUTH_HOSTS,
+  SESSION_AUTH_VALUES,
   authIssuerKey,
+  authStatusExitCode,
   beginAuthFlow,
   classifyFirstPartyAuth,
   classifyLoginMethod,
@@ -581,6 +584,25 @@ describe('the credential store shape', () => {
       '.api_key',
       '.session_ingress_token',
     ]);
+  });
+
+  it('names the five storage backends the target has', () => {
+    expect([...CREDENTIAL_STORAGE_BACKENDS]).toEqual([
+      'keychain',
+      'plaintext',
+      'windows-credman',
+      'keychain-with-plaintext-fallback',
+      'windows-credman-with-plaintext-fallback',
+    ]);
+  });
+
+  it('names the three ways a sign-in credential can land', () => {
+    expect([...SESSION_AUTH_VALUES]).toEqual(['fresh', 'previous', 'none']);
+  });
+
+  it('reports the exit code the target\'s auth status command uses', () => {
+    expect(authStatusExitCode(true)).toBe(0);
+    expect(authStatusExitCode(false)).toBe(1);
   });
 });
 

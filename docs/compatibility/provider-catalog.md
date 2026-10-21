@@ -256,6 +256,12 @@ ceiling, `O_NOFOLLOW` (a symlink is refused rather than followed), and the five 
 shipped**: the descriptor records where a credential *would* live and how it would be protected,
 and nothing here writes one.
 
+The **storage backends** are the target's own five — `keychain`, `plaintext`,
+`windows-credman`, `keychain-with-plaintext-fallback` and
+`windows-credman-with-plaintext-fallback` — and the **session-auth** vocabulary is its own
+three — `fresh`, `previous` and `none`. The `auth status` command exits `0` when the session is
+signed in and `1` when it is not.
+
 ### The refusals
 
 | Flow | The capability it needs |

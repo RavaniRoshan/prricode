@@ -1304,7 +1304,52 @@ export interface CredentialStoreDescriptor {
   recordKeys: readonly string[];
   /** The suffixes of the single-credential files the target also reads. */
   fileSuffixes: readonly string[];
+  /** The storage backends the target can use. */
+  backends: readonly CredentialStorageBackend[];
+  /** How a sign-in's credential landed. */
+  sessionAuthValues: readonly SessionAuth[];
 }
+
+/**
+ * The credential **storage backends** the target can use.
+ *
+ * **REA observed** — `chunk-dt3pd9ft.js` carries exactly five, and the
+ * telemetry maps any other name to `"other"`.
+ */
+export type CredentialStorageBackend =
+  | 'keychain'
+  | 'plaintext'
+  | 'windows-credman'
+  | 'keychain-with-plaintext-fallback'
+  | 'windows-credman-with-plaintext-fallback';
+
+/** The five storage backends. */
+export const CREDENTIAL_STORAGE_BACKENDS: readonly CredentialStorageBackend[] = Object.freeze([
+  'keychain',
+  'plaintext',
+  'windows-credman',
+  'keychain-with-plaintext-fallback',
+  'windows-credman-with-plaintext-fallback',
+] as const);
+
+/**
+ * How a sign-in's credential landed.
+ *
+ * **REA observed** — the target reports exactly three:
+ *
+ *   - `fresh` — the credential was stored by this sign-in;
+ *   - `previous` — the browser completed the sign-in but the new credential
+ *     could not be stored, so the previous one is still in use;
+ *   - `none` — there is no usable credential.
+ */
+export type SessionAuth = 'fresh' | 'previous' | 'none';
+
+/** The three values. */
+export const SESSION_AUTH_VALUES: readonly SessionAuth[] = Object.freeze([
+  'fresh',
+  'previous',
+  'none',
+] as const);
 
 /** The target's credential store, as a shape. */
 export const CREDENTIAL_STORE: CredentialStoreDescriptor = Object.freeze({
@@ -1329,7 +1374,19 @@ export const CREDENTIAL_STORE: CredentialStoreDescriptor = Object.freeze({
     '.api_key',
     '.session_ingress_token',
   ] as const),
+  backends: CREDENTIAL_STORAGE_BACKENDS,
+  sessionAuthValues: SESSION_AUTH_VALUES,
 });
+
+/**
+ * The exit code the target's `auth status` command reports.
+ *
+ * **REA observed** — `chunk-1kkch1sj.js` exits `0` when the session is signed
+ * in and `1` when it is not.
+ */
+export function authStatusExitCode(loggedIn: boolean): 0 | 1 {
+  return loggedIn ? 0 : 1;
+}
 
 // ---------------------------------------------------------------------------
 // The pure helpers
