@@ -113,6 +113,7 @@ request:
 | an unknown protocol version | `protocol/unsupported`, with the versions this build speaks | an **error response carrying the request's id** | `… › an unknown protocol version is refused with the versions this build speaks` |
 | a frame with no usable `v` | `frame/malformed` | an **error response carrying the frame's id** | `… › a frame with no version at all is refused as malformed` |
 | a response whose id matches no request in flight | `frame/unknown-id` | the peer's **diagnostic channel** — there is nobody to answer | (the peer's own report) |
+| a method named after a prototype member | `method/unknown` | an **error response carrying the request's id** — the lookup of a caller-supplied key is guarded, so a method called `__proto__` is an ordinary name | `… › a method named after a prototype member is refused, not obeyed` |
 
 **Implementation choice — the refusal that cannot be attributed.** The
 specification does not say how a refusal reaches the peer when the refused frame

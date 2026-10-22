@@ -2759,8 +2759,8 @@ an unbounded buffer.
 process** (`tests/fixtures/protocol-server.ts`) that reads its stdin and writes
 its stdout, and the client is **the same module the server is built from**. The
 malformed cases are measured on the **raw** pipe — the test writes the bytes a
-client would never write and reads the bytes the server sends back. **Thirty-seven
-tests**, and the suite is green at **2 823** with `tsc --noEmit` clean.
+client would never write and reads the bytes the server sends back. **Thirty-eight
+tests**, and the suite is green at **2 828** with `tsc --noEmit` clean.
 
 **Every malformed case is refused with a reason, never ignored and never a
 crash:** a frame that is not JSON (`frame/malformed`), a response with neither a

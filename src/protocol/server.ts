@@ -230,6 +230,9 @@ export function createProtocolServer(options: ProtocolServerOptions): ProtocolSe
 
   /** The record of the capability a method belongs to, when it is disabled. */
   const degradedAnswer = (method: string): CapabilityRecord | undefined => {
+    // The method comes from the wire, so the lookup is guarded: a method
+    // named `__proto__` is an ordinary name and not a prototype assignment.
+    if (!Object.hasOwn(METHOD_CAPABILITIES, method)) return undefined;
     const name = METHOD_CAPABILITIES[method];
     if (name === undefined) return undefined;
     const record = capabilities.get(name);

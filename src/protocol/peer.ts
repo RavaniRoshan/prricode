@@ -52,7 +52,6 @@ import {
 } from './errors.js';
 import { encodeFrame } from './framing.js';
 import {
-  isRequestId,
   readFrame,
   readFrameId,
   type ProtocolFrame,
@@ -339,10 +338,16 @@ export function createProtocolPeer(options: ProtocolPeerOptions): ProtocolPeer {
     const handler = notificationHandlers.get(method);
     if (!handler) {
       // A diagnostic is never answered with a diagnostic, so a notification
-      // nobody serves is reported and nothing more.
+      // nobody serves is reported and nothing more. A method that is not of
+      // the vocabulary is unknown; a method that is of it and is not served
+      // is unavailable, and the two say different things.
       report({
-        code: PROTOCOL_ERROR_CODES.methodUnknown,
-        message: `the notification "${method}" is not served by this peer`,
+        code: isKnownMethod(method)
+          ? PROTOCOL_ERROR_CODES.methodUnavailable
+          : PROTOCOL_ERROR_CODES.methodUnknown,
+        message: isKnownMethod(method)
+          ? `the notification "${method}" is not served by this peer`
+          : `the notification "${method}" is not a method of this protocol`,
         data: { method },
       });
       return;
@@ -514,6 +519,3 @@ export function createProtocolPeer(options: ProtocolPeerOptions): ProtocolPeer {
 
   return peer;
 }
-
-/** Whether the value is an id a request may carry. */
-export { isRequestId };

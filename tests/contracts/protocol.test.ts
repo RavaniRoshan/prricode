@@ -619,6 +619,16 @@ describe('the malformed cases are refused with a reason', () => {
     expect(error['code']).toBe(PROTOCOL_ERROR_CODES.methodNotificationOnly);
   });
 
+  it('a method named after a prototype member is refused, not obeyed', async () => {
+    const pipe = raw();
+    pipe.write(`${JSON.stringify({ v: '1', id: 8100, method: '__proto__', params: {} })}\n`);
+
+    const frame = JSON.parse(await pipe.readLine()) as Record<string, unknown>;
+    expect(frame['id']).toBe(8100);
+    const error = frame['error'] as Record<string, unknown>;
+    expect(error['code']).toBe(PROTOCOL_ERROR_CODES.methodUnknown);
+  });
+
   it('an unknown protocol version is refused with the versions this build speaks', async () => {
     const pipe = raw();
     pipe.write(
