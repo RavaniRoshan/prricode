@@ -3253,8 +3253,86 @@ The four kinds, each a thing that can fail.
   picture cannot pass.
 
 - **Deliverable:** one command that runs all four, and a report that says which passed.
-- **Files:** `tests/e2e/`, `tests/visual/`, `scripts/verify-product.ts`,
-  `docs/compatibility/verification.md`.
+- **Verified:** by the suite itself: every kind is measured against its own failure —
+  an over-claiming run, a refusing backend, a tampered golden and a stale golden —
+  and a kind that cannot run reports that it could not run.
+- **Files:** `tests/e2e/`, `tests/visual/`, `tests/verification/`,
+  `scripts/verify-product.ts`, `docs/compatibility/verification.md`.
+
+
+**Result (the verification suite).** The four kinds above, each a thing that can
+fail, are measured in `docs/compatibility/verification.md`.
+
+**Delivered:** `scripts/verify-product.ts` — **one command** — carrying the four
+kinds, the report and the exit code, with `tests/verification/` — **two files**,
+**thirty-five tests** — as the suite's own tests.
+
+**One command, four kinds, and a report that says which passed.** The command is
+`bun run scripts/verify-product.ts`; `--kind` runs one kind at a time. The
+report names every kind, every check and **what the check saw**, and the exit
+code says the same thing: **zero** when every kind passed, **one** when a kind
+failed, and **two** when a kind could not run — so a suite that could not
+measure everything never reads as a suite that measured everything and found
+nothing wrong.
+
+**The product is measured twice, and the second run is the point.** The honest
+run must reach all **eight** stages, produce the **eight documents** — written
+down, not only reported — and have every criterion met by **a test that covers
+it**. The **over-claiming** run is a build whose test fails while the run
+**claims** the criterion is met, and it must **fail at the stage that claimed
+it**, with `ship` and `operate` reported as `not-reached` — so **nothing is
+released**. And the suite reads the **claim** and the **execution** itself
+rather than taking the product's own comparison for it: a suite that believes
+the thing it measures is not a suite.
+
+**The backend is measured over the real things.** The protocol is measured over
+a **real pipe** — the repository's own server, spawned as a **real child
+process**, with the frames read off the **raw** wire, so a line that is not
+JSON is seen to be refused with `frame/malformed`. The providers are measured
+against a **real HTTP server on a real port** that speaks **every API shape**
+the model layer has — the chat-completions shape, the messages shape and the
+responses shape — and the credential store is measured with **where the secret
+came from**: the **encrypted file**, and the **environment** as a first-class
+peer of a stored key. The **five failures** are each measured for the thing
+that matters: the failure **degrades with its reason** — `model/not-connected`,
+`model/unavailable`, `model/endpoint-refused`, `model/credential-unresolved`,
+`model/overlay-unknown` — and the turn that failed produced **no events at
+all**, so nothing claimed success.
+
+**The frontend and the goldens are two kinds, and they are told apart.** The
+**frontend** compares the rendered frames with the **recorded goldens**, byte
+for byte, and the motion's **degraded** form against **its own** golden — the
+resting picture and the reason beside it. The **visual** kind checks the
+goldens themselves: every one has a record and a picture, every record
+describes the picture beside it, and — the check that matters — every golden is
+**current**. A golden that was not regenerated deliberately is **stale**, and a
+stale golden **fails**, so a stale picture cannot pass quietly.
+
+**A kind that cannot run says so.** The shared shape — `enabled: false` and
+`unsupported: <why>` — and the kind's checks are **empty**: it never passes
+vacuously and never skips quietly. The goldens are the terminal surface's own,
+so a host where they are not recorded reports that, and the test says the
+report is right.
+
+**Each kind was measured against its own failure, and the mutations are
+recorded.** The product's comparison was forced to agree, and the product kind
+went red on the over-claim; the engine's `model/endpoint-refused` was
+swallowed, and the backend kind went red on the refusal; the composer's rule
+character was changed, and the frontend kind went red on the picture; and a
+line was added to the theme that changes **no** picture, and the **visual** kind
+went red on the **staleness** while the frontend kind stayed green — which is
+the whole point of the staleness check.
+
+**Thirty-five tests**, the suite green at **3 101**, and `tsc --noEmit` is clean.
+
+**Not done here, and named:** the **first layer's** compatibility matrix and
+`docs/compatibility/results.md` are the orchestrator's, and the suite does not
+touch them; the suite measures the **second layer** — the product, the backend,
+the frontend and the goldens — and the first layer's own tests are the first
+layer's. The suite draws **no golden of its own**: a golden is a **picture**,
+and the pictures are the terminal surface's. And there is **no compatibility
+row**: the target has no counterpart for this surface, and a divergence is not a
+compatibility claim.
 
 ## The order
 
