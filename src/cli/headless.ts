@@ -39,12 +39,15 @@
  * and `uuid` (`chunk-pj5cyqhw.js:171561`), and this module does the same, so
  * the members arrive on the wire in the target's order.
  *
- * **One deliberate divergence, named.** The target's error variant's `subtype`
- * is one of `error_during_execution`, `error_max_turns`, `error_max_budget_usd`
- * and `error_max_structured_output_retries`; this implementation's is `error`.
- * The value is pinned by a contract test this milestone does not own
- * (`tests/contracts/cli-surface.test.ts`), and the divergence is recorded in
- * `docs/compatibility/command-surface.md`.
+ * **The error variant is the target's own.** The subtype is
+ * `error_during_execution` (`chunk-pj5cyqhw.js:326977`), and the variant
+ * carries the failure in its `errors` member — the target's own — with no
+ * answer text, because the printer that prints the `text` format writes
+ * `Execution error` on stdout and the failure's detail on stderr
+ * (`chunk-e7w77ts3.js:445913`). `buildResultDocument` spreads the **common**
+ * members, then the **variant** members, then `type`, `duration_ms` and
+ * `uuid`, so the members arrive on the wire in the target's order for both
+ * variants.
  *
  * ## The events
  *
@@ -221,10 +224,21 @@ export interface ResultDocument {
   modelUsage: Record<string, ModelUsage>;
   /** The calls a permission rule refused. */
   permission_denials: PermissionDenial[];
-  /** What the run was. */
-  subtype: 'success' | 'error';
-  /** The assistant's text. */
-  result: string;
+  /**
+   * What the run was.
+   *
+   * **The target's own vocabulary** (`chunk-pj5cyqhw.js:326977`):
+   * `error_during_execution`, `error_max_turns`, `error_max_budget_usd` and
+   * `error_max_structured_output_retries` for the error variant. The run this
+   * implementation makes reaches `error_during_execution` — the other three
+   * name limits this implementation has no machinery for (`--max-turns` and
+   * the budget surface are refused on this path, see
+   * `tests/contracts/cli-surface.test.ts`) — and the printer formats all
+   * four (`src/cli/print/documents.ts`).
+   */
+  subtype: 'success' | 'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd' | 'error_max_structured_output_retries';
+  /** The assistant's text — the success variant's answer. */
+  result?: string;
   /** The failures, when the run failed. */
   errors?: string[];
   /** The document's type. */
@@ -389,8 +403,8 @@ function toModelUsage(record: ModelCostRecord): ModelUsage {
 export function buildResultDocument(input: {
   /** Whether the run failed. */
   isError: boolean;
-  /** The assistant's text. */
-  result: string;
+  /** The assistant's text — the success variant's own; the error variant carries none. */
+  result?: string;
   /** The failures, when the run failed. */
   errors?: readonly string[];
   /** The provider's own stop reason. */
@@ -425,8 +439,11 @@ export function buildResultDocument(input: {
   };
   const variant = input.isError
     ? {
-        subtype: 'error' as const,
-        result: input.result,
+        // The error variant's subtype is the target's own
+        // (`chunk-pj5cyqhw.js:326977`), and the variant carries no answer
+        // text: the printer writes `Execution error` on stdout and the
+        // failure's `errors` member on stderr (`chunk-e7w77ts3.js:445913`).
+        subtype: 'error_during_execution' as const,
         ...(input.errors !== undefined ? { errors: [...input.errors] } : {}),
       }
     : { subtype: 'success' as const, result: input.result };
@@ -500,7 +517,10 @@ export async function* runHeadless(options: HeadlessOptions): AsyncIterable<Head
   // document and the `json` format's one document is the same object.
   yield buildResultDocument({
     isError: failed,
-    result: assistantText(turn.events),
+    // The success variant's answer is the assistant's text; the error variant
+    // carries no answer text — its subtype is `error_during_execution` and the
+    // failure goes in its `errors` member (`chunk-pj5cyqhw.js:326977`).
+    ...(failed ? {} : { result: assistantText(turn.events) }),
     errors: failed && message !== undefined ? [message] : undefined,
     // The **provider's** stop reason, when it reported one: the target's result
     // document carries the provider's own reason, and it is nullable
@@ -640,7 +660,7 @@ function textOf(value: unknown): string | undefined {
 function eventsOf(record: SessionEvent): HeadlessEvent[] {
   switch (record.t) {
     case 'assistant_message':
-      return [{ type: 'text', text: record.text }];
+      return [{ type: 'text', id: record.id, text: record.text }];
     case 'tool_call':
       return [{ type: 'tool_use', id: record.id, name: record.name, input: record.input }];
     case 'tool_result':

@@ -86,6 +86,7 @@ import {
   writeHeadlessOutput,
   type OutputSink,
 } from '../../src/cli/output.js';
+import { buildSystemInitDocument } from '../../src/cli/print/documents.js';
 import { CLI_VERSION, HELP_TEXT, UNIMPLEMENTED_OPTIONS, createCommandSession, runCommand } from '../../src/cli/command.js';
 import { PROVIDER_STATE_FILE } from '../../src/cli/interactive.js';
 import { providerManagerCommand } from '../../src/cli/commands/manager.js';
@@ -787,7 +788,7 @@ describe('the headless run', () => {
 
     for await (const event of stream) events.push(event);
 
-    expect(events[0]).toEqual({ type: 'text', text: 'hi there' });
+    expect(events[0]).toEqual({ type: 'text', id: 'rec-1', text: 'hi there' });
     expect(events[events.length - 1]?.type).toBe('result');
   });
 
@@ -840,10 +841,15 @@ describe('the headless run', () => {
     expect(code).not.toBe(EXIT_SUCCESS);
     expect(code).toBe(EXIT_FAILURE);
     expect(readJsonDocuments(stdout.text)).toHaveLength(1);
-    expect(JSON.parse(stdout.text)).toMatchObject({ is_error: true, subtype: 'error' });
+    // The error variant's subtype is the target's own
+    // (`chunk-pj5cyqhw.js:326977`).
+    expect(JSON.parse(stdout.text)).toMatchObject({
+      is_error: true,
+      subtype: 'error_during_execution',
+    });
   });
 
-  it('writes one JSON object per event in stream-json', async () => {
+  it('writes one JSON object per message in stream-json: the init document first', async () => {
     const stdout = new CollectingSink();
     const stderr = new CollectingSink();
 
@@ -857,14 +863,32 @@ describe('the headless run', () => {
       format: 'stream-json',
       stdout,
       stderr,
+      init: buildSystemInitDocument({
+        cwd: '/work',
+        model: 'claude-sonnet-4-5',
+        mode: 'default',
+        apiKeySource: 'none',
+        version: '0.1.0',
+        tools: ['Read'],
+        slashCommands: ['/help'],
+        outputStyle: 'default',
+        skills: [],
+      }),
+      sessionId: 'session-1',
+      model: 'claude-sonnet-4-5',
     });
 
     expect(code).toBe(EXIT_SUCCESS);
     const documents = readJsonDocuments(stdout.text);
-    // One object per event: the assistant's text and the result.
-    expect(documents).toHaveLength(2);
-    expect(documents[0]).toEqual({ type: 'text', text: 'hi there' });
-    expect(documents[1]).toMatchObject({ type: 'result' });
+    // One document per message, the SDK kinds: init first, the assistant's
+    // text inside an `assistant` document (`chunk-pj5cyqhw.js:261767`), and
+    // the result last. The init document is **the one the caller wired**: the
+    // writer writes it whole, and the headless-output contract pins its own
+    // member order.
+    expect(documents).toHaveLength(3);
+    expect(documents[0]).toMatchObject({ type: 'system', subtype: 'init', cwd: '/work' });
+    expect((documents[1] as { type: string }).type).toBe('assistant');
+    expect(documents[documents.length - 1]).toMatchObject({ type: 'result' });
   });
 
   it('writes the assistant’s text in text mode', async () => {
@@ -904,25 +928,28 @@ describe('the headless run', () => {
     });
 
     expect(code).toBe(EXIT_FAILURE);
-    // The two formats must not disagree about the same failure: the message the
-    // provider gave is the message the text format writes.
+    // The target's printer writes the format's own line on stdout
+    // (`Execution error`, no trailing newline) and the failure's detail on
+    // stderr — the two formats must not disagree about the same failure.
     expect(stderr.text).toBe('the provider failed\n');
-    expect(stdout.text).toBe('');
+    expect(stdout.text).toBe('Execution error');
   });
 
-  it('fails when the event stream carries no result event', async () => {
+  it('writes the target\'s line to stderr and nothing to stdout when the run carries no result event', async () => {
     const stdout = new CollectingSink();
     const stderr = new CollectingSink();
 
     async function* events(): AsyncIterable<HeadlessEvent> {
-      yield { type: 'text', text: 'partial' };
+      yield { type: 'text', id: 'rec-1', text: 'partial' };
     }
 
     const code = await writeHeadlessOutput({ events: events(), format: 'json', stdout, stderr });
 
-    // The document says the run failed, so the exit code says so too.
+    // The target's own rule (`chunk-e7w77ts3.js:529318`): the line on stderr,
+    // nothing on stdout, exit `1`.
     expect(code).toBe(EXIT_FAILURE);
-    expect(JSON.parse(stdout.text)).toMatchObject({ is_error: true, subtype: 'error' });
+    expect(stdout.text).toBe('');
+    expect(stderr.text).toBe('Error: No messages returned from query\n');
   });
 
   it('maps the tool call, the tool result and the provider event', async () => {
@@ -1412,6 +1439,9 @@ describe('the command', () => {
     const stderr = new CollectingSink();
     const configDir = makeDirectory();
 
+    // The **real** session factory: the init document is built from the
+    // session's own context — the tools the builtins registered, the style the
+    // settings resolved — and not from a stub's.
     const code = await runCommand(
       parseArgs(['-p', 'hello', '--output-format', 'stream-json']),
       {
@@ -1420,19 +1450,72 @@ describe('the command', () => {
         configDir,
         cwd: configDir,
         isTTY: false,
-        createSession: async () => ({
-          sessionId: 'session-1',
-          mode: 'default',
-          runtime: runtimeOf([assistantRecord('hi there')]),
-        }),
+        driver: fakeDriver([
+          [
+            { type: 'message_start', messageId: 'msg-1', model: 'claude-sonnet-4-5' },
+            { type: 'text_delta', text: 'hi there' },
+            { type: 'message_stop', stopReason: 'end_turn' },
+          ],
+        ]),
       },
     );
 
     expect(code).toBe(EXIT_SUCCESS);
     const documents = readJsonDocuments(stdout.text);
-    expect(documents).toHaveLength(2);
-    expect(documents[0]).toEqual({ type: 'text', text: 'hi there' });
-    expect(documents[1]).toMatchObject({ type: 'result' });
+    // The SDK kinds: the `system`/`init` document first, the assistant's text
+    // inside an `assistant` document, the **result** document last
+    // (`chunk-pj5cyqhw.js:333857`, `:261767`).
+    expect(documents).toHaveLength(3);
+    expect(documents[0]).toMatchObject({
+      type: 'system',
+      subtype: 'init',
+      claude_code_version: CLI_VERSION,
+      cwd: configDir,
+      model: 'claude-sonnet-4-5',
+      permissionMode: 'default',
+      output_style: 'default',
+      mcp_servers: [],
+      plugins: [],
+    });
+    // The tools are the ones the **real** session offers.
+    expect((documents[0] as { tools: readonly string[] }).tools).toContain('Bash');
+    expect((documents[1] as { session_id?: string }).session_id).toBeDefined();
+    expect(documents[1]).toMatchObject({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'hi there' }] },
+    });
+    expect(documents[documents.length - 1]).toMatchObject({ type: 'result' });
+  });
+
+  it('reports the no-result line through the command when the turn throws', async () => {
+    const stdout = new CollectingSink();
+    const stderr = new CollectingSink();
+    const configDir = makeDirectory();
+
+    const code = await runCommand(parseArgs(['-p', 'hello', '--output-format', 'json']), {
+      stdout,
+      stderr,
+      configDir,
+      cwd: configDir,
+      isTTY: false,
+      createSession: async () => ({
+        sessionId: 'session-1',
+        mode: 'default',
+        // A turn the runtime never came back with records from: `runTurn`
+        // throws, and the writer applies the no-result rule.
+        runtime: {
+          async runTurn(_input: TurnInput): Promise<TurnResult> {
+            throw new Error('the runtime blew up');
+          },
+        },
+      }),
+    });
+
+    expect(code).toBe(EXIT_FAILURE);
+    // `Error: No messages returned from query` — the target's own line, and
+    // **nothing** on stdout (`chunk-e7w77ts3.js:529318`).
+    expect(stdout.text).toBe('');
+    expect(stderr.text).toBe('Error: No messages returned from query\n');
   });
 
   it('resumes the session a path names', async () => {

@@ -97,10 +97,13 @@ import { streamingSourceOf } from '../agent/context.js';
 import { loadManagerState, providerManagerCommand } from './commands/manager.js';
 import { resolveActiveConnection } from './commands/provider.js';
 import { PROVIDER_EXTENSION_NOTICE } from './commands/shared.js';
+import { slashCommandNames } from './commands/slash.js';
 import { loadSettings } from '../config/loader.js';
+import { currentOutputStyle, DEFAULT_OUTPUT_STYLE_NAME } from '../config/outputStyles.js';
 import { parseSettingsDocument } from '../config/schema.js';
 import type { SettingsSource, SettingsTier } from '../config/tiers.js';
-import { TIER_PRECEDENCE, documentOf, mergeSettingsValue } from '../config/tiers.js';
+import { TIER_PRECEDENCE, documentOf, mergeMergedSettings, mergeSettingsValue } from '../config/tiers.js';
+import { createSkillRegistry } from '../extensions/skills/registry.js';
 import type { HookRegistry } from '../extensions/hooks/registry.js';
 import { createHookRegistry } from '../extensions/hooks/registry.js';
 import { createHookApproval, createPreToolUseApproval } from '../extensions/hooks/runner.js';
@@ -168,6 +171,7 @@ import {
   writeHeadlessOutput,
   type OutputSink,
 } from './output.js';
+import { buildSystemInitDocument } from './print/documents.js';
 
 /* -------------------------------------------------------------------------- */
 /* The constants                                                               */
@@ -438,6 +442,19 @@ export interface CommandSession {
    * see which mode the rules and the settings resolved to.
    */
   mode: PermissionMode;
+  /**
+   * The names of the tools the session offers.
+   *
+   * The `stream-json` output's `system`/`init` document carries them
+   * (`chunk-pj5cyqhw.js:333857`), and the member makes the offered list
+   * observable to the run that writes the document.
+   */
+  tools?: readonly string[];
+  /**
+   * The active output style's name — the `system`/`init` document's
+   * `output_style`. Optional: a stub session unravels it to the default.
+   */
+  outputStyle?: string;
 }
 
 /** The factory that builds the session a run uses. */
@@ -1298,11 +1315,37 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
     }
   }
 
+  // The `stream-json` output carries the `system`/`init` document first
+  // (`chunk-pj5cyqhw.js:333857`), so the run builds it from the session's own
+  // context **before** the turn and hands it to the writer. The writer holds
+  // it until the first message document reaches the wire — and a run that
+  // writes no message at all, the no-result rule below, writes nothing at all.
+  // The MCP surface and the plugins are refused on this path, so their lists
+  // are the empty ones (`docs/compatibility/command-surface.md`).
+  const model = resolveModel(parsed, context);
+  const init =
+    parsed.outputFormat === 'stream-json'
+      ? buildSystemInitDocument({
+          apiKeySource: apiKeySourceOf(env),
+          version: CLI_VERSION,
+          cwd,
+          tools: session.tools ?? [],
+          mcpServers: [],
+          model,
+          mode: session.mode,
+          slashCommands: slashCommandNames(),
+          outputStyle: session.outputStyle ?? DEFAULT_OUTPUT_STYLE_NAME,
+          skills: createSkillRegistry({ cwd, configDir }).list().map((skill) => skill.name),
+          plugins: [],
+          pluginErrors: [],
+        })
+      : undefined;
+
   const code = await writeHeadlessOutput({
     events: runHeadless({
       prompt,
       sessionId: session.sessionId,
-      model: resolveModel(parsed, context),
+      model,
       runtime: session.runtime,
       ...(context.signal === undefined ? {} : { signal: context.signal }),
       ...(context.now === undefined ? {} : { now: context.now }),
@@ -1311,6 +1354,9 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
     format: parsed.outputFormat,
     stdout: context.stdout,
     stderr: context.stderr,
+    ...(init === undefined ? {} : { init }),
+    sessionId: session.sessionId,
+    model,
   });
 
   return code;
@@ -1648,7 +1694,16 @@ export async function createCommandSession(context: SessionContext): Promise<Com
     ...(context.approveAsk === undefined ? {} : { approveAsk: context.approveAsk }),
   });
 
-  return { sessionId: context.sessionId, runtime, mode };
+  return {
+    sessionId: context.sessionId,
+    runtime,
+    mode,
+    // The init document's sources: the tools the session offers and the style
+    // the settings resolved (`chunk-pj5cyqhw.js:333857`). They ride along with
+    // the mode, and the run that writes the init document builds it from them.
+    tools: registry.list().map((tool) => tool.name),
+    outputStyle: currentOutputStyle(mergeMergedSettings(settings.tiers)),
+  };
 }
 
 /**
@@ -1762,6 +1817,24 @@ export function resolveModel(
   context: { model?: string | undefined },
 ): string {
   return parsed.model ?? context.model ?? DEFAULT_MODEL;
+}
+
+/**
+ * Where the run's key comes from, the `system`/`init` document's
+ * `apiKeySource` (`chunk-pj5cyqhw.js:333857`).
+ *
+ * **Implementation choice.** The target names several sources — the
+ * environment variable, the key helper, a managed key — and this build wires
+ * exactly one of them: the first-party environment entry
+ * (`src/provider/credentials.ts`), whose reference the manager resolves from
+ * the environment. The environment **holding** the variable decides the
+ * source, the way the target's own `environmentApiKey` fact
+ * (`src/provider/credentials.ts`) decides it; a run without one reports
+ * `none`.
+ */
+function apiKeySourceOf(env: NodeJS.ProcessEnv): 'ANTHROPIC_API_KEY' | 'none' {
+  const value = env.ANTHROPIC_API_KEY;
+  return typeof value === 'string' && value !== '' ? 'ANTHROPIC_API_KEY' : 'none';
 }
 
 function mergedTopLevelKey(

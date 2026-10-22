@@ -71,9 +71,15 @@
  * reason, and the runtime is not this milestone's to change.
  */
 
-import { randomUUID } from 'node:crypto';
-
-import { buildResultDocument, usageOf, type ResultDocument } from './headless.js';
+import {
+  buildAssistantDocument,
+  buildUserDocument,
+  streamJsonLine,
+  TextResultPrinter,
+  type StreamJsonDocument,
+  type SystemInitDocument,
+} from './print/documents.js';
+import type { ResultDocument } from './headless.js';
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                              */
@@ -156,20 +162,28 @@ export interface CommandResult {
 /**
  * The events a headless run produces.
  *
- * The union is this implementation's own: the audit pins that the `stream-json` format
- * writes one object per event, and not what an event is. The five members cover
- * everything a turn produces — the assistant's text, the tool calls it made, the
- * results those calls produced, the errors, and the result of the run itself.
+ * The union is this implementation's own: the run turns the turn's transcript
+ * records into these (`src/cli/headless.ts`), and the writers decide what the
+ * output formats write from them. The five members cover everything a turn
+ * produces — the assistant's text, the tool calls it made, the results those
+ * calls produced, the errors, and the result of the run itself.
  *
  * The **result** member is not this implementation's own: it is the **target's**
- * result document, member for member and member for member in the target's own
+ * result document, member for member in the target's own
  * order (`chunk-pj5cyqhw.js:171561`), so the `stream-json` format's **last**
  * document is the target's document. The document's type and the builder live in
  * `src/cli/headless.ts`.
+ *
+ * What the `stream-json` format **writes** from these events is the SDK
+ * message kinds the target's own source names — `system`/`init` first, the
+ * assistant's text and tool calls inside `assistant` documents, the tool
+ * results inside `user` documents, and the `result` document last. The
+ * mapping lives in the writer below; the builders live in
+ * `src/cli/print/documents.ts`.
  */
 export type HeadlessEvent =
-  /** The assistant produced text. */
-  | { type: 'text'; text: string }
+  /** The assistant produced text, from the record the transcript named. */
+  | { type: 'text'; id: string; text: string }
   /** The assistant asked for a tool to run. */
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   /** A tool produced a result. */
@@ -219,118 +233,178 @@ export interface HeadlessOutputOptions {
   stdout: OutputSink;
   /** The stream the failures go to. */
   stderr: OutputSink;
+  /**
+   * The `system`/`init` document the run is wired with.
+   *
+   * The `stream-json` output always begins with it, and the command that wires
+   * the run always builds one from the session's context
+   * (`src/cli/print/documents.ts`); a `stream-json` call without one is
+   * refused.
+   */
+  init?: SystemInitDocument;
+  /**
+   * The session the run belonged to — the SDK message documents'
+   * `session_id`. The result document carries its own.
+   */
+  sessionId?: string;
+  /** The model the run ran on — the assistant documents' `model`. */
+  model?: string;
 }
 
 /**
  * Write a headless run's events, and return the exit code the run ends with.
  *
- * The exit code is the run's own: `EXIT_SUCCESS` when the run finished and
- * `EXIT_FAILURE` when it did not. It is derived from the **result** event, so
- * the three formats agree on it — a machine reading the `json` document and a
- * machine reading the exit code see the same thing.
+ * **The target's own switch** (`chunk-e7w77ts3.js:529318`), read back from the
+ * findings' record:
+ *
+ *   - the `json` format writes **exactly one** document — the result document,
+ *     `JSON.stringify(result) + "\n"`;
+ *   - the `stream-json` format writes **one document per line**, one per
+ *     message, the `system`/`init` document first (`chunk-btsgvmny.js:29557`),
+ *     the **result** document last;
+ *   - the `text` format prints the result document through the target's own
+ *     printer (`chunk-e7w77ts3.js:445913`) — the result's text at the end of
+ *     the turn, the format's own line for a failure;
+ *   - the exit code is the result document's `is_error`;
+ *   - a run that produced **no** result document writes
+ *     `Error: No messages returned from query` to **stderr**, writes
+ *     **nothing** to stdout, and exits `1`.
+ *
+ * NULL RESULT BETWEEN EVENTS: a turn that threw — the runtime that never came
+ * back with records — is the same no-result case, and the writer applies the
+ * same rule for it.
  */
 export async function writeHeadlessOutput(options: HeadlessOutputOptions): Promise<number> {
-  const { events, format, stdout, stderr } = options;
+  const { events, format, stdout, stderr, init, sessionId, model } = options;
 
-  let result: Extract<HeadlessEvent, { type: 'result' }> | undefined;
-  let text = '';
+  // The stream-json wire always begins with the init document (`src/cli/print/documents.ts`),
+  // and the command always wires one. A caller without one has built no
+  // stream, and the writer refuses rather than writing one that starts
+  // elsewhere.
+  if (format === 'stream-json' && init === undefined) {
+    throw new Error('the stream-json output writes the run\'s init document, and none was supplied');
+  }
+
+  const printer = new TextResultPrinter({ stdout, stderr });
+
+  // The target's own hold, read the other way round: the init document is
+  // flushed before the **first** message document reaches the wire, so the
+  // init document is always first — and a run that yielded nothing, the
+  // no-result case below, writes nothing at all.
+  let pendingInit: SystemInitDocument | undefined = init;
+  const writeStream = (document: StreamJsonDocument): void => {
+    if (pendingInit !== undefined) {
+      stdout.write(streamJsonLine(pendingInit));
+      pendingInit = undefined;
+    }
+    stdout.write(streamJsonLine(document));
+  };
+
+  let result: ResultDocument | undefined;
   let failure: string | undefined;
-  let wroteText = false;
 
-  for await (const event of events) {
-    switch (event.type) {
-      case 'text':
-        text += event.text;
-        if (format === 'text') {
-          stdout.write(event.text);
-          wroteText = true;
-        } else if (format === 'stream-json') stdout.write(`${JSON.stringify(event)}\n`);
-        break;
-      case 'tool_use':
-      case 'tool_result':
-        if (format === 'stream-json') stdout.write(`${JSON.stringify(event)}\n`);
-        break;
-      case 'error':
-        failure = event.message;
-        if (format === 'stream-json') stdout.write(`${JSON.stringify(event)}\n`);
-        break;
-      case 'result':
-        result = event;
-        if (format === 'stream-json') stdout.write(`${JSON.stringify(event)}\n`);
-        break;
-      default:
-        break;
+  try {
+    for await (const event of events) {
+      switch (event.type) {
+        case 'text':
+          if (format === 'stream-json') {
+            // The assistant's text arrives inside the SDK's `assistant`
+            // document (`chunk-pj5cyqhw.js:261767`).
+            writeStream(
+              buildAssistantDocument({
+                id: event.id,
+                model: model ?? '',
+                content: [{ type: 'text', text: event.text }],
+                sessionId: sessionId ?? '',
+              }),
+            );
+          }
+          break;
+        case 'tool_use':
+          if (format === 'stream-json') {
+            writeStream(
+              buildAssistantDocument({
+                id: event.id,
+                model: model ?? '',
+                content: [{ type: 'tool_use', id: event.id, name: event.name, input: event.input }],
+                sessionId: sessionId ?? '',
+              }),
+            );
+          }
+          break;
+        case 'tool_result':
+          if (format === 'stream-json') {
+            // The result turns around inside the SDK's `user` document
+            // (`chunk-pj5cyqhw.js:239906`), marked with `tool_use_result`.
+            writeStream(
+              buildUserDocument({
+                content: [
+                  {
+                    type: 'tool_result',
+                    tool_use_id: event.id,
+                    content: event.content,
+                    is_error: event.is_error,
+                  },
+                ],
+                toolUseResult: event.content,
+                sessionId: sessionId ?? '',
+              }),
+            );
+          }
+          break;
+        case 'error':
+          failure = event.message;
+          break;
+        case 'result':
+          result = event;
+          if (format === 'stream-json') writeStream(event);
+          break;
+      }
     }
+  } catch {
+    // The turn produced no records — the runtime never came back. This is the
+    // no-result case the target's own switch names: the line on stderr,
+    // nothing on stdout, exit `1`.
+    return exitForNoResult(stderr);
   }
 
-  // The exit code is the run's own, and it agrees with the document the `json`
-  // format writes: a run that produced **no** result event failed — the
-  // document says so, and so does the exit code.
-  const failed = result === undefined || result.is_error === true || failure !== undefined;
-
-  if (format === 'text') {
-    // The text of a failed run goes to stderr, so stdout stays the answer. The
-    // provider's own message is preferred over the generic one: the two formats
-    // must not disagree about the same failure.
-    if (failed) {
-      stderr.write(`${failure ?? result?.errors?.[0] ?? 'The run failed.'}\n`);
-    } else if (wroteText) {
-      stdout.write('\n');
-    }
-  } else if (format === 'json') {
-    // **Exactly one** document, whether the run succeeded or not.
-    stdout.write(`${JSON.stringify(resultDocument(result, text, failure))}\n`);
-  }
-
-  return failed ? EXIT_FAILURE : EXIT_SUCCESS;
+  return exitAfterRun(stdout, stderr, printer, format, result, failure);
 }
 
 /**
- * The document the `json` format writes.
+ * The exit code and the writing that surround a run the writer consumed.
  *
- * The **target's own document**, built in the target's own member order
- * (`chunk-pj5cyqhw.js:171561`): the common members, then the variant members,
- * then `type`, `duration_ms` and `uuid`.
- *
- * A run that produced **no** result event still produces a document: the document
- * says the run failed, and says why, rather than leaving the reader with an
- * empty stdout. **This is a divergence from the target, and it is named**: the
- * target writes `Error: No messages returned from query` to **stderr**, writes
- * **nothing** to stdout and exits `1` (`chunk-e7w77ts3.js:529318`). The
- * divergence is pinned by a contract test this milestone does not own
- * (`tests/contracts/cli-surface.test.ts`).
+ * Split from {@link writeHeadlessOutput} so the no-result rule reads once.
  */
-function resultDocument(
-  result: Extract<HeadlessEvent, { type: 'result' }> | undefined,
-  text: string,
+function exitAfterRun(
+  stdout: OutputSink,
+  stderr: OutputSink,
+  printer: TextResultPrinter,
+  format: OutputFormat,
+  result: ResultDocument | undefined,
   failure: string | undefined,
-): ResultDocument {
-  if (result === undefined) {
-    return buildResultDocument({
-      isError: true,
-      result: text,
-      errors: failure !== undefined ? [failure] : undefined,
-      stopReason: null,
-      sessionId: '',
-      durationMs: 0,
-      numTurns: 0,
-      usage: usageOf(undefined),
-      permissionDenials: [],
-      uuid: randomUUID(),
-    });
+): number {
+  if (result === undefined) return exitForNoResult(stderr);
+
+  if (format === 'text') {
+    // The printer prints the result document once — the one-batch run's own
+    // turn-end is the run's end (`src/cli/headless.ts` states the runtime's
+    // contract).
+    printer.print(result, failure);
+  } else if (format === 'json') {
+    // **Exactly one** document: the run's own result document, written as the
+    // run built it.
+    stdout.write(`${JSON.stringify(result)}\n`);
   }
 
-  const errors = result.errors ?? (failure !== undefined ? [failure] : undefined);
-  return buildResultDocument({
-    isError: result.is_error,
-    result: text,
-    errors,
-    stopReason: result.stop_reason,
-    sessionId: result.session_id,
-    durationMs: result.duration_ms,
-    numTurns: result.num_turns,
-    usage: result.usage,
-    permissionDenials: result.permission_denials,
-    uuid: result.uuid,
-  });
+  return (result.is_error) ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+/**
+ * The no-result case: `Error: No messages returned from query` on stderr,
+ * nothing on stdout, exit `1` (`chunk-e7w77ts3.js:529318`).
+ */
+function exitForNoResult(stderr: OutputSink): number {
+  stderr.write('Error: No messages returned from query\n');
+  return EXIT_FAILURE;
 }
