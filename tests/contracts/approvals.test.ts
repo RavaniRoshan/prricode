@@ -227,6 +227,12 @@ describe('the approval rules are the first layer\'s rules', () => {
         subject: { toolName: 'Bash', input: { command: 'git status && rm -rf /tmp/whatever' } },
       },
       {
+        // A deny rule that cannot be applied to the call is degraded to an ask
+        // by the first layer, and the degradation carries over.
+        rules: approvalRules({ deny: ['Write(file_path:/tmp/whatever)'] }),
+        subject: { toolName: 'Write', input: { file_path: '/tmp/whatever' } },
+      },
+      {
         rules: approvalRules({}),
         subject: { toolName: 'Bash', input: { command: 'ls' } },
       },
@@ -391,6 +397,26 @@ describe('the decision point', () => {
     const asked = await gate.decide({ ...call, model: 'beta' });
     expect(asked.outcome).toBe('allowed');
     expect(asked.decidedBy).toBe('answer');
+    expect(transport.asked).toHaveLength(1);
+  });
+
+  it('a deny rule that cannot be applied is degraded to an ask, as the first layer degrades it', async () => {
+    const transport = recordingTransport('allow');
+    const gate = createApprovalGate({
+      // `file_path` is the primary content field of `Write`, so the first layer
+      // cannot apply the rule to it — and degrades the deny to an ask, because
+      // a deny rule that silently does not apply protects nothing.
+      rules: approvalRules({ deny: ['Write(file_path:/tmp/whatever)'] }),
+      transport,
+    });
+
+    const outcome = await gate.decide({
+      toolName: 'Write',
+      input: { file_path: '/tmp/whatever' },
+    });
+
+    expect(outcome.outcome).toBe('allowed');
+    expect(outcome.decidedBy).toBe('answer');
     expect(transport.asked).toHaveLength(1);
   });
 

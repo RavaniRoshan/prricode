@@ -11,7 +11,7 @@ open, which reading was taken and why.
 **Owning task:** `CC-046` in
 [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
 **The implementation:** `src/approvals/` — five modules.
-**The test:** `tests/contracts/approvals.test.ts` — **eighteen tests**.
+**The test:** `tests/contracts/approvals.test.ts` — **nineteen tests**.
 
 ---
 
@@ -63,7 +63,7 @@ named, in this document or in the code it describes.
 | the rule language | "the way the first layer's permissions are" | the first layer's syntax (`Tool`, `Tool(matcher)`, `Tool(param:value)`, `!` negation), the first layer's parser (`parseRule`), the first layer's matcher (`evaluateListOutcome`) and the first layer's path anchors | `… › a rule written for the first layer's permissions behaves the same way here`; `… › the layer has no rule language of its own` |
 | the precedence | "a matching rule decides without asking" | the first layer's own order — `deny` → `ask` → `allow`, and the first rule **in a list** that matches is the rule that matched | `… › a matching allow rule decides without asking`; `… › a matching deny rule decides without asking` |
 | the subject | "what a tool call is, and whether it needs a human" | the call, **in the turn it belongs to**: the tool, the call's arguments, and the turn's **model** | `… › a rule may match on a model` |
-| the equivalence | — | the approval layer's verdict **is** the first layer's own `evaluateRules` over the same rules and the same call, with "nothing matched" read as *ask* | `… › a rule written for the first layer's permissions behaves the same way here` |
+| the equivalence | — | the approval layer's verdict **is** the first layer's own `evaluateRules` over the same rules and the same call, with "nothing matched" read as *ask*. The first layer's **degradations** carry over too: a deny rule that cannot be applied to the call is degraded to an **ask**, because a deny rule that silently does not apply protects nothing | `… › a rule written for the first layer's permissions behaves the same way here`; `the decision point › a deny rule that cannot be applied is degraded to an ask, as the first layer degrades it` |
 
 **The equivalence is proved by construction and by test.** The approval layer
 does not have a rule language: `src/approvals/rules.ts` imports the first

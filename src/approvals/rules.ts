@@ -256,13 +256,14 @@ export function mergeApprovalRules(
     }
   }
 
+  const cwd = base.cwd ?? persisted.cwd;
   return {
     ...base,
     allow,
     ask,
     deny,
     ruleSources,
-    ...(persisted.cwd === undefined ? {} : { cwd: base.cwd ?? persisted.cwd }),
+    ...(cwd === undefined ? {} : { cwd }),
   };
 }
 
@@ -280,13 +281,13 @@ export function evaluateApprovalRules(
   const tool = approvalToolContext(subject);
 
   const denied = evaluateListOutcome(rules, rules.deny, 'deny', tool);
-  if (denied.decision) return verdictOf('deny', denied, subject);
+  if (denied.decision) return verdictOf(denied, subject);
 
   const asked = evaluateListOutcome(rules, rules.ask, 'ask', tool);
-  if (asked.decision) return verdictOf('ask', asked, subject);
+  if (asked.decision) return verdictOf(asked, subject);
 
   const allowed = evaluateListOutcome(rules, rules.allow, 'allow', tool);
-  if (allowed.decision) return verdictOf('allow', allowed, subject);
+  if (allowed.decision) return verdictOf(allowed, subject);
 
   if (allowed.unmatched.length > 0) {
     // An allow rule covered only part of the command, so it approves nothing:
@@ -312,13 +313,25 @@ export function evaluateApprovalRules(
   };
 }
 
-/** The verdict of a rule that matched. */
-function verdictOf(
-  behavior: 'allow' | 'deny' | 'ask',
-  outcome: RuleListOutcome,
-  subject: ApprovalSubject,
-): ApprovalRuleVerdict {
-  const rule = outcome.decision?.rule;
+/**
+ * The verdict of a rule that matched.
+ *
+ * The behaviour is the **decision's own**, not the list's: the first layer
+ * degrades a deny rule that cannot be applied to the call — a rule that names
+ * the tool's primary content field — to an **ask**, and the degradation
+ * carries over. A rule that could not be applied protects nothing as a
+ * denial, and it must not be reported as one.
+ */
+function verdictOf(outcome: RuleListOutcome, subject: ApprovalSubject): ApprovalRuleVerdict {
+  const decision = outcome.decision;
+  if (decision === undefined) {
+    return {
+      behavior: 'ask',
+      reason: `This ${subject.toolName} call needs a human decision.`,
+    };
+  }
+  const behavior = decision.behavior;
+  const rule = decision.rule;
   return {
     behavior,
     reason: describeRuleVerdict(behavior, rule, subject.toolName),
