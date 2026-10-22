@@ -269,22 +269,18 @@ describe('the telemetry vocabulary', () => {
 
   it('agrees with the reverse-engineering record it was generated from', () => {
     const markdown = readFileSync(INVENTORY, 'utf8');
-    const placements = sectionRows(markdown, 'The telemetry vocabulary');
+    const rows = sectionRows(markdown, 'The telemetry vocabulary');
+    // The record holds the **distinct event names**. It once held one entry
+    // per *placement*, so an event the target ships in two chunks was listed
+    // twice; the derivation that produced it has been fixed, and this is the
+    // assertion that keeps it fixed.
     const names = new Set<string>();
-    for (const placement of placements) {
-      const quoted = /"(tengu_[A-Za-z0-9_]+)"?$/.exec(placement);
-      if (quoted !== null) {
-        names.add(quoted[1] ?? '');
-        continue;
-      }
-      const afterColon = /:(tengu_[A-Za-z0-9_]+)$/.exec(placement);
-      expect(afterColon, `a telemetry row is not a placement: ${placement}`).not.toBeNull();
-      names.add(afterColon?.[1] ?? '');
+    for (const row of rows) {
+      const name = /^tengu_[A-Za-z0-9_]+$/.test(row) ? row : (/^"(tengu_[A-Za-z0-9_]+)"$/.exec(row)?.[1] ?? '');
+      expect(name, `a telemetry row is not an event name: ${row}`).not.toBe('');
+      names.add(name);
     }
-    // The record lists **(file, name) pairs** and the vocabulary holds the
-    // **distinct names**: the pairs are more, because an event the target
-    // ships in two chunks is listed twice.
-    expect(placements.length).toBe(3554);
+    expect(rows.length).toBe(3084);
     expect(names.size).toBe(3084);
     expect([...TELEMETRY_EVENT_NAMES].sort()).toEqual([...names].sort());
   });
