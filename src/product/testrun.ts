@@ -10,30 +10,40 @@
  * > are run and tested, not merely written.**
  *
  * A file that was described is not a file that works. So the product runs the
- * tests the build produced, **in a process of their own**, and the verdict is
- * the process's own exit code. Nothing here reads a file and *decides* that
- * it is fine: the only evidence that a test passed is that the runner that
- * ran it said so.
+ * tests the build produced, and the verdict is the **runner's own**: the
+ * process's exit code, and the tests the runner reported. Nothing here reads
+ * a file and *decides* that it is fine.
  *
  * ## Why one process per file
  *
- * **Each test file is run on its own**, and the reason is the verification:
- * a criterion is met by **the test that covers it**, so the product has to
- * know which file passed and which did not. Running the suite as one process
- * and reading its report would mean parsing a report whose format belongs to
- * the runner; running each file on its own means the verdict is the exit
- * code, which is the runner's own and cannot be misread.
+ * **Each test file is run on its own, in a process of its own**, in the
+ * product's own directory. The reasons are two:
  *
- * The cost is one process per file. A product's test suite is a handful of
- * files, and the run is not on an interactive path.
+ *   - the **directory**: a test that reads a file by a relative path must see
+ *     the product's own directory, and a process is the only thing that can
+ *     be *in* a directory;
+ *   - the **verdict**: a criterion is met by **the test that covers it**, so
+ *     the product has to know which file passed and which did not, and a
+ *     process's own report is per file.
  *
- * ## A file that runs no tests
+ * ## A file that runs no test
  *
  * A test file with **no tests in it** has demonstrated nothing, and it is
- * reported as **not passed**. The exit code alone cannot tell an empty file
- * from a passing one, so the runner reads the summary the runner prints and
- * asks whether any test passed. A file that ran a test and passed is passed;
- * a file that ran no test is not.
+ * reported as **not passed**. The runner counts the file itself as a test
+ * when the file has none, and it says so: the reported test's name is **the
+ * file's own path**, which is the path the product gave the runner. So the
+ * product reads the runner's report and asks whether the runner reported a
+ * test **other than the file** — and a file that ran none is not a file that
+ * passed.
+ *
+ * A file that could not be run at all — a syntax error, a module that would
+ * not load — is **not passed** either, and the runner's own report of the
+ * failure is carried into the detail.
+ *
+ * When the runner's report cannot be read — a format this build does not
+ * know — the **exit code** is the verdict, and the file is reported as
+ * passed. A report this build cannot read is not evidence of an empty file,
+ * and it must not fail a product that works.
  */
 
 import { spawn } from 'node:child_process';
@@ -81,19 +91,43 @@ export interface NodeTestRunnerOptions {
 /** The default wait for one test file. */
 export const DEFAULT_TEST_TIMEOUT_MS = 60_000;
 
-/** The last lines of the runner's output, as one line. */
+/** One test the runner reported. */
+interface ReportedTest {
+  /** Whether the test passed. */
+  readonly passed: boolean;
+  /** The name the runner gave the test. */
+  readonly name: string;
+}
+
+/** The line the runner reports a test on. */
+const REPORTED_TEST = /^(✔|✖)\s(.*)\s\(\d+(?:\.\d+)?ms\)$/u;
+
+/**
+ * The tests the runner reported.
+ *
+ * The line is a marker, the test's name, and the time it took. The name may
+ * hold anything, so it is read from the end: the time is always the last
+ * parenthesised number.
+ */
+function reportedTests(output: string): ReportedTest[] {
+  const tests: ReportedTest[] = [];
+  for (const raw of output.split('\n')) {
+    const line = raw.trim();
+    const match = REPORTED_TEST.exec(line);
+    if (match === null) continue;
+    tests.push({ passed: match[1] === '✔', name: match[2] ?? '' });
+  }
+  return tests;
+}
+
+/** The last lines of what the runner wrote, as one line. */
 function summarise(output: string): string {
   const lines = output
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
   if (lines.length === 0) return 'the runner said nothing';
-  return lines.slice(-3).join(' | ');
-}
-
-/** Whether the runner's output reports that a test passed. */
-function reportsAPassedTest(output: string): boolean {
-  return /(^|\s)pass (\d+)/.test(output) || /(^|\s)✔/.test(output);
+  return lines.slice(-2).join(' | ');
 }
 
 /** Run one file and report what it did. */
@@ -127,31 +161,56 @@ function runFile(
 
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      finish({ path: file, passed: false, detail: `the test file did not finish within ${timeoutMs} ms` });
+      finish({
+        path: file,
+        passed: false,
+        detail: `the test file did not finish within ${timeoutMs} ms`,
+      });
     }, timeoutMs);
     if (typeof timer.unref === 'function') timer.unref();
 
     child.on('error', (error) => {
-      finish({ path: file, passed: false, detail: `the test file could not be run: ${error.message}` });
+      finish({
+        path: file,
+        passed: false,
+        detail: `the test file could not be run: ${error.message}`,
+      });
     });
 
     child.on('close', (code) => {
-      if (code === 0) {
-        if (!reportsAPassedTest(output)) {
-          finish({
-            path: file,
-            passed: false,
-            detail: 'the test file ran no test, and a file that runs nothing demonstrates nothing',
-          });
-          return;
+      const tests = reportedTests(output);
+      if (code !== 0) {
+        const parts = [`the test file failed with the exit code ${code ?? 'none'}`];
+        if (tests.length > 0) {
+          parts.push(`${tests.filter((test) => !test.passed).length} of ${tests.length} test(s) failed`);
         }
-        finish({ path: file, passed: true, detail: `the test file passed: ${summarise(output)}` });
+        parts.push(summarise(output));
+        finish({ path: file, passed: false, detail: parts.join(': ') });
+        return;
+      }
+      if (tests.length === 0) {
+        // The report could not be read. The exit code is the verdict, and a
+        // report this build cannot read is not evidence of an empty file.
+        finish({
+          path: file,
+          passed: true,
+          detail: 'the test file passed, and the runner reported no test it could read',
+        });
+        return;
+      }
+      if (tests.every((test) => test.name === file)) {
+        finish({
+          path: file,
+          passed: false,
+          detail:
+            'the test file ran no test, and a file that runs nothing demonstrates nothing',
+        });
         return;
       }
       finish({
         path: file,
-        passed: false,
-        detail: `the test file failed with the exit code ${code ?? 'none'}: ${summarise(output)}`,
+        passed: true,
+        detail: `the test file ran ${tests.length} test(s), and every one of them passed`,
       });
     });
   });
@@ -160,8 +219,8 @@ function runFile(
 /**
  * The default runner — the platform's own test runner, one process per file.
  *
- * The arguments are `--test <file>`, which is the runner's own way of running
- * one file as a test file, and the file's own exit code is the verdict.
+ * The verdict is the runner's own report, and the file's own directory is the
+ * product's own directory.
  */
 export function nodeTestRunner(options: NodeTestRunnerOptions = {}): ProductTestRunner {
   const command = options.command ?? process.execPath;

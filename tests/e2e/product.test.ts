@@ -319,6 +319,8 @@ interface Harness {
 interface HarnessOptions {
   /** The files the fake model writes. */
   readonly build?: string;
+  /** The answer the fake model gives, when it is not the default one. */
+  readonly answer?: Answerer;
   /** Whether the model backend is connected. */
   readonly connected?: boolean;
   /** The approval rules. `null` means no rules at all. */
@@ -330,7 +332,7 @@ interface HarnessOptions {
 /** Build a harness, and the options the product is run with. */
 async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const workspace = await mkdtemp(path.join(tmpdir(), 'prricode-product-'));
-  const backend = await startFakeBackend(answerWith(options.build ?? FILES));
+  const backend = await startFakeBackend(options.answer ?? answerWith(options.build ?? FILES));
   const connected = options.connected ?? true;
   const provider = providerEntry(backend, connected);
 
@@ -511,9 +513,42 @@ describe('the product, end to end', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 2. The capabilities follow their backends                                   */
+/* 2. The product refuses what it cannot use                                    */
 /* -------------------------------------------------------------------------- */
 
+describe('the product refuses what it cannot use', () => {
+  it('refuses a model that answers with nothing', async () => {
+    // The model answers every question with nothing at all.
+    const product = await harness({ answer: () => '' });
+    const result = await runProduct(product.options);
+
+    expect(result.state).toBe('refused');
+    expect(result.failedAt).toBe('specify');
+    expect(result.reason).toContain('answered the "specify" stage with no text');
+    expect(recordsOf(result).get('plan')?.state).toBe('not-reached');
+  });
+
+  it('refuses a file the model named outside the product own directory', async () => {
+    // The model names a file that climbs out of the product's own directory.
+    const product = await harness({
+      build: [
+        'artefact ../escape.mjs',
+        'content export const escaped = 1;',
+        'satisfies 1',
+      ].join('\n'),
+    });
+    const result = await runProduct(product.options);
+
+    expect(result.state).toBe('refused');
+    expect(result.failedAt).toBe('build');
+    expect(result.reason).toContain("is named outside the product's own directory");
+    expect(recordsOf(result).get('verify')?.state).toBe('not-reached');
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 3. The capabilities follow their backends                                   */
+/* -------------------------------------------------------------------------- */
 describe('the capabilities follow their backends', () => {
   it('turns the model capability off when no backend is connected', async () => {
     const product = await harness({ connected: false });
@@ -647,6 +682,51 @@ describe('the verification is executed, and compared with what the run claimed',
     expect(verification.comparison.agreed).toBe(false);
     expect(verification.comparison.overClaimed).toHaveLength(1);
     expect(verification.checks[1]?.detail).toContain('no test covers this acceptance criterion');
+  });
+
+  it('does not accept a test file that runs no test', async () => {
+    // The model names a test file, and the file runs no test at all.
+    const product = await harness({
+      build: [
+        'artefact src/last-line.mjs',
+        `content ${LAST_LINE}`,
+        'satisfies 1',
+        'artefact test/empty.test.mjs',
+        'content export const nothing = 1;',
+        'satisfies 1',
+      ].join('\n'),
+    });
+    const result = await runProduct(product.options);
+
+    expect(result.state).toBe('refused');
+    expect(result.failedAt).toBe('verify');
+    const verification = result.verification;
+    if (verification === null) throw new Error('unreachable');
+    expect(verification.tests.files[0]?.passed).toBe(false);
+    expect(verification.tests.files[0]?.detail).toContain('ran no test');
+    expect(verification.checks[0]?.passed).toBe(false);
+  });
+
+  it('does not accept a test file that cannot be run', async () => {
+    // The model names a test file, and the file does not even parse.
+    const product = await harness({
+      build: [
+        'artefact src/last-line.mjs',
+        `content ${LAST_LINE}`,
+        'satisfies 1',
+        'artefact test/broken.test.mjs',
+        'content this is not javascript ((',
+        'satisfies 1',
+      ].join('\n'),
+    });
+    const result = await runProduct(product.options);
+
+    expect(result.state).toBe('refused');
+    expect(result.failedAt).toBe('verify');
+    const verification = result.verification;
+    if (verification === null) throw new Error('unreachable');
+    expect(verification.tests.files[0]?.passed).toBe(false);
+    expect(verification.tests.files[0]?.detail).toContain('the exit code');
   });
 
   it('agrees with a run that claimed exactly what the product does', async () => {
