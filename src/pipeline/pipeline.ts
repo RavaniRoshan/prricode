@@ -147,6 +147,18 @@ export interface PipelineRunOptions {
   readonly onStage?: (event: StageEvent) => void;
 }
 
+/**
+ * The output of one stage of a run, or `null` when there is none.
+ *
+ * The lookup is of a **caller-supplied key** in a plain object, so it is
+ * guarded: a stage named `__proto__` is an ordinary name and not a prototype
+ * assignment.
+ */
+export function runOutput(run: PipelineRun, stageId: string): StageOutput | null {
+  if (!Object.hasOwn(run.outputs, stageId)) return null;
+  return run.outputs[stageId] ?? null;
+}
+
 /* -------------------------------------------------------------------------- */
 /* The pipeline                                                                */
 /* -------------------------------------------------------------------------- */

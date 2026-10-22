@@ -56,6 +56,7 @@ import {
   createStageServices,
   loadPackageStage,
   registerStage,
+  runOutput,
   stageEventParams,
   type StageContext,
   type StageInput,
@@ -397,11 +398,11 @@ describe('the pipeline runs', () => {
 
     // The run produced a verified, shippable product: the stages' documents
     // are there, and the verification says the criteria were met.
-    expect(run.outputs['verify']).toBeDefined();
-    const verification = run.outputs['verify']!;
+    expect(runOutput(run, 'verify')).not.toBeNull();
+    const verification = runOutput(run, 'verify')!;
     expect(verification.artifacts['passed']).toBe(true);
-    expect(run.outputs['ship']).toBeDefined();
-    expect(run.outputs['operate']).toBeDefined();
+    expect(runOutput(run, 'ship')).not.toBeNull();
+    expect(runOutput(run, 'operate')).not.toBeNull();
   });
 
   it('a run that is cancelled stops and says so', async () => {
@@ -420,6 +421,17 @@ describe('the pipeline runs', () => {
     expect(run.records[0]!.state).toBe('refused');
     expect(run.records[1]!.state).toBe('not-reached');
     expect(run.records[7]!.state).toBe('not-reached');
+  });
+
+  it('a stage named after a prototype member is an ordinary name', async () => {
+    const pipeline = builtInPipeline();
+    const run = await pipeline.run({ brief: BRIEF, runId: 'run_1' });
+
+    // The lookup of a stage's output is guarded: a stage named `__proto__` is
+    // an ordinary name and not a prototype assignment.
+    expect(runOutput(run, '__proto__')).toBeNull();
+    expect(runOutput(run, 'constructor')).toBeNull();
+    expect(runOutput(run, 'concept')).not.toBeNull();
   });
 
   it('a stage that cannot run says so, and the pipeline reports which stage and why', async () => {

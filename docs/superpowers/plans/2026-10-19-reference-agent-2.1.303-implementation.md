@@ -2965,7 +2965,7 @@ and the files → the release) and `operate` (the release → the runbook, and t
 watch). A stage **invents nothing**: a model answer the stage cannot read is a refusal,
 not half a document.
 
-**Thirty-one tests**, the suite green, and `tsc --noEmit` clean.
+**Thirty-two tests**, the suite green, and `tsc --noEmit` clean.
 
 **Not done here, and named:** the **model layer** (`CC-044`) and the **approval rules**
 (`CC-046`) are other milestones' work, and this milestone reports both capabilities as

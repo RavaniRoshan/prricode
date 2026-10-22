@@ -9,7 +9,7 @@ three deliveries, and the `event/stage` notification.
 **The implementation:** `src/pipeline/` — **sixteen modules**: six at the top (`stage`,
 `services`, `registry`, `process`, `pipeline`, `index`) and ten under `stages/` (the eight
 built-in stages, the format they read, and the barrel).
-**The test:** `tests/contracts/pipeline.test.ts` — **thirty-one tests**, over a **real child
+**The test:** `tests/contracts/pipeline.test.ts` — **thirty-two tests**, over a **real child
 process** for the third delivery.
 
 ---
@@ -199,6 +199,7 @@ stage says what would have to be watched, and the product is what does it.
 | **Never skip a stage silently.** | the report carries all eight, and a stage nobody supplied is a refusal | `one stage interface, three deliveries › a stage the pipeline does not have is reported, not skipped` |
 | **Every refusal names what is missing.** | the reason is a sentence, checked where the refusal is made | `the degradation contract › the model capability is off in this build…` |
 | **The pipeline does not know how a stage arrived.** | the runner calls `run` and nothing else; the three runs are compared | `one stage interface, three deliveries › the pipeline cannot tell the deliveries apart` |
+| **A name is a name.** | every lookup of a caller-supplied key in a plain object is guarded with `Object.hasOwn` — a stage named `__proto__` is an ordinary name | `the pipeline runs › a stage named after a prototype member is an ordinary name` |
 | **The protocol surface is ours.** | it is versioned, it is small, and it is not derived from anyone else's — and the naming rule keeps it that way | `tests/contracts/naming.test.ts` |
 
 ---

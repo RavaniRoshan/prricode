@@ -78,6 +78,7 @@ export {
 
 export {
   Pipeline,
+  runOutput,
   stageEventParams,
   type PipelineOptions,
   type PipelineRun,
