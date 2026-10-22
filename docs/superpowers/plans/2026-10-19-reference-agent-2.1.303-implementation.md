@@ -3116,6 +3116,65 @@ The pipeline end to end, from an idea to a verified product.
   run claimed.
 - **Files:** `src/product/`; `tests/e2e/`; `docs/compatibility/product-surface.md`.
 
+
+**Result (the product, and the run).** The concept is `docs/DIVERGENCE-LAYER-2.md`
+§4 — "turning an idea into a verified, shippable product" — and the implementation
+is measured against it, and against the two sentences above, in
+`docs/compatibility/product-surface.md`.
+
+**Delivered:** `src/product/` — **eight modules** — carrying the run, the two
+seams, the workspace, the test run, the verification and the command.
+
+**The wiring follows the backends, and never a hand-written flag.** The `model`
+capability is on only when the **model layer's own predicate** says the provider
+is connected, and the `approval` capability is on only when a **rule** is
+configured — so an enabled capability always has something behind it. The
+generative stages ask the seam, and the seam is the **model layer's engine**:
+one method, so a backend plugs in without touching a stage. The test measures
+the whole path — a **real HTTP server on a real port**, speaking one of the
+model layer's own API shapes — and counts the questions the backend was asked:
+**three**, one per stage.
+
+**"Verified" means three things here, and all three are the run's own.** The
+**whole thing runs**: all **eight** stages, and the **eight documents** they
+produce, which are written down as well as reported. The **verification stage's
+own checks are really executed**: a criterion is met by **the test that covers
+it**, and the evidence is the **product's own test run** — the files the build
+produced are **run**, in a process of their own, in the product's own
+directory, and the verdict is the runner's own. And the result is **compared
+with what the run claimed**.
+
+**The comparison is the milestone's most important test.** The **claim** is the
+pipeline's own check over the documents the run holds — a criterion is met when
+a file delivers it. The **execution** is a fact about the product. A run that
+claims a criterion is met and does not meet it **fails**, it fails **at the
+stage that claimed it**, and `ship` and `operate` are reported as `not-reached`
+— so **nothing is released**. The test proves it by making the covering test
+**fail**: the claim says *met*, the execution says *not met*, and the run stops.
+A criterion **nothing tests** is not met either — a file that runs no test
+demonstrates nothing, and the runner's own report is what says so.
+
+**A failure is a failure.** A stage that cannot run **stops** the run and names
+the stage and the reason: a model backend that is not connected, an approval
+nobody answers, a model that answers with nothing, a file named outside the
+product's own directory. Each one is refused with a reason, and the stages
+after it are reported as `not-reached`.
+
+**Eighteen tests**, the product's own green, and the suite is at **3 060** —
+its **seven** failures are in the **terminal surface's** in-flight files (the
+golden frames and the motion surface) and not in this milestone's — and
+`tsc --noEmit` is clean.
+
+**Not done here, and named:** the **terminal surface** — the run driven from a
+screen — is `CC-048`'s, and so is the motion; the product is a **library and a
+command**, and it hands the run's advances to a caller through `onStage`. The
+**verification suite** is `CC-050`'s, and this milestone is what it will
+measure. The **wiring of a deployment's own** model backend and approval
+transport **to the command line** is the model layer's and the approvals' — the
+product takes the backends as options. And there is **no compatibility row**:
+the target has no counterpart for this surface, and a divergence is not a
+compatibility claim.
+
 ### CC-050 — The verification suite
 
 The four kinds, each a thing that can fail.
