@@ -9,7 +9,7 @@
     "reducedMotion": false
   },
   "pictureHash": "7da093361631c07f42b00ee94914dc40449d3e3434142bd9f53b7cd5f0b05e4e",
-  "fingerprint": "4f5959f5d6b17ad35a2b68ae03a219d51701d40aa4f8dbd224984f3648ebcdc2",
+  "fingerprint": "493c38de34437afcbd94b272e1805abacc6c49e9446da4223f766952e3ec2286",
   "sources": [
     "src/ui/theme.ts",
     "src/ui/motion/vocabulary.ts",

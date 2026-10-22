@@ -57,14 +57,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  AGENT_STATES,
   approvalOverlayRows,
   renderMotionSurface,
   renderOverlayFrame,
   renderPromptFrame,
   renderStageFrame,
   renderStateFrame,
-  type FrameRow,
   type TerminalFrame,
 } from '../../src/ui/surface/index.js';
 import { renderPicture } from '../../src/ui/surface/frame.js';
@@ -464,16 +462,4 @@ export function checkGolden(
 /** Check every golden. */
 export function checkGoldens(directory: string = GOLDEN_DIRECTORY): GoldenFailure[] {
   return GOLDENS.flatMap((definition) => checkGolden(definition, directory));
-}
-
-/* -------------------------------------------------------------------------- */
-/* The states                                                                  */
-/* -------------------------------------------------------------------------- */
-
-/** The states the agent can be in — re-exported for the golden's own use. */
-export const GOLDEN_STATES = AGENT_STATES;
-
-/** The rows an overlay golden draws. */
-export function goldenOverlayRows(): FrameRow[] {
-  return approvalOverlayRows(APPROVAL);
 }

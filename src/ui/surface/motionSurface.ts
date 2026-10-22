@@ -33,7 +33,7 @@ import { DARK_THEME, type Theme } from '../theme.js';
 import type { MotionCapability } from '../motion/capability.js';
 import type { MotionName } from '../motion/vocabulary.js';
 
-import { rowOf, type FrameRow, type TerminalFrame } from './frame.js';
+import { frameOf, rowOf, type FrameRow, type TerminalFrame } from './frame.js';
 import { renderPromptFrame } from './prompt.js';
 import { renderStageFrame, type StageAdvance } from './stages.js';
 import { renderStateFrame, type StateChange } from './states.js';
@@ -135,5 +135,5 @@ export function renderMotionSurface(request: MotionSurfaceRequest): TerminalFram
   const reason = motionReasonRow(request.capability);
   if (reason !== null) rows.push(reason);
 
-  return { rows };
+  return frameOf(rows);
 }

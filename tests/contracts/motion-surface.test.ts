@@ -42,6 +42,7 @@ import { App, renderApp, type AppProps } from '../../src/ui/app.js';
 import {
   AGENT_STATES,
   PROMPT_RULE_CHARACTER,
+  agentStateFor,
   approvalOverlayRows,
   autocompleteOverlayRows,
   frameText,
@@ -210,6 +211,13 @@ describe("the motion surface — the transitions between the agent's states", ()
     for (const state of AGENT_STATES) {
       expect(stateRole(state)).not.toBe('');
     }
+  });
+
+  it('refuses a name that is not a state, rather than answering with another one', () => {
+    expect(agentStateFor('thinking')).toBe('thinking');
+    expect(() => agentStateFor('constructor')).toThrow(/no agent state/);
+    expect(() => agentStateFor('toString')).toThrow(/no agent state/);
+    expect(() => agentStateFor('')).toThrow(/no agent state/);
   });
 
   it('draws only the incoming line when there was no state before', () => {

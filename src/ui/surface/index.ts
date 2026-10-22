@@ -67,7 +67,6 @@ export {
 } from './stages.js';
 
 export {
-  approvalChoiceRows,
   approvalOverlayGroups,
   approvalOverlayRows,
   autocompleteOverlayRows,

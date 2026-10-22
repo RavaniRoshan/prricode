@@ -33,7 +33,7 @@ import { drawMotion } from '../motion/render.js';
 import type { MotionCapability } from '../motion/capability.js';
 import type { MotionName } from '../motion/vocabulary.js';
 
-import { optionSegments, type ApprovalChoiceView, type ApprovalPromptParts } from '../render/prompts.js';
+import { optionSegments, type ApprovalPromptParts } from '../render/prompts.js';
 import { renderAutocompleteSuggestion, type AutocompleteSuggestion } from '../render/prompts.js';
 
 import { rowOf, type FrameRow } from './frame.js';
@@ -90,16 +90,6 @@ export function autocompleteOverlayRows(
   return suggestions.map((suggestion, index) =>
     rowOf([{ text: renderAutocompleteSuggestion(suggestion, index === focused) }]),
   );
-}
-
-/**
- * The rows of the approval dialog, for the dialog's own choices.
- *
- * A convenience over `approvalOverlayRows`, for a caller that has the
- * choices rather than the parts.
- */
-export function approvalChoiceRows(choices: readonly ApprovalChoiceView[]): FrameRow[] {
-  return choices.map((choice) => rowOf(optionSegments(choice)));
 }
 
 /* -------------------------------------------------------------------------- */
