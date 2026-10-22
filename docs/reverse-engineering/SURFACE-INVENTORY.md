@@ -5214,6 +5214,15 @@ Every event a hook may answer to, re-derived from the target's own list.
 | `WorktreeCreate` |
 | `WorktreeRemove` |
 
+## The native inventory
+
+Every native object the target's image carries, read from the extraction manifest's own payload index.
+
+| name |
+|---|
+| `audio-capture.node (492368 bytes, 4bf312cbbc81f577d5ed0bcdcba803bfaa219c05ac4a1cca729ec81628561e88)` |
+| `clipboard-napi.node (1072864 bytes, 4881da9229654a04bdec176cb70c818b872dd6bc74aaa881f021dbe20cdcbea7)` |
+
 ## The value-taking flags
 
 Re-derived from the target's own parser, and told apart by the target's own relationships.

@@ -444,6 +444,54 @@ function deriveBrowserTools(): Set<string> {
   return names;
 }
 
+/**
+ * The native inventory: the target's own native objects, and the whole
+ * payload the image carries.
+ *
+ * The audit's *whole-image* native inventory was never established — three
+ * attempts timed out (330 s, 360 s, 900 s). But the **extraction manifest**
+ * enumerates the image's payload file by file, with each file's kind, size and
+ * digest, and the native ones are the `ELF x86-64` entries. So the question
+ * that three scans could not answer is answered by the image's own index.
+ */
+function deriveNativeInventory(): { members: string[]; payload: number } {
+  const members: string[] = [];
+  let payload = 0;
+  const manifest = path.join(path.dirname(EXTRACTED), 'extraction-manifest-patched.json');
+  let text: string;
+  try {
+    text = readFileSync(manifest, 'utf8');
+  } catch {
+    return { members, payload };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { members, payload };
+  }
+  const entries = Array.isArray(parsed) ? parsed : [parsed];
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const files = (entry as { files?: unknown }).files;
+    if (!Array.isArray(files)) continue;
+    payload += files.length;
+    for (const file of files) {
+      if (typeof file !== 'object' || file === null) continue;
+      const record = file as { kind?: unknown; path?: unknown; size?: unknown; sha256?: unknown };
+      if (record.kind !== 'ELF x86-64') continue;
+      const name = typeof record.path === 'string' ? record.path : '';
+      if (name === '') continue;
+      members.push(
+        `${name} (${typeof record.size === 'number' ? record.size : 0} bytes, ${
+          typeof record.sha256 === 'string' ? record.sha256 : ''
+        })`,
+      );
+    }
+  }
+  return { members: members.sort(), payload };
+}
+
 /** Every section of the generated record, with its members. */
 function inventorySections(markdown: string): Map<string, Set<string>> {
   const sections = new Map<string, Set<string>>();
@@ -558,6 +606,7 @@ function main(): number {
   const hookEvents = deriveHookEvents();
   mark('the hook events');
   const flagSets = deriveFlagSets();
+  const native = deriveNativeInventory();
   mark('the flag sets');
 
   const sections: { heading: string; note: string; entries: string[] }[] = [
@@ -590,6 +639,11 @@ function main(): number {
       heading: 'The hook event matrix',
       note: "Every event a hook may answer to, re-derived from the target's own list.",
       entries: [...hookEvents].sort(),
+    },
+    {
+      heading: 'The native inventory',
+      note: "Every native object the target's image carries, read from the extraction manifest's own payload index.",
+      entries: native.members,
     },
     ...[...flagSets].map(([heading, members]) => ({
       heading,

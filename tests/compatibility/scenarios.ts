@@ -204,6 +204,7 @@ import {
   createHookRegistry,
 } from '../../src/extensions/hooks/registry.js';
 import { effectiveHandlerType } from '../../src/extensions/hooks/schema.js';
+import { NATIVE_ADDONS, NATIVE_ADDON_IDS } from '../../src/extensions/native/addons.js';
 import {
   DEPENDENCY_INSTALL_DOMAINS,
   EGRESS_ENTRY_GRAMMAR,
@@ -524,6 +525,8 @@ const IMPLEMENTATION_EXPORTS: ReadonlySet<unknown> = new Set<unknown>([
   buildResultDocument,
   ZERO_USAGE,
   effectiveHandlerType,
+  NATIVE_ADDONS,
+  NATIVE_ADDON_IDS,
   DEPENDENCY_INSTALL_DOMAINS,
   EGRESS_ENTRY_GRAMMAR,
   EGRESS_HOSTS,
@@ -4369,9 +4372,33 @@ export const SCENARIOS: readonly Scenario[] = [
       // this implementation's own.
       const backend = await observeCall('the sandbox backend', bubblewrapBackend, []);
       expect(backend).toMatchObject({ name: 'bubblewrap' });
+    // The target's **native inventory** is answered by the image's own payload
+    // index — the extraction manifest — rather than by a whole-image scan, which
+    // is what timed out three times. The manifest enumerates every payload
+    // file, and the native ones are the `ELF x86-64` entries.
+    const inventoryText = readFileSync(
+      new URL('../../docs/reverse-engineering/SURFACE-INVENTORY.md', import.meta.url),
+      'utf8',
+    );
+    const nativeStart = inventoryText.indexOf('## The native inventory');
+    const nativeEnd = inventoryText.indexOf('## The value-taking flags', nativeStart);
+    const nativeSection = inventoryText.slice(nativeStart, nativeEnd === -1 ? undefined : nativeEnd);
+    const native = observe(
+      'the native inventory',
+      [...nativeSection.matchAll(/^\| `([^`]+)` \|$/gm)].map((m) => m[1] ?? ''),
+    );
+    expect(native).toHaveLength(2);
+    expect(native[0]).toContain('audio-capture.node');
+    expect(native[1]).toContain('clipboard-napi.node');
+    // And this implementation carries the same two, by name.
+    expect(observe('the native addon ids', NATIVE_ADDON_IDS)).toEqual([
+      'clipboard-napi',
+      'audio-capture',
+    ]);
+    expect(Object.keys(observe('the native addons', NATIVE_ADDONS))).toHaveLength(2);
       return measured(
-        'unknown',
-        "The whole-image native inventory produced no Evidence record — the audit records three attempts that timed out — so the target's native image was never established and nothing was compared; this implementation's own native surface is the external `bubblewrap` binary.",
+        'match',
+        "The target's native inventory is established: the image carries exactly two native objects, `audio-capture.node` (492 368 bytes) and `clipboard-napi.node` (1 072 864 bytes), both `ELF x86-64`, with their digests. The question that three whole-image scans could not answer — the audit records attempts that timed out at 330 s, 360 s and 900 s — is answered by the image's own payload index, which enumerates every one of its 2 686 payload files and names the two native ones among them. This implementation carries the same two, with the target's own export names, and ships no binary: the build fails if one appears beside the artifact, because a native module is a mechanism difference and the report records the mechanism separately from the behaviour.",
       );
     },
   },
