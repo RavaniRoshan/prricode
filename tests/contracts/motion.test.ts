@@ -177,6 +177,14 @@ describe('the motion vocabulary', () => {
     expect(restingFrame(motionFor('cursor-blink'))).toEqual({ kind: 'blink', visible: true });
   });
 
+  it('refuses a name that is not in the table, rather than answering with something else', () => {
+    // `Object.prototype` carries members called `constructor` and `toString`,
+    // and a name can come from a surface.
+    expect(() => motionFor('constructor' as MotionName)).toThrow(/no motion named/);
+    expect(() => motionFor('__proto__' as MotionName)).toThrow(/no motion named/);
+    expect(() => ease('toString' as EasingName, 0.5)).toThrow(/no easing named/);
+  });
+
   it('does not mistake the end of a pass for the resting picture', () => {
     // `overlay-out` ends at no opacity; its resting frame is fully present.
     const end = motionFrame(motionFor('overlay-out'), 1000);

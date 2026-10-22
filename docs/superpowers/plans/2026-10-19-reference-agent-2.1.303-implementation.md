@@ -3041,6 +3041,58 @@ One vocabulary, used everywhere, with the terminal's capability detected once.
   input.
 - **Files:** `src/ui/motion/`; `tests/contracts/motion.test.ts`; `docs/compatibility/motion-surface.md`.
 
+
+**Result (the vocabulary, the frame, and the degradation).** The specification is
+`docs/protocol/MOTION.md`, the decision is `docs/DIVERGENCE-LAYER-2.md` §6, and the
+implementation is measured against both in `docs/compatibility/motion-surface.md`.
+
+**Delivered:** `src/ui/motion/` — **seven modules** — carrying the vocabulary, the four
+easings, the frame, the capability, the renderer, the scheduler and the barrel.
+
+**The vocabulary is one table.** Seven named motions — the two overlays, the two
+transitions, the prompt's shimmer, the stage's advance and the cursor — with **one**
+table of easings, **one** table of durations and **one** frame budget of 33
+milliseconds. A surface asks for a motion by name, and there is nothing else to ask for.
+**The direction is in the table**: every motion declares a **start**, an **end** and a
+**resting** frame, so `overlay-in` fades in and `overlay-out` fades out, and the resting
+frame is never the end of a pass — a motion that is not drawn is not a motion that has
+finished.
+
+**The frame is a value.** It reads no clock and keeps no counter, and the time is
+**quantised** to the frame index — so two times inside one interval give the same frame,
+and **stepping** to a frame one frame at a time gives exactly the frame that asking for
+that time gives. The test proves both. **This is what makes the next milestone's visual
+golden possible**, so it is not a convenience: it is the property the system exists for.
+
+**One drawer.** There is one function that turns a motion into a picture, and the test
+draws the same motion in **two places** — the direct draw and the frame the scheduler
+produced — and compares the pictures. The output is the first layer's own `Segment[]`,
+carrying **roles** and **styles**: the motion system **writes no colour of its own**,
+and the shimmer is drawn in the theme's **own** shimmer roles.
+
+**What cannot be drawn is not drawn.** The capability is detected **once**, in the
+shared shape — `enabled: false` and `unsupported: <why>` — and a terminal that cannot
+draw a frame gets the motion's **resting** picture, **no** frame is scheduled at all,
+and the reason is reported beside it. The user's own **reduced-motion** reason comes
+first, because it is the one they can act on, and the setting is the first layer's own
+`prefersReducedMotion` — taken as an input, because the settings loader is the
+configuration's business.
+
+**Motion never blocks the input.** A tick that finds an input waiting draws **nothing**
+and yields to it, and the time comes from the clock — so a slow frame **drops** the
+frames it missed rather than queueing them: the picture catches up, and the key is never
+behind the picture.
+
+**Forty-eight tests**, the suite green at **2 999**, and `tsc --noEmit` clean.
+
+**Not done here, and named:** the **surfaces** — the prompt, the transitions, the stage
+changes and the overlays — are `CC-048`'s, and so are the **golden frames**. The
+**pipeline**'s stage advance is `CC-045`'s; the motion's **name** is here. The first
+layer's own **spinner** and its shimmer are the target's and are pinned by the first
+layer's own tests, and this system defines no second spinner. And there is **no
+compatibility row**: the target has no counterpart for this surface, and a divergence is
+not a compatibility claim.
+
 ### CC-048 — The terminal surface
 
 The motion in the prompt, the transitions between the agent's states, the pipeline's
