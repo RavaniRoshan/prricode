@@ -205,11 +205,29 @@ TelemetryEventName`), so a rename, or an event the target does not emit, is a
 | `tengu_continue` | `success`, `resume_duration_ms`, `entrypoint`, `error_name` | `chunk-9y799w6p.js:57109`, `chunk-e7w77ts3.js:734066` | the same properties |
 | `tengu_resume_print` | **none** — the payload is `{}` | `chunk-e7w77ts3.js:736480` | the same: the payload carries no property but the name |
 | `tengu_carried_prompts_taken` | `count`, `already_delivered`, `outcome`, `age_ms` | `chunk-6bp7hdav.js:58863` | the same four properties; `count` is `1` for a prompt taken and `0` for one that was not, and `age_ms` is the age of the **row** rather than of the file, because this implementation's store is a row store |
+| `tengu_unknown_model_cost` | `model`, `shortName` | `chunk-dt3pd9ft.js:268732` | the same two properties: the **model** is the id the run asked for and the **short name** is the **canonical** id the catalog knows it by, and the id is reported the way the target's own sanitiser reports it — `"nonconforming"` for an id outside its shape, and absent for an absent id |
 
 **Implementation choice.** The carried-prompt event's `count` and `age_ms` are
 this implementation's own semantics — the target takes a **file** of prompts
 and reports the file's age, and this implementation takes one **row** at a
 time. The property **names** and their **types** are the target's.
+
+**Implementation choice.** The unknown-cost event's **short name** is the
+catalog's canonical id. The target's short name comes from its **served
+catalog**, and this implementation has a **built-in** catalog and a
+provider-owned one; where the catalog knows the model, the two agree, and
+where it does not, the short name is absent — the target's own rule for an
+absent id.
+
+### The events that are carried as data only
+
+Two of the target's events belong to behaviour this implementation has, but
+**not the behaviour the event describes**, and they are therefore not raised:
+
+| event | why it is not raised |
+|---|---|
+| `tengu_tool_use_tool_result_mismatch_error` | the target's event reports a **normalisation** mismatch in the message sequence — it carries the normalised and the pre-normalised sequences, the message counts and the offending blocks. This implementation reports an unmatched `tool_result` in the transcript, which is a **different** check; raising the target's event name for it would rename the event's meaning |
+| `tengu_propose_skills`, `tengu_propose_skills_read_check`, `tengu_propose_skills_kept_lines` | the target's `propose_skills` **tool** does not exist here, so there is no behaviour that warrants the events. The read check the module owns is a different thing, and it is not the target's tool |
 
 **Not established.** The target's carried-prompt outcome vocabulary has
 **eight** members — `unbound`, `bound`, `altered`, `no_row`, `job_has_run`,
@@ -312,7 +330,7 @@ target has and this implementation does not.
 
 ### The events carried as data only
 
-The other **3 080** event names are carried as **data**. They belong to
+The other **3 079** event names are carried as **data**. They belong to
 capabilities this implementation does not have, and raising one "to make the
 count look right" would be inventing an event the target emits in a place
 this implementation has no behaviour at all.

@@ -43,6 +43,7 @@
 
 import type { ModelCatalog, PricingTier } from './catalog.js';
 import { findModel } from './catalog.js';
+import type { TelemetryEventName } from '../telemetry/vocabulary.js';
 
 /* -------------------------------------------------------------------------- */
 /* The price                                                                    */
@@ -532,6 +533,37 @@ export class CostLedger {
 /* -------------------------------------------------------------------------- */
 /* The price lookup                                                             */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The telemetry event the target records when a model's price is unknown.
+ *
+ * **Observed** (`chunk-dt3pd9ft.js:268732`): the target records
+ * `tengu_unknown_model_cost` with the **model** and its **short name**.
+ */
+export const UNKNOWN_MODEL_COST_TELEMETRY_EVENT = 'tengu_unknown_model_cost' satisfies TelemetryEventName;
+
+/**
+ * The model-id shape the target's telemetry accepts.
+ *
+ * **Observed** (`chunk-dt3pd9ft.js:239498`): the target's own sanitiser
+ * accepts an id of `[A-Za-z0-9._:[\]-]` up to a hundred characters, or the
+ * same shape with an `@` and an eight-digit date — and replaces anything else
+ * with `"nonconforming"`. An **absent** id stays absent.
+ */
+const TELEMETRY_MODEL_ID = /^[A-Za-z0-9._:[\]-]{1,100}$/;
+const TELEMETRY_MODEL_ID_AT_DATE = /^[A-Za-z0-9._:[\]-]{1,91}@\d{8}(\[\d{1,3}[mM]\])?$/;
+
+/**
+ * The model id as the target's telemetry reports it.
+ *
+ * **Observed** (`chunk-dt3pd9ft.js:239591`): an id that does not match the
+ * target's shape is reported as `"nonconforming"` rather than dropped, and an
+ * absent id stays absent.
+ */
+export function telemetryModelId(id: string | undefined): string | undefined {
+  if (id === undefined) return undefined;
+  return TELEMETRY_MODEL_ID.test(id) || TELEMETRY_MODEL_ID_AT_DATE.test(id) ? id : 'nonconforming';
+}
 
 /**
  * The **catalog price** of a model.

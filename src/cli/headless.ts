@@ -96,14 +96,17 @@
 import { randomUUID } from 'node:crypto';
 
 import type { AgentRuntime, TurnPermissionDenial, TurnUsage } from '../agent/loop.js';
-import { builtinCatalog } from '../provider/catalog.js';
+import { builtinCatalog, findModel } from '../provider/catalog.js';
 import {
+  UNKNOWN_MODEL_COST_TELEMETRY_EVENT,
   catalogCostsOf,
   costOf,
+  telemetryModelId,
   type ModelCostRecord,
   type ModelUsage as ProviderModelUsage,
 } from '../provider/cost.js';
 import { toolResultId, type SessionEvent } from '../session/event.js';
+import { raiseTelemetryEvent } from '../telemetry/emitter.js';
 
 import type { HeadlessEvent } from './output.js';
 
@@ -306,16 +309,33 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  *
  * The target prices the turn out of the **catalog**, and a model the catalog does
  * not know leaves the cost **unmeasured** — the target records
- * `tengu_unknown_model_cost` and says so.
+ * `tengu_unknown_model_cost` and says so, with the **model** and its **short
+ * name** (`chunk-dt3pd9ft.js:268732`).
+ *
+ * This implementation records the same event, with the same two properties: the
+ * **model** is the id the run asked for, and the **short name** is the
+ * **canonical** id the catalog knows it by — absent when the catalog does not
+ * know the model at all, which is the target's own rule for an absent id.
  */
 export function costOfTurn(
   model: string,
   usage: TurnUsage | undefined,
+  onTelemetry?: (event: unknown) => void,
 ): { totalCostUsd: number; modelUsage: Record<string, ModelUsage> } {
   if (usage === undefined) return { totalCostUsd: 0, modelUsage: {} };
 
   const costs = catalogCostsOf(builtinCatalog, model);
-  if (costs === undefined) return { totalCostUsd: 0, modelUsage: {} };
+  if (costs === undefined) {
+    raiseTelemetryEvent(
+      {
+        name: UNKNOWN_MODEL_COST_TELEMETRY_EVENT,
+        model: telemetryModelId(model),
+        shortName: telemetryModelId(findModel(builtinCatalog, model)?.id),
+      },
+      onTelemetry,
+    );
+    return { totalCostUsd: 0, modelUsage: {} };
+  }
 
   const providerUsage: ProviderModelUsage = {
     input_tokens: usage.inputTokens,
@@ -437,6 +457,14 @@ export interface HeadlessOptions {
   signal?: AbortSignal;
   /** The clock, for the run's duration. */
   now?: () => number;
+  /**
+   * The telemetry sink.
+   *
+   * The turn records `tengu_unknown_model_cost` when the model has no price,
+   * and the sink is where the event goes. It is optional: a caller with no
+   * telemetry pipeline simply does not receive the event.
+   */
+  telemetry?: (event: unknown) => void;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -482,7 +510,7 @@ export async function* runHeadless(options: HeadlessOptions): AsyncIterable<Head
     durationMs: Math.max(0, now() - startedAt),
     numTurns: turn.numTurns ?? 0,
     usage: usageOf(turn.usage),
-    ...costOfTurn(options.model, turn.usage),
+    ...costOfTurn(options.model, turn.usage, options.telemetry),
     permissionDenials: denialsOf(turn.permissionDenials),
     uuid: randomUUID(),
   });

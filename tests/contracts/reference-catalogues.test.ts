@@ -52,6 +52,8 @@ import {
   isPersonalConfigRestricted,
 } from '../../src/permissions/decision.js';
 import { selectRoute } from '../../src/provider/routes.js';
+import { UNKNOWN_MODEL_COST_TELEMETRY_EVENT, telemetryModelId } from '../../src/provider/cost.js';
+import { costOfTurn } from '../../src/cli/headless.js';
 import {
   SESSION_CONTINUE_TELEMETRY_EVENT,
   SESSION_RESUME_PRINT_TELEMETRY_EVENT,
@@ -530,8 +532,44 @@ describe('the events this implementation raises', () => {
       SESSION_RESUME_PRINT_TELEMETRY_EVENT,
       SESSION_CONTINUE_TELEMETRY_EVENT,
       CARRIED_PROMPT_TELEMETRY_EVENT,
+      UNKNOWN_MODEL_COST_TELEMETRY_EVENT,
     ]) {
       expect(isTargetTelemetryEvent(name), `${name} is not the target's event`).toBe(true);
     }
+  });
+
+  it('records the target\'s unknown-cost event with the model and its short name', () => {
+    // **Observed** (`chunk-dt3pd9ft.js:268732`): the target records
+    // `tengu_unknown_model_cost` with the **model** and its **short name**.
+    const events: { name: string; model?: string; shortName?: string }[] = [];
+    const cost = costOfTurn(
+      'not-a-model',
+      {
+        inputTokens: 1000,
+        outputTokens: 1000,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+      (event) => {
+        events.push(event as { name: string; model?: string; shortName?: string });
+      },
+    );
+    expect(cost.totalCostUsd).toBe(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.name).toBe('tengu_unknown_model_cost');
+    expect(events[0]?.model).toBe('not-a-model');
+    // The catalog does not know the model, so there is no canonical id — and
+    // the target's own rule for an absent id is that it stays absent.
+    expect(events[0]?.shortName).toBeUndefined();
+  });
+
+  it('reports a model id the target would refuse as nonconforming', () => {
+    // **Observed** (`chunk-dt3pd9ft.js:239498`): the target's sanitiser
+    // accepts `[A-Za-z0-9._:[\]-]` and replaces anything else with
+    // `"nonconforming"`.
+    expect(telemetryModelId('claude-sonnet-4-5')).toBe('claude-sonnet-4-5');
+    expect(telemetryModelId('anthropic.claude-haiku-4-5')).toBe('anthropic.claude-haiku-4-5');
+    expect(telemetryModelId('a model with spaces')).toBe('nonconforming');
+    expect(telemetryModelId(undefined)).toBeUndefined();
   });
 });

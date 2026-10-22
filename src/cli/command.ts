@@ -1306,6 +1306,7 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
       runtime: session.runtime,
       ...(context.signal === undefined ? {} : { signal: context.signal }),
       ...(context.now === undefined ? {} : { now: context.now }),
+      ...(context.telemetry === undefined ? {} : { telemetry: context.telemetry }),
     }),
     format: parsed.outputFormat,
     stdout: context.stdout,
