@@ -404,6 +404,24 @@ describe('the pipeline runs', () => {
     expect(run.outputs['operate']).toBeDefined();
   });
 
+  it('a run that is cancelled stops and says so', async () => {
+    const pipeline = builtInPipeline();
+    pipeline.cancel();
+    expect(pipeline.cancelled).toBe(true);
+
+    const run = await pipeline.run({ brief: BRIEF, runId: 'run_1' });
+    expect(run.state).toBe('refused');
+    expect(run.failedAt).toBe('concept');
+    expect(run.reason).toMatch(/cancelled/);
+
+    // And every stage is reported — the one that was cancelled into, and the
+    // ones that were never reached.
+    expect(run.records).toHaveLength(8);
+    expect(run.records[0]!.state).toBe('refused');
+    expect(run.records[1]!.state).toBe('not-reached');
+    expect(run.records[7]!.state).toBe('not-reached');
+  });
+
   it('a stage that cannot run says so, and the pipeline reports which stage and why', async () => {
     // The production wiring: no model backend is connected.
     const pipeline = builtInPipeline(createStageServices());

@@ -9,7 +9,7 @@ three deliveries, and the `event/stage` notification.
 **The implementation:** `src/pipeline/` — **sixteen modules**: six at the top (`stage`,
 `services`, `registry`, `process`, `pipeline`, `index`) and ten under `stages/` (the eight
 built-in stages, the format they read, and the barrel).
-**The test:** `tests/contracts/pipeline.test.ts` — **thirty tests**, over a **real child
+**The test:** `tests/contracts/pipeline.test.ts` — **thirty-one tests**, over a **real child
 process** for the third delivery.
 
 ---
@@ -93,6 +93,7 @@ channel, so a stage that fails can say why in its own words.
 | a stage nobody supplied | "rather than skipping it silently" | the run **refuses at that stage** and says which one is missing: `no stage is registered for "<stage>"` | `… › a stage the pipeline does not have is reported, not skipped` |
 | the stages after a refusal | — | they are reported as `not-reached`, with the reason naming the stage the run stopped at | `… › a stage that cannot run says so, and the pipeline reports which stage and why` |
 | a stage that throws | — | the run refuses **that** stage with the message it threw, and the stages after it are reported as not reached. A stage never takes the run down | `… › a stage that cannot run says so, and the pipeline reports which stage and why` (the refusal path) |
+| a cancelled run | — | `pipeline.cancel()` aborts the signal the stage holds; the run stops at the next stage and **reports** it — `the run was cancelled before "<stage>" began` — and the stages after it are reported as not reached | `the pipeline runs › a run that is cancelled stops and says so` |
 | the run end to end | "turning an idea into a verified, shippable product" | with the seams present, all eight stages complete and the run carries the eight documents | `the pipeline runs › the pipeline runs end to end` |
 
 **Implementation choice — the run stops at the first refusal.** The specification says a
@@ -140,6 +141,12 @@ shape is carried "when the stage is not proceeding". The reading is that this co
 input the stage cannot use — so there is one shape for "not proceeding" and a reason in
 it. The **state** in the run's report is the same for all three (`refused`), and the
 reason says which one it was.
+
+**Implementation choice — a cancelled run.** The specification says nothing about
+cancellation. The reading is that a cancelled run is **reported** like every other
+ending: the signal reaches the stage that is running, the run stops at the next stage,
+and the report says `the run was cancelled before "<stage>" began`. A cancelled pipeline
+stays cancelled — starting another run does not undo the cancellation.
 
 ---
 
@@ -224,3 +231,4 @@ Every place the specification left a choice open, and the reading taken:
 | 8 | how a criterion is checked | a criterion is met when **a file delivers it** | a check that can fail is a check; the pipeline's check is over the documents the pipeline holds |
 | 9 | what `operate` does | it records the operating work; it does not perform it | a stage that claimed to be operating something would be faking it |
 | 10 | one process per call, or one for the run | **one per call** | a stage is a short unit of work, and a process left behind is a process nobody asked for |
+| 11 | what a cancelled run does | it is **reported** like every other ending, and a cancelled pipeline stays cancelled | a cancellation nobody can see is a cancellation that did not happen |

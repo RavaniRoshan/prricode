@@ -159,7 +159,7 @@ export async function callProcessStage(
  */
 export function mapStageAnswer(stageId: string, answer: unknown): StageOutcome {
   if (typeof answer !== 'object' || answer === null || Array.isArray(answer)) {
-    return stageRefusal('the stage process answered with something that is not a result');
+    return stageRefusal(`the stage process for "${stageId}" answered with something that is not a result`);
   }
   const record = answer as Record<string, unknown>;
   const state = record['state'];
@@ -167,7 +167,9 @@ export function mapStageAnswer(stageId: string, answer: unknown): StageOutcome {
   if (state === 'completed') {
     const output = record['output'];
     if (!isStageOutput(output)) {
-      return stageRefusal('the stage process answered with a completion that carries no output');
+      return stageRefusal(
+        `the stage process for "${stageId}" answered with a completion that carries no output`,
+      );
     }
     return { state: 'completed', output };
   }
@@ -175,10 +177,14 @@ export function mapStageAnswer(stageId: string, answer: unknown): StageOutcome {
   if (state === 'refused') {
     const reason = record['reason'];
     if (typeof reason !== 'string' || reason.trim().length === 0) {
-      return stageRefusal('the stage process refused without naming a reason');
+      return stageRefusal(
+        `the stage process for "${stageId}" refused without naming a reason`,
+      );
     }
     return stageRefusal(reason);
   }
 
-  return stageRefusal(`the stage process answered with a state this build does not know`);
+  return stageRefusal(
+    `the stage process for "${stageId}" answered with a state this build does not know`,
+  );
 }

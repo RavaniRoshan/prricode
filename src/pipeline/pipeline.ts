@@ -39,6 +39,13 @@
  * when it ends — and each advance is an event. The event carries the stage's
  * id and the stage's state, and a stage that is **not proceeding** carries the
  * shared shape: `{ enabled: false, unsupported: <why> }`.
+ *
+ * ## The cancellation
+ *
+ * The stage holds a signal, and `cancel()` aborts it. The run stops at the
+ * next stage and **reports** the cancellation, the way it reports every other
+ * ending — a cancellation nobody can see is a cancellation that did not
+ * happen.
  */
 
 import { capabilityRecord, type CapabilityRecord } from '../protocol/index.js';
@@ -136,8 +143,6 @@ export interface PipelineRunOptions {
   readonly brief: string;
   /** The run's id. */
   readonly runId?: string;
-  /** The seams the run uses. */
-  readonly services?: StageServices;
   /** Called with every advance. */
   readonly onStage?: (event: StageEvent) => void;
 }
@@ -161,6 +166,7 @@ export interface PipelineOptions {
 export class Pipeline {
   private readonly registrations = new Map<string, StageRegistration>();
   private readonly services: StageServices;
+  private readonly controller = new AbortController();
   private runCounter = 0;
 
   constructor(options: PipelineOptions = {}) {
@@ -170,6 +176,22 @@ export class Pipeline {
   /** The seams this pipeline's runs use. */
   get stageServices(): StageServices {
     return this.services;
+  }
+
+  /** Whether the run has been cancelled. */
+  get cancelled(): boolean {
+    return this.controller.signal.aborted;
+  }
+
+  /**
+   * Cancel the run.
+   *
+   * The signal reaches the stage that is running, and the run stops at the next
+   * stage — and says so. A cancelled run is **reported**, like every other way
+   * a run can end.
+   */
+  cancel(): void {
+    this.controller.abort();
   }
 
   /** Every registered stage, in the order it was registered. */
@@ -198,7 +220,7 @@ export class Pipeline {
     this.runCounter += 1;
     const runId = options.runId ?? `run_${this.runCounter}`;
     const brief = options.brief;
-    const services = options.services ?? this.services;
+    const services = this.services;
 
     const outputs: Record<string, StageOutput> = {};
     const records: StageRecord[] = [];
@@ -236,6 +258,17 @@ export class Pipeline {
         continue;
       }
 
+      if (this.controller.signal.aborted) {
+        // The run was cancelled. It is reported, like every other ending.
+        const refusal = stageRefusal(`the run was cancelled before "${stageId}" began`);
+        records.push({ stageId, title: registration.stage.title, state: 'refused', reason: refusal.reason });
+        emit({ runId, stageId, state: 'refused', capability: refusal.capability });
+        state = 'refused';
+        failedAt = stageId;
+        reason = refusal.reason;
+        continue;
+      }
+
       emit({ runId, stageId, state: 'running' });
 
       const input: StageInput = {
@@ -248,7 +281,7 @@ export class Pipeline {
         runId,
         services,
         capabilities: services.capabilities,
-        signal: new AbortController().signal,
+        signal: this.controller.signal,
       };
 
       const outcome = await this.runStage(stageId, registration, input, context);
