@@ -3,3 +3,4 @@ dist/
 .vitest/
 *.tsbuildinfo
 .DS_Store
+native/build/
