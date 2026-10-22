@@ -2985,6 +2985,50 @@ The rule model and the decision point.
   is final; and the answer is attributed.
 - **Files:** `src/approvals/`; `tests/contracts/approvals.test.ts`; `docs/compatibility/approval-surface.md`.
 
+
+**Result (the rules, and the decision point).** The specification is
+`docs/protocol/PROTOCOL.md` §7, the decision is `docs/DIVERGENCE-LAYER-2.md` §6, and the
+implementation is measured against both in `docs/compatibility/approval-surface.md`.
+
+**Delivered:** `src/approvals/` — **five modules** — carrying the rule model, the transport
+seam, the store, the decision point and the public surface.
+
+**The rules are the first layer's, and they are called rather than copied.** The approval
+layer runs the first layer's own matcher, its own parser and its own path anchors over the
+second layer's **subject** — the call, **in the turn it belongs to** — so a rule may name
+the model the call runs against, and the call's own fields always win. **There is no second
+rule engine**: no module under `src/approvals/` contains a regular expression, and the test
+says so. The **equivalence is a test**: the first layer's own `evaluateRules` is run over the
+same rules and the same call, and the two verdicts are compared, case by case.
+
+**The decision point has three ways out and no fourth** — `allowed`, `denied`, `refused` —
+and **an approval that cannot be asked for is not an approval that was granted**: no
+transport, the `approval` capability off, a peer that failed and a peer that never answered
+are all a **refusal with the reason**.
+
+**A matching rule decides without asking**, and the test proves it by **counting the
+questions** — zero. **An unmatched call asks**, and the request names the tool, the call and
+the reason. **A denial is final**: it is recorded against the turn, and the same call in the
+same turn is not asked about again — one question, two decisions. **The answer is attributed
+to the peer that gave it**, over the **real protocol** — the real framing, the real peer, the
+real registry — so a client that answers on the user's behalf is recorded as the client, not
+as the user.
+
+**A rule persists.** The approval is written to a store, and the next decision for the same
+call is made **by the rule** — the questions counted again, and again zero. The rule's text
+is the first layer's own computation, and a persisted **path** rule is anchored to the
+filesystem root, so that it matches the very call that was approved.
+
+**Seventeen tests**, the suite green at **2 947**, and `tsc --noEmit` clean.
+
+**Not done here, and named:** the permission **modes**, the **hooks**, the safety check and
+the tool's own validation are the first layer's; the **agent loop** and the pipeline's own
+stage seam are other milestones' work — the pipeline's seam asks about a stage's *subject*,
+not about a tool call, and the wiring of the two is the product's. And there is **no
+compatibility row**: the target's counterpart is the first layer's permission surface,
+measured in `docs/compatibility/permission-matrix.md`, and a divergence is not a
+compatibility claim.
+
 ### CC-047 — The motion system
 
 One vocabulary, used everywhere, with the terminal's capability detected once.
