@@ -1115,6 +1115,7 @@ export async function checkBackend(
   }
 
   const build = options.backend ?? startFakeBackend;
+  const credentials = scratch('prricode-verify-credentials-');
 
   /* --- the protocol, over a real pipe ---------------------------------- */
   const harness = startProtocolHarness(node);
@@ -1264,8 +1265,7 @@ export async function checkBackend(
   }
 
   /* --- the credentials, and where the secret came from ------------------ */
-  const credentials = scratch('prricode-verify-credentials-');
-  try {
+  {
     const integration: Integration = {
       id: 'house',
       name: 'the house',
@@ -1338,8 +1338,6 @@ export async function checkBackend(
       !carries,
       'the provider names an integration, and the secret is nowhere in the record',
     );
-  } finally {
-    credentials.remove();
   }
 
   /* --- the failures ----------------------------------------------------- */
@@ -1550,6 +1548,7 @@ export async function checkBackend(
     );
   } finally {
     await refusing.close();
+    credentials.remove();
   }
 
   return {
