@@ -7,7 +7,7 @@ why.
 **Owning task:** `CC-044` in
 [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
 **The implementation:** `src/model/` — eighteen modules.
-**The test:** `tests/contracts/model-layer.test.ts` — **seventy-one tests**, over a
+**The test:** `tests/contracts/model-layer.test.ts` — **seventy-two tests**, over a
 **real HTTP server on a real port** that speaks all three shapes, and over a
 backend that fails.
 
@@ -313,7 +313,7 @@ Every place the specification left a choice open, and the reading taken:
 | 9 | where an OAuth grant lives | one JSON document in the secret store | the secret material never leaves the store |
 | 10 | whether a force-enabled provider survives a changed connection | it does not | the specification lists the three conditions as ones that must all hold |
 | 11 | the chain's sixth step | the first available model that can hold text | §8's more specific wording wins over §7's |
-| 12 | whether the chain falls through when the named model is unavailable | it does not; the selection fails loudly | the chain stops at the first source that *names* a model, which is the only reading that keeps "fails loudly" |
+| 12 | whether the chain falls through when the named model is unavailable | it does not; the selection fails loudly — **including** when the model came from the configuration | the chain stops at the first source that *names* a model, which is the only reading that keeps "fails loudly". §8's "the configured default **if there is one**" is read as "if a default is configured at all", not as "if the configured default happens to be available" — the second reading would make a configured model silently give way to the last-used one, which is the substitution the specification forbids |
 | 13 | a model reference that is not one | refused, with the form in the reason | a malformed reference is not a model, and the refusal says what the form is |
 | 14 | how long the recent list is | ten, as a named constant | the specification does not say, and a constant can be changed in one place |
 | 15 | which store holds the session's record | the layer defines the seam and ships a file-backed carrier | the repository's own session store belongs to the agent loop's milestone |

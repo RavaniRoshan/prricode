@@ -29,6 +29,43 @@ function encodeContent(content: ModelMessage['content']): Record<string, unknown
   return content.map(encodePart);
 }
 
+/** The text of a message's content, whatever shape it carries. */
+function textOf(content: ModelMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text ?? '')
+    .join('');
+}
+
+/**
+ * How a message is carried in this shape.
+ *
+ * A tool's answer travels as an output item, and an assistant's tool calls
+ * travel as call items beside the text.
+ */
+function encodeItem(message: ModelMessage): Record<string, unknown> {
+  if (message.role === 'tool') {
+    return {
+      type: 'function_call_output',
+      call_id: message.toolCallId ?? '',
+      output: textOf(message.content),
+    };
+  }
+  const content = encodeContent(message.content);
+  if (message.role === 'assistant' && message.toolCalls) {
+    for (const call of message.toolCalls) {
+      content.push({
+        type: 'function_call',
+        call_id: call.id,
+        name: call.name,
+        arguments: JSON.stringify(call.arguments),
+      });
+    }
+  }
+  return { role: message.role, content };
+}
+
 /** How a tool is carried in this shape. */
 function encodeTool(tool: ModelTool): Record<string, unknown> {
   return {
@@ -70,11 +107,7 @@ export const responsesDialect: Dialect = {
   buildRequest(input: DialectRequestInput): DialectRequest {
     const body: Record<string, unknown> = {
       model: input.model.id,
-      input: input.messages.map((message) => ({
-        role: message.role,
-        content: encodeContent(message.content),
-        ...(message.toolCallId === undefined ? {} : { call_id: message.toolCallId }),
-      })),
+      input: input.messages.map(encodeItem),
       stream: true,
     };
     if (input.tools && input.tools.length > 0) body['tools'] = input.tools.map(encodeTool);

@@ -1446,6 +1446,40 @@ describe('the whole path, against a fake backend', () => {
     }
   });
 
+  it('carries a tool answer and an assistant tool call back to the endpoint', async () => {
+    const backend = await startFakeBackend({ dialect: 'messages' });
+    try {
+      const provider = fakeProvider('fake', 'messages', backend.url);
+      const catalogue = new ModelCatalogue({
+        snapshot: document('fake', [plainModel(ALPHA, 'fake')]),
+      });
+      const engine = engineFor(provider, catalogue, { secret: 'a-secret' });
+      const turn: ModelMessage[] = [
+        { role: 'user', content: 'read a' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call_1', name: 'read', arguments: { path: 'a' } }],
+        },
+        { role: 'tool', content: 'the file', toolCallId: 'call_1' },
+      ];
+      for await (const _event of engine.run({ provider: 'fake', model: ALPHA }, { messages: turn })) {
+        // The turn runs; the request is what is asserted.
+      }
+      const body = backend.lastRequest()?.body as { messages: Record<string, unknown>[] };
+      expect(body.messages).toHaveLength(3);
+      expect(body.messages[1]?.content).toEqual([
+        { type: 'text', text: '' },
+        { type: 'tool_use', id: 'call_1', name: 'read', input: { path: 'a' } },
+      ]);
+      expect(body.messages[2]?.content).toEqual([
+        { type: 'tool_result', tool_use_id: 'call_1', content: 'the file' },
+      ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
   it('reads the model list from the provider', async () => {
     const backend = await startFakeBackend({
       dialect: 'chat',

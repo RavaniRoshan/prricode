@@ -36,6 +36,43 @@ function encodeContent(content: ModelMessage['content']): Record<string, unknown
   return content.map(encodePart);
 }
 
+/** The text of a message's content, whatever shape it carries. */
+function textOf(content: ModelMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text ?? '')
+    .join('');
+}
+
+/**
+ * How a message is carried in this shape.
+ *
+ * A tool's answer travels as a result block, and an assistant's tool calls
+ * travel as use blocks beside the text.
+ */
+function encodeMessage(message: ModelMessage): Record<string, unknown> {
+  if (message.role === 'tool') {
+    return {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: message.toolCallId ?? '',
+          content: textOf(message.content),
+        },
+      ],
+    };
+  }
+  const content = encodeContent(message.content);
+  if (message.role === 'assistant' && message.toolCalls) {
+    for (const call of message.toolCalls) {
+      content.push({ type: 'tool_use', id: call.id, name: call.name, input: call.arguments });
+    }
+  }
+  return { role: message.role, content };
+}
+
 /** How a tool is carried in this shape. */
 function encodeTool(tool: ModelTool): Record<string, unknown> {
   return {
@@ -76,18 +113,14 @@ export const messagesDialect: Dialect = {
   buildRequest(input: DialectRequestInput): DialectRequest {
     const system = input.messages
       .filter((message) => message.role === 'system')
-      .map((message) => (typeof message.content === 'string' ? message.content : ''))
+      .map((message) => textOf(message.content))
       .join('\n\n');
 
     const body: Record<string, unknown> = {
       model: input.model.id,
       messages: input.messages
         .filter((message) => message.role !== 'system')
-        .map((message) => ({
-          role: message.role,
-          content: encodeContent(message.content),
-          ...(message.toolCallId === undefined ? {} : { tool_call_id: message.toolCallId }),
-        })),
+        .map(encodeMessage),
       stream: true,
     };
     if (system !== '') body['system'] = system;
