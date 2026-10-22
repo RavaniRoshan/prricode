@@ -115,7 +115,8 @@ environment. The rules are the target's:
 |---|---|---|
 | the truthy tokens are `1`, `true`, `yes`, `on` | `chunk-c5n7mysv.js:717` (`Ne`) | REA observed |
 | the falsy tokens are `0`, `false`, `no`, `off` | `chunk-c5n7mysv.js:859` (`ws`) | REA observed |
-| a value is trimmed, and a blank value is **unset** | the target's own `readEnvValue`-shaped reads | REA observed |
+| the environment namespace's schema: `str` (trimmed, empty is unset), `bool` (`Ne`), `triBool`, `int`, `enum` | `chunk-5jcc28n0.js` | REA observed |
+| a value is trimmed, and a blank value is **unset** | the target's own `H.str()` | REA observed |
 | the traffic mode: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` **by presence**, then `DISABLE_TELEMETRY` **by presence**, then `DO_NOT_TRACK` **by the boolean parse** | `chunk-kmrt4q1v.js:14089` (`fjt`) | REA observed |
 | the name of the variable that turned the traffic mode off | `chunk-kmrt4q1v.js:14412` (`ZBr`) | REA observed |
 | the configuration root is `CLAUDE_CONFIG_DIR`, or `~/.claude` | `process.env.CLAUDE_CONFIG_DIR\|\|ce()` | REA observed |
@@ -129,6 +130,23 @@ against the process's working directory. The target carries a message about
 the variable being "empty or relative" and a configuration directory that "is
 worked out from each of three folders" (`chunk-8fgrwnc5.js:209487`); that
 rule is **not established** here and is not reproduced.
+
+### 1.5 The rules that were **wider** before this milestone
+
+This implementation read six of the variables above by a rule **wider** than
+the target's, and a wider rule is a difference: it turned a switch on when the
+target leaves it off. The milestone narrowed each one to the target's own
+rule.
+
+| variable | the rule before | the target's rule | the difference it made |
+|---|---|---|---|
+| `CLAUDE_CODE_USE_*` (the route flags) | "not false" — any value outside `0`/`false`/`no`/`off` turned the route **on** | the **boolean** parse | `CLAUDE_CODE_USE_BEDROCK=2` selected Bedrock here and does not in the target |
+| `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` | "not false" in the permission module, and **presence** in the CLI and the slash command | the **boolean** parse | `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=2` restricted the personal configuration here and does not in the target |
+| `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING` | **presence** | the **boolean** parse | `=0` switched the checkpointing off here and does not in the target |
+| `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | **presence** | the **boolean** parse | `=0` switched the host checkpointing on here and does not in the target |
+| `INK_SCREEN_READER` | `=== 'true'` | the **boolean** parse | `=1` left the screen reader off here and does not in the target |
+| `CLAUDE_CODE_ENABLE_XAA` | **presence** | the **boolean** parse | `=0` enabled the XAA feature here and does not in the target |
+| `CLAUDE_CONFIG_DIR` (the IDE lock directories) | **presence** | the **string** parse — trimmed, empty is unset | an **empty** variable added the home directory's lock directory here and does not in the target |
 
 ---
 
@@ -255,13 +273,33 @@ reproduced, and none of it is claimed.
 
 ### The variables that change behaviour here
 
-| variable | the rule | what it changes |
+| variable | the target's rule | what it changes |
 |---|---|---|
-| `CLAUDE_CODE_USE_BEDROCK`, `…_USE_VERTEX`, `…_USE_FOUNDRY`, `…_USE_ANTHROPIC_AWS`, `…_USE_ANTHROPIC_GOOGLE_CLOUD`, `…_USE_MANTLE` | the target's boolean parse | the **route** the provider layer selects. A value outside `1`/`true`/`yes`/`on` leaves the route off |
-| `CLAUDE_CONFIG_DIR` | presence, and the default is `~/.claude` | the **configuration root**: the settings tiers, the session store and the provider manager's state |
+| `CLAUDE_CODE_USE_BEDROCK`, `…_USE_VERTEX`, `…_USE_FOUNDRY`, `…_USE_ANTHROPIC_AWS`, `…_USE_ANTHROPIC_GOOGLE_CLOUD`, `…_USE_MANTLE` | the **boolean** parse | the **route** the provider layer selects. A value outside `1`/`true`/`yes`/`on` leaves the route off |
+| `CLAUDE_CONFIG_DIR` | the **string** parse — trimmed, empty is unset | the **configuration root**: the settings tiers, the session store, the provider manager's state, and the IDE lock directories |
 | `DISABLE_TELEMETRY` | **presence** | the **telemetry**: no event is emitted |
 | `DO_NOT_TRACK` | the **boolean** parse | the **telemetry**: no event is emitted |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | **presence** | the **telemetry**: no event is emitted |
+| `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` | the **boolean** parse | the **settings scope** (the project-side tiers are suppressed) and the **host-level gate** |
+| `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING` | the **boolean** parse | the **checkpointing** |
+| `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` | the **boolean** parse | the **checkpointing** in a host application |
+| `INK_SCREEN_READER` | the **boolean** parse | the **screen reader** |
+| `CLAUDE_CODE_ENABLE_XAA` | the **boolean** parse | the **XAA** requirement check |
+| `CLAUDE_CODE_IDE_SKIP_VALID_CHECK` | the **boolean** parse | the **IDE lock** validity |
+
+**The rules are the target's, and the evidence is the target's environment
+namespace.** The namespace's schema (`chunk-5jcc28n0.js`) is the whole of it:
+
+| the target's schema | the rule |
+|---|---|
+| `H.str()` | the trimmed value; an empty value is **unset** |
+| `H.bool()` | `Ne` — `1`, `true`, `yes`, `on`, and **nothing else** |
+| `H.triBool()` | true, false, or unset |
+| `H.int({…})` | a number, with the bounds the namespace declares |
+| `H.enum([…])` | the trimmed value when it is in the list, and unset otherwise |
+
+Every variable above was read out of that namespace, and the schema it carries
+is the schema this implementation now applies.
 
 ### The variables carried as data only
 

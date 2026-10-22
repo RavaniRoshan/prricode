@@ -46,6 +46,11 @@ import {
 } from '../../src/config/environmentCatalogue.js';
 import { loadSettings } from '../../src/config/loader.js';
 import { documentOf } from '../../src/config/tiers.js';
+import { ideLockDirectories } from '../../src/integration/ide/lockfile.js';
+import {
+  RESTRICT_PERSONAL_CONFIG_ENV,
+  isPersonalConfigRestricted,
+} from '../../src/permissions/decision.js';
 import { selectRoute } from '../../src/provider/routes.js';
 import {
   SESSION_CONTINUE_TELEMETRY_EVENT,
@@ -53,6 +58,11 @@ import {
   SESSION_RESUMED_TELEMETRY_EVENT,
   resumeSession,
 } from '../../src/session/resume.js';
+import {
+  DISABLE_FILE_CHECKPOINTING_ENV,
+  ENABLE_SDK_FILE_CHECKPOINTING_ENV,
+  checkpointingEnabled,
+} from '../../src/session/checkpoints.js';
 import { CARRIED_PROMPT_TELEMETRY_EVENT, createSessionStore, defaultConfigDir } from '../../src/session/store.js';
 import {
   DECLARED_TELEMETRY_EVENTS,
@@ -438,6 +448,49 @@ describe('the variables that change behaviour here', () => {
       '/tmp/a-config',
     );
     expect(defaultConfigDir({})).toBe(defaultConfigDir({}));
+  });
+
+  it('reads every boolean switch with the target\'s boolean rule', () => {
+    // The target reads these through its environment namespace, whose boolean
+    // schema accepts `1`, `true`, `yes` and `on` — and nothing else. A value
+    // outside that set is **false**.
+    expect(isPersonalConfigRestricted({ [RESTRICT_PERSONAL_CONFIG_ENV]: '1' })).toBe(true);
+    expect(isPersonalConfigRestricted({ [RESTRICT_PERSONAL_CONFIG_ENV]: 'yes' })).toBe(true);
+    expect(isPersonalConfigRestricted({ [RESTRICT_PERSONAL_CONFIG_ENV]: '0' })).toBe(false);
+    expect(isPersonalConfigRestricted({ [RESTRICT_PERSONAL_CONFIG_ENV]: '2' })).toBe(false);
+    expect(isPersonalConfigRestricted({})).toBe(false);
+
+    expect(checkpointingEnabled({ env: { [DISABLE_FILE_CHECKPOINTING_ENV]: '1' } })).toBe(false);
+    expect(checkpointingEnabled({ env: { [DISABLE_FILE_CHECKPOINTING_ENV]: '0' } })).toBe(true);
+    expect(
+      checkpointingEnabled({ mode: 'host', env: { [ENABLE_SDK_FILE_CHECKPOINTING_ENV]: '1' } }),
+    ).toBe(true);
+    expect(
+      checkpointingEnabled({ mode: 'host', env: { [ENABLE_SDK_FILE_CHECKPOINTING_ENV]: '0' } }),
+    ).toBe(false);
+  });
+
+  it('reads the configuration root of the IDE lock directories as a trimmed string', () => {
+    // **Observed** (`chunk-8fgrwnc5.js`): the target reads the variable
+    // through its environment namespace, whose string schema trims it and
+    // reports an empty value as unset — so an **empty** variable does not add
+    // the home directory's lock directory.
+    expect(
+      ideLockDirectories({
+        configRoot: '/opt/config',
+        homeDir: '/home/u',
+        platform: 'linux',
+        env: { CLAUDE_CONFIG_DIR: '/opt/config' },
+      }),
+    ).toEqual(['/opt/config/ide', '/home/u/.claude/ide']);
+    expect(
+      ideLockDirectories({
+        configRoot: '/opt/config',
+        homeDir: '/home/u',
+        platform: 'linux',
+        env: { CLAUDE_CONFIG_DIR: '  ' },
+      }),
+    ).toEqual(['/opt/config/ide']);
   });
 });
 

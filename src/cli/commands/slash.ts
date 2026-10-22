@@ -68,7 +68,7 @@ import {
 } from '../../config/outputStyles.js';
 import { mergeMergedSettings } from '../../config/tiers.js';
 import { createSkillRegistry } from '../../extensions/skills/registry.js';
-import { RESTRICT_PERSONAL_CONFIG_ENV } from '../../permissions/decision.js';
+import { isPersonalConfigRestricted } from '../../permissions/decision.js';
 import { builtinCatalog, findModel, listModels } from '../../provider/catalog.js';
 import type { ProviderRegistry } from '../../provider/registry.js';
 import { REWIND_MISSING_CAPABILITY } from '../../session/checkpoints.js';
@@ -957,7 +957,7 @@ async function outputStyleCommand(
   const settings = loadSettings({
     cwd: context.cwd,
     configDir: context.configDir,
-    restricted: context.env[RESTRICT_PERSONAL_CONFIG_ENV] !== undefined,
+    restricted: isPersonalConfigRestricted(context.env),
   });
   const current = currentOutputStyle(mergeMergedSettings(settings.tiers) as Record<string, unknown>);
 
@@ -1012,7 +1012,7 @@ function configCommand(context: SlashCommandContext): CommandResult {
   const settings = loadSettings({
     cwd: context.cwd,
     configDir: context.configDir,
-    restricted: context.env[RESTRICT_PERSONAL_CONFIG_ENV] !== undefined,
+    restricted: isPersonalConfigRestricted(context.env),
   });
 
   const rows: string[][] = [];

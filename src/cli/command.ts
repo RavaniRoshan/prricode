@@ -108,6 +108,7 @@ import type { RunHooksOptions } from '../extensions/hooks/runner.js';
 import {
   RESTRICT_PERSONAL_CONFIG_ENV,
   checkPermission,
+  isPersonalConfigRestricted,
   permissionsFromSettings,
   resolveStartMode,
   type PermissionDecision,
@@ -1542,7 +1543,9 @@ export async function createCommandSession(context: SessionContext): Promise<Com
   const settings = loadSettings({
     cwd,
     configDir,
-    restricted: env[RESTRICT_PERSONAL_CONFIG_ENV] !== undefined,
+    // The restriction is read with the target's **boolean** rule, the rule
+    // `isPersonalConfigRestricted` owns.
+    restricted: isPersonalConfigRestricted(env),
     // **Implementation choice**: the settings file `--settings` named is the
     // highest-precedence overlay of the tiered settings.
     ...(context.settingsDocument === undefined ? {} : { flagSettings: context.settingsDocument }),

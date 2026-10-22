@@ -107,6 +107,7 @@ import { Box, Text, render, useApp, useInput, type Instance, type RenderOptions 
 
 import type { PermissionDecision } from '../permissions/decision.js';
 import type { SessionEvent } from '../session/event.js';
+import { targetFlag } from '../config/environment.js';
 
 import { stripControlSequences } from './render/markdown.js';
 import { renderTranscript, type TranscriptRow } from './render/messages.js';
@@ -574,7 +575,10 @@ export function appRenderOptions(): RenderOptions {
     incrementalRendering: true,
     maxFps: STREAMING_MAX_FPS,
     exitOnCtrlC: false,
-    isScreenReaderEnabled: process.env['INK_SCREEN_READER'] === 'true',
+    // **Observed**: the target reads the screen-reader switch with its own
+    // **boolean** rule — `Ne(process.env.INK_SCREEN_READER)` — so `1`, `true`,
+    // `yes` and `on` turn it on and nothing else does.
+    isScreenReaderEnabled: targetFlag(process.env['INK_SCREEN_READER']),
   };
 }
 

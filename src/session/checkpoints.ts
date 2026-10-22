@@ -36,6 +36,8 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+import { readEnvironment } from '../config/environment.js';
+
 /* -------------------------------------------------------------------------- */
 /* The switch                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -81,18 +83,24 @@ export interface CheckpointingOptions {
 export function checkpointingEnabled(options: CheckpointingOptions = {}): boolean {
   const env = options.env ?? process.env;
   const mode = options.mode ?? 'cli';
+  // The target's own **boolean** rule for these two variables: they are read
+  // through the environment namespace, whose boolean schema accepts `1`,
+  // `true`, `yes` and `on` — and nothing else. A value outside that set is
+  // **false**, so `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING=0` leaves the
+  // checkpointing on.
+  const environment = readEnvironment(env);
 
   if (mode === 'sdk') return false;
   if (mode === 'host') {
     return (
-      env[ENABLE_SDK_FILE_CHECKPOINTING_ENV] !== undefined &&
-      env[DISABLE_FILE_CHECKPOINTING_ENV] === undefined
+      environment.flag(ENABLE_SDK_FILE_CHECKPOINTING_ENV) &&
+      !environment.flag(DISABLE_FILE_CHECKPOINTING_ENV)
     );
   }
 
   const setting = options.settings?.fileCheckpointingEnabled;
   const enabled = setting === undefined ? true : setting === true;
-  return enabled && env[DISABLE_FILE_CHECKPOINTING_ENV] === undefined;
+  return enabled && !environment.flag(DISABLE_FILE_CHECKPOINTING_ENV);
 }
 
 /* -------------------------------------------------------------------------- */

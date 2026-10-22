@@ -56,6 +56,8 @@
 
 import path from 'node:path';
 
+import { readEnvironment, targetFlag } from '../../config/environment.js';
+
 import { normalizeIdeName } from './registry.js';
 
 /* -------------------------------------------------------------------------- */
@@ -133,7 +135,13 @@ export function windowsProfileToWslPath(profile: string): string | undefined {
 export function ideLockDirectories(environment: IdeLockEnvironment): string[] {
   const directories: string[] = [path.join(environment.configRoot, 'ide')];
 
-  if (environment.env['CLAUDE_CONFIG_DIR'] !== undefined || environment.configRoot.trim() === '') {
+  // **Observed**: the target reads the variable through its environment
+  // namespace, whose string schema trims it and reports an empty value as
+  // unset — so an **empty** `CLAUDE_CONFIG_DIR` does not add the directory.
+  if (
+    readEnvironment(environment.env).text('CLAUDE_CONFIG_DIR') !== undefined ||
+    environment.configRoot.trim() === ''
+  ) {
     directories.push(path.join(environment.homeDir, '.claude', 'ide').normalize('NFC'));
   }
 
@@ -312,9 +320,7 @@ export function workspaceRelation(
  * including an unset variable, is false.
  */
 export function envBoolean(value: string | undefined): boolean {
-  if (!value) return false;
-  const normalized = value.toLowerCase().trim();
-  return ['1', 'true', 'yes', 'on'].includes(normalized);
+  return targetFlag(value);
 }
 
 /**

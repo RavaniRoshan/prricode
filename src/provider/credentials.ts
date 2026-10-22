@@ -74,6 +74,7 @@ import { promisify } from 'node:util';
 // module's single environment reader, so the route flags and the credential
 // references cannot disagree about what counts as set or about trimming.
 import { readEnvValue } from './routes.js';
+import { targetFlag } from '../config/environment.js';
 
 /**
  * A credential **reference**. It names where a secret lives; it never contains
@@ -1060,7 +1061,10 @@ export function validateXaaClientSecret(
 
 /** Check that the XAA feature is enabled at all. */
 export function validateXaaEnabled(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  if (readEnvValue(env, 'CLAUDE_CODE_ENABLE_XAA') === undefined) {
+  // **Observed**: the target reads the switch through its environment
+  // namespace, whose boolean schema accepts `1`, `true`, `yes` and `on` — and
+  // nothing else.
+  if (!targetFlag(readEnvValue(env, 'CLAUDE_CODE_ENABLE_XAA'))) {
     return 'Error: --xaa requires CLAUDE_CODE_ENABLE_XAA=1 in your environment';
   }
   return undefined;

@@ -236,6 +236,7 @@ import {
   documentOf,
   type SettingsSource,
 } from '../config/tiers.js';
+import { targetFlag } from '../config/environment.js';
 import type { SettingsLoadError, SettingsLoadResult } from '../config/loader.js';
 
 import {
@@ -1949,15 +1950,14 @@ const PERSONAL_TIERS: ReadonlySet<SettingsSource> = new Set<SettingsSource>([
 /**
  * Whether the personal configuration is restricted.
  *
- * The environment variable is the transport the target uses; any value other than
- * an empty string, `0` and `false` restricts the personal configuration.
+ * **Observed** (the target's own source): the restriction is read with the
+ * target's **boolean** rule — `a.CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG===!0`
+ * or `Ne(host?.CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG)` — and the boolean rule
+ * accepts `1`, `true`, `yes` and `on` and **nothing else**. A value outside
+ * that set leaves the personal configuration **unrestricted**.
  */
 export function isPersonalConfigRestricted(env: NodeJS.ProcessEnv = process.env): boolean {
-  const value = env[RESTRICT_PERSONAL_CONFIG_ENV];
-  if (typeof value !== 'string') return false;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === '' || normalized === '0' || normalized === 'false') return false;
-  return true;
+  return targetFlag(env[RESTRICT_PERSONAL_CONFIG_ENV]);
 }
 
 /**
