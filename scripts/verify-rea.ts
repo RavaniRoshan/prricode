@@ -141,7 +141,17 @@ function deriveToolSites(): Map<string, string[]> {
 function deriveTelemetry(): Set<string> {
   const events = new Set<string>();
   for (const line of grepTree('"tengu_[A-Za-z0-9_]{2,80}"')) {
-    events.add(line.replace(/^"|"$/g, ''));
+    // `grep -H` prefixes the file, so a line reads
+    // `./chunk-<id>.js:"tengu_name"`. The **name** is what follows the last
+    // colon; taking the whole line would record one entry per *placement*
+    // rather than one per event, and the same event shipped in two chunks
+    // would be counted twice.
+    const match = /"([A-Za-z0-9_]+)"$/.exec(line);
+    if (match !== null) {
+      events.add(match[1] ?? '');
+      continue;
+    }
+    events.add(line.replace(/^.*"tengu_/, '').replace(/"$/, ''));
   }
   return events;
 }
