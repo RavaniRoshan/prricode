@@ -44,25 +44,37 @@ import type { SurfaceFrame } from './surface.js';
 /* -------------------------------------------------------------------------- */
 
 /**
+ * The approval dialog's rows, **grouped** as the dialog lays them out.
+ *
+ * The groups are: the title, the question, the reason (when there is one),
+ * a group for each choice, and the guide. The grouping is what lets a
+ * surface lay the dialog out with its own chrome — a border and a padding —
+ * and still fade the whole of it as one thing.
+ */
+export function approvalOverlayGroups(parts: ApprovalPromptParts): FrameRow[][] {
+  const groups: FrameRow[][] = [];
+
+  groups.push([rowOf([{ text: parts.title, role: 'permission', bold: true }])]);
+  groups.push([rowOf([{ text: parts.question }])]);
+  if (parts.reason !== '') groups.push([rowOf([{ text: parts.reason, dim: true }])]);
+
+  for (const choice of parts.choices) {
+    groups.push([rowOf(optionSegments(choice))]);
+  }
+
+  groups.push([rowOf([{ text: parts.guide, dim: true, italic: true }])]);
+
+  return groups;
+}
+
+/**
  * The approval dialog's rows.
  *
  * The dialog's **own** parts — the title, the question, the reason, the
  * choices and the guide — in the order the first layer draws them.
  */
 export function approvalOverlayRows(parts: ApprovalPromptParts): FrameRow[] {
-  const rows: FrameRow[] = [];
-
-  rows.push(rowOf([{ text: parts.title, role: 'permission', bold: true }]));
-  rows.push(rowOf([{ text: parts.question }]));
-  if (parts.reason !== '') rows.push(rowOf([{ text: parts.reason, dim: true }]));
-
-  for (const choice of parts.choices) {
-    rows.push(rowOf(optionSegments(choice)));
-  }
-
-  rows.push(rowOf([{ text: parts.guide, dim: true, italic: true }]));
-
-  return rows;
+  return approvalOverlayGroups(parts).flat();
 }
 
 /**

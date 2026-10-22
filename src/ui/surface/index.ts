@@ -68,6 +68,7 @@ export {
 
 export {
   approvalChoiceRows,
+  approvalOverlayGroups,
   approvalOverlayRows,
   autocompleteOverlayRows,
   renderOverlayFrame,

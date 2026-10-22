@@ -34,6 +34,9 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { Writable } from 'node:stream';
+
+import { renderApp, type AppProps } from '../../src/ui/app.js';
 import {
   AGENT_STATES,
   PROMPT_RULE_CHARACTER,
@@ -90,6 +93,35 @@ function rolesOf(segments: readonly Segment[]): (string | undefined)[] {
 /** The text of a frame's rows, joined by a newline. */
 function rowsText(rows: readonly FrameRow[]): string {
   return rows.map((row) => textOf(row.segments)).join('\n');
+}
+
+/**
+ * Mount the app and collect the frame it drew.
+ *
+ * The mount goes through `renderApp`, so the options are this
+ * implementation's own, and Ink's **debug** mode is on: the frame is the
+ * plain text of what was on the terminal.
+ */
+async function mountApp(props: AppProps): Promise<string> {
+  const chunks: string[] = [];
+  const stdout = new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      callback();
+    },
+  }) as unknown as NodeJS.WritableStream & { columns: number; rows: number };
+  stdout.columns = 80;
+  stdout.rows = 24;
+
+  const instance = renderApp(props, {
+    stdout,
+    debug: true,
+    patchConsole: false,
+  });
+  await instance.waitUntilRenderFlush();
+  const frame = chunks.join('');
+  instance.unmount();
+  return frame;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -460,5 +492,57 @@ describe('the motion surface — the vocabulary', () => {
       const known: AgentState = state;
       expect(AGENT_STATES).toContain(known);
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The app                                                                     */
+/* -------------------------------------------------------------------------- */
+
+describe('the app — the motion', () => {
+  it('draws the motion surface\'s rows, so the picture and the app agree', async () => {
+    const output = await mountApp({
+      events: [],
+      input: 'what next?',
+      motion: {
+        capability: capableTerminal(),
+        state: { change: { from: 'thinking', to: 'tool' }, atMs: 0 },
+        stage: {
+          advance: { stageId: 'concept', state: 'running', enabled: true, unsupported: null },
+          atMs: 0,
+        },
+        now: () => 0,
+      },
+    });
+
+    // The state line, the stage's row and the composer's rule.
+    expect(output).toContain(stateLabel('tool'));
+    expect(output).toContain('concept');
+    expect(output).toContain(PROMPT_RULE_CHARACTER.repeat(80));
+  });
+
+  it('shows the resting picture and the reason when the terminal cannot draw', async () => {
+    const reason = 'the user asked for reduced motion, so no animation is drawn';
+    const output = await mountApp({
+      events: [],
+      input: 'what next?',
+      motion: {
+        capability: blindTerminal(reason),
+        state: { change: { from: 'thinking', to: 'tool' }, atMs: 0 },
+        now: () => 0,
+      },
+    });
+
+    expect(output).toContain(reason);
+    // The resting picture: the current state, and not the one it came from.
+    expect(output).toContain(stateLabel('tool'));
+    expect(output).not.toContain(stateLabel('thinking'));
+  });
+
+  it('draws no motion at all when the caller asks for none', async () => {
+    const output = await mountApp({ events: [], input: 'what next?' });
+
+    expect(output).not.toContain(stateLabel('tool'));
+    expect(output).not.toContain('the output is not an interactive terminal');
   });
 });

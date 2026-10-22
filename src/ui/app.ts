@@ -103,7 +103,7 @@
 
 import { createElement, Fragment, useEffect, useState, type ReactNode } from 'react';
 
-import { Box, Text, render, useApp, useInput, type Instance, type RenderOptions } from 'ink';
+import { Box, Text, render, useApp, useInput, useStdout, type Instance, type RenderOptions } from 'ink';
 
 import type { PermissionDecision } from '../permissions/decision.js';
 import type { SessionEvent } from '../session/event.js';
@@ -127,6 +127,20 @@ import {
   SPINNER_FRAMES,
   type Segment,
 } from './theme.js';
+import {
+  approvalOverlayGroups,
+  motionReasonRow,
+  promptRuleSegments,
+  renderOverlayFrame,
+  renderPromptFrame,
+  renderStageFrame,
+  renderStateFrame,
+  type MotionCapability,
+  type StageAdvance,
+  type StateChange,
+} from './surface/index.js';
+import { motionFor } from './motion/vocabulary.js';
+import { MOTION_FRAME_INTERVAL_MS } from './motion/frame.js';
 
 /* -------------------------------------------------------------------------- */
 /* The vocabulary                                                               */
@@ -594,6 +608,52 @@ export interface PendingApproval {
   readonly toolName: string;
 }
 
+/**
+ * A change of the agent's state, and when it happened.
+ *
+ * The time is on the **caller's** clock — the same clock the app reads the
+ * time from — and it is the time the change happened at, not the time it was
+ * noticed.
+ */
+export interface MotionStateChange {
+  /** The change: the state the agent was in, and the state it is in. */
+  readonly change: StateChange;
+  /** When the change happened, in milliseconds. */
+  readonly atMs: number;
+}
+
+/**
+ * The pipeline's stage advance, and when it arrived.
+ */
+export interface MotionStageAdvance {
+  /** The advance. */
+  readonly advance: StageAdvance;
+  /** When the advance arrived, in milliseconds. */
+  readonly atMs: number;
+}
+
+/**
+ * What the app needs to draw the motion.
+ *
+ * **The capability is the terminal's own**, detected once by the motion
+ * system, and it is an input here: the app does not detect it and it does not
+ * decide it. A terminal that cannot draw a frame gets the **resting** picture
+ * and the reason, and the app schedules no frame at all.
+ *
+ * The app is **controlled** — the caller owns the state — so the times come
+ * from the caller too, on the clock the app is given.
+ */
+export interface MotionSurfaceProps {
+  /** The terminal's capability. */
+  readonly capability: MotionCapability;
+  /** The agent's state, and when it changed. */
+  readonly state?: MotionStateChange | undefined;
+  /** The stage's advance, and when it arrived. */
+  readonly stage?: MotionStageAdvance | undefined;
+  /** The clock the times are measured on. */
+  readonly now?: (() => number) | undefined;
+}
+
 /** The app's props. */
 export interface AppProps {
   /** The transcript records the app shows. */
@@ -612,6 +672,8 @@ export interface AppProps {
   readonly notice?: string | undefined;
   /** The environment the glyphs and the theme are read from. */
   readonly env?: NodeJS.ProcessEnv | undefined;
+  /** The motion the surface draws with. */
+  readonly motion?: MotionSurfaceProps | undefined;
   /** Called when the user types. */
   readonly onInputChange?: ((text: string) => void) | undefined;
   /** Called when the user submits the input. */
@@ -797,6 +859,57 @@ export function App(props: AppProps): ReactNode {
 
   const { exit } = useApp();
 
+  /* ---------------------------------------------------------------------- */
+  /* The motion                                                              */
+  /* ---------------------------------------------------------------------- */
+
+  // The clock the motion's times are measured on. It is the caller's own, so
+  // a test drives the motion by hand and the picture is reproducible.
+  const motion = props.motion;
+  const clock = motion?.now ?? ((): number => Date.now());
+
+  // The moment the app opened. The prompt's shimmer runs from it, because the
+  // shimmer is the one motion that never ends.
+  const [startedAtMs] = useState(() => clock());
+
+  // The terminal's width, for the composer's rule. Ink's own border was
+  // exactly this wide, so the rule the surface draws is the rule the border
+  // drew.
+  const { stdout } = useStdout();
+  const columns = streamColumns(stdout) ?? 80;
+
+  // The frame the motion is on. The app schedules a frame only when the
+  // terminal can draw one: a terminal that cannot is given the resting
+  // picture and the reason, and no frame at all.
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    if (motion?.capability.enabled !== true) return undefined;
+    const timer = setInterval(() => {
+      setFrame((value) => value + 1);
+    }, MOTION_FRAME_INTERVAL_MS);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [motion]);
+
+  // The overlay's story: the approval that is on the screen, when it arrived,
+  // and when it was let go of. The exit is drawn from it, so the dialog fades
+  // out rather than vanishing.
+  const [shown, setShown] = useState<PendingApproval | undefined>(approval);
+  const [story, setStory] = useState<
+    { readonly approval: PendingApproval; readonly enteredAtMs: number; readonly releasedAtMs: number | undefined } | undefined
+  >(undefined);
+  if (approval !== shown) {
+    setShown(approval);
+    if (approval === undefined) {
+      setStory((current) =>
+        current === undefined ? undefined : { ...current, releasedAtMs: clock() },
+      );
+    } else {
+      setStory({ approval, enteredAtMs: clock(), releasedAtMs: undefined });
+    }
+  }
+
   // The spinner advances every 50 ms while a turn runs, exactly as the
   // target's does (§12.1).
   useEffect(() => {
@@ -933,24 +1046,75 @@ export function App(props: AppProps): ReactNode {
   // The approval prompt: the title, the question, the reason and the three
   // choices as **options** — a screen reader that hears a paragraph after the
   // listbox does not hear three answers.
+  //
+  // The dialog is an **overlay**, and the overlay's entrance and its exit are
+  // the two halves of one fade. The exit is drawn from the story: the dialog
+  // fades out over the exit's own duration, and then it is gone.
   const approvalRegion = (() => {
-    if (approval === undefined) return null;
-    const parts = approvalPromptParts(approval.decision, approval.toolName, focus);
-    const choices = parts.choices.map((choice, index) =>
+    const exitDuration = motionFor('overlay-out').durationMs;
+    const released = story?.releasedAtMs;
+    const leaving =
+      approval === undefined &&
+      story !== undefined &&
+      released !== undefined &&
+      motion?.capability.enabled === true &&
+      clock() - released < exitDuration;
+
+    const visible = approval ?? (leaving ? story?.approval : undefined);
+    if (visible === undefined) return null;
+
+    const parts = approvalPromptParts(visible.decision, visible.toolName, focus);
+    const groups = approvalOverlayGroups(parts);
+
+    // Without the motion there is no fade: the dialog is drawn exactly as the
+    // first layer draws it. With it, the dialog is an **overlay**, and the
+    // overlay's entrance and its exit are the two halves of one fade — the
+    // exit is drawn from the story, so the dialog fades out over the exit's
+    // own duration and then it is gone.
+    let faded = groups;
+    if (motion !== undefined) {
+      const entrance = story?.enteredAtMs ?? clock();
+      const overlay = renderOverlayFrame({
+        rows: groups.flat(),
+        elapsedMs: leaving ? clock() - (released ?? clock()) : clock() - entrance,
+        capability: motion.capability,
+        motion: leaving ? 'overlay-out' : 'overlay-in',
+      });
+
+      // The faded rows, in the groups they came in.
+      let index = 0;
+      faded = groups.map((group) => {
+        const start = index;
+        index += group.length;
+        return overlay.rows.slice(start, index);
+      });
+    }
+
+    const titleGroup = faded[0] ?? [];
+    const questionGroup = faded[1] ?? [];
+    const guideGroup = faded[faded.length - 1] ?? [];
+    // The reason, when there is one, and then the choices.
+    const middle = faded.slice(2, Math.max(2, faded.length - 1));
+    const hasReason = parts.reason !== '';
+    const reasonGroup = hasReason ? (middle[0] ?? []) : [];
+    const choiceGroups = hasReason ? middle.slice(1) : middle;
+
+    const choices = choiceGroups.map((group, choiceIndex) =>
       createElement(
         Box,
         {
-          key: `choice-${index}`,
+          key: `choice-${choiceIndex}`,
           'aria-role': 'option',
-          'aria-label': optionLabel(choice),
+          'aria-label': optionLabel(parts.choices[choiceIndex] ?? parts.choices[0]!),
           flexDirection: 'row',
         },
-        drawSegments(optionSegments(choice)),
+        drawSegments(group.flatMap((row) => row.segments)),
       ),
     );
+
     return region(
       'listbox',
-      approvalLabel(approval.toolName),
+      approvalLabel(visible.toolName),
       createElement(
         Fragment,
         null,
@@ -969,11 +1133,21 @@ export function App(props: AppProps): ReactNode {
           createElement(
             Box,
             { flexDirection: 'column', paddingLeft: 2, paddingTop: 1 },
-            createElement(Text, { bold: true, color: roleColor('permission', DARK_THEME) }, parts.title),
-            createElement(Text, null, parts.question),
-            parts.reason === '' ? null : createElement(Text, { dimColor: true }, parts.reason),
+            createElement(Text, { key: 'title' }, drawSegments(titleGroup.flatMap((r) => r.segments))),
+            createElement(
+              Text,
+              { key: 'question' },
+              drawSegments(questionGroup.flatMap((r) => r.segments)),
+            ),
+            parts.reason === ''
+              ? null
+              : createElement(
+                  Text,
+                  { key: 'reason' },
+                  drawSegments(reasonGroup.flatMap((r) => r.segments)),
+                ),
             ...choices,
-            createElement(Text, { dimColor: true, italic: true }, parts.guide),
+            createElement(Text, { key: 'guide' }, drawSegments(guideGroup.flatMap((r) => r.segments))),
           ),
         ),
       ),
@@ -981,22 +1155,33 @@ export function App(props: AppProps): ReactNode {
   })();
 
   // The composer: the target's top rule, the prompt glyph and the input.
+  //
+  // The rule is drawn by the **surface**, so the prompt's shimmer can travel
+  // across it. The rule's characters are the ones Ink's border drew — the
+  // rule character, as many of them as the terminal is wide, in the
+  // `promptBorder` role — so what the user sees does not change; what changes
+  // is that the light can travel along it.
+  const ruleSegments =
+    motion === undefined
+      ? promptRuleSegments(columns)
+      : (renderPromptFrame({
+          columns,
+          elapsedMs: clock() - startedAtMs,
+          capability: motion.capability,
+        }).rows[0]?.segments ?? []);
+
   const composer = createElement(
     Box,
-    {
-      borderStyle: 'round',
-      borderTop: true,
-      borderBottom: false,
-      borderLeft: false,
-      borderRight: false,
-      borderColor: roleColor('promptBorder', DARK_THEME),
-      flexDirection: 'row',
-      width: '100%',
-    },
-    drawSegment(composerGlyph(mode, env, props.busy === true)),
-    input === ''
-      ? createElement(Text, null, drawSegments(composerPlaceholder(placeholderText(suggestion))))
-      : createElement(Text, null, input),
+    { flexDirection: 'column', width: '100%' },
+    createElement(Box, { key: 'rule' }, drawSegments(ruleSegments)),
+    createElement(
+      Box,
+      { key: 'input', flexDirection: 'row', width: '100%' },
+      drawSegment(composerGlyph(mode, env, props.busy === true)),
+      input === ''
+        ? createElement(Text, null, drawSegments(composerPlaceholder(placeholderText(suggestion))))
+        : createElement(Text, null, input),
+    ),
   );
 
   const inputRegion = region('textbox', ARIA_LABELS.input, composer);
@@ -1015,12 +1200,57 @@ export function App(props: AppProps): ReactNode {
     const status = props.status === undefined ? '' : stripControlSequences(props.status);
     if (status === '') return null;
     if (props.busy !== true) return createElement(Text, { dimColor: true }, status);
-    const frame = spinnerFrame(elapsed, SPINNER_FRAMES);
+    const spinner = spinnerFrame(elapsed, SPINNER_FRAMES);
     return createElement(
       Text,
       { dimColor: true },
-      `${glyphs(env).arrowDown} ${frame} ${status}`,
+      `${glyphs(env).arrowDown} ${spinner} ${status}`,
     );
+  })();
+
+  // The state line: the agent's state, and the transition between two of
+  // them. The outgoing line leaves and the incoming one arrives, and the gap
+  // between them is the incoming line's own offset.
+  const stateRegion = (() => {
+    if (motion?.state === undefined) return null;
+    const rows = renderStateFrame({
+      change: motion.state.change,
+      elapsedMs: clock() - motion.state.atMs,
+      capability: motion.capability,
+    }).rows;
+    return createElement(
+      Box,
+      { key: 'state', flexDirection: 'column' },
+      ...rows.map((row, index) =>
+        createElement(Box, { key: `state-${index}` }, drawSegments(row.segments)),
+      ),
+    );
+  })();
+
+  // The stage's row: the pipeline's stage advancing, as it happens.
+  const stageRegion = (() => {
+    if (motion?.stage === undefined) return null;
+    const rows = renderStageFrame({
+      advance: motion.stage.advance,
+      elapsedMs: clock() - motion.stage.atMs,
+      capability: motion.capability,
+    }).rows;
+    return createElement(
+      Box,
+      { key: 'stage', flexDirection: 'column' },
+      ...rows.map((row, index) =>
+        createElement(Box, { key: `stage-${index}` }, drawSegments(row.segments)),
+      ),
+    );
+  })();
+
+  // The reason a terminal that cannot draw a frame gives. It is written once,
+  // beside the resting picture, and it is never left out.
+  const reasonRegion = (() => {
+    if (motion === undefined) return null;
+    const reason = motionReasonRow(motion.capability);
+    if (reason === null) return null;
+    return createElement(Box, { key: 'reason' }, drawSegments(reason.segments));
   })();
 
   // The toast: the transient line the two gestures show.
@@ -1051,6 +1281,8 @@ export function App(props: AppProps): ReactNode {
     { flexDirection: 'column' },
     region('list', ARIA_LABELS.messageList, createElement(Fragment, null, ...messageItems)),
     approvalRegion,
+    stateRegion,
+    stageRegion,
     // The status line sits **above** the composer, as the target's spinner
     // line does (§5.2).
     statusRegion,
@@ -1058,12 +1290,28 @@ export function App(props: AppProps): ReactNode {
     inputRegion,
     hintRegion,
     toastRegion,
+    reasonRegion,
   );
 }
 
 /* -------------------------------------------------------------------------- */
 /* The helpers                                                                 */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * The width of a stream, when it has one.
+ *
+ * The stream is Ink's own, and the width is a property of a terminal and not
+ * of a stream, so the read is guarded: a stream that does not say how wide
+ * it is has no width, and the caller falls back to the terminal's own
+ * default of eighty columns.
+ */
+export function streamColumns(stream: NodeJS.WritableStream): number | undefined {
+  const candidate = stream as { readonly columns?: unknown };
+  const columns = candidate.columns;
+  if (typeof columns !== 'number') return undefined;
+  return columns > 0 ? columns : undefined;
+}
 
 /**
  * The focus moves, and it wraps.

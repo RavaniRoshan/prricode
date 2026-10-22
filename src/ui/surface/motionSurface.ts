@@ -80,20 +80,21 @@ export function motionReasonRow(capability: MotionCapability): FrameRow | null {
 /**
  * The whole motion surface, as one frame.
  *
- * The rows are in the order they are drawn on the terminal: the prompt's
- * rule, the state line, the stage's row, the overlay, and the reason.
+ * The rows are in the order they are drawn on the terminal: the overlay, the
+ * state line, the stage's row, the prompt's rule, and the reason.
  */
 export function renderMotionSurface(request: MotionSurfaceRequest): TerminalFrame {
   const theme = request.theme ?? DARK_THEME;
   const rows: FrameRow[] = [];
 
-  if (request.prompt !== undefined) {
+  if (request.overlay !== undefined) {
     rows.push(
-      ...renderPromptFrame({
-        columns: request.prompt.columns,
+      ...renderOverlayFrame({
+        rows: request.overlay.rows,
         elapsedMs: request.elapsedMs,
         capability: request.capability,
         theme,
+        ...(request.overlay.motion === undefined ? {} : { motion: request.overlay.motion }),
       }).rows,
     );
   }
@@ -120,14 +121,13 @@ export function renderMotionSurface(request: MotionSurfaceRequest): TerminalFram
     );
   }
 
-  if (request.overlay !== undefined) {
+  if (request.prompt !== undefined) {
     rows.push(
-      ...renderOverlayFrame({
-        rows: request.overlay.rows,
+      ...renderPromptFrame({
+        columns: request.prompt.columns,
         elapsedMs: request.elapsedMs,
         capability: request.capability,
         theme,
-        ...(request.overlay.motion === undefined ? {} : { motion: request.overlay.motion }),
       }).rows,
     );
   }

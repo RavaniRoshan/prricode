@@ -8,8 +8,8 @@
     "interactive": false,
     "reducedMotion": false
   },
-  "pictureHash": "271c0c12493167a6df2d19f5968ca89abf04c823d8de0be21063f73e84e58003",
-  "fingerprint": "3abb3904202d571c118352f2e64b8b938570c862bc945129e8fb7d9322720d3f",
+  "pictureHash": "7da093361631c07f42b00ee94914dc40449d3e3434142bd9f53b7cd5f0b05e4e",
+  "fingerprint": "4f5959f5d6b17ad35a2b68ae03a219d51701d40aa4f8dbd224984f3648ebcdc2",
   "sources": [
     "src/ui/theme.ts",
     "src/ui/motion/vocabulary.ts",
