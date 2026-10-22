@@ -36,7 +36,9 @@ import { describe, expect, it } from 'vitest';
 
 import { Writable } from 'node:stream';
 
-import { renderApp, type AppProps } from '../../src/ui/app.js';
+import { createElement } from 'react';
+
+import { App, renderApp, type AppProps } from '../../src/ui/app.js';
 import {
   AGENT_STATES,
   PROMPT_RULE_CHARACTER,
@@ -103,6 +105,18 @@ function rowsText(rows: readonly FrameRow[]): string {
  * plain text of what was on the terminal.
  */
 async function mountApp(props: AppProps): Promise<string> {
+  const mounted = await mountAppWith(props);
+  return mounted.text();
+}
+
+/**
+ * Mount the app and keep it mounted, so a test can change the props and read
+ * the frame again.
+ */
+async function mountAppWith(props: AppProps): Promise<{
+  text: () => string;
+  update: (next: AppProps) => Promise<void>;
+}> {
   const chunks: string[] = [];
   const stdout = new Writable({
     write(chunk, _encoding, callback) {
@@ -119,9 +133,14 @@ async function mountApp(props: AppProps): Promise<string> {
     patchConsole: false,
   });
   await instance.waitUntilRenderFlush();
-  const frame = chunks.join('');
-  instance.unmount();
-  return frame;
+
+  return {
+    text: () => chunks.join(''),
+    update: async (next: AppProps) => {
+      instance.rerender(createElement(App, next));
+      await instance.waitUntilRenderFlush();
+    },
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -544,5 +563,52 @@ describe('the app — the motion', () => {
 
     expect(output).not.toContain(stateLabel('tool'));
     expect(output).not.toContain('the output is not an interactive terminal');
+  });
+
+  it('fades the overlay out before it goes', async () => {
+    const approval = {
+      decision: {
+        behavior: 'ask' as const,
+        source: 'unknown' as const,
+        reasonType: 'other' as const,
+        reason: 'No permission rule matched.',
+      },
+      toolName: 'Bash',
+    };
+
+    const mounted = await mountAppWith({
+      events: [],
+      input: '',
+      approval,
+      motion: { capability: capableTerminal(), now: () => 0 },
+    });
+
+    expect(mounted.text()).toContain('Do you want to proceed?');
+
+    // The question is answered: the overlay fades out rather than vanishing.
+    // The terminal collects every frame, so what a change *wrote* is the text
+    // that came after it.
+    const before = mounted.text().length;
+    await mounted.update({ events: [], input: '', motion: { capability: capableTerminal(), now: () => 0 } });
+    expect(mounted.text().slice(before)).toContain('Do you want to proceed?');
+  });
+
+  it('takes the overlay away at once when there is no motion to fade it with', async () => {
+    const approval = {
+      decision: {
+        behavior: 'ask' as const,
+        source: 'unknown' as const,
+        reasonType: 'other' as const,
+        reason: 'No permission rule matched.',
+      },
+      toolName: 'Bash',
+    };
+
+    const mounted = await mountAppWith({ events: [], input: '', approval });
+    expect(mounted.text()).toContain('Do you want to proceed?');
+
+    const before = mounted.text().length;
+    await mounted.update({ events: [], input: '' });
+    expect(mounted.text().slice(before)).not.toContain('Do you want to proceed?');
   });
 });

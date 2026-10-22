@@ -881,16 +881,17 @@ export function App(props: AppProps): ReactNode {
   // The frame the motion is on. The app schedules a frame only when the
   // terminal can draw one: a terminal that cannot is given the resting
   // picture and the reason, and no frame at all.
-  const [frame, setFrame] = useState(0);
+  const capable = motion?.capability.enabled === true;
+  const [, setFrame] = useState(0);
   useEffect(() => {
-    if (motion?.capability.enabled !== true) return undefined;
+    if (!capable) return undefined;
     const timer = setInterval(() => {
       setFrame((value) => value + 1);
     }, MOTION_FRAME_INTERVAL_MS);
     return () => {
       clearInterval(timer);
     };
-  }, [motion]);
+  }, [capable]);
 
   // The overlay's story: the approval that is on the screen, when it arrived,
   // and when it was let go of. The exit is drawn from it, so the dialog fades
@@ -898,7 +899,11 @@ export function App(props: AppProps): ReactNode {
   const [shown, setShown] = useState<PendingApproval | undefined>(approval);
   const [story, setStory] = useState<
     { readonly approval: PendingApproval; readonly enteredAtMs: number; readonly releasedAtMs: number | undefined } | undefined
-  >(undefined);
+  >(() =>
+    approval === undefined
+      ? undefined
+      : { approval, enteredAtMs: clock(), releasedAtMs: undefined },
+  );
   if (approval !== shown) {
     setShown(approval);
     if (approval === undefined) {

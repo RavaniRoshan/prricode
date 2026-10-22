@@ -3158,7 +3158,7 @@ same role, the same width, so the picture the user sees does not change. The fir
 layer's own tests pass **unchanged**, and a test mounts the app and reads the
 surface's rows off the frame it drew, so the golden and the app cannot drift apart.
 
-**Forty-six tests** across the two new files, the suite green at **3 063**, and
+**Forty-eight tests** across the two new files, the suite green at **3 065**, and
 `tsc --noEmit` clean.
 
 **Not done here, and named:** the **stage advance, live** — the surface reads the
