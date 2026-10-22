@@ -173,8 +173,8 @@ export class MotionCapabilityProvider {
 /** The input the process-wide capability is detected from. */
 let configuredInput: MotionCapabilityInput = {};
 
-/** The process-wide capability, once it has been detected. */
-let detected: MotionCapability | undefined;
+/** The provider the process-wide capability is detected by. */
+let provider: MotionCapabilityProvider | undefined;
 
 /**
  * Say what the process-wide capability should be detected from.
@@ -188,7 +188,7 @@ let detected: MotionCapability | undefined;
  */
 export function configureMotionCapability(input: MotionCapabilityInput): void {
   configuredInput = input;
-  detected = undefined;
+  provider = undefined;
 }
 
 /**
@@ -197,6 +197,8 @@ export function configureMotionCapability(input: MotionCapabilityInput): void {
  * The same record every time it is asked for, and detected on the first ask.
  */
 export function motionCapability(): MotionCapability {
-  if (detected === undefined) detected = detectMotionCapability(configuredInput);
-  return detected;
+  if (provider === undefined) {
+    provider = new MotionCapabilityProvider(() => detectMotionCapability(configuredInput));
+  }
+  return provider.capability();
 }
