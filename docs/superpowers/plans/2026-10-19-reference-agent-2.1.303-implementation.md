@@ -3105,6 +3105,69 @@ stage changes, and the overlays.
   golden is a *frame*, not a description.
 - **Files:** `src/ui/`; `tests/contracts/frame-snapshot.test.ts`; `tests/contracts/ui-render.test.ts`; `docs/compatibility/motion-surface.md`.
 
+
+**Result (the surface, and the golden frames).** The specification is
+`docs/protocol/MOTION.md`, the decision is `docs/DIVERGENCE-LAYER-2.md` §6, and the
+implementation is measured against both in `docs/compatibility/motion-surface.md` §6.
+
+**Delivered:** `src/ui/surface/` — **seven modules** — carrying the frame and the picture,
+the prompt's shimmer, the agent's states and their transitions, the pipeline's stage
+advance, the overlays, the composition, and the barrel. And `tests/visual/` — the golden
+frames themselves, with the machinery that records them and the deliberate regeneration.
+
+**The motion is on the surface, and the surface asks the vocabulary for it.** The
+**prompt's shimmer** travels across the composer's rule, in the theme's own
+`promptBorderShimmer` — the theme owns that partner, and the rule is what the
+composer's border is drawn in. The **transitions** are the system's own pair: the
+outgoing line leaves with `transition-out`, the incoming one arrives with
+`transition-in`, and the gap between them is the incoming line's own offset. The
+**stage advance** is read out of the protocol's `event/stage` notification and pulses
+with `stage-advance`. The **overlays** fade in with `overlay-in` and out with
+`overlay-out`. **Nothing on the surface chooses a curve, a duration or a frame
+budget** — every one of them asks the vocabulary by name, and there is no second
+easing curve and no second duration table anywhere in the product. The agent's
+states are a **closed list** of four — `idle`, `thinking`, `asking`, `tool` — and a
+name that is not in it is refused rather than answered with something else.
+
+**A golden is a picture.** `tests/visual/goldens/<name>.frame` holds the **bytes** —
+the frame's rows, in the theme's own colours, with the styles the terminal has — and
+`cat` on it in a terminal shows the frame as the user saw it. The record beside it
+holds the parameters, the picture's hash and the drawing's fingerprint. Six goldens:
+the prompt's shimmer, the transition, the stage advance, the overlay's entrance, the
+overlay's exit, and the **degraded** form.
+
+**A stale golden must fail.** Each golden records a **fingerprint** — the SHA-256 over
+the **sources that draw it**: the surface module, the frame writer, the motion system
+and the theme. The fingerprint is compared on **every** run, so a change to the code
+that draws a golden — whether or not it changed that particular frame — makes the
+golden **stale**, and a stale golden **fails**. The test proves it twice: `isCurrent`
+is false for a drawing that has moved, and the real check reports a tampered record as
+`stale` rather than passing it quietly. The regeneration is a **deliberate act**
+(`bun run tests/visual/regenerate.ts`); the test never writes, and a golden that
+cannot be produced is a **failure**, not a skipped test.
+
+**What cannot be drawn is not drawn.** A terminal without the capability gets the
+**resting** picture and **the reason**, written once beside it in the theme's own
+`inactive` role — and the degraded form has **its own golden**, compared like any
+other. The app schedules **no** frame at all when the capability is off.
+
+**The first layer is not disturbed.** Nothing under `src/ui/render/` changed, and
+`src/ui/app.ts` changed only to draw the surface's rows: the composer's rule is now
+drawn by the surface so the light can travel along it — the **same characters**, the
+same role, the same width, so the picture the user sees does not change. The first
+layer's own tests pass **unchanged**, and a test mounts the app and reads the
+surface's rows off the frame it drew, so the golden and the app cannot drift apart.
+
+**Forty-six tests** across the two new files, the suite green at **3 063**, and
+`tsc --noEmit` clean.
+
+**Not done here, and named:** the **stage advance, live** — the surface reads the
+`event/stage` notification and draws it, but the run that sends it is `CC-049`'s. The
+**whole terminal frame** as a golden — a golden is the motion surface's frame, and
+the first layer's chrome is Ink's own layout, pinned by the first layer's own tests.
+And the **verification suite** is `CC-050`'s; the goldens recorded here are what it
+will measure.
+
 ### CC-049 — The product
 
 The pipeline end to end, from an idea to a verified product.

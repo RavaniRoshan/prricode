@@ -8,11 +8,15 @@ drawn**, with the reason in the shared shape; motion that never blocks the input
 motion that is deterministic.
 **The decision:** [`docs/DIVERGENCE-LAYER-2.md`](../DIVERGENCE-LAYER-2.md) §6 — "A shared
 motion system, used everywhere" and "Detect and disable, with the reason".
-**Owning task:** `CC-047` in
+**Owning task:** `CC-047` for the system and `CC-048` for the surface, in
 [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
 **The implementation:** `src/ui/motion/` — **seven modules**: `vocabulary`, `easing`,
-`frame`, `capability`, `render`, `schedule` and the barrel.
-**The test:** `tests/contracts/motion.test.ts` — **forty-eight tests**.
+`frame`, `capability`, `render`, `schedule` and the barrel — and `src/ui/surface/` — **seven
+modules**: `frame`, `surface`, `prompt`, `states`, `stages`, `overlays`, `motionSurface` and
+the barrel.
+**The test:** `tests/contracts/motion.test.ts` — **forty-eight tests** — and, for the
+surface, `tests/contracts/motion-surface.test.ts` and `tests/contracts/frame-snapshot.test.ts`
+— with the golden frames themselves in `tests/visual/goldens/`.
 
 The specification says what was built against it, and where it left a choice open, which
 reading was taken and why.
@@ -48,6 +52,11 @@ and, inside the second layer, the label that says where the row comes from:
 
 The two are orthogonal: a row is `Project requirement` **and** `specified`, or `Project
 requirement` **and** `implementation choice`.
+
+**§6 — the surface — carries the same two labels.** The **system** is `specified` wherever
+`docs/protocol/MOTION.md` names it, and the **surface** — what a motion is drawn over, and
+where — is an `implementation choice` wherever the specification is silent, which §6.1 and
+§9 say row by row.
 
 **The naming rule applies to every line of this document.** The surface is named — a
 motion, a frame, a capability — and no product and no company is named, in this document
@@ -130,7 +139,7 @@ one reason for the whole system rather than one reason per motion, because the t
 that is missing is a terminal and not a particular animation. The **per-motion** question
 ("can this motion be drawn here?") has no separate answer in this milestone: every one
 of the seven motions is drawn in roles and styles that every terminal has, so the
-system-level record is the whole of it. §7 names what would change that.
+system-level record is the whole of it. §8 names what would change that.
 
 ---
 
@@ -166,7 +175,91 @@ the motion says.
 
 ---
 
-## 6. The rules the layer keeps
+## 6. The surface — the motion on the terminal
+
+**Owning task:** `CC-048`. The system above is the vocabulary; this section is the
+**surfaces** it is used on, and the **golden frames** that prove what the user sees.
+
+### 6.1 The four surfaces
+
+| the surface | the motion | what it is drawn over | the label | the test that pins it |
+|---|---|---|---|---|
+| the **prompt's shimmer** | `prompt-shimmer` | the composer's rule, in the `promptBorder` role | `Project requirement` + `implementation choice` | `the motion surface — the prompt's shimmer › draws the travelling light in the theme's own shimmer partner` |
+| the **transitions** | `transition-in` and `transition-out` | the agent's state line | `Project requirement` + `implementation choice` | `the motion surface — the transitions between the agent's states › draws the outgoing line and the incoming one while the transition runs` |
+| the **stage advance** | `stage-advance` | the pipeline's stage row, read out of the `event/stage` notification | `Project requirement` + `specified` — the motion's name and the notification are the specification's | `the motion surface — the pipeline's stage advance › reads the advance out of the protocol's notification` |
+| the **overlays** | `overlay-in` and `overlay-out` | the approval dialog and the autocomplete overlay | `Project requirement` + `specified` — the two motions are the vocabulary's | `the motion surface — the overlays › fades the overlay in` |
+
+The four states are a **closed list** — `idle`, `thinking`, `asking`, `tool` — and a name
+that is not in it is refused rather than answered with something else.
+
+**Nothing here chooses a curve, a duration or a frame budget.** Every surface asks the
+vocabulary for a motion by name, and the system draws it. There is no second easing curve
+and no second duration table anywhere in the product.
+
+### 6.2 The frame, and the picture
+
+A **frame** is rows of the first layer's own `Segment[]` — a piece of text and the theme
+**role** it is drawn in. The **picture** is the frame's bytes: the escape sequences that
+put the theme's own colours on the screen, in the styles every terminal has.
+
+The picture is written by **one** function — `renderPicture` — so a frame is a picture in
+exactly one way, and the picture is reproducible: the same frame is the same bytes on any
+machine, because the motion's frame is a value and the time is quantised.
+
+### 6.3 The golden frames
+
+| the golden | what it shows |
+|---|---|
+| `prompt-shimmer` | the composer's rule with the travelling light on it, in the theme's `promptBorderShimmer` |
+| `state-transition` | the outgoing line and the incoming one, with the gap the incoming line's offset leaves |
+| `stage-advance` | the stage's row, pulsing from half brightness to full |
+| `overlay-in` | the approval dialog, faded in |
+| `overlay-out` | the approval dialog, faded out |
+| `degraded` | the **resting** picture and the reason beside it, for a terminal that cannot draw a frame |
+
+A golden is a **picture**, not a description of one: `tests/visual/goldens/<name>.frame`
+holds the bytes, and `cat` on it in a terminal shows the frame as the user saw it. The
+record beside it — `<name>.json` — holds the parameters, the picture's hash and the
+drawing's fingerprint.
+
+### 6.4 The staleness check
+
+Each golden records a **fingerprint**: the SHA-256 over the **sources that draw it** — the
+surface module, the frame writer, the motion system and the theme. The check compares the
+recorded fingerprint with the fingerprint of those files **on every run**, so:
+
+- a change to what the user sees fails the **picture** comparison; and
+- a change to the code that draws it — whether or not it changed this particular frame —
+  fails the **fingerprint** comparison, and the golden is **stale**.
+
+**A stale golden must fail.** The test proves it in two ways: `isCurrent` is false for a
+drawing that has moved, and the real check reports a tampered record as `stale` rather
+than passing it.
+
+The regeneration is a **deliberate act** — `bun run tests/visual/regenerate.ts` — and the
+test never writes.
+
+### 6.5 The degradation
+
+A terminal that cannot draw a frame gets the **resting** picture and **the reason**,
+written once beside it, in the theme's own `inactive` role. The degraded form has **its
+own golden**, and that golden is compared like any other.
+
+### 6.6 The rules the surface keeps
+
+| the rule | how it is kept | the test |
+|---|---|---|
+| **The motion sits on the first layer.** | the surface draws the first layer's own segments, in the first layer's own roles, and writes no colour of its own; nothing under `src/ui/render/` changed | `the motion surface — the picture › writes no colour of its own` |
+| **The first layer's own tests are unchanged and green.** | the app's rendering is the first layer's, and `tests/contracts/ui-render.test.ts` passes unchanged | the whole suite |
+| **The picture and the app agree.** | the app draws the surface's own rows, and the test mounts the app and reads the rows off the frame | `the app — the motion › draws the motion surface's rows, so the picture and the app agree` |
+| **What cannot be drawn is not drawn.** | the capability is off, the resting picture is drawn, and the reason is written beside it | `the app — the motion › shows the resting picture and the reason when the terminal cannot draw` |
+| **Never fake success.** | a golden that cannot be produced is a failure, not a skipped test: the check reports `missing`, `picture` or `stale` | `the golden frames — the staleness check › fails a golden that was never recorded` |
+| **A caller-supplied key is guarded.** | the stage's id is read out of the notification's parameters with `Object.hasOwn`, and a notification with no stage names nothing | `the motion surface — the pipeline's stage advance › refuses a notification that carries no stage` |
+| **The naming rule.** | the layer names the things it draws — a prompt, a state, a stage, an overlay — and no product and no company | `tests/contracts/naming.test.ts` |
+
+---
+
+## 7. The rules the layer keeps
 
 | the rule | how it is kept | the test |
 |---|---|---|
@@ -176,27 +269,36 @@ the motion says.
 | **Never fake success.** | there is no third thing: a motion is drawn, or it is not drawn and the reason is reported. A capability that is enabled carries no reason, and one that cannot run carries a sentence — the pair is built by the protocol's own `capabilityRecord`, so a record that breaks the contract cannot be built | `the terminal capability › carries the shared pair, and the reason is a sentence`; `the degradation › does not draw the animation of a motion that is not drawn` |
 | **Motion never blocks the input.** | the tick yields to a waiting input, and the time comes from the clock so a slow frame drops frames rather than queueing them | `the frame budget › yields to the input`; `… › drops the frames a slow frame missed, rather than queueing them` |
 | **The motion is deterministic.** | the frame reads no clock and keeps no counter, and the time is quantised to the frame index | `the frame › is the same frame whether it is stepped to or asked for`; `… › gives the same frame to two times inside one frame interval` |
-| **The first layer is not disturbed.** | the system reads the theme's roles and the first layer's `Segment` shape, and writes **no colour of its own**; nothing under `src/ui/render/` or `src/ui/app.ts` changed, and the first layer's own tests pass unchanged | `the motion system sits on the first layer › uses the theme's own roles, and writes no colour of its own`; `the renderer › writes no colour of its own` |
+| **The first layer is not disturbed.** | the system reads the theme's roles and the first layer's `Segment` shape, and writes **no colour of its own**; the system changed nothing under `src/ui/render/` or `src/ui/app.ts`, and the surface changed `src/ui/app.ts` and nothing under `src/ui/render/`; the first layer's own tests pass unchanged | `the motion system sits on the first layer › uses the theme's own roles, and writes no colour of its own`; `the renderer › writes no colour of its own`; `the motion surface — the picture › writes no colour of its own` |
 | **A caller-supplied key is guarded.** | the motion's name and the easing's name come from a caller, and `Object.prototype` carries members called `constructor` and `toString`; both lookups are `Object.hasOwn`, and a name that is not in the table is **refused** | `the motion vocabulary › refuses a name that is not in the table, rather than answering with something else` |
 | **The naming rule.** | the layer names the capability — a motion, a frame, a capability — and no product and no company | `tests/contracts/naming.test.ts` |
 
 ---
 
-## 7. What was not done, and why
+## 8. What was not done, and why
 
 | what | why |
 |---|---|
-| the **surfaces** — the prompt, the transitions, the stage changes and the overlays | they are `CC-048`'s. This milestone builds the system they will use, and the vocabulary names the motion each of them will ask for |
-| the **golden frames** | a frame is deterministic, so a golden *can* be recorded; recording one is `CC-048`'s and `CC-050`'s |
-| the **pipeline**'s stage advance | the event is `CC-045`'s and the pipeline is another implementer's in flight. The motion's **name** is here — `stage-advance` — and the drawing of it is `CC-048`'s |
+| the **surfaces** — the prompt, the transitions, the stage changes and the overlays | **done, in `CC-048`** — §6. This milestone built the system they use, and the vocabulary named the motion each of them asks for |
+| the **golden frames** | **recorded, in `CC-048`** — §6.3. The **verification suite** (`CC-050`) is what measures them, and it will measure the goldens this milestone recorded |
+| the **pipeline**'s stage advance, **live** | the event is `CC-045`'s and the run is `CC-049`'s. The motion's **name** is here, the **drawing** of it is here, and the reading of the notification is here — but the notification has to come from a run, and the run is another implementer's |
 | the **first layer's own spinner** and its shimmer | they are the target's, and they are pinned by the first layer's own tests. The motion system does not define a second spinner, and it does not touch the theme's spinner frames |
 | a **per-motion** capability record | every one of the seven motions is drawn in roles and styles that every terminal has, so the system-level record is the whole of the answer. A per-motion record would become necessary the moment a motion needed something a terminal might not have — a colour blend, say — and the specification would then name what it needs |
 | the **colour depth** of the terminal | the motion system writes no colour, so it has no use for the depth. It is the theme's business, and the theme's roles are the theme's own |
 | a **compatibility row** for the motion surface | a divergence is not a compatibility claim. The target's counterpart is the first layer's terminal surface, measured in `docs/compatibility/feature-matrix.md` |
 
+### 8.1 What the surface milestone did not do, and why
+
+| what | why |
+|---|---|
+| the **transcript's** rows, the **hint line** and the **keybindings** | they are the first layer's, and they are pinned by the first layer's own tests. The motion sits on the surface and does not replace it |
+| the **whole terminal frame** as a golden | a golden is the **motion surface's** frame: the rows the motion draws, in the theme's own colours. The first layer's chrome — the transcript, the borders, the padding — is Ink's own layout, and it is pinned by the first layer's own tests. What ties the two together is a **test**: the app is mounted and the surface's rows are read off the frame it drew |
+| the **app** in the golden's fingerprint | the fingerprint covers the code that **draws the golden** — the surface module, the frame writer, the motion system and the theme. The app is a **consumer** of the surface, and it is bound to the surface by the test above, which is a sharper instrument than a coarse hash |
+| the **motion's** wiring into the **product's** run | the stage advance arrives over the protocol, and the run is `CC-049`'s. The surface reads the notification and draws it; what is left is the run that sends it |
+
 ---
 
-## 8. The readings, in one place
+## 9. The readings, in one place
 
 1. **The direction of a motion is carried by three frames** — a start, an end and a
    resting one — rather than by a reversal flag. §1.
@@ -208,4 +310,16 @@ the motion says.
 5. **The shimmer falls back to the theme's `text` role** for a role with no partner, and
    the theme's partner pairs are followed as the theme names them. §1.
 6. **A per-motion capability record is not needed yet**, and what would make it needed
-   is named. §7.
+   is named. §8.
+7. **The prompt's shimmer travels across the composer's rule**, because the theme owns a
+   shimmer partner for the `promptBorder` role and the rule is what the composer's border
+   is drawn in. §6.1.
+8. **The composer's rule is drawn by the surface and not by Ink's border**, so the light
+   can travel along it. The characters are the ones the border drew — the rule
+   character, as many of them as the terminal is wide, in the `promptBorder` role — so
+   the picture the user sees does not change. §6.1.
+9. **The agent's four states are this implementation's own.** The first layer's status
+   line is the caller's own text; the state line is the second layer's, and its words
+   are ours. §6.1.
+10. **A golden is the picture and the record is kept beside it**, in two files, so the
+    picture is a picture and nothing of the machinery is in it. §6.3.
