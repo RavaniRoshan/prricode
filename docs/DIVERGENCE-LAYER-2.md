@@ -102,18 +102,24 @@ These were asked and answered. They are **locked** unless a later note says othe
 | **Where the code lives** | **In this repository, one workspace.** Layer 2 builds on the first layer's modules directly, in the same workspace and the same package. |
 | **How a stage plugs in** | **One interface, three deliveries.** A stage may be in-process, a package, or a process speaking our protocol over stdio, and the pipeline does not know the difference. |
 
-### Open, and deliberately so
+### The three the research settled
 
-Three decisions were **deferred to the research** rather than taken now, and they are
-held here until it lands:
+These were held for the research, and are now taken from its evidence. The research
+file is `/home/shiva/opt/reference-agent-rea/analysis/findings-model-layer.md` — 1 131
+lines, every claim carrying a file and a line.
 
-| the question | what is waiting | what will settle it |
+| the question | the decision | what the evidence said |
 |---|---|---|
-| **The catalogue and effort gap** | the catalogue is fetched, and a fetched list may not say which effort levels a model accepts | the research into how a comparable project reconciles a fetched catalogue with a per-model capability table |
-| **The credential storage** | where real API keys live, and how they are named | the research into how a comparable project stores and selects credentials across many providers |
-| **The degradation contract's shape** | one shape for every capability, one shape with per-capability detail, or per-capability shapes | the research into how capabilities report themselves when they cannot run |
+| **The catalogue and effort gap** | **The catalogue is fetched, and the effort is a named overlay the catalogue declares — never a rule in our code.** A model entry carries a list of named overlays, each with the request fields, the headers and the body it adds; the *reasoning effort* is one such overlay, and so are a thinking toggle and a token budget. The engine applies an overlay and knows no vendor's spelling. | The subject's design puts the effort in a 690-line table of near-duplicate protocol functions, most of them conditional on a model-id substring. The research flagged that table as the accumulated scar tissue of the design, and that the vendor-specific spelling belongs in the catalogue's declarative descriptor rather than in code. **We take the mechanism and refuse the scar tissue.** |
+| **The credential storage** | **A store keyed by *integration*, not by provider, in three kinds — a key, an OAuth grant, and an *external* reference that carries no secret at all. The provider record has no secret field, ever.** A *connection* is derived rather than stored: the stored credentials, newest first, then the environment variables that are currently set, with the first being the active one. The secret lives in the **operating system's credential store**, with an **encrypted file** as the fallback where that store is not available. | The subject keys its store by integration, in three kinds, with `external` carrying only a reference; its provider record has no `apiKey` field at all; and its connections are derived from stored credentials followed by the environment variables that are set, with an identity of `credential:<id>` or `env:<name>`. Its medium is a database column; the *shape* is what matters, and the medium is ours — a real API key belongs in the keychain. |
+| **The degradation contract's shape** | **One shape for every capability, with per-capability detail beneath it.** A capability reports whether it is enabled, and when it is not, why — and each capability adds its own fields under that shared pair. | The first layer already has the pattern: a typed refusal that *names* the capability it needed. This generalises it from an exception into data, so any caller can ask any capability the same question. |
 
-Nothing waits on the research for the other seven decisions, and none of them needs to.
+### Two more the research answered, that were not asked
+
+| the question | the decision |
+|---|---|
+| **Can one model be reached through more than one provider?** | **Yes, in the catalogue — and the choice is never made for the user.** One model appears under many providers, and the agent does **not** silently fall back when the selected one is unavailable; it fails loudly. Separately, a provider may **alias** another provider's whole definition — its models, its capabilities, its cost, its limits, its overlay spelling — and change only the endpoint and the credential. That is "the same model, but through my own gateway", and it is the answer to the question the research left open. |
+| **What compatibility apparatus do we inherit?** | **None.** The subject's largest cost is the machinery that preserves a published configuration format and an ecosystem: a version migration, a prefix scheme, and two tables of rewriting rules. We have no published format and no ecosystem to preserve, so we build none of it. That is a saving, and it is deliberate. |
 
 ## 7. What the second layer will need, and does not have yet
 

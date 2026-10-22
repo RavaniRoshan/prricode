@@ -2701,9 +2701,32 @@ and it applies to everything below. And the **honest-degradation contract** — 
 capability that cannot run reports `enabled: false` and `unsupported: <why>`, and never
 fakes success — is a *tested* property, not a promise.
 
-**Three decisions were held for the research** and are taken from its evidence when it
-lands: the **catalogue-and-effort gap**, the **credential storage**, and the **shape of
-the degradation contract**.
+**The three decisions held for the research are taken**, from
+`/home/shiva/opt/reference-agent-rea/analysis/findings-model-layer.md`:
+
+- **The catalogue-and-effort gap** — the catalogue is fetched, and the effort is a
+  **named overlay the catalogue declares**, never a rule in our code. One mechanism
+  expresses the effort, a thinking toggle, a token budget and a user-defined overlay. The
+  research found the subject's equivalent to be a 690-line table of near-duplicate
+  protocol functions, most of it conditional on a model-id substring, and flagged it as
+  the design's accumulated scar tissue. **We take the mechanism and refuse the scar
+  tissue.**
+- **The credential storage** — a store keyed by **integration**, not by provider, in
+  three kinds: a key, an OAuth grant, and an **external reference that carries no
+  secret**. The provider record has no secret field, ever. A *connection* is **derived**,
+  not stored: the stored credentials newest first, then the environment variables that
+  are currently set, with the first active. The secret lives in the **operating
+  system's credential store**, with an **encrypted file** as the fallback.
+- **The degradation contract's shape** — **one shape for every capability, with
+  per-capability detail beneath it**: enabled, and when not, why. The first layer's typed
+  capability refusal generalises from an exception into data.
+
+And two the research answered that were not asked: **one model may appear under many
+providers, and the choice is never made for the user** — the agent fails loudly rather
+than falling back silently — and a provider may **alias** another provider's whole
+definition, changing only the endpoint and the credential. **We inherit no compatibility
+apparatus**: the subject's largest cost is machinery that preserves a published
+configuration format and an ecosystem, and we have neither.
 
 ## The milestones
 
