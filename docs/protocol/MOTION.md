@@ -62,7 +62,7 @@ A **kind** says *what* is animated. There are five, and no more.
 | the kind | the frame carries | what it animates |
 |---|---|---|
 | `fade` | `opacity` — 0..1 | how present the content is |
-| `slide` | `offset` — whole lines | where the content sits |
+| `slide` | `offset` — whole lines, signed | where the content sits |
 | `pulse` | `brightness` — 0.5..1 | how brightly the content is drawn |
 | `shimmer` | `phase` — 0..1 | where the travelling light is |
 | `blink` | `visible` — a boolean | whether the content is drawn at all |
@@ -109,13 +109,39 @@ surface that wants a motion takes one of these names.
 | `stage-advance` | `pulse` | `ease-in-out` | `normal` | no | the pipeline's stage changing |
 | `cursor-blink` | `blink` | `linear` | `slow` | yes | the cursor |
 
-Two further fields belong to a motion:
+### 2.5 The three frames of a motion
 
-- **the distance** — how many lines a `slide` moves. It is **1** for both transitions, and
-  **0** for every other motion.
-- **the resting frame** — the picture the motion shows when it is **not animating** (§3.5).
+Every motion declares **three** frames, all of its own kind:
 
-### 2.5 The rule about the easing
+| the frame | what it is |
+|---|---|
+| the **start** | the frame at the beginning of a pass |
+| the **end** | the frame at the end of a pass |
+| the **resting** | the picture the motion shows when it is **not** animating |
+
+| the motion | the start | the end | the resting |
+|---|---|---|---|
+| `overlay-in` | `opacity 0` | `opacity 1` | `opacity 1` |
+| `overlay-out` | `opacity 1` | `opacity 0` | `opacity 1` |
+| `transition-in` | `offset +1` | `offset 0` | `offset 0` |
+| `transition-out` | `offset 0` | `offset -1` | `offset 0` |
+| `prompt-shimmer` | `phase 0` | `phase 1` | `phase 0` |
+| `stage-advance` | `brightness 0.5` | `brightness 1` | `brightness 1` |
+| `cursor-blink` | `visible true` | `visible false` | `visible true` |
+
+Two things follow from the table, and both are the point of it:
+
+- **The direction is in the table.** `overlay-in` fades *in* and `overlay-out` fades
+  *out*; `transition-in` comes up from one line below and `transition-out` goes one line
+  above. A motion never has to be told which way it runs.
+- **The resting frame is not the end of a pass.** `overlay-out` ends at no opacity and
+  still rests fully present, because a motion that is not drawn is not a motion that has
+  finished.
+
+A motion also declares its **distance**: how many lines a `slide` moves. It is **1** for
+both transitions and **0** for every other motion.
+
+### 2.6 The rule about the easing
 
 The easing shapes a motion that moves **between two states**: `fade`, `slide` and
 `pulse`. The two motions that **cycle** — `shimmer` and `blink` — run on the **raw**
@@ -159,16 +185,25 @@ motion's progress is the position **within** its cycle.
 
 ### 3.3 The frames
 
+The three kinds that move **between two states** interpolate between the motion's
+**start** and its **end**, with the eased progress:
+
 | the kind | the frame |
 |---|---|
-| `fade` | `{ kind: 'fade', opacity: e }` |
-| `slide` | `{ kind: 'slide', offset: round(e * distance) }` — whole lines, `0`..`distance` |
-| `pulse` | `{ kind: 'pulse', brightness: 0.5 + 0.5 * e }` |
-| `shimmer` | `{ kind: 'shimmer', phase: p }` — the raw cycle progress |
-| `blink` | `{ kind: 'blink', visible: p < 0.5 }` — the raw cycle progress |
+| `fade` | `{ kind: 'fade', opacity: start.opacity + (end.opacity - start.opacity) * e }` |
+| `slide` | `{ kind: 'slide', offset: round(start.offset + (end.offset - start.offset) * e) }` |
+| `pulse` | `{ kind: 'pulse', brightness: start.brightness + (end.brightness - start.brightness) * e }` |
 
-`round` is the nearest whole number, halves upward. `opacity` and `brightness` are
-floating point and are never rounded — the frame carries the exact value.
+The two kinds that **cycle** run on the raw cycle progress `p`:
+
+| the kind | the frame |
+|---|---|
+| `shimmer` | `{ kind: 'shimmer', phase: start.phase + (end.phase - start.phase) * p }` |
+| `blink` | `{ kind: 'blink', visible: p < 0.5 ? start.visible : end.visible }` |
+
+`round` is the nearest whole number, halves upward — a terminal's layout is in whole
+lines, so a slide is a whole line. `opacity` and `brightness` are floating point and are
+never rounded: the frame carries the exact value.
 
 ### 3.4 Determinism
 
@@ -183,7 +218,8 @@ it. Two consequences, and both are tested:
 
 ### 3.5 The resting frame
 
-Every motion has a **resting frame**: the picture it shows when it is **not** animating.
+The **resting frame** is the picture a motion shows when it is **not** animating. It is
+the third frame of §2.5, and it is what a terminal without the capability gets:
 
 | the motion | the resting frame |
 |---|---|
@@ -195,7 +231,7 @@ Every motion has a **resting frame**: the picture it shows when it is **not** an
 
 **The resting frame is not the end of a pass.** `overlay-out` *ends* at no opacity, but
 its resting frame is fully present: a motion that is not drawn is not a motion that has
-finished. The resting frame is what a terminal without the capability gets.
+finished.
 
 ---
 
