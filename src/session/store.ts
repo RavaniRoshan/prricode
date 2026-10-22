@@ -127,7 +127,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import path from 'node:path';
 
 import {
@@ -142,6 +141,9 @@ import {
   type ToolResultStub,
   type TranscriptSource,
 } from './event.js';
+import { configurationDirectory } from '../config/environment.js';
+import { raiseTelemetryEvent } from '../telemetry/emitter.js';
+import type { TelemetryEventName } from '../telemetry/vocabulary.js';
 import type { ToolResultEnvelope } from '../tools/runner.js';
 
 export { SessionFormatError, SessionVersionError } from './event.js';
@@ -184,9 +186,14 @@ export function projectDirectoryFor(configDir: string, cwd: string): string {
  * holds a `projects` subtree among fifty-five others. This implementation reproduces the
  * root and the subtree; the rest of the target's layout is not part of the
  * implementation's session surface.
+ *
+ * **Observed** (the target's own source): the root is moved by
+ * `CLAUDE_CONFIG_DIR` — the target reads `process.env.CLAUDE_CONFIG_DIR` and
+ * falls back to the default when the variable is unset or empty. The variable
+ * is the target's, so it keeps the target's name.
  */
-export function defaultConfigDir(): string {
-  return path.join(homedir(), '.claude');
+export function defaultConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  return configurationDirectory(env);
 }
 
 /**
@@ -975,8 +982,12 @@ export type CarriedPromptOutcome =
  *
  * **Observed** (audit §2.6): "with a `tengu_carried_prompts_taken` telemetry
  * event".
+ *
+ * The name is typed as the target's own event name, so it is checked against
+ * the target's vocabulary by the **compiler**: a rename, or an event the target
+ * does not emit, does not build.
  */
-export const CARRIED_PROMPT_TELEMETRY_EVENT = 'tengu_carried_prompts_taken';
+export const CARRIED_PROMPT_TELEMETRY_EVENT = 'tengu_carried_prompts_taken' satisfies TelemetryEventName;
 
 /** One persisted prompt. */
 export interface CarriedPromptRow {
@@ -1052,14 +1063,41 @@ export interface CarriedPromptStoreOptions {
    *
    * The target emits `tengu_carried_prompts_taken` when a carried prompt is
    * taken (audit §2.6), and this implementation emits the same event name with the
-   * outcome attached. The sink is optional: a caller that has no telemetry
+   * **target's own properties** attached — see
+   * {@link CarriedPromptTelemetry}.
+   *
+   * The sink is optional: a caller that has no telemetry
    * pipeline simply does not receive the event.
    */
-  onTelemetry?: (event: {
-    name: typeof CARRIED_PROMPT_TELEMETRY_EVENT;
-    outcome: CarriedPromptOutcome;
-    id: string;
-  }) => void;
+  onTelemetry?: (event: CarriedPromptTelemetry) => void;
+}
+
+/**
+ * The telemetry of a carried-prompt take.
+ *
+ * **Observed** (`chunk-6bp7hdav.js:58863`): the target emits
+ * `tengu_carried_prompts_taken` with **four** properties —
+ * `count` (how many prompts were taken), `already_delivered` (how many of the
+ * file's prompts had already been delivered), `outcome` and `age_ms` (the age
+ * of the carried file).
+ *
+ * This implementation's store takes **one** prompt at a time, so `count` is
+ * `1` for a prompt that was taken and `0` for one that was not, and `age_ms`
+ * is the age of the **row** rather than of the file — the implementation's
+ * store is a row store, not a file of prompts. The property **names** and their
+ * **types** are the target's.
+ */
+export interface CarriedPromptTelemetry {
+  /** The event's name. */
+  name: typeof CARRIED_PROMPT_TELEMETRY_EVENT;
+  /** How many prompts were taken. */
+  count: number;
+  /** How many of the store's prompts had already been delivered. */
+  already_delivered: number;
+  /** What happened to the row. */
+  outcome: CarriedPromptOutcome;
+  /** How old the row is, in milliseconds. */
+  age_ms: number;
 }
 
 /**
@@ -1165,13 +1203,25 @@ export function createCarriedPromptStore(options: CarriedPromptStoreOptions): Ca
       const maxAgeMs = opts.maxAgeMs ?? defaultMaxAgeMs;
       const rows = await readRows();
       const row = rows.find((candidate) => candidate.id === opts.id);
+      // The number of rows the store holds that have already been delivered:
+      // the target's `already_delivered`.
+      const alreadyDelivered = rows.filter((candidate) => candidate.deliveredAt !== undefined).length;
 
       const fail = (outcome: CarriedPromptOutcome): CarriedPromptTakeResult => {
         const result: CarriedPromptTakeResult = {
           outcome,
           telemetry: CARRIED_PROMPT_TELEMETRY_EVENT,
         };
-        options.onTelemetry?.({ name: CARRIED_PROMPT_TELEMETRY_EVENT, outcome, id: opts.id });
+        raiseTelemetryEvent(
+          {
+            name: CARRIED_PROMPT_TELEMETRY_EVENT,
+            count: 0,
+            already_delivered: alreadyDelivered,
+            outcome,
+            age_ms: row === undefined ? 0 : at - row.createdAt,
+          },
+          options.onTelemetry,
+        );
         return result;
       };
 
@@ -1193,7 +1243,16 @@ export function createCarriedPromptStore(options: CarriedPromptStoreOptions): Ca
       await writeRow(taken);
 
       const outcome: CarriedPromptOutcome = row.altered === true ? 'altered' : 'bound';
-      options.onTelemetry?.({ name: CARRIED_PROMPT_TELEMETRY_EVENT, outcome, id: opts.id });
+      raiseTelemetryEvent(
+        {
+          name: CARRIED_PROMPT_TELEMETRY_EVENT,
+          count: 1,
+          already_delivered: alreadyDelivered,
+          outcome,
+          age_ms: at - row.createdAt,
+        },
+        options.onTelemetry,
+      );
       return {
         outcome,
         prompt: taken,

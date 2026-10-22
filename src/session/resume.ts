@@ -153,6 +153,8 @@ import {
   type SessionStore,
   type SessionSummary,
 } from './store.js';
+import { raiseTelemetryEvent } from '../telemetry/emitter.js';
+import type { TelemetryEventName } from '../telemetry/vocabulary.js';
 
 export type { SessionEvent } from './event.js';
 
@@ -1264,25 +1266,30 @@ export type SessionResumeFailureReason =
  * `{entrypoint, success, resume_duration_ms}` on success,
  * `{entrypoint, success, failure_reason, error_name, error_code}` on failure,
  * and an extra `interruption_kind` on the print path."
+ *
+ * The name is typed as the target's own event name, so the **compiler** checks
+ * it against the target's vocabulary: a rename, or an event the target does
+ * not emit, does not build.
  */
-export const SESSION_RESUMED_TELEMETRY_EVENT = 'tengu_session_resumed';
+export const SESSION_RESUMED_TELEMETRY_EVENT = 'tengu_session_resumed' satisfies TelemetryEventName;
 
 /**
  * The telemetry event that marks the **start** of a print-mode resume.
  *
  * **Observed** (audit §2.6): "A separate `tengu_resume_print` event marks the
- * start of a print-mode resume." The audit does not record the members of the
- * event, so this implementation's payload is a **implementation choice**: the entrypoint the
- * print-mode resume came from.
+ * start of a print-mode resume."
+ *
+ * **Observed** (`chunk-e7w77ts3.js:736480`): the target's event carries **no
+ * properties** — its payload is `{}`. The event's identity is its name, and
+ * the target's payload says nothing else, so this implementation's payload
+ * says nothing else either.
  */
-export const SESSION_RESUME_PRINT_TELEMETRY_EVENT = 'tengu_resume_print';
+export const SESSION_RESUME_PRINT_TELEMETRY_EVENT = 'tengu_resume_print' satisfies TelemetryEventName;
 
 /** The telemetry of a print-mode resume's start. */
 export interface SessionResumePrintTelemetry {
   /** The event's name. */
   name: typeof SESSION_RESUME_PRINT_TELEMETRY_EVENT;
-  /** The entrypoint the print-mode resume came from. */
-  entrypoint: 'print';
 }
 
 /** The telemetry of a successful resume. */
@@ -1446,10 +1453,10 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
   // The print path marks its start, whether the resume goes on to succeed or
   // to fail.
   if (entrypoint === 'print') {
-    options.onPrintTelemetry?.({
-      name: SESSION_RESUME_PRINT_TELEMETRY_EVENT,
-      entrypoint: 'print',
-    });
+    raiseTelemetryEvent(
+      { name: SESSION_RESUME_PRINT_TELEMETRY_EVENT },
+      options.onPrintTelemetry,
+    );
   }
 
   const fail = (
@@ -1464,7 +1471,7 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
       failure_reason: reason,
       error_name: errorName,
     };
-    options.onTelemetry?.(telemetry);
+    raiseTelemetryEvent(telemetry, options.onTelemetry);
     return { status: 'failed', failure: { reason, message }, telemetry };
   };
 
@@ -1510,7 +1517,7 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
   // The attach short-circuit: a live session is handed off, not replayed.
   if (options.forkSession !== true && options.isLiveSession?.(sessionId) === true) {
     const telemetry = succeed();
-    options.onTelemetry?.(telemetry);
+    raiseTelemetryEvent(telemetry, options.onTelemetry);
     return { status: 'attached', sessionId, canFork: true, telemetry };
   }
 
@@ -1559,7 +1566,7 @@ export async function resumeSession(options: ResumeSessionOptions): Promise<Resu
   const telemetry = succeed(
     entrypoint === 'print' ? (resume.turnInterruptionState?.kind ?? 'none') : undefined,
   );
-  options.onTelemetry?.(telemetry);
+  raiseTelemetryEvent(telemetry, options.onTelemetry);
 
   const result: ResumeSessionResult = {
     status: 'resumed',
@@ -1887,7 +1894,7 @@ export function selectResumableCandidate(
  * `{success}` and `resume_duration_ms`, or `{success: false, error_name}` on
  * failure."
  */
-export const SESSION_CONTINUE_TELEMETRY_EVENT = 'tengu_continue';
+export const SESSION_CONTINUE_TELEMETRY_EVENT = 'tengu_continue' satisfies TelemetryEventName;
 
 /**
  * The message the target's lookup reports when there is **nothing** to
@@ -2161,7 +2168,7 @@ export async function continueSession(
       success: false,
       error_name: errorName,
     };
-    options.onTelemetry?.(telemetry);
+    raiseTelemetryEvent(telemetry, options.onTelemetry);
     return {
       status: 'failed',
       failure: {
@@ -2259,7 +2266,7 @@ export async function continueSession(
     success: true,
     resume_duration_ms: Math.max(0, now() - startedAt),
   };
-  options.onTelemetry?.(telemetry);
+  raiseTelemetryEvent(telemetry, options.onTelemetry);
 
   const result: SessionContinueResult = {
     status: 'continued',

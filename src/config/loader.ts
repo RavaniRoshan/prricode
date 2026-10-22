@@ -53,6 +53,7 @@ import type { Stats } from 'node:fs';
 import path from 'node:path';
 
 import { parseFlatManagedConfig, parseSettingsDocument } from './schema.js';
+import { configurationDirectory } from './environment.js';
 import { isSuppressed } from './scope.js';
 import {
   SETTINGS_SOURCES,
@@ -73,8 +74,18 @@ export type SettingsReadMode = 'none' | 'as_read' | 'machine_admin';
 export interface SettingsLoadOptions {
   /** The working directory the project tiers are resolved against. */
   cwd: string;
-  /** The configuration directory the user and policy tiers are resolved against. */
-  configDir: string;
+  /**
+   * The configuration directory the user and policy tiers are resolved against.
+   *
+   * When the caller does not supply one, it is read from the environment —
+   * `CLAUDE_CONFIG_DIR`, the target's own variable, and `~/.claude` when the
+   * variable is unset. The target reads the variable directly
+   * (`process.env.CLAUDE_CONFIG_DIR||ce()`), so a clone that ignored it would
+   * write its state somewhere the target never looks.
+   */
+  configDir?: string;
+  /** The environment the configuration directory is read from. */
+  env?: NodeJS.ProcessEnv;
   /** Whether personal configuration is restricted (project-side tiers suppressed). */
   restricted: boolean;
   /** Override the machine policy settings path. */
@@ -312,7 +323,7 @@ function sandboxPolicyOfTiers(tiers: Map<SettingsSource, SettingsTier>): Sandbox
  */
 export function loadSettings(opts: SettingsLoadOptions): SettingsLoadResult {
   const cwd = path.resolve(opts.cwd);
-  const configDir = path.resolve(opts.configDir);
+  const configDir = path.resolve(opts.configDir ?? configurationDirectory(opts.env ?? process.env));
 
   const collected = new Map<SettingsSource, SettingsTier>();
   const errors: SettingsLoadError[] = [];

@@ -126,6 +126,7 @@ import {
 } from '../provider/registry.js';
 import { sendProviderRequest } from '../provider/transport/index.js';
 import { continueSession, resumeAtMessage, resumeSession } from '../session/resume.js';
+import { TelemetryEmitter, propertiesOf } from '../telemetry/emitter.js';
 import type { SessionEvent } from '../session/event.js';
 import {
   createSessionStore,
@@ -626,7 +627,7 @@ async function runManagerCommand(
   options: CommandOptions & { stdout: OutputSink; stderr: OutputSink },
 ): Promise<number> {
   const { stdout, stderr } = options;
-  const configDir = options.configDir ?? defaultConfigDir();
+  const configDir = options.configDir ?? defaultConfigDir(options.env ?? process.env);
   const statePath = join(configDir, PROVIDER_STATE_FILE);
   const { registry, catalogs } = await loadManagerState(statePath);
   // The surface the **parser** named is the surface that runs: the parser
@@ -1171,8 +1172,10 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
   }
 
   const cwd = context.cwd ?? process.cwd();
-  const configDir = context.configDir ?? defaultConfigDir();
   const env = context.env ?? process.env;
+  // The configuration root honours `CLAUDE_CONFIG_DIR`, the way the target's
+  // does — the variable is the target's, so it keeps the target's name.
+  const configDir = context.configDir ?? defaultConfigDir(env);
   const store = createSessionStore({ configDir });
 
   // The settings file the `--settings` flag named. It is loaded **before** the
@@ -1186,7 +1189,7 @@ async function runRun(parsed: ParsedRunArgs, context: RunContext): Promise<numbe
   // The session: continued, resumed, or new. The resolution runs **before** the
   // prompt is read, so a failed session lookup is reported with the target's own
   // message rather than with a complaint about a missing prompt.
-  const resolved = await resolveSession(parsed, { store, cwd, configDir, context });
+  const resolved = await resolveSession(parsed, { store, cwd, configDir, context, env });
   if (resolved === undefined) return EXIT_FAILURE;
 
   // **The active connection.** The provider manager exists so that a run can
@@ -1331,6 +1334,12 @@ interface ResolvedSession {
  * A `--continue` and a `--resume` are the session module's own: this module
  * calls `continueSession` and `resumeSession`, so the **target's** messages and
  * the **target's** telemetry come from there and are not re-implemented here.
+ *
+ * The telemetry the run delivers is the **target's model**: an event name and
+ * a metadata object. The run's own seam — the `telemetry` option — receives
+ * the record the session module raised, so a caller sees the same flat shape
+ * it always did, and the emitter's guard and its traffic mode apply in
+ * between.
  */
 async function resolveSession(
   parsed: ParsedRunArgs,
@@ -1339,10 +1348,26 @@ async function resolveSession(
     cwd: string;
     configDir: string;
     context: RunContext;
+    env: NodeJS.ProcessEnv;
   },
 ): Promise<ResolvedSession | undefined> {
-  const { store, cwd, configDir, context } = options;
-  const telemetry = context.telemetry;
+  const { store, cwd, configDir, context, env } = options;
+  const emitter = new TelemetryEmitter(env);
+  const deliver = context.telemetry;
+  if (deliver !== undefined) {
+    emitter.attachSink({
+      logEvent: (name, properties) => {
+        deliver({ name, ...properties });
+      },
+    });
+  }
+  const telemetry =
+    deliver === undefined
+      ? undefined
+      : (event: unknown) => {
+          const record = event as Record<string, unknown> & { name: string };
+          emitter.logEvent(record.name, propertiesOf(record));
+        };
 
   if (parsed.continueSession) {
     const result = await continueSession({

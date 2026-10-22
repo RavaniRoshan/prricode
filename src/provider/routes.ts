@@ -93,6 +93,7 @@ import {
   type SettingsSource,
   type SettingsTierMap,
 } from '../config/tiers.js';
+import { readEnvironment, targetFlag } from '../config/environment.js';
 
 /** The eight provider routes the target declares. */
 export type ProviderRoute =
@@ -219,14 +220,14 @@ export function flagEnabled(value: unknown): boolean {
  * unset, and a value that carries surrounding whitespace yields the trimmed
  * text, so a secret pasted with a trailing newline never travels to a provider
  * with the newline attached.
+ *
+ * The reading itself is the environment module's
+ * ({@link readEnvironment}), so the trimming rule and the own-property rule
+ * have **one** implementation in the whole codebase.
  */
 export function readEnvValue(env: NodeJS.ProcessEnv | undefined, name: string): string | undefined {
   if (!env) return undefined;
-  if (!Object.hasOwn(env, name)) return undefined;
-  const value = env[name];
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed === '' ? undefined : trimmed;
+  return readEnvironment(env).text(name);
 }
 
 /**
@@ -284,7 +285,12 @@ export function enabledRoutes(
   for (const route of ROUTE_FLAG_ORDER) {
     const variable = ROUTE_ENV_VARS.get(route);
     if (variable === undefined) continue;
-    if (flagEnabled(readEnvValue(env, variable))) enabled.add(route);
+    // The **target's** boolean parse, not this implementation's wider one:
+    // the target reads `Ne(process.env.CLAUDE_CODE_USE_BEDROCK)`, and `Ne`
+    // accepts `1`, `true`, `yes` and `on` and **nothing else**
+    // (`chunk-c5n7mysv.js:717`). A value outside that set leaves the route
+    // off — `CLAUDE_CODE_USE_BEDROCK=2` does not turn Bedrock on.
+    if (targetFlag(readEnvValue(env, variable))) enabled.add(route);
   }
   // Nothing was turned on: the default route is the one in play.
   if (enabled.size === 0) enabled.add('firstParty');

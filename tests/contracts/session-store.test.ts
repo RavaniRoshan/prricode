@@ -46,6 +46,7 @@ import {
   createSessionStore,
   projectDirectoryName,
   resolveSessionTarget,
+  type CarriedPromptTelemetry,
   type SessionHandle,
 } from '../../src/session/store.js';
 
@@ -848,7 +849,7 @@ describe('the carried prompts', () => {
 
   it('emits the target\'s telemetry event with the outcome', async () => {
     const configDir = path.join(makeRoot(), 'config');
-    const events: { name: string; outcome: string; id: string }[] = [];
+    const events: CarriedPromptTelemetry[] = [];
     const prompts = createCarriedPromptStore({
       configDir,
       maxAgeMs: 60_000,
@@ -864,6 +865,14 @@ describe('the carried prompts', () => {
     expect(events[0]?.name).toBe('tengu_carried_prompts_taken');
     expect(events[0]?.outcome).toBe('bound');
     expect(events[1]?.outcome).toBe('no_row');
+    // **The target's own properties** (`chunk-6bp7hdav.js:58863`): the count
+    // of the prompts taken, the count of the prompts already delivered, the
+    // outcome and the age of the row.
+    expect(events[0]?.count).toBe(1);
+    expect(events[0]?.already_delivered).toBe(0);
+    expect(events[0]?.age_ms).toBe(500);
+    expect(events[1]?.count).toBe(0);
+    expect(events[1]?.already_delivered).toBe(1);
   });
 
   it('keeps the carried prompts append-only', async () => {
