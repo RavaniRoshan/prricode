@@ -18,23 +18,33 @@
  * `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md`
  * §2, and every claim there carries a file and a byte offset. The summary:
  *
- *   - `text` writes the result document's `result` text, plus a newline, and
- *     the failure's detail on stderr (`chunk-e7w77ts3.js:445913`);
+ *   - `text` prints the result document through the target's own printer
+ *     (`chunk-e7w77ts3.js:445913`): the result's text at the end of the turn,
+ *     and for a failure the format's own line — `Execution error`, without a
+ *     trailing newline — on stdout and the failure's detail on stderr;
  *   - `json` writes **exactly one** document — the **result** document
  *     (`chunk-e7w77ts3.js:529318`), and with `--verbose` a JSON **array** of
  *     every significant message instead;
- *   - `stream-json` writes **one document per line**, one per message, and the
- *     **last** document is the result document (`chunk-btsgvmny.js:29557`).
+ *   - `stream-json` writes **one document per line**, one per message, the
+ *     `system`/`init` document first (`chunk-btsgvmny.js:29557`), the **result**
+ *     document last;
+ *   - a run whose query returns **no** messages writes
+ *     `Error: No messages returned from query` to **stderr**, **nothing** to
+ *     stdout, and exits `1` — and a turn that threw, whose records never
+ *     arrive, is that same no-result case.
  *
- * **The result document is the target's own** — its member set, its member
- * order and its nested shapes — and it is built in `src/cli/headless.ts`,
- * because the document belongs to the run and not to the writer. The
- * **other** documents are this implementation's own: the target's stream-json
- * documents are the SDK message kinds (`system`/`init`, `assistant`, `user`,
- * `stream_event` and `result` — `chunk-pj5cyqhw.js:333857`, `:261767`,
- * `:239906`, `:352585`) and this implementation's events are not those
- * documents. The three places where this implementation knowingly differs
- * from the target are named in `docs/compatibility/command-surface.md`.
+ * **The documents are the target's own.** The result document is built in
+ * `src/cli/headless.ts`, both variants of it: the run's own builder
+ * (`chunk-pj5cyqhw.js:171561`) and the startup-failure builder
+ * (`chunk-05nax923.js:1868`). The rest of the `stream-json` wire — the
+ * `system`/`init` document, the `assistant` documents and the `user` document
+ * that carries `tool_use_result` — is built in `src/cli/print/documents.ts`
+ * from the SDK message kinds (`chunk-pj5cyqhw.js:333857`, `:261767`,
+ * `:239906`). What this module adds is the **seam**: the mapping of the
+ * runtime's records onto those kinds, the hold that keeps the init document
+ * first, and the no-result rule above. The places this implementation
+ * knowingly differs from the target are named in
+ * `docs/compatibility/command-surface.md`.
  *
  * ## The exit codes
  *
@@ -49,16 +59,20 @@
  *
  * ## The formats
  *
- *   - `text` — the assistant's text, and nothing else. The text of a failed run
- *     goes to **stderr**, so that stdout stays the answer and a pipeline can
- *     trust it.
+ *   - `text` — the result's text through the printer, and the failure's detail
+ *     on **stderr**, so that stdout stays the answer and a pipeline can trust
+ *     it.
  *   - `json` — **exactly one** JSON document: the result of the run. The
  *     document is written even when the run failed, because a machine reading
  *     the document has to be able to tell a success from a failure without
- *     parsing the exit code.
- *   - `stream-json` — **one JSON object per event**, one per line.
+ *     parsing the exit code — unless the run returned **no** result at all,
+ *     which writes nothing, the no-result rule above.
+ *   - `stream-json` — **one JSON document per line**: the `system`/`init`
+ *     document first, one document per message the run produced, the result
+ *     document last. The documents are written with the target's own writer's
+ *     escaping (`streamJsonLine`, `src/cli/print/documents.ts`).
  *
- * The `json` document is written **after** the run. The `stream-json` objects
+ * The `json` document is written **after** the run. The `stream-json` documents
  * are written **as the events arrive** in the target — that is the difference
  * between the two formats, and it is the whole reason the target has both.
  * This implementation's own behavior is the **one-batch** limitation stated below.

@@ -377,11 +377,15 @@ The **input format** is `text` or `stream-json`; the **output format** is `text`
 `/home/shiva/opt/reference-agent-rea/analysis/findings-permissions-and-headless.md` §2.
 Every claim below carries a file and a byte offset there.
 
+**Implementation:** [`src/cli/headless.ts`](../../src/cli/headless.ts) (the result document, both variants, and the events the run turns into), [`src/cli/print/documents.ts`](../../src/cli/print/documents.ts) (the `stream-json` wire's message kinds, its escaping and the printer) and [`src/cli/output.ts`](../../src/cli/output.ts) (the writer: the three formats, the init-first hold and the no-result rule).
+
 | Format | stdout | stderr | Exit code |
 |---|---|---|---|
-| `text` | the result document's `result` text, plus a newline | the failure's detail, when the run failed | `0` on success, `1` on failure |
+| `text` | the result document's `result` text, printed **at the end of the turn**, plus one newline; on a failure the format's own line — `Execution error`, **without** a trailing newline (`chunk-e7w77ts3.js:445913`) | the failure's detail, when the run failed | `0` on success, `1` on failure |
 | `json` | **exactly one** document: the **result** document | — | as above |
-| `stream-json` | **one document per line**, one per message, the **result** last | — | as above |
+| `stream-json` | **one document per line**: the **`system`/`init` document first**, one document per message, the **result** document last (`chunk-btsgvmny.js:29557`) | — | as above |
+
+A run whose query returns **no** messages — the runtime never came back with records, including a turn that threw — is one rule for all three formats (`chunk-e7w77ts3.js:529318`): **nothing** on stdout, `Error: No messages returned from query` on **stderr**, and exit `1`. The `stream-json` run writes **no** opening `system`/`init` document in that case; the writer holds it until the first message document reaches the wire.
 
 The **result document** is the target's own, and this implementation builds it: the member set, the member **order** and the nested shapes are the target's (`chunk-pj5cyqhw.js:300922` for the success variant, `:326977` for the error variant, `:178563` for the `usage` object and `:288789` for a `permission_denials` entry). The target builds the document by spreading the **common** members, then the **variant** members, then `type`, `duration_ms` and `uuid` (`chunk-pj5cyqhw.js:171561`), and this implementation does the same — so the members arrive on the wire in the target's order.
 
@@ -389,19 +393,25 @@ The members the target fills and this implementation cannot are the target's **o
 
 A `--print` run **is a session**: the result document carries a `session_id`, and the session's transcript is appended to disk as the turn runs — the append-only JSONL the [session format](session-format.md) describes — unless `--no-session-persistence` turns it off. The split is: **stdout carries the format's output; the disk carries the transcript.**
 
-### The three divergences this milestone keeps, in the output
+### The output formats' divergences — closed in this milestone
 
-**Implementation choice, deliberate.** Each is pinned by a contract test this milestone does not own (`tests/contracts/cli-surface.test.ts`), and each is **named** here rather than hidden.
+`CC-014` left three differences in the output, named below and measured as `F-02`'s `mismatch`. This milestone read the target's own source (`findings-permissions-and-headless.md` §2.2–2.5) and **closed all three**, together with the fourth the reading established — the `stream-json` wire — so the output formats now reproduce the target's behaviour:
 
-| # | The target's own behaviour | This implementation | Why |
+| # | The target's own behaviour (observed) | This implementation now | Where the reading is recorded |
 |---|---|---|---|
-| 1 | the error variant's `subtype` is one of `error_during_execution`, `error_max_turns`, `error_max_budget_usd` and `error_max_structured_output_retries` (`chunk-pj5cyqhw.js:326977`) | `error` | the `CC-014` contract test pins `subtype: 'error'` for a failed run, in both the `json` and the "no result event" cases |
-| 2 | a run that produced **no** result document writes `Error: No messages returned from query` to **stderr**, writes **nothing** to stdout and exits `1` (`chunk-e7w77ts3.js:529318`) | a document that says the run failed | the `CC-014` contract test pins a document on stdout for that case |
-| 3 | the `text` format writes the result's text at the **end of the turn** and, on a failure, the format's own line on stdout (`Execution error`, `Error: Reached max turns (n)`, …) with the failure's detail on stderr (`chunk-e7w77ts3.js:445913`) | the assistant's text as it arrives, and nothing on stdout for a failure | the `CC-014` contract test pins the text format's stdout and stderr for both the success and the failure case |
+| 1 | the error variant's `subtype` is `error_during_execution`, and the variant carries **no** `result` member (`chunk-pj5cyqhw.js:326977`) | the same — the subtype is in the target's vocabulary, and the error variant builds without a `result` member | findings §2.5 |
+| 2 | a run that produced **no** result document writes `Error: No messages returned from query` to **stderr**, writes **nothing** to stdout and exits `1` (`chunk-e7w77ts3.js:529318`); a turn that threw is the same case | the same rule, for all three formats | findings §2.2–2.3 |
+| 3 | the `text` format prints the result's text **at the end of the turn** through the target's own printer; on a failure the format's own line on stdout — `Execution error`, no trailing newline — and the failure's detail on stderr (`chunk-e7w77ts3.js:445913`); the other subtypes print their own lines (`Error: Reached max turns (n)`, `Error: Exceeded USD budget (n)`, `Error: <errors[0] ?? 'Failed to provide valid structured output after maximum retries'>`) | the same printing, through the printer in `src/cli/print/documents.ts` — including the dedupe (`lastPrinted`) and the separator the printer keeps | findings §2.3 |
+| 4 | the `stream-json` documents are the SDK message kinds — the `system`/`init` document **first** (`chunk-pj5cyqhw.js:333857`), the `assistant` documents (`:261767`), the `user` document that carries `tool_use_result` (`:239906`), the `result` document **last** — written through `JSON.stringify` with U+2028 and U+2029 escaped, one document per line (`chunk-btsgvmny.js:29557`) | the same kinds, built in `src/cli/print/documents.ts` and written by the writer — and the init document is built from the session's own context (`src/cli/command.ts`) | findings §2.4 |
 
-The **stream-json** documents are this implementation's **events**, one per line, with the target's **result** document last. The target's own documents are the SDK message kinds — `system`/`init`, `assistant`, `user`, `stream_event` and `result` (`chunk-pj5cyqhw.js:333857`, `:261767`, `:239906`, `:352585`) — and this implementation's event vocabulary is its own; the result document is the target's, because the target's `json` format writes exactly that document.
+**What stays an implementation choice, named here:**
 
-**Pinned by:** `tests/contracts/headless-output.test.ts` — the result document's members and their order, the three formats' stdout, and the turn's own accounting.
+- **One batch, not one per event.** The runtime returns the turn's records when the turn is over (`src/agent/loop.ts`), so the `stream-json` documents are written in one batch rather than as a provider streams them. The `stream_event` kind is in the target's schema (`chunk-pj5cyqhw.js:352585`) and this build produces **none** — there is nothing streaming to project. The limitation is not hidden: `src/cli/headless.ts` and `src/cli/output.ts` both state it.
+- **The prompt record is not projected.** The runtime appends the run's own prompt record to the transcript (`src/agent/loop.ts`), and the projection deliberately emits nothing for it: the target's own `user` documents on this wire are the ones a **tool result** turns around (`chunk-pj5cyqhw.js:239906`).
+- **`--verbose`'s JSON array is not implemented.** The flag is refused (`docs/compatibility/command-surface.md`), so the `json` format always writes the single result document.
+- **`apiKeySource` is a two-value rule.** The target names several sources (`ANTHROPIC_API_KEY`, `apiKeyHelper`, a managed key); this build wires exactly one — the first-party environment entry — so the init document's source is `ANTHROPIC_API_KEY` when the environment holds the variable and `none` otherwise (`src/cli/command.ts`).
+
+**Pinned by:** `tests/contracts/headless-output.test.ts` — the result document's members and their order, the headless output formats' stdout for all three formats and the no-result rule, the stream-json documents' kinds and the init-first hold, and the text printer's lines; and `tests/contracts/cli-surface.test.ts` for the through-command wiring.
 
 ## The validation messages (REA observed)
 
@@ -565,7 +575,7 @@ This implementation reads the shape the target's own SDK protocol uses: the stan
 | The **default model** | `claude-sonnet-4-5` | the audit does not record the target's default model |
 | The **version** | this implementation's own `package.json` version | this implementation does not claim to be the reference agent |
 | The **help text** | this implementation's own, **generated** from the vocabulary and the tree | the audit records the flag names and no help text; generating it means the help and the parser cannot drift apart |
-| The **output documents** | the **result** document is the target's own — its member set, its member order and its nested shapes; the other documents are this implementation's own events | the audit pinned the three formats and nothing about the documents; the reading that establishes them is `findings-permissions-and-headless.md` §2, and the three divergences this milestone keeps are named above |
+| The **output documents** | every document is the target's own: the **result** document — its member set, its member order and its nested shapes on both variants — and the `stream-json` wire of SDK message kinds (`system`/`init`, `assistant`, `user`, `result`), written with the target's own escaping | the audit pinned the three formats and nothing about the documents; the reading that establishes them is `findings-permissions-and-headless.md` §2, and `src/cli/print/documents.ts` builds the message kinds. The one-batch projection and the sources it cannot fill are named above |
 | The **exit codes** | `0` success, `1` failure, `2` an argument error | the audit records this implementation's two known ones |
 | The **gateway condition** | the settings key `useGateway` | the target's condition (`Br() \|\| aet() \|\| cet()`) is not resolved in the REA record |
 | The **manager surfaces** | `/provider`, `catalog`, and their `--provider` / `--catalog` forms | a **project extension** — see [`provider-catalog.md`](provider-catalog.md) |
