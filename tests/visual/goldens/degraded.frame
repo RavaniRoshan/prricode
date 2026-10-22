@@ -1,0 +1,11 @@
+[0m[38;2;136;136;136m────────────────────────────────────────[0m
+[0m[38;2;255;255;255mRunning a tool[0m
+[0m[38;2;215;119;87mconcept[0m: [0m[38;2;255;255;255mrunning[0m
+[0m[1;38;2;177;185;249mBash command[0m
+Do you want to proceed?
+[0m[2mNo permission rule matched.[0m
+[0m[38;2;177;185;249m❯[0m Yes [0m[38;2;78;186;101m✔[0m
+[0m[2m [0m Yes, and don't ask again for this Bash call
+[0m[2m [0m No, and tell PRRICODE what to do differently (esc)
+[0m[2;3menter to confirm · esc to cancel[0m
+[0m[38;2;153;153;153mthe output is not an interactive terminal, so no frame can be drawn[0m

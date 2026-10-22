@@ -1,0 +1,24 @@
+{
+  "name": "overlay-out",
+  "motion": "overlay-out",
+  "elapsedMs": 0,
+  "capability": {
+    "enabled": true,
+    "unsupported": null,
+    "interactive": true,
+    "reducedMotion": false
+  },
+  "pictureHash": "cfea278bec677a0645ce3dd09f375e022ee7f6d1b8621108dd438423bb3608db",
+  "fingerprint": "ad192498cdb3eb79cbb10a360929ba1e95d0fcd9d336a934daf0040d9f29d321",
+  "sources": [
+    "src/ui/theme.ts",
+    "src/ui/motion/vocabulary.ts",
+    "src/ui/motion/easing.ts",
+    "src/ui/motion/frame.ts",
+    "src/ui/motion/render.ts",
+    "src/ui/motion/capability.ts",
+    "src/ui/surface/frame.ts",
+    "src/ui/surface/overlays.ts",
+    "src/ui/render/prompts.ts"
+  ]
+}

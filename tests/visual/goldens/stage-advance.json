@@ -1,0 +1,23 @@
+{
+  "name": "stage-advance",
+  "motion": "stage-advance",
+  "elapsedMs": 0,
+  "capability": {
+    "enabled": true,
+    "unsupported": null,
+    "interactive": true,
+    "reducedMotion": false
+  },
+  "pictureHash": "8c6a006e968ed42659fafb5c8a4670bc6fbc38b6decc8bec291330d69b9ad6e3",
+  "fingerprint": "2dfcae1ef7914fe510a03718e5286b6e8aa81fa73d0f14e6ecf663a471217c01",
+  "sources": [
+    "src/ui/theme.ts",
+    "src/ui/motion/vocabulary.ts",
+    "src/ui/motion/easing.ts",
+    "src/ui/motion/frame.ts",
+    "src/ui/motion/render.ts",
+    "src/ui/motion/capability.ts",
+    "src/ui/surface/frame.ts",
+    "src/ui/surface/stages.ts"
+  ]
+}

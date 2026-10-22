@@ -1,0 +1,28 @@
+{
+  "name": "degraded",
+  "motion": "prompt-shimmer",
+  "elapsedMs": 60,
+  "capability": {
+    "enabled": false,
+    "unsupported": "the output is not an interactive terminal, so no frame can be drawn",
+    "interactive": false,
+    "reducedMotion": false
+  },
+  "pictureHash": "271c0c12493167a6df2d19f5968ca89abf04c823d8de0be21063f73e84e58003",
+  "fingerprint": "3abb3904202d571c118352f2e64b8b938570c862bc945129e8fb7d9322720d3f",
+  "sources": [
+    "src/ui/theme.ts",
+    "src/ui/motion/vocabulary.ts",
+    "src/ui/motion/easing.ts",
+    "src/ui/motion/frame.ts",
+    "src/ui/motion/render.ts",
+    "src/ui/motion/capability.ts",
+    "src/ui/surface/frame.ts",
+    "src/ui/surface/prompt.ts",
+    "src/ui/surface/states.ts",
+    "src/ui/surface/stages.ts",
+    "src/ui/surface/overlays.ts",
+    "src/ui/surface/motionSurface.ts",
+    "src/ui/render/prompts.ts"
+  ]
+}

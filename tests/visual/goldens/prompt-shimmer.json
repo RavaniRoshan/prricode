@@ -1,0 +1,23 @@
+{
+  "name": "prompt-shimmer",
+  "motion": "prompt-shimmer",
+  "elapsedMs": 60,
+  "capability": {
+    "enabled": true,
+    "unsupported": null,
+    "interactive": true,
+    "reducedMotion": false
+  },
+  "pictureHash": "367488e21a7f7cb09fc144a7fbd8ce546ced8269242cd6fe5a74cbebb7c11b30",
+  "fingerprint": "04e79ef67e7da5bdd6d1bbaca4a2a99922f55fdd8230d102e48926552c93c055",
+  "sources": [
+    "src/ui/theme.ts",
+    "src/ui/motion/vocabulary.ts",
+    "src/ui/motion/easing.ts",
+    "src/ui/motion/frame.ts",
+    "src/ui/motion/render.ts",
+    "src/ui/motion/capability.ts",
+    "src/ui/surface/frame.ts",
+    "src/ui/surface/prompt.ts"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "state-transition",
+  "motion": "transition-in",
+  "elapsedMs": 0,
+  "capability": {
+    "enabled": true,
+    "unsupported": null,
+    "interactive": true,
+    "reducedMotion": false
+  },
+  "pictureHash": "4a7b4b9f6e4aab4189d713044b8c2fc8a8ca57252e10c27ab4bd954ae783f4d6",
+  "fingerprint": "1a39524ac6a21f31bfa100ebb891944dbbceb47357ad96c09f5dc4a83f3fe517",
+  "sources": [
+    "src/ui/theme.ts",
+    "src/ui/motion/vocabulary.ts",
+    "src/ui/motion/easing.ts",
+    "src/ui/motion/frame.ts",
+    "src/ui/motion/render.ts",
+    "src/ui/motion/capability.ts",
+    "src/ui/surface/frame.ts",
+    "src/ui/surface/states.ts"
+  ]
+}
