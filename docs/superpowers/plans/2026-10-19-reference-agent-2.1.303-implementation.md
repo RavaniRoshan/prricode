@@ -2631,18 +2631,18 @@ until the owner says otherwise.
 
 **Interfaces:** the ones the divergence specification names.
 
-- [ ] **Step 1: Receive the divergence specification** — the identity, the surfaces and
+- [x] **Step 1: Receive the divergence specification** — the identity, the surfaces and
   the capabilities that differ from the reference build. Until this step is done, every
   other step is blocked and **nothing may be guessed**.
-- [ ] **Step 2: Write the failing test** — for each divergence, the test that shows the
+- [x] **Step 2: Write the failing test** — for each divergence, the test that shows the
   clone does **not** yet behave that way.
-- [ ] **Step 3: Run it to verify it fails** — expected: FAIL.
-- [ ] **Step 4: Implement the divergence** — the behaviour the specification names.
-- [ ] **Step 5: Run it to verify it passes** — expected: PASS.
-- [ ] **Step 6: Update the conformance documents** — a divergence is **not** a
+- [x] **Step 3: Run it to verify it fails** — expected: FAIL.
+- [x] **Step 4: Implement the divergence** — the behaviour the specification names.
+- [x] **Step 5: Run it to verify it passes** — expected: PASS.
+- [x] **Step 6: Update the conformance documents** — a divergence is **not** a
   compatibility claim, so it is recorded in its own document and **not** as a row of the
   compatibility matrix. The matrix stays a statement about the parity layer.
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
   ```bash
   git add <the paths the specification names>
   git commit -m "feat: the divergence layer"
