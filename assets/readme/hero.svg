@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="100%" role="img" aria-label="PRRICODE: an autonomous terminal agent that builds its work and verifies it">
+  <title>PRRICODE — an autonomous terminal agent that builds its work and verifies it</title>
+  <rect width="1200" height="340" rx="16" fill="#0b0f14"/>
+  <rect x="0" y="0" width="1200" height="340" rx="16" fill="none" stroke="#263041" stroke-width="2"/>
+  <!-- title -->
+  <text x="56" y="86" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="44" font-weight="700" fill="#e6edf3" letter-spacing="6">PRRICODE</text>
+  <text x="56" y="124" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="17" fill="#8b98a5">an autonomous terminal agent that builds its work — and verifies it</text>
+  <rect x="56" y="146" width="46" height="3" fill="#d7a35c"/>
+  <!-- prompt -->
+  <text x="56" y="196" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="16" fill="#8b98a5"><tspan fill="#d7a35c">$</tspan> dist/prricode --print "an idea" --output-format json</text>
+  <text x="830" y="196" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="16" fill="#d7a35c">▉</text>
+  <!-- transcript panel -->
+  <rect x="56" y="224" width="1088" height="82" rx="10" fill="#11161d" stroke="#263041"/>
+  <text x="80" y="256" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="15" fill="#e6edf3">concept → clarify → specify → plan → build → <tspan fill="#3fb950">verify</tspan> → ship → operate</text>
+  <text x="80" y="290" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="15" fill="#8b98a5">suite: 4 of 4 kinds passed <tspan fill="#3fb950">✓</tspan>   product · backend · frontend · visual <tspan fill="#3fb950">✓</tspan></text>
+  <rect x="968" y="272" width="14" height="22" fill="#3fb950"/>
+  <text x="992" y="290" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="15" fill="#e6edf3">verified</text>
+</svg>
