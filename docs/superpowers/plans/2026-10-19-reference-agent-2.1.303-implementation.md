@@ -2684,3 +2684,141 @@ that reason.
 Recommended execution: **subagent-driven** — the tasks share a lot of interface surface (the provider registry, permission vocabulary, and session event schema are consumed by most later tasks), so a fresh implementer plus a fresh reviewer per task catches interface drift early, and a shipped mistake in the provider or permission layer would be expensive to unwind.
 
 **Prerequisite:** `CC-001` in this plan must close the REA coverage audit first. The audit currently reports four requirement groups as partial, and those specific gaps are the exact inputs the tasks below need.
+
+---
+
+# The second layer
+
+**The concept and the decisions are in `docs/DIVERGENCE-LAYER-2.md`.** This section is
+the *plan*: the milestones, in order, with what each one delivers and how it is
+verified. It is written before the work, so that the work is measured against
+something.
+
+**Two of the first layer's rules carry over.** The **naming rule** — no third-party
+product or company is referenced, named or cited anywhere: source, comments, docs,
+commit messages, identifiers — is already enforced by `tests/contracts/naming.test.ts`,
+and it applies to everything below. And the **honest-degradation contract** — a
+capability that cannot run reports `enabled: false` and `unsupported: <why>`, and never
+fakes success — is a *tested* property, not a promise.
+
+**Three decisions were held for the research** and are taken from its evidence when it
+lands: the **catalogue-and-effort gap**, the **credential storage**, and the **shape of
+the degradation contract**.
+
+## The milestones
+
+### CC-043 — The protocol surface
+
+Our own JSON-RPC over stdio. The frame format, the method names, the error shape, the
+session lifecycle, and the notifications.
+
+- **Deliverable:** a protocol module that both sides use, a **test client** and a
+  **test server** that speak it to each other over a real pipe.
+- **Verified:** the two talk, in order, with the errors the contract says, and a
+  malformed frame is refused with a reason rather than ignored.
+- **Files:** `src/protocol/`; `tests/contracts/protocol.test.ts`; `docs/compatibility/protocol-surface.md`.
+
+### CC-044 — The model layer
+
+The provider registry, the two API shapes, the fetched catalogue, the effort capability,
+the credential store, and the model selector.
+
+- **Deliverable:** a provider registry where a provider is *data* — its shape, its
+  endpoint, its credential reference, its headers — and one engine speaks it; a catalogue
+  fetched from each connected provider; a selector that filters by capability and by
+  effort; and a credential store that resolves a reference to a secret without the
+  catalogue ever holding one.
+- **Verified:** against a **fake backend** that speaks both API shapes, so the whole
+  path is exercised without a network, and against a backend that fails, so the
+  degradation is exercised.
+- **Files:** `src/model/`; `tests/contracts/model-layer.test.ts`; `docs/compatibility/model-surface.md`.
+
+### CC-045 — The pipeline
+
+The pluggable stages, and the eight built-in ones.
+
+- **Deliverable:** one stage interface with **three deliveries** — in-process, a
+  package, and a process speaking our protocol over stdio — and the eight stages of
+  the Product Builder pipeline, each with a defined input, a defined output and a
+  defined refusal.
+- **Verified:** a stage of each delivery runs the same test, so the pipeline cannot
+  tell the difference; and the pipeline runs end to end.
+- **Files:** `src/pipeline/`; `tests/contracts/pipeline.test.ts`; `docs/compatibility/pipeline-surface.md`.
+
+### CC-046 — Approvals as rules
+
+The rule model and the decision point.
+
+- **Deliverable:** the first layer's rule shape — allow, ask, deny — reused, plus the
+  approval that travels over the protocol so a client can answer on the user's behalf
+  and the answer is attributed to that client.
+- **Verified:** a matching rule decides without asking; an unmatched one asks; a denial
+  is final; and the answer is attributed.
+- **Files:** `src/approvals/`; `tests/contracts/approvals.test.ts`; `docs/compatibility/approval-surface.md`.
+
+### CC-047 — The motion system
+
+One vocabulary, used everywhere, with the terminal's capability detected once.
+
+- **Deliverable:** the shared easing, the durations and the frame budget; the capability
+  detection; and the degradation — what cannot be drawn is not drawn, and the reason is
+  reported in the shared shape.
+- **Verified:** the same motion renders identically wherever it is used; a terminal
+  without the capability gets the degraded form and the reason; and motion never blocks
+  input.
+- **Files:** `src/ui/motion/`; `tests/contracts/motion.test.ts`; `docs/compatibility/motion-surface.md`.
+
+### CC-048 — The terminal surface
+
+The motion in the prompt, the transitions between the agent's states, the pipeline's
+stage changes, and the overlays.
+
+- **Deliverable:** the first layer's terminal surface, with the shared motion applied
+  to it, and the stage changes rendered as they happen.
+- **Verified:** **visually** — the rendered frame is compared against a recorded
+  golden, so a change to what the user sees is a failing test and not a surprise. The
+  golden is a *frame*, not a description.
+- **Files:** `src/ui/`; `tests/contracts/frame-snapshot.test.ts`; `tests/contracts/ui-render.test.ts`; `docs/compatibility/motion-surface.md`.
+
+### CC-049 — The product
+
+The pipeline end to end, from an idea to a verified product.
+
+- **Deliverable:** the whole thing running — an idea in, a verified, shippable product
+  out — with the pipeline's stages real and the verification the stages carry out real.
+- **Verified:** the product e2e: a run from concept to ship, with the verification
+  stage's own checks executed and reported, and the result compared against what the
+  run claimed.
+- **Files:** `src/product/`; `tests/e2e/`; `docs/compatibility/product-surface.md`.
+
+### CC-050 — The verification suite
+
+The four kinds, each a thing that can fail.
+
+- **The product.** The e2e run above, and the report of what it produced.
+- **The backend.** The protocol over a real pipe; the providers against a fake backend
+  that speaks both API shapes; the credential store's resolution; and the failures —
+  each degrading with its reason rather than claiming success.
+- **The frontend.** The rendered frames, compared against the goldens; and the motion's
+  degraded form, compared against its own golden.
+- **Visually.** The frame goldens themselves, and a check that the goldens are
+  *current* — a golden that was not regenerated deliberately is a failure, so a stale
+  picture cannot pass.
+
+- **Deliverable:** one command that runs all four, and a report that says which passed.
+- **Files:** `tests/e2e/`, `tests/visual/`, `scripts/verify-product.ts`,
+  `docs/compatibility/verification.md`.
+
+## The order
+
+1. **CC-043** the protocol — everything else speaks it.
+2. **CC-044** the model layer — the pipeline's stages need a model.
+3. **CC-045** the pipeline.
+4. **CC-046** the approvals — the stages need a decision point.
+5. **CC-047** the motion system.
+6. **CC-048** the terminal surface.
+7. **CC-049** the product.
+8. **CC-050** the verification suite.
+
+Each milestone is committed and pushed when it is green, and the whole suite is run
+before every push.
