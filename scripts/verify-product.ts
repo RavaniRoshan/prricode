@@ -85,6 +85,7 @@ import {
   nodeTestRunner,
   runProduct,
   type ProductResult,
+  type ProductVerification,
 } from '../src/product/index.js';
 
 import type { GoldenRecord } from '../tests/visual/goldens.js';
@@ -561,8 +562,10 @@ const THE_PROVIDER = 'house';
 export interface ProductKindOptions {
   /** The files the fake model writes. The honest ones by default. */
   readonly build?: string;
-  /** The `node` executable the product's own tests are run with. */
-  readonly node?: string;
+  /** The `node` executable the product's own tests are run with. `null` for none. */
+  readonly node?: string | null;
+  /** How the product is run. The seam the suite's own tests drive. */
+  readonly run?: ProductRunner;
 }
 
 /** The answer the fake model gives, chosen by the prompt it was asked. */
@@ -625,20 +628,48 @@ function recordsOf(result: ProductResult): Map<string, string> {
 }
 
 /**
+ * What one run of the product produced.
+ *
+ * It is a **summary** of the run, and not the run itself: the kind reads the
+ * verdict, the stages, the documents and the verification, and nothing else.
+ * The summary is what makes the runner a **seam** — a caller can hand the kind
+ * a run that behaved differently, and the kind will say so.
+ */
+export interface ProductRun {
+  /** The run's id. */
+  readonly runId: string;
+  /** Whether the product is verified. */
+  readonly state: 'verified' | 'refused';
+  /** The stage the run stopped at, when it stopped. */
+  readonly failedAt: string | null;
+  /** Why the run was refused, when it was. */
+  readonly reason: string | null;
+  /** Every stage's record, keyed by the stage's id. */
+  readonly records: ReadonlyMap<string, string>;
+  /** How many documents the run produced. */
+  readonly documents: number;
+  /** Whether every document was written down. */
+  readonly written: boolean;
+  /** The verification the run carried. */
+  readonly verification: ProductVerification | null;
+  /** Take the run's directory away. */
+  readonly remove: () => void;
+}
+
+/** How the product is run. The seam the suite's own tests drive. */
+export type ProductRunner = (build: string, node: string) => Promise<ProductRun>;
+
+/**
  * Run the product, once, over a fake backend.
  *
  * The backend is a **real HTTP server on a real port**, and the product's own
  * tests are run by **node**, in the product's own directory — so the run's
  * verdict is a fact about the product and not a claim about it.
  */
-async function runTheProduct(
+export const runTheProduct: ProductRunner = async (
   build: string,
   node: string,
-): Promise<{
-  readonly result: ProductResult;
-  readonly workspace: string;
-  readonly remove: () => void;
-}> {
+): Promise<ProductRun> => {
   const workspace = scratch('prricode-verify-product-');
   const backend = await startFakeBackend({ answer: answerWith(build) });
   try {
@@ -654,14 +685,26 @@ async function runTheProduct(
       approvals: { rules: approvalRules({ allow: ['ship'] }) },
       testRunner: nodeTestRunner({ command: node }),
     });
-    return { result, workspace: workspace.directory, remove: workspace.remove };
+    return {
+      runId: result.runId,
+      state: result.state,
+      failedAt: result.failedAt,
+      reason: result.reason,
+      records: recordsOf(result),
+      documents: result.documents.length,
+      written: THE_EIGHT_STAGES.every((stage) =>
+        existsSync(path.join(workspace.directory, 'documents', `${stage}.json`)),
+      ),
+      verification: result.verification,
+      remove: workspace.remove,
+    };
   } catch (error) {
     workspace.remove();
     throw error;
   } finally {
     await backend.close();
   }
-}
+};
 
 /**
  * The **product** kind.
@@ -675,7 +718,7 @@ export async function checkProduct(
   options: ProductKindOptions = {},
 ): Promise<VerificationKindResult> {
   const checks = new CheckList();
-  const node = options.node ?? nodeExecutable();
+  const node = options.node === undefined ? nodeExecutable() : (options.node ?? undefined);
   if (node === undefined) {
     return {
       kind: 'product',
@@ -688,28 +731,25 @@ export async function checkProduct(
     };
   }
 
+  const run = options.run ?? runTheProduct;
+
   /* --- the honest run ------------------------------------------------- */
-  const honest = await runTheProduct(options.build ?? HONEST_BUILD, node);
-  const records = recordsOf(honest.result);
-  const stages = [...records.keys()];
-  const allCompleted = THE_EIGHT_STAGES.every((stage) => records.get(stage) === 'completed');
+  const honest = await run(options.build ?? HONEST_BUILD, node);
+  const stages = [...honest.records.keys()];
+  const allCompleted = THE_EIGHT_STAGES.every((stage) => honest.records.get(stage) === 'completed');
   checks.add(
     'the run reaches all eight stages',
     stages.length === THE_EIGHT_STAGES.length && allCompleted,
     `${stages.length} stage(s): ${stages.join(', ')}`,
   );
 
-  const documents = honest.result.documents;
-  const written = THE_EIGHT_STAGES.every((stage) =>
-    existsSync(path.join(honest.workspace, 'documents', `${stage}.json`)),
-  );
   checks.add(
     'the run produces the eight documents, and writes them down',
-    documents.length === THE_EIGHT_STAGES.length && written,
-    `${documents.length} document(s), ${written ? 'all of them on disk' : 'some of them are missing'}`,
+    honest.documents === THE_EIGHT_STAGES.length && honest.written,
+    `${honest.documents} document(s), ${honest.written ? 'all of them on disk' : 'some of them are missing'}`,
   );
 
-  const verification = honest.result.verification;
+  const verification = honest.verification;
   const tests = verification?.tests;
   const everyTestPassed =
     tests !== undefined && tests.files.length > 0 && tests.files.every((file) => file.passed);
@@ -747,23 +787,21 @@ export async function checkProduct(
       : verification.comparison.detail,
   );
 
-  const verified =
-    honest.result.state === 'verified' && honest.result.verified && honest.result.failedAt === null;
+  const verified = honest.state === 'verified' && honest.failedAt === null;
   checks.add(
     'the product is verified',
     verified,
     verified
-      ? `the run ${honest.result.runId} is verified`
-      : `the run ${honest.result.runId} is not verified: ${honest.result.reason ?? 'no reason was given'}`,
+      ? `the run ${honest.runId} is verified`
+      : `the run ${honest.runId} is not verified: ${honest.reason ?? 'no reason was given'}`,
   );
 
   /* --- the over-claiming run ------------------------------------------ */
-  const overclaiming = await runTheProduct(OVERCLAIMING_BUILD, node);
-  const overRecords = recordsOf(overclaiming.result);
-  const overVerification = overclaiming.result.verification;
+  const overclaiming = await run(OVERCLAIMING_BUILD, node);
+  const overVerification = overclaiming.verification;
   const refused =
-    overclaiming.result.state === 'refused' &&
-    overclaiming.result.failedAt === 'verify' &&
+    overclaiming.state === 'refused' &&
+    overclaiming.failedAt === 'verify' &&
     overVerification !== null &&
     !overVerification.comparison.agreed &&
     overVerification.comparison.overClaimed.length > 0;
@@ -776,11 +814,22 @@ export async function checkProduct(
   );
 
   const nothingReleased =
-    overRecords.get('ship') === 'not-reached' && overRecords.get('operate') === 'not-reached';
+    overclaiming.records.get('ship') === 'not-reached' &&
+    overclaiming.records.get('operate') === 'not-reached';
   checks.add(
     'a run that over-claims releases nothing',
     nothingReleased,
-    `ship: ${overRecords.get('ship') ?? 'not reached'}, operate: ${overRecords.get('operate') ?? 'not reached'}`,
+    `ship: ${overclaiming.records.get('ship') ?? 'not reached'}, operate: ${overclaiming.records.get('operate') ?? 'not reached'}`,
+  );
+
+  /* --- the over-claim, read by the suite itself ------------------------ */
+  const overClaimed = overClaimedBy(overVerification);
+  checks.add(
+    'the over-claim is a real disagreement, and not a broken comparison',
+    overClaimed.length > 0,
+    overClaimed.length > 0
+      ? `the run claimed ${overClaimed.length} criterion/criteria that the product own test run does not meet`
+      : 'the run claimed nothing that the execution does not meet',
   );
 
   honest.remove();
@@ -796,14 +845,32 @@ export async function checkProduct(
   };
 }
 
+/**
+ * The criteria the run **claimed** were met and the execution does not meet.
+ *
+ * The suite reads the claim and the execution itself, and does not take the
+ * product's own comparison for it — a suite that believes the thing it
+ * measures is not a suite.
+ */
+function overClaimedBy(verification: ProductVerification | null): readonly string[] {
+  if (verification === null) return [];
+  const overClaimed: string[] = [];
+  for (const executed of verification.checks) {
+    const claim = verification.claimed.checks.find((entry) => entry.criterion === executed.criterion);
+    if (claim === undefined) continue;
+    if (claim.passed && !executed.passed) overClaimed.push(executed.criterion);
+  }
+  return overClaimed;
+}
+
 /* -------------------------------------------------------------------------- */
 /* 2. The backend                                                              */
 /* -------------------------------------------------------------------------- */
 
 /** How the backend kind is run. */
 export interface BackendKindOptions {
-  /** The `node` executable the protocol's server process is run with. */
-  readonly node?: string;
+  /** The `node` executable the protocol's server process is run with. `null` for none. */
+  readonly node?: string | null;
   /** How the fake backend is built. The seam the suite's own tests drive. */
   readonly backend?: FakeBackendFactory;
 }
@@ -1034,7 +1101,7 @@ export async function checkBackend(
   options: BackendKindOptions = {},
 ): Promise<VerificationKindResult> {
   const checks = new CheckList();
-  const node = options.node ?? nodeExecutable();
+  const node = options.node === undefined ? nodeExecutable() : (options.node ?? undefined);
   if (node === undefined) {
     return {
       kind: 'backend',
