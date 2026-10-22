@@ -63,6 +63,7 @@ import {
   type MotionFrame,
   type MotionKind,
   type MotionName,
+  type MotionRender,
 } from '../../src/ui/motion/index.js';
 
 /* -------------------------------------------------------------------------- */
@@ -416,6 +417,8 @@ describe('the renderer', () => {
   const capable = capableTerminal();
 
   it('draws the same picture in two places', () => {
+    // **Place one:** a surface that draws once — it asks for the motion at a
+    // time and the picture is computed for it.
     const direct = drawMotion({
       motion: 'overlay-in',
       elapsedMs: 99,
@@ -424,17 +427,40 @@ describe('the renderer', () => {
       theme: DARK_THEME,
       capability: capable,
     });
-    const drawn = drawFrame({
+
+    // **Place two:** a surface that animates — it asks the scheduler for the
+    // frames, and the clock decides which ones are drawn.
+    const drawn: MotionRender[] = [];
+    const scheduler = new MotionScheduler({
       motion: 'overlay-in',
-      frame: motionFrame(motionFor('overlay-in'), 99),
-      content: 'the overlay',
-      role: 'permission',
-      theme: DARK_THEME,
       capability: capable,
+      onFrame: (frame) => {
+        drawn.push(
+          drawFrame({
+            motion: 'overlay-in',
+            frame,
+            content: 'the overlay',
+            role: 'permission',
+            theme: DARK_THEME,
+            capability: capable,
+          }),
+        );
+      },
     });
-    expect(drawn.segments).toEqual(direct.segments);
-    expect(drawn.frame).toEqual(direct.frame);
-    expect(drawn.opacity).toBe(direct.opacity);
+    scheduler.start(0);
+    scheduler.tick(0);
+    scheduler.tick(33);
+    scheduler.tick(66);
+    scheduler.tick(99);
+
+    // The same motion, at the same time, in two places — and one picture.
+    expect(drawn).toHaveLength(4);
+    expect(drawn[3]?.segments).toEqual(direct.segments);
+    expect(drawn[3]?.frame).toEqual(direct.frame);
+    expect(drawn[3]?.opacity).toBe(direct.opacity);
+
+    // And the frame the scheduler drew is the frame that was asked for.
+    expect(drawn[3]?.frame).toEqual(motionFrame(motionFor('overlay-in'), 99));
   });
 
   it('draws the fade as the dim style below the full opacity', () => {
