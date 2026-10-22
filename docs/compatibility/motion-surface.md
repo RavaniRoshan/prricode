@@ -313,13 +313,15 @@ own golden**, and that golden is compared like any other.
    is named. §8.
 7. **The prompt's shimmer travels across the composer's rule**, because the theme owns a
    shimmer partner for the `promptBorder` role and the rule is what the composer's border
-   is drawn in. §6.1.
+   is drawn in. — `Project requirement` + `implementation choice`. §6.1.
 8. **The composer's rule is drawn by the surface and not by Ink's border**, so the light
    can travel along it. The characters are the ones the border drew — the rule
    character, as many of them as the terminal is wide, in the `promptBorder` role — so
-   the picture the user sees does not change. §6.1.
+   the picture the user sees does not change. — `Project requirement` +
+   `implementation choice`. §6.1.
 9. **The agent's four states are this implementation's own.** The first layer's status
    line is the caller's own text; the state line is the second layer's, and its words
-   are ours. §6.1.
+   are ours. — `Project requirement` + `implementation choice`. §6.1.
 10. **A golden is the picture and the record is kept beside it**, in two files, so the
-    picture is a picture and nothing of the machinery is in it. §6.3.
+    picture is a picture and nothing of the machinery is in it. — `Project requirement` +
+    `implementation choice`. §6.3.
