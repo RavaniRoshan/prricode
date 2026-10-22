@@ -193,6 +193,8 @@ describe('the approval rules are the first layer\'s rules', () => {
     expect(transport.asked[0]?.reason.length).toBeGreaterThan(0);
     // The request names the tool, the call and the reason.
     expect(transport.asked[0]?.call).toEqual({ file_path: '/tmp/prricode-approvals-note.txt' });
+    // And the outcome quotes the request id the answer must carry.
+    expect(allowedBy(outcome).requestId).toBe(transport.asked[0]?.requestId);
   });
 
   it('an unmatched call asks', async () => {
@@ -348,6 +350,29 @@ describe('the decision point', () => {
 
     expect(outcome.outcome).toBe('refused');
     expect(outcome.reason).toContain('nobody answered the approval');
+  });
+
+  it('a decision made by a rule is the same the next time', async () => {
+    const rules = approvalRules({ allow: ['Bash(git status)'] });
+    const transport = recordingTransport('allow');
+    const gate = createApprovalGate({ rules, transport });
+    const subject: ApprovalSubject = { toolName: 'Bash', input: { command: 'git status' } };
+
+    const first = await gate.decide(subject);
+    const second = await gate.decide(subject);
+    // The same gate, the same rules, the same call: the same decision.
+    expect(second.outcome).toBe('allowed');
+    expect(second.reason).toBe(first.reason);
+
+    // And another gate with the same rules decides the same way.
+    const other = await createApprovalGate({ rules, transport: recordingTransport('deny') }).decide(
+      subject,
+    );
+    expect(other.outcome).toBe('allowed');
+    expect(other.reason).toBe(first.reason);
+
+    // Nobody was asked, either time.
+    expect(transport.asked).toHaveLength(0);
   });
 
   it('a rule may match on a model', async () => {

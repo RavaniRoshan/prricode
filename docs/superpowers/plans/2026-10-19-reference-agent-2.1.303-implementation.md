@@ -3019,7 +3019,7 @@ call is made **by the rule** — the questions counted again, and again zero. Th
 is the first layer's own computation, and a persisted **path** rule is anchored to the
 filesystem root, so that it matches the very call that was approved.
 
-**Seventeen tests**, the suite green at **2 947**, and `tsc --noEmit` clean.
+**Eighteen tests**, the suite green at **2 949**, and `tsc --noEmit` clean.
 
 **Not done here, and named:** the permission **modes**, the **hooks**, the safety check and
 the tool's own validation are the first layer's; the **agent loop** and the pipeline's own

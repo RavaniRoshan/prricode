@@ -11,7 +11,7 @@ open, which reading was taken and why.
 **Owning task:** `CC-046` in
 [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
 **The implementation:** `src/approvals/` — five modules.
-**The test:** `tests/contracts/approvals.test.ts` — **seventeen tests**.
+**The test:** `tests/contracts/approvals.test.ts` — **eighteen tests**.
 
 ---
 
@@ -85,6 +85,7 @@ and the rule module imports the first layer's.
 | a matching rule decides | "a matching rule decides without asking" | `ApprovalGate.decide` returns as soon as a rule decides — and the test counts the questions the transport was asked: **zero** | `the approval rules are the first layer's rules › a matching allow rule decides without asking`; `… › a matching deny rule decides without asking` |
 | an unmatched call asks | the ask is what the rules are for | a call no rule covers is asked about; the request names the tool, the call and the reason | `… › an unmatched call asks`; `… › an ask rule asks, and the answer resolves it` |
 | the answer resolves it | "`approval/answer` carries `allow` or `deny` and the request id" | the outcome is `allowed` or `denied`, and it carries the decision, the answerer and the request id the answer quoted | `… › an ask rule asks, and the answer resolves it`; `… › an unmatched call asks` |
+| the same the next time | "a matching rule decides without asking" | the decision is a property of the **rules**, not of the gate: the same rules and the same call decide the same way, twice, in two gates | `the decision point › a decision made by a rule is the same the next time` |
 | a denial is final | "**A denial is final.** It is not re-asked within the turn." | the denial is recorded against the turn, and the same call in the same turn is **not asked about again** — the test counts one question for two decisions | `the decision point › a denial is final and is not re-asked within the turn` |
 | the scope of the finality | "within the turn" | the turn, the session when the call belongs to no turn, and the life of the gate when it belongs to neither | `the decision point › a denial in one turn does not silence the next turn` |
 | a partially covered command | — | an allow rule that covers only part of a compound command approves nothing, and the parts it did not cover are named — the first layer's escalation, in the first layer's order | `the decision point › an allow rule that covers only part of a command is asked` |
