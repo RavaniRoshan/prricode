@@ -2612,6 +2612,23 @@ implicit.
 
 **Files:** the ones the divergence specification names. Nothing is decided here.
 
+
+**The specification for this layer has been given, and it is saved — not started.**
+See `docs/DIVERGENCE-LAYER-2.md`. In short: PRRICODE as an open-source terminal agent
+driving a **JSON-RPC protocol over stdio** against any OpenAI-compatible model backend,
+extending into the **Product Builder pipeline** (concept → clarify → specify → plan →
+build → verify → ship → operate); MIT, all code our own, and **never reference, name or
+cite any third-party product or company** anywhere — source, comments, docs, commit
+messages, identifiers; **honest degradation**, so a feature that cannot run reports
+`enabled: false` and `unsupported: <why>` and never fakes success; **approvals** as a
+first-class concept; sandboxing and computer use as capabilities whose mechanism is an
+open decision; and the terminal surface built with deliberate motion and transitions.
+
+**This layer begins only when the first layer is precisely complete.** The concept is
+recorded so it is not lost; nothing in it is implemented, and this milestone stays open
+until the owner says otherwise.
+
+
 **Interfaces:** the ones the divergence specification names.
 
 - [ ] **Step 1: Receive the divergence specification** — the identity, the surfaces and
