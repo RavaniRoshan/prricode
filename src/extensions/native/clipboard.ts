@@ -231,14 +231,22 @@ export function clipboardToolStatus(
  * when the addon is the mechanism, and one of the three commands otherwise.
  *
  * **This implementation has neither.** The write refuses, and the refusal names
- * the capability it would have needed.
+ * the capability it would have needed. The capability is the **general** one —
+ * a clipboard write path — because the target's own fallback would have done
+ * the work as well as the addon, and neither is here.
  *
  * @param text the text to write.
  * @returns the refusal.
  */
 export function writeClipboardText(text: string): NativeAddonResult<boolean> {
   void text;
-  return refuseNativeAddon('clipboard-napi', 'clipboard write');
+  return refuseNativeAddon('clipboard-napi', 'clipboard write', {
+    capability: 'a clipboard write path',
+    reason:
+      'the clipboard write needs a clipboard write path; this implementation ships no native ' +
+      "clipboard addon and implements none of the target's wl-copy, xclip or xsel fallbacks, " +
+      'so it refuses.',
+  });
 }
 
 /**
@@ -253,7 +261,13 @@ export function writeClipboardText(text: string): NativeAddonResult<boolean> {
  * @returns the refusal.
  */
 export function readClipboardText(): NativeAddonResult<string | null> {
-  return refuseNativeAddon('clipboard-napi', 'clipboard read');
+  return refuseNativeAddon('clipboard-napi', 'clipboard read', {
+    capability: 'a clipboard read path',
+    reason:
+      'the clipboard read needs a clipboard read path; this implementation ships no native ' +
+      "clipboard addon and implements none of the target's wl-paste, xclip or xsel fallbacks, " +
+      'so it refuses.',
+  });
 }
 
 /* -------------------------------------------------------------------------- */

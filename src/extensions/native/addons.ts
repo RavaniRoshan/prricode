@@ -390,17 +390,27 @@ export type NativeAddonResult<T> =
  *
  * @param addon the addon the operation would have used.
  * @param operation what the operation was.
+ * @param options the capability the operation needed, and the reason it is
+ *   refused — both default to the addon's own capability and to the standard
+ *   refusal for an addon this implementation does not ship.
  * @returns the refusal.
  */
-export function refuseNativeAddon(id: NativeAddonId, operation: string): NativeAddonRefusal {
+export function refuseNativeAddon(
+  id: NativeAddonId,
+  operation: string,
+  options: { readonly capability?: string; readonly reason?: string } = {},
+): NativeAddonRefusal {
   const spec = NATIVE_ADDONS[id];
+  const capability = options.capability ?? spec.capability;
+  const reason =
+    options.reason ??
+    `the ${operation} needs ${capability}; this implementation ships no native ` +
+      'addon, so it refuses.';
   return {
     ok: false,
     addon: id,
     operation,
-    capability: spec.capability,
-    reason:
-      `the ${operation} needs ${spec.capability}; this implementation ships no native ` +
-      'addon, so it refuses.',
+    capability,
+    reason,
   };
 }

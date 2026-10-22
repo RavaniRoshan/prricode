@@ -1441,8 +1441,8 @@ ALSA.
 | the export lookup | the target reads an export off the loaded object | `chunk-yp10c36w.js:6555`, `:8259` | the **own-property** guard: an export the object only inherits is not the addon's export | **implemented** (the guard) |
 | the clipboard probe | `wl-copy` → `xclip` → `xsel` → **`addon`** → `none`, and the addon is **demoted after one failed write** | `chunk-yp10c36w.js:3738`, `:4115` | the same five-way decision, the same demotion rule | **implemented** |
 | the clipboard status | `not_linux` \| `not_probed` \| the tool's name \| `none` | `chunk-yp10c36w.js:4699` | the same four answers | **implemented** |
-| the clipboard write | the target writes through the mechanism the probe chose, and the addon write answers a boolean | `chunk-yp10c36w.js:6555` | **refuses** — names *a native clipboard addon* | **refused** |
-| the clipboard read | the target reads through the mechanism the probe chose, strips the trailing newline, and answers `null` when there is no display | `chunk-yp10c36w.js:8259` | **refuses** — names *a native clipboard addon* | **refused** |
+| the clipboard write | the target writes through the mechanism the probe chose, and the addon write answers a boolean | `chunk-yp10c36w.js:6555` | **refuses** — names *a clipboard write path* | **refused** |
+| the clipboard read | the target reads through the mechanism the probe chose, strips the trailing newline, and answers `null` when there is no display | `chunk-yp10c36w.js:8259` | **refuses** — names *a clipboard read path* | **refused** |
 | the audio wrapper | **nine** functions, and each has the target's own answer when the addon is absent: `false` for the three queries, nothing for the two stops, and **`0`** for the microphone authorization status | `chunk-vjnh31ch.js:1048`–`:1505` | the same nine, and the same absent-values | **implemented** |
 | the audio recording | the target calls `startRecording` with **two** callbacks and answers a boolean | `chunk-mhdmymcx.js:5292` | **refuses** — names *a native audio capture addon* | **refused** |
 | the microphone permission rule | **no native addon → the request is granted**; an addon that starts a recording → granted; an addon that does not → refused | `chunk-mhdmymcx.js:3653` | the same rule, plus this implementation's own first question: **no capture path at all → refused**, and the refusal names the capability | **implemented** |
@@ -1464,8 +1464,12 @@ The **shapes** are reproduced and the **operations refuse**:
   wrapper's nine operations and their absent-values, the microphone permission
   rule and the `/voice` option parsing are **the target's own**;
 - the operations that would need an addon **refuse**, and each refusal names
-  the capability it would have needed — *a native clipboard addon* and *a native
-  audio capture addon*;
+  the capability it would have needed — *a clipboard write path*, *a clipboard
+  read path* and *a native audio capture addon*. The clipboard capabilities are
+  the **general** ones, because the target's own `wl-copy`/`xclip`/`xsel`
+  fallbacks would have done the work as well as the addon, and neither the addon
+  nor the fallbacks are here; the audio capability names the **native** addon,
+  because the operation is the native one;
 - **nothing shells out** to a clipboard or an audio binary to stand in for an
   addon, and no stub pretends to be one.
 

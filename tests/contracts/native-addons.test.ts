@@ -392,15 +392,18 @@ describe('the clipboard operations', () => {
     const result = writeClipboardText('text');
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('the write must refuse');
-    expect(result.capability).toBe('a native clipboard addon');
+    expect(result.capability).toBe('a clipboard write path');
+    expect(result.reason).toContain('clipboard write path');
+    // The reason names both of the mechanisms the target would have used.
     expect(result.reason).toContain('native clipboard addon');
+    expect(result.reason).toContain('xclip');
   });
 
   it('refuses the read and names the capability it would need', () => {
     const result = readClipboardText();
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('the read must refuse');
-    expect(result.capability).toBe('a native clipboard addon');
+    expect(result.capability).toBe('a clipboard read path');
   });
 });
 
