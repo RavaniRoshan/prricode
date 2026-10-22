@@ -2741,6 +2741,65 @@ session lifecycle, and the notifications.
   malformed frame is refused with a reason rather than ignored.
 - **Files:** `src/protocol/`; `tests/contracts/protocol.test.ts`; `docs/compatibility/protocol-surface.md`.
 
+
+**Result (the surface, and the readings it needed).** The specification is
+`docs/protocol/PROTOCOL.md`, and it is the design: the implementation is measured
+against it, clause by clause, in `docs/compatibility/protocol-surface.md`.
+
+**Delivered:** `src/protocol/` — **thirteen modules** — carrying the transport, the
+three frame kinds, the error shape, the method vocabulary, the capability record,
+the approvals, the session and turn lifecycle, and the two roles the
+specification describes. **Twenty-one methods** over seven areas; **nineteen
+codes**, each a kebab-case path whose first segment is the area; one capability
+record asked of anything; the **8 MiB** limit counted in UTF-8 bytes and
+enforced **while the frame is being read**, so a peer cannot make the reader hold
+an unbounded buffer.
+
+**Verified over a real pipe, not in memory:** the test server is a **real child
+process** (`tests/fixtures/protocol-server.ts`) that reads its stdin and writes
+its stdout, and the client is **the same module the server is built from**. The
+malformed cases are measured on the **raw** pipe — the test writes the bytes a
+client would never write and reads the bytes the server sends back. **Thirty-seven
+tests**, and the suite is green at **2 823** with `tsc --noEmit` clean.
+
+**Every malformed case is refused with a reason, never ignored and never a
+crash:** a frame that is not JSON (`frame/malformed`), a response with neither a
+result nor an error (`frame/malformed`), a response with both (`frame/malformed`),
+a frame over the limit (`frame/too-large`), an unknown method (`method/unknown`),
+a notification-only method called as a request (`method/notification-only`), and
+an unknown major version (`protocol/unsupported`, carrying the versions this
+build speaks). A refusal that **can** be attributed to a request is answered as
+an error response carrying that request's id; one that cannot — a line that is
+not JSON has no id at all — is reported as an `event/diagnostic` notification, so
+the three frame kinds are intact and the peer still learns.
+
+**The honest-report rule is a tested property, not a promise:** the test calls
+**every** method of the vocabulary and checks which of the three ways it answered
+— a result, an error with a reason, or a capability that is not enabled with a
+reason — and the degradation contract is exercised in both directions: a
+disabled capability reports `{ enabled: false, unsupported: "<a sentence>" }`, and
+a method of an area that is off answers with **that record** rather than with a
+result that pretends the work was done.
+
+**The readings, all recorded in the conformance document.** The specification's
+prose says **"Six areas"** and its table lists **seven** rows: the six are the
+areas a client calls, and `event/*` is the notification area — all seven are
+implemented. The table does not list `turn/failed`, which §5 names: it is a
+notification-only method of the `turn` area. A **disposed** session does no work
+and refuses every later call with `session/disposed`. `session/create` returns
+**every** capability, so a client learns at once what the agent cannot do and
+why. A **turn that fails** fails loudly with `model/unavailable` and is not
+retried. The **answer to an approval** is attributed to the peer that gave it,
+and a decided request cannot be decided again.
+
+**Not done here, and named:** the approval **rules** (`CC-046`), the model layer
+(`CC-044`), the pipeline and its three deliveries (`CC-045`) and the agent loop
+are other milestones' work; this milestone owns the protocol they speak. And
+there is **no compatibility row**: the target has no counterpart for this
+surface, and a divergence is not a compatibility claim.
+
+---
+
 ### CC-044 — The model layer
 
 The provider registry, the two API shapes, the fetched catalogue, the effort capability,
