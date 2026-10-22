@@ -134,6 +134,8 @@ import { PERSISTED_RULES_SETTINGS_PATH, persistentAllowRules } from '../permissi
 import { compact } from '../session/compaction.js';
 import type { SessionEvent } from '../session/event.js';
 import type { AppProps, PendingApproval } from '../ui/app.js';
+import { motionCapability } from '../ui/motion/capability.js';
+import type { AgentState } from '../ui/surface/index.js';
 import type { ApprovalChoice } from '../ui/render/prompts.js';
 
 import type { ParsedRunArgs } from './args.js';
@@ -336,8 +338,39 @@ export async function runInteractiveSession(
   /** Whether a turn is running. */
   let turning = false;
 
+  /* ---------------------------------------------------------------------- */
+  /* The motion                                                              */
+  /* ---------------------------------------------------------------------- */
+
+  // The terminal's capability, detected **once** by the motion system. A
+  // terminal that cannot draw a frame is given the resting picture and the
+  // reason, and the app schedules no frame at all.
+  const capability = motionCapability();
+
+  // The agent's state, and when it changed. The host knows the three things
+  // the state is made of: a question is waiting, a turn is running, and a
+  // tool is running.
+  let agentState: AgentState = 'idle';
+  let previousState: AgentState | null = null;
+  let agentStateAtMs = Date.now();
+
+  /** The state the host's own state says the agent is in. */
+  const stateOf = (): AgentState => {
+    if (state.approval !== undefined) return 'asking';
+    const last = state.events[state.events.length - 1];
+    if (turning && last?.t === 'tool_call') return 'tool';
+    if (turning) return 'thinking';
+    return 'idle';
+  };
+
   /** Render the app with the state the host owns. */
   const render = (): void => {
+    const current = stateOf();
+    if (current !== agentState) {
+      previousState = agentState;
+      agentState = current;
+      agentStateAtMs = Date.now();
+    }
     app?.update(props());
   };
 
@@ -351,6 +384,11 @@ export async function runInteractiveSession(
     // needs to know that a turn **is** running.
     busy: turning,
     notice: state.notice,
+    motion: {
+      capability,
+      state: { change: { from: previousState, to: agentState }, atMs: agentStateAtMs },
+      now: () => Date.now(),
+    },
     onInputChange: (text: string) => {
       state.input = text;
       render();
