@@ -321,6 +321,7 @@ coarse form can read them:
 
 | what the render carries | what it is |
 |---|---|
+| `motion` | the motion's name |
 | `frame` | the frame itself (§3.3) |
 | `opacity` | the frame's opacity, 0..1 |
 | `offset` | the frame's offset, in whole lines |
@@ -366,6 +367,9 @@ The **shimmer partner** of a role is the theme's own role of that name:
 2. otherwise `<role>_shimmer` — the theme's underscored partner, as in
    `rainbow_red_shimmer`;
 3. otherwise the theme's **`text`** role.
+
+A character with **no role** has no partner: there is nothing to draw it in, and it
+keeps the role it has — which is none.
 
 So the shimmer is drawn in the **theme's own colours**, and the motion system writes no
 colour of its own.
