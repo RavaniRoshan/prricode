@@ -14,6 +14,7 @@
  * See [`docs/protocol/MODEL-LAYER.md`](../../docs/protocol/MODEL-LAYER.md) §4.
  */
 
+import { mergeOwn } from './merge.js';
 import type { Dialect, ModelEntry, Overlay, OverlaySpelling } from './types.js';
 
 /**
@@ -175,33 +176,10 @@ export function applyOverlay(target: OverlayTarget, resolution: OverlayResolutio
     throw new Error(resolution.reason);
   }
   const { spelling } = resolution;
-  if (spelling.body) mergeInto(target.body, spelling.body);
-  if (spelling.fields) mergeInto(target.fields, spelling.fields);
-  if (spelling.headers) Object.assign(target.headers, spelling.headers);
+  if (spelling.body) mergeOwn(target.body, spelling.body);
+  if (spelling.fields) mergeOwn(target.fields, spelling.fields);
+  if (spelling.headers) mergeOwn(target.headers, spelling.headers);
   return target;
-}
-
-/**
- * Merge one level of a plain object.
- *
- * A nested plain object is merged; every other value replaces what was there.
- * The overlay's own spelling is data, and a nested object it brings is a
- * fragment the shape's body is missing, not a whole replacement of it.
- */
-function mergeInto(target: Record<string, unknown>, source: Readonly<Record<string, unknown>>): void {
-  for (const [key, value] of Object.entries(source)) {
-    const existing = target[key];
-    if (isPlainObject(existing) && isPlainObject(value)) {
-      mergeInto(existing, value);
-      continue;
-    }
-    target[key] = value;
-  }
-}
-
-/** Whether a value is a plain object — not `null`, and not an array. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

@@ -34,6 +34,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { CredentialReference } from './types.js';
+import { defineOwn } from './merge.js';
 
 /** The three kinds a credential may take. */
 export type CredentialKind = 'key' | 'oauth' | 'external';
@@ -224,7 +225,7 @@ export function createEncryptedFileSecretStore(file: string, passphrase: string)
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
     const entries: Record<string, string> = {};
     for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof value === 'string') entries[id] = value;
+      if (typeof value === 'string') defineOwn(entries, id, value);
     }
     return entries;
   }

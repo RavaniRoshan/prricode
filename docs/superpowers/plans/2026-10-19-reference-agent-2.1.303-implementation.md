@@ -2820,7 +2820,7 @@ the credential store, and the model selector.
 `docs/protocol/MODEL-LAYER.md`, and it is the design: the implementation is
 measured against it, clause by clause, in `docs/compatibility/model-surface.md`.
 
-**Delivered:** `src/model/` — **seventeen modules** — carrying the vocabulary,
+**Delivered:** `src/model/` — **eighteen modules** — carrying the vocabulary,
 the provider table, the catalogue, the overlays, the credentials, the one
 availability predicate, the selection grammar and the persistence, the three
 dialect modules, and the engine. **Three dialects** (`chat`, `messages`,
@@ -2873,7 +2873,7 @@ own record; and the configuration's model.
 **Verified against a real HTTP server on a real port**, not a stubbed
 function: the request, the streaming reply, the **tool calls** and the
 **model list** are all exercised over a socket, against a backend that speaks
-**all three shapes**. **Seventy tests**, and the suite is green at **2 898**
+**all three shapes**. **Seventy-one tests**, and the suite is green at **2 899**
 with `tsc --noEmit` clean.
 
 **Every failure degrades with its reason and never fakes success:** a provider

@@ -789,6 +789,26 @@ describe('the overlays — where the effort lives', () => {
     expect(overlayNames(model, 'chat')).toContain('thinking-on');
     expect(findOverlay(model, 'high')?.kind).toBe('effort');
   });
+
+  it('writes a catalogue-supplied key as data, never as a prototype', () => {
+    // The catalogue may be fetched from a remote provider, so its keys are
+    // data. A key named `__proto__` must not reach the prototype of the
+    // object it is written into.
+    const fields = JSON.parse('{"__proto__": {"polluted": true}}') as Record<string, unknown>;
+    const model: ModelEntry = {
+      ...plainModel(ALPHA, 'house'),
+      overlays: [
+        { kind: 'named', name: 'sneaky', spellings: { chat: { fields } } },
+      ],
+    };
+    const resolution = resolveOverlay(model, 'chat', 'sneaky');
+    expect(resolution.ok).toBe(true);
+    if (!resolution.ok) throw new Error(resolution.reason);
+    const target = emptyOverlayTarget();
+    applyOverlay(target, resolution);
+    expect(Object.getPrototypeOf(target.fields)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@
  */
 
 import { parseModelList } from '../entries.js';
+import { mergeOwn } from '../merge.js';
 import type { ContentPart, ModelMessage, ModelStreamEvent, ModelTool } from '../types.js';
 import { createSseReader } from './sse.js';
 import { joinEndpoint, type Dialect, type DialectRequest, type DialectRequestInput } from './types.js';
@@ -93,8 +94,8 @@ export const chatDialect: Dialect = {
     if (input.temperature !== undefined) body['temperature'] = input.temperature;
 
     // The overlay's own contribution is merged over the shape's body.
-    if (input.overlay.body) Object.assign(body, input.overlay.body);
-    if (input.overlay.fields) Object.assign(body, input.overlay.fields);
+    if (input.overlay.body) mergeOwn(body, input.overlay.body);
+    if (input.overlay.fields) mergeOwn(body, input.overlay.fields);
 
     const headers: Record<string, string> = {
       'content-type': 'application/json',
@@ -102,7 +103,7 @@ export const chatDialect: Dialect = {
       ...(input.provider.headers ?? {}),
     };
     if (input.credential) headers['authorization'] = `Bearer ${input.credential.secret}`;
-    if (input.overlay.headers) Object.assign(headers, input.overlay.headers);
+    if (input.overlay.headers) mergeOwn(headers, input.overlay.headers);
 
     return {
       url: joinEndpoint(input.provider.endpoint, this.requestPath),

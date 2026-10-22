@@ -9,6 +9,7 @@
  */
 
 import { parseModelList } from '../entries.js';
+import { mergeOwn } from '../merge.js';
 import type { ContentPart, ModelMessage, ModelStreamEvent, ModelTool } from '../types.js';
 import { createSseReader } from './sse.js';
 import { joinEndpoint, type Dialect, type DialectRequest, type DialectRequestInput } from './types.js';
@@ -94,8 +95,8 @@ export const messagesDialect: Dialect = {
     if (input.maxOutputTokens !== undefined) body['max_tokens'] = input.maxOutputTokens;
     if (input.temperature !== undefined) body['temperature'] = input.temperature;
 
-    if (input.overlay.body) Object.assign(body, input.overlay.body);
-    if (input.overlay.fields) Object.assign(body, input.overlay.fields);
+    if (input.overlay.body) mergeOwn(body, input.overlay.body);
+    if (input.overlay.fields) mergeOwn(body, input.overlay.fields);
 
     const headers: Record<string, string> = {
       'content-type': 'application/json',
@@ -104,7 +105,7 @@ export const messagesDialect: Dialect = {
       ...(input.provider.headers ?? {}),
     };
     if (input.credential) headers['x-api-key'] = input.credential.secret;
-    if (input.overlay.headers) Object.assign(headers, input.overlay.headers);
+    if (input.overlay.headers) mergeOwn(headers, input.overlay.headers);
 
     return {
       url: joinEndpoint(input.provider.endpoint, this.requestPath),

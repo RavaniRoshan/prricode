@@ -6,8 +6,8 @@ and where the specification left a choice open, which reading was taken and
 why.
 **Owning task:** `CC-044` in
 [`docs/superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md`](../superpowers/plans/2026-10-19-reference-agent-2.1.303-implementation.md).
-**The implementation:** `src/model/` — seventeen modules.
-**The test:** `tests/contracts/model-layer.test.ts` — **seventy tests**, over a
+**The implementation:** `src/model/` — eighteen modules.
+**The test:** `tests/contracts/model-layer.test.ts` — **seventy-one tests**, over a
 **real HTTP server on a real port** that speaks all three shapes, and over a
 backend that fails.
 
@@ -278,6 +278,7 @@ alias whose endpoint wants one must be able to say so.
 | **Never fall back silently.** The model a turn selected is the model it runs against, or the turn fails. | the engine resolves one provider and one model and sends one request; a missing model fails before anything reaches the wire | `the whole path, against a fake backend › never falls back silently: a model that is gone fails, and no other provider is tried` |
 | **Every refusal names what is missing.** | the reason is a sentence naming the provider, the model or the modality concerned | every refusal test above reads the reason |
 | **No vendor's spelling in the engine.** | the spelling is the catalogue's, per shape | `the overlays — where the effort lives › takes the spelling from the catalogue, not from a rule in the code` |
+| **A key that came from data stays data.** | the catalogue's, the provider's and the file's keys are **defined** rather than assigned, so a key named `__proto__` is an own data property and never a prototype assignment; a lookup of a key in a plain object is guarded with `Object.hasOwn` | `the overlays — where the effort lives › writes a catalogue-supplied key as data, never as a prototype` |
 | **The naming rule.** | the layer names the capabilities (`chat`, `messages`, `responses`) and no product and no company | `tests/contracts/naming.test.ts` |
 
 ---

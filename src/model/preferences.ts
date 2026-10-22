@@ -19,6 +19,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { ModelRef } from './selection.js';
+import { defineOwn } from './merge.js';
 
 /** What the user interface remembers. */
 export interface ModelPreferences {
@@ -87,7 +88,7 @@ function readPreferences(text: string): ModelPreferences {
   const raw = payload['overlays'];
   if (isRecord(raw)) {
     for (const [key, value] of Object.entries(raw)) {
-      if (typeof value === 'string') overlays[key] = value;
+      if (typeof value === 'string') defineOwn(overlays, key, value);
     }
   }
   return {
