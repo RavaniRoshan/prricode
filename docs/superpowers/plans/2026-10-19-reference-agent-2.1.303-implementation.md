@@ -2917,6 +2917,63 @@ The pluggable stages, and the eight built-in ones.
   tell the difference; and the pipeline runs end to end.
 - **Files:** `src/pipeline/`; `tests/contracts/pipeline.test.ts`; `docs/compatibility/pipeline-surface.md`.
 
+
+**Result (the pipeline, and the three deliveries).** The concept is
+`docs/DIVERGENCE-LAYER-2.md` §4 and §6, the specification of the deliveries is
+`docs/protocol/PROTOCOL.md` §8, and the implementation is measured against both in
+`docs/compatibility/pipeline-surface.md`.
+
+**Delivered:** `src/pipeline/` — **sixteen modules** — carrying the stage interface, the
+two seams, the three deliveries, the runner, and the eight built-in stages.
+
+**The claim, and the evidence for it.** The stage contract is written **once** and run
+against a stage of **each** delivery: an in-process stage, **a package that imports
+nothing of ours** (`tests/fixtures/stage-package.mjs` — the contract, not our
+implementation of it), and **a real child process** speaking our protocol over stdio and
+answering `tool/call` (`tests/fixtures/stage-process.ts`, run through the same loader
+the protocol's own fixture uses). The whole pipeline is then run **three times**, once per
+delivery of one stage, and the three runs are compared: the same decisions, in the same
+order, over the same documents. **The pipeline cannot tell them apart**, because it calls
+`stage.run(input, context)` and never asks how the stage arrived.
+
+**The report is the point.** A stage either produces its output or refuses with a reason,
+and **every** refusal carries the shared shape — `{ enabled: false, unsupported: <why> }`
+— so a refusal caused by a capability being off and a refusal caused by an input the
+stage cannot use are reported the same way, with the reason saying which. A stage that
+refuses **stops** the run, and the stages after it are reported as `not-reached`, with
+the reason naming the stage the run stopped at. A stage **nobody supplied** is a refusal
+too — `no stage is registered for "<stage>"` — never a silent skip. **A stage that is
+skipped is a stage that was reported.**
+
+**The degradation contract, doing its job.** The model layer (`CC-044`) and the approval
+rules (`CC-046`) are other milestones' work, and neither is faked here. The `model`
+capability is **off** — `no model backend is connected` — and the three stages that would
+use it (`specify`, `plan`, `build`) refuse with it. The `approval` capability is **off**
+— `no approval rules are configured` — and the `ship` stage asks the approval seam and is
+refused with that reason. The capability records are **not written by hand**: each one
+follows the backend it belongs to, so an enabled capability always has something behind
+it.
+
+**The eight built-in stages**, each with a defined input, a defined output and a defined
+refusal: `concept` (the brief → the idea, its title, the problem it names), `clarify`
+(the concept → the open questions, each with the assumption it holds down), `specify`
+(the concept → the requirements, each with the acceptance criterion that shows it is
+met), `plan` (the specification → the steps, each naming the criterion it delivers),
+`build` (the plan → the files, each naming the criterion it delivers), `verify` (the
+criteria and the files → the checks, and whether the whole passed), `ship` (the verdict
+and the files → the release) and `operate` (the release → the runbook, and the files to
+watch). A stage **invents nothing**: a model answer the stage cannot read is a refusal,
+not half a document.
+
+**Thirty tests**, the suite green, and `tsc --noEmit` clean.
+
+**Not done here, and named:** the **model layer** (`CC-044`) and the **approval rules**
+(`CC-046`) are other milestones' work, and this milestone reports both capabilities as
+off rather than working around either. The **product** — the pipeline driven by a turn,
+the stage changes rendered in the terminal, and the verification the product carries out
+— is `CC-048` and `CC-049`. And there is **no compatibility row**: the target has no
+counterpart for this surface, and a divergence is not a compatibility claim.
+
 ### CC-046 — Approvals as rules
 
 The rule model and the decision point.
