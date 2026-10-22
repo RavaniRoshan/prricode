@@ -500,6 +500,26 @@ describe('the dialect seam — not a vendor switch', () => {
     expect(resolved?.models.map((model) => model.id)).toEqual([ALPHA]);
     expect(resolved?.endpoint).toBe('https://gateway.invalid/v1');
   });
+
+  it('re-spells an alias that speaks another shape', () => {
+    // The canonical provider speaks one shape and the alias speaks another.
+    // The models are the canonical's, and the overlays are spelled for the
+    // shape the alias actually speaks.
+    const canonical = fakeProvider('first', 'chat', 'https://first.invalid/v1', {
+      models: [reasoningModel(ALPHA, 'first')],
+    });
+    const alias = fakeProvider('gateway', 'messages', 'https://gateway.invalid/v1', {
+      aliasOf: 'first',
+    });
+    const resolved = aliasProvider(alias, canonical);
+    const model = resolved.models[0];
+    expect(model).toBeDefined();
+    if (!model) throw new Error('unreachable');
+    const resolution = resolveOverlay(model, resolved.dialect, 'high');
+    expect(resolution.ok).toBe(true);
+    if (!resolution.ok) throw new Error(resolution.reason);
+    expect(resolution.spelling.body).toEqual({ output_config: { effort: 'high' } });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1311,6 +1331,96 @@ describe('the whole path, against a fake backend', () => {
       }
       const body = backend.lastRequest()?.body as { output_config?: unknown };
       expect(body.output_config).toEqual({ effort: 'high' });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it('sends a responses request, streams the reply, and reads the tool call', async () => {
+    const backend = await startFakeBackend({ dialect: 'responses' });
+    try {
+      const provider = fakeProvider('fake', 'responses', backend.url);
+      const catalogue = new ModelCatalogue({
+        snapshot: document('fake', [plainModel(ALPHA, 'fake')]),
+      });
+      const engine = engineFor(provider, catalogue, { secret: 'a-secret' });
+      const events = [];
+      for await (const event of engine.run({ provider: 'fake', model: ALPHA }, { messages, tools })) {
+        events.push(event);
+      }
+      const request = backend.lastRequest();
+      expect(request?.path).toBe('/v1/responses');
+      expect(request?.headers.authorization).toBe('Bearer a-secret');
+      const call = events.find((event) => event.type === 'tool-call');
+      if (!call || call.type !== 'tool-call') throw new Error('unreachable');
+      expect(call.call.name).toBe('read');
+      expect(call.call.arguments).toEqual({ path: 'a' });
+      expect(events.at(-1)).toMatchObject({ type: 'end' });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("sends no overlay at all when the pseudo-overlay 'default' is chosen", async () => {
+    const backend = await startFakeBackend({ dialect: 'chat' });
+    try {
+      const provider = fakeProvider('fake', 'chat', backend.url);
+      const catalogue = new ModelCatalogue({
+        snapshot: document('fake', [reasoningModel(ALPHA, 'fake')]),
+      });
+      const engine = engineFor(provider, catalogue, { secret: 'a-secret' });
+      for await (const _event of engine.run(
+        { provider: 'fake', model: ALPHA, overlay: DEFAULT_OVERLAY_NAME },
+        { messages },
+      )) {
+        // The turn runs; nothing else is asserted here.
+      }
+      const body = backend.lastRequest()?.body as Record<string, unknown>;
+      expect(body['reasoning_effort']).toBeUndefined();
+      expect(body['thinking']).toBeUndefined();
+      expect(body['max_reasoning_tokens']).toBeUndefined();
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("puts the provider's own headers and the overlay's headers on the wire", async () => {
+    const backend = await startFakeBackend({ dialect: 'chat' });
+    try {
+      const provider = fakeProvider('fake', 'chat', backend.url, { headers: { 'x-house': '1' } });
+      const model = withOverlay(reasoningModel(ALPHA, 'fake'), {
+        kind: 'named',
+        name: 'house-mode',
+        spellings: { chat: { headers: { 'x-house-mode': 'on' } } },
+      });
+      const catalogue = new ModelCatalogue({ snapshot: document('fake', [model]) });
+      const engine = engineFor(provider, catalogue, { secret: 'a-secret' });
+      for await (const _event of engine.run(
+        { provider: 'fake', model: ALPHA, overlay: 'house-mode' },
+        { messages },
+      )) {
+        // The turn runs; the request is what is asserted.
+      }
+      const headers = backend.lastRequest()?.headers ?? {};
+      expect(headers['x-house']).toBe('1');
+      expect(headers['x-house-mode']).toBe('on');
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it('never falls back silently: a model that is gone fails, and no other provider is tried', async () => {
+    const backend = await startFakeBackend({ dialect: 'chat' });
+    try {
+      const provider = fakeProvider('fake', 'chat', backend.url);
+      const catalogue = new ModelCatalogue({
+        snapshot: document('fake', [plainModel(BETA, 'fake')]),
+      });
+      const engine = engineFor(provider, catalogue, { secret: 'a-secret' });
+      const failure = await collectFailure(engine, { provider: 'fake', model: ALPHA });
+      expect(failure.code).toBe('model/unavailable');
+      // Nothing was sent: the turn failed before it reached the wire.
+      expect(backend.requests).toHaveLength(0);
     } finally {
       await backend.close();
     }

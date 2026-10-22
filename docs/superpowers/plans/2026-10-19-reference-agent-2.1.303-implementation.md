@@ -2815,6 +2815,96 @@ the credential store, and the model selector.
   degradation is exercised.
 - **Files:** `src/model/`; `tests/contracts/model-layer.test.ts`; `docs/compatibility/model-surface.md`.
 
+
+**Result (the layer, and the readings it needed).** The specification is
+`docs/protocol/MODEL-LAYER.md`, and it is the design: the implementation is
+measured against it, clause by clause, in `docs/compatibility/model-surface.md`.
+
+**Delivered:** `src/model/` — **seventeen modules** — carrying the vocabulary,
+the provider table, the catalogue, the overlays, the credentials, the one
+availability predicate, the selection grammar and the persistence, the three
+dialect modules, and the engine. **Three dialects** (`chat`, `messages`,
+`responses`), each with its own module and its own single code path, and
+**no branch on a provider's name anywhere in the layer**.
+
+**A provider is data.** The entry carries its identity, its shape, its
+endpoint, its **credential reference** — an integration *name*, never a secret
+— its headers and its models, and adding a provider is adding an entry. The
+engine is the single code path that reads it.
+
+**The catalogue merges three sources** — a local override, the fetched list,
+the shipped snapshot — **per model**, so a provider that reports nothing keeps
+its snapshot models and is simply not connected. **A fetch that returns the
+same bytes changes nothing**: not the cache, not the merge, and not the
+notification, so a watcher is not woken for a no-op.
+
+**The effort, the thinking toggle and the token budget are named overlays**,
+and the mechanism carries all of them — including an overlay the user defines.
+**The spelling is the catalogue's, per shape**, so the overlays are
+**re-spelled** when the effective shape changes, and the engine **knows no
+vendor's spelling**: there is no rule anywhere in `src/model/` that inspects
+a model id. A model that does not declare a support kind is refused, and so
+is an effort outside the declared ladder and a budget outside the declared
+range. The pseudo-overlay `default` means *no overlay at all*.
+
+**The credentials are keyed by *integration***, in three kinds, and the third
+carries **no secret at all** — a reference to a secret managed somewhere else,
+which this layer refuses to resolve rather than sending empty. The
+**connections are derived**: the stored credentials newest first, then the
+environment variables that are currently set, and **the first is the active
+one** — the environment a **first-class peer** of a stored key, not a
+fallback. The secret lives in the operating system's credential store, an
+**encrypted file** where that store is not available, and the resolution
+**reports which one it came from**.
+
+**"Connected" is one predicate**, and the picker, the filter and the
+credential resolution all follow from it: not disabled, the connection has not
+changed, and either force-enabled or a connection or no integration at all.
+
+**The selection grammar is `provider/model#overlay`**, and the precedence is
+the specification's six — remembered, the agent's own, the command line, the
+configured, the last used, the first available. The chain **stops at the
+first source that names a model**: a model that has become unavailable **fails
+loudly**, and there is **no cross-provider fallback**. The persistence is
+**three stores**: the user interface's preferences, written **atomically** and
+**watched for edits made elsewhere**; the **durable** choice on the session's
+own record; and the configuration's model.
+
+**Verified against a real HTTP server on a real port**, not a stubbed
+function: the request, the streaming reply, the **tool calls** and the
+**model list** are all exercised over a socket, against a backend that speaks
+**all three shapes**. **Seventy tests**, and the suite is green at **2 898**
+with `tsc --noEmit` clean.
+
+**Every failure degrades with its reason and never fakes success:** a provider
+that is not connected, a model that has become unavailable, an endpoint that
+refuses, a credential that cannot be resolved, an attachment the model cannot
+take, and an overlay the model does not offer each refuse with a stable code
+and a sentence — and a model that is gone fails **before anything reaches the
+wire**, so nothing is substituted.
+
+**The readings, all recorded in the conformance document** — sixteen of them.
+The model entry carries the specification's seven fields **plus** an `enabled`
+flag, because a model must be able to become unavailable. The catalogue's
+merge is **per model**, not per provider. The credential reference's `none`
+means the provider **names no integration**, not "needs no secret". A
+force-enabled provider does **not** survive a changed connection. The chain's
+sixth step is "the first available model that **can hold text**". The shapes'
+own headers are **ours**, because the naming rule keeps a product's vocabulary
+out of the repository and a deployment supplies its own as provider headers or
+overlay headers.
+
+**Not done here, and named:** the **retry policy** (the specification states
+what it must do, and it is not this milestone's deliverable), the **wiring of
+the durable choice to the repository's own session store** (the seam is here
+and a file-backed carrier ships with it; the agent loop's milestone owns the
+store), the **pipeline** (`CC-045`), the **approvals** (`CC-046`) and the
+protocol's `model/*` methods (`CC-043`). And there is **no compatibility
+row**: the target has no counterpart for this surface, and a divergence is not
+a compatibility claim.
+
+---
+
 ### CC-045 — The pipeline
 
 The pluggable stages, and the eight built-in ones.
