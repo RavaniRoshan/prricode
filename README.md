@@ -13,6 +13,12 @@ Independently implemented against the static structure of a pinned reference bui
 <code>375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450</code> —
 plus a multi-provider model layer the reference build does not have.</p>
 
+<p align="center">
+  <img src="assets/readme/demo.gif" alt="A real run of the interactive terminal UI: the one-line brief is submitted, the agent streams its plan, reads the build log, catches a test that over-claims, fixes it, verifies the product against its own criteria and reports that the run did what it claimed. Ends on the verified end card." width="100%">
+</p>
+
+*The demo is the repository's own renderer, recorded: `scripts/demo/capture.ts` drives the interactive UI beat by beat and writes the real screen rows; `scripts/demo/assemble.py` composites the window chrome and encodes the measured cadence — 414 frames at 10 fps, one play, no looping.*
+
 ---
 
 ## The proof comes first
