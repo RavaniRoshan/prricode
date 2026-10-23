@@ -55,7 +55,56 @@ bun run build                   # → dist/prricode, one self-contained executab
 
 `CLAUDE_CONFIG_DIR` relocates the configuration root; the first run creates it `0700` and reports where it put it.
 
-In **interactive mode** it is a terminal TUI: a composer, a transcript, slash commands, a running-tool state. In **print mode** it is a session that writes exactly one result document (`--output-format json|stream-json|text`).
+In **print mode** it is a session that writes exactly one result document (`--output-format json|stream-json|text`). **Interactive mode is the default** — run the binary bare and the terminal UI takes over.
+
+## Try the TUI on your own machine
+
+```bash
+bun run build            # → dist/prricode — one self-contained file, no host runtime
+./dist/prricode          # the interactive session — a composer is waiting
+```
+
+*(Measured on this machine: the build takes about a second and lands a ~90 MB executable.)*
+
+Type a short brief, press **Enter**, and the run streams its real work: the eight stages advance, every tool call lands with its result beside it, and anything not covered by a permission rule calls back with the approval prompt — the same one the demo above shows:
+
+```text
+  ❯ Yes ✔
+    Yes, and don't ask again for this Bash call
+    No, and tell PRRICODE what to do differently (esc)
+  enter to confirm · esc to cancel
+```
+
+Keys worth knowing on the first screen:
+
+| Key | What it does |
+|---|---|
+| `Enter` | sends the brief; confirms a prompt |
+| `esc` | declines a prompt, cancels a turn; `esc` again clears the line |
+| `?` | opens the shortcuts overlay — only on an **empty** line, so it never eats your draft |
+| `/exit` | leaves the session (alias `/quit`) |
+
+The command registry is the transcript's backbone — type `/` in the composer and read them live (`/help` lists every one):
+
+| Command | Job |
+|---|---|
+| `/help`, `/status` | help, and the full status: version, model, connectivity, tool states |
+| `/provider list` / `add` / `use` / `test` | connect a model: list the integrations, name a credential, activate the connection, prove it live |
+| `/model`, `/catalog` | set the model; read the catalogue it can come from |
+| `/usage`, `/context` | session usage; the current context as a grid |
+| `/config`, `/keybindings` | settings; your keyboard-shortcuts file |
+| `/clear`, `/compact`, `/resume` | a fresh empty session (the old one stays resumable); compress the history; pick a previous conversation back up |
+| `/skills`, `/skill-doctor` | the available skills; which loaded skills are going unused |
+| `/version`, `/exit` | the build this session runs; leave |
+
+Connecting a model is two commands:
+
+```text
+/provider list                                  # the integrations and their env names
+/provider add mine --credential-env <ITS_VAR> --use
+```
+
+Credentials are **derived, not kept**: a stored secret is consulted newest-first, then the environment — a connection record carries no secret field of its own. `/provider test` proves the connection live before you spend a brief on it.
 
 ## Two layers, two claims
 
