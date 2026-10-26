@@ -113,7 +113,7 @@ skips quietly.
 
 | the check | the command | the result |
 |---|---|---|
-| the test suite | `npx vitest run --maxWorkers=4` | **63 files, 3 101 tests, green** |
+| the test suite | `npx vitest run --maxWorkers=4` | **63 files, 3 115 tests, green** |
 | the types | `npx tsc --noEmit` | **clean** |
 | the naming rule | `npx vitest run tests/contracts/naming.test.ts` | **green** — no third-party product or company anywhere |
 | the clone's completeness | `bun run scripts/verify-rea.ts` | **the record accounts for every entry the target has** |

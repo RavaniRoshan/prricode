@@ -74,6 +74,14 @@ import {
   type ParsedRunArgs,
 } from '../../src/cli/args.js';
 import { ZERO_USAGE, buildResultDocument } from '../../src/cli/headless.js';
+import { TextResultPrinter, buildSystemInitDocument, streamJsonLine } from '../../src/cli/print/documents.js';
+import {
+  EXIT_FAILURE,
+  writeHeadlessOutput,
+  type HeadlessEvent,
+  type OutputSink,
+  type ResultDocument,
+} from '../../src/cli/output.js';
 import {
   DEFAULT_SEVERITY_THRESHOLDS,
   DEFAULT_SITE_CONFIG,
@@ -1521,9 +1529,147 @@ export const SCENARIOS: readonly Scenario[] = [
         tool_use_id: 't1',
         tool_input: { command: 'ls' },
       });
+      // The four differences the ledger once carried are **closed** — each one
+      // measured here against the same writer the formats print through.
+      // 1. The error variant's `subtype` is the target's own, the variant
+      //    carries the `errors` array, and it carries no answer text.
+      const failed = observe(
+        'the failed result document',
+        buildResultDocument({
+          isError: true,
+          result: '',
+          errors: ['the provider failed'],
+          stopReason: null,
+          sessionId: 's1',
+          durationMs: 12,
+          numTurns: 0,
+          usage: ZERO_USAGE,
+          permissionDenials: [],
+          uuid: 'uuid-2',
+        }),
+      );
+      expect(failed).toMatchObject({
+        subtype: 'error_during_execution',
+        is_error: true,
+        errors: ['the provider failed'],
+        stop_reason: null,
+      });
+      expect(Object.hasOwn(failed, 'result')).toBe(false);
+
+      // 2. A run with **no** result document writes nothing to stdout, the
+      //    target's line to stderr, and exits 1.
+      const sink = (): OutputSink & { text: string } => {
+        let text = '';
+        return { get text() { return text; }, write: (chunk: string) => { text += chunk; } };
+      };
+      async function* noResult(): AsyncIterable<HeadlessEvent> {
+        yield { type: 'text', id: 'rec-1', text: 'partial' };
+      }
+      const nrOut = sink();
+      const nrErr = sink();
+      const nrCode = await writeHeadlessOutput({
+        events: noResult(),
+        format: 'json',
+        stdout: nrOut,
+        stderr: nrErr,
+      });
+      expect(nrCode).toBe(EXIT_FAILURE);
+      expect(nrOut.text).toBe('');
+      expect(nrErr.text).toBe('Error: No messages returned from query\n');
+
+      // 3. The `text` format prints through the target's own printer: the
+      //    result's text at the end of the turn; on a failure the detail on
+      //    stderr and the bare `Execution error` line on stdout.
+      const txOut = sink();
+      const txErr = sink();
+      const printer = new TextResultPrinter({ stdout: txOut, stderr: txErr });
+      printer.print(document as ResultDocument);
+      expect(txOut.text).toBe('the answer\n');
+      printer.print(failed as ResultDocument);
+      expect(txErr.text).toBe('the provider failed\n');
+      expect(txOut.text).toBe('the answer\n\nExecution error');
+
+      // 4. The `stream-json` documents are the SDK message kinds — the
+      //    `system`/`init` document first, the tool call inside an assistant
+      //    document, the result inside a user document that carries
+      //    `tool_use_result`, the result document last — and the writer's line
+      //    is `JSON.stringify` with the two separators escaped.
+      const init = buildSystemInitDocument({
+        apiKeySource: 'none',
+        version: '0.1.0',
+        cwd: '/workspace',
+        tools: ['Write'],
+        model: 'claude-sonnet-4-5',
+        mode: 'default',
+        slashCommands: [],
+        outputStyle: 'the default',
+        skills: [],
+      });
+      async function* kinds(): AsyncIterable<HeadlessEvent> {
+        yield { type: 'tool_use', id: 'toolu_1', name: 'Write', input: { file_path: '/x' } };
+        yield { type: 'tool_result', id: 'toolu_1', content: 'written', is_error: false };
+        yield document as ResultDocument;
+      }
+      const sjOut = sink();
+      const sjErr = sink();
+      await writeHeadlessOutput({
+        events: kinds(),
+        format: 'stream-json',
+        stdout: sjOut,
+        stderr: sjErr,
+        init,
+        sessionId: 's1',
+        model: 'claude-sonnet-4-5',
+      });
+      const documents = sjOut.text
+        .split('\n')
+        .filter((line) => line.trim() !== '')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      // init, the call's assistant document, the result's user document, the
+      // result document.
+      expect(documents).toHaveLength(4);
+      expect(documents[0]).toMatchObject({ type: 'system', subtype: 'init' });
+      const call = documents[1] as Record<string, unknown>;
+      expect(Object.keys(call)).toEqual([
+        'type',
+        'message',
+        'parent_tool_use_id',
+        'uuid',
+        'session_id',
+      ]);
+      expect(call.message).toEqual({
+        id: 'toolu_1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-sonnet-4-5',
+        content: [{ type: 'tool_use', id: 'toolu_1', name: 'Write', input: { file_path: '/x' } }],
+      });
+      expect(call.parent_tool_use_id).toBeNull();
+      expect(call.session_id).toBe('s1');
+      const answer = documents[2] as Record<string, unknown>;
+      expect(Object.keys(answer)).toEqual([
+        'type',
+        'message',
+        'parent_tool_use_id',
+        'tool_use_result',
+        'uuid',
+        'session_id',
+      ]);
+      expect(answer.message).toEqual({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'written', is_error: false }],
+      });
+      expect(answer.tool_use_result).toBe('written');
+      expect(documents[3]).toMatchObject({ type: 'result', subtype: 'success' });
+      // The writer's line escapes the two separators, so a document that
+      // carries one still arrives as one line.
+      const hasSeparator = sjOut.text.split('\n').some((line) => line.includes('\u2028') && !line.includes('\\u2028'));
+      expect(hasSeparator).toBe(false);
+      expect(streamJsonLine({ text: 'two\u2028lines' }).endsWith('\n')).toBe(true);
+
       return measured(
-        'mismatch',
-        "The headless rule and the three output formats are reproduced, and so is what a run **writes**: the `json` format writes **exactly one** document — the target's own **result document**, with its member order (*common → variant → `type`, `duration_ms`, `uuid`*) and its nested shapes — the `stream-json` format writes one document per line with the result last, the `text` format writes the result's text, and a `--print` run **is** a session. Four differences remain and they are named: the error variant's `subtype` is `error` here and `error_during_execution` in the target; a run with no result document writes a document here, while the target writes nothing to stdout and the error to stderr; the `text` format writes the assistant's text as it arrives and nothing on stdout for a failure, while the target writes the result's text at the end of the turn and its own failure line; and the `stream-json` documents are this implementation's events, while the target's are the SDK message kinds.",
+        'match',
+        "The headless rule and the three output formats are reproduced, and so is what a run **writes**: the `json` format writes **exactly one** document — the target's own **result document**, with its member order (*common → variant → `type`, `duration_ms`, `uuid`*) and its nested shapes — the `stream-json` format writes one document per line with the result last, the `text` format writes the result's text, and a `--print` run **is** a session. The four differences the ledger once carried are closed, each measured here: the error variant's `subtype` is the target's `error_during_execution` and the variant carries the `errors` array; a run with no result document writes **nothing** to stdout, the target's line to stderr and exits 1; the `text` format prints through the target's own printer — the result's text with its newline ensured, and on a failure the detail on stderr with the bare `Execution error` line on stdout; and the `stream-json` documents are the SDK message kinds — init, the call inside an assistant document, the result inside a user document marked with `tool_use_result`, the writer's line `JSON.stringify` with U+2028 and U+2029 escaped.",
       );
     },
   },

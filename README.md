@@ -35,10 +35,10 @@ npx tsc --noEmit                       # the types
 
 | Check | What it proves | Measured | Date |
 |---|---|---|---|
-| parity report | 42 rows over the reference MD's behaviours: `match`, `mismatch`, `not-tested` — no `unknown` | 36 `match` · 3 `mismatch` · 3 `not-tested` | 2026-10-22 |
+| parity report | 42 rows over the reference MD's behaviours: `match`, `mismatch`, `not-tested` — no `unknown` | 37 `match` · 2 `mismatch` · 3 `not-tested` | 2026-10-26 |
 | surface verifier | all 13 re-derived surfaces are accounted for | ok — "the record accounts for every entry the target has" | 2026-10-22 |
 | product suite | product · backend · frontend · visual | **4 of 4 kinds passed**, exit 0 | 2026-10-22 |
-| test suite | everything pinned by a test | 60+ files, 3 100+ tests, green | 2026-10-22 |
+| test suite | everything pinned by a test | 63 files, 3 115 tests, green | 2026-10-26 |
 
 *(The parity row's exact counts move only when a `mismatch` is closed or opened; re-run the command to read today's.)*
 
