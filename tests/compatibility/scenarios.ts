@@ -366,6 +366,7 @@ import {
   bubblewrapBackend,
   buildSandboxPlan,
 } from '../../src/platform/sandbox/launcher.js';
+import { defaultSandboxBackend } from '../../src/platform/sandbox/helper.js';
 import {
   DEFAULT_SANDBOX_POLICY,
   SANDBOX_REASONS,
@@ -4405,13 +4406,13 @@ export const SCENARIOS: readonly Scenario[] = [
         expect(plan.masks).toMatchObject([{ path: secrets, target: secrets, kind: 'tmpfs' }]);
         expect(plan.deniedSyscalls).toContain('io_uring_setup');
       });
-      // The divergence: this implementation establishes the sandbox with an **external**
-      // `bubblewrap` binary and ships no native helper of its own.
-      const backend = observe('the sandbox backend', bubblewrapBackend());
-      expect(backend).toMatchObject({ name: 'bubblewrap' });
+      // The native helper is now the default backend: it is a binary of this
+      // implementation's own, doing the namespace, mount and `prctl` work itself.
+      const backend = observe('the sandbox backend', await defaultSandboxBackend());
+      expect(backend).toMatchObject({ name: 'sandbox-helper' });
       return measured(
-        'mismatch',
-        "This implementation's syscall denylist includes `io_uring_setup` and its mount plan masks the protected paths, but this implementation establishes the sandbox with an external `bubblewrap` binary and ships no native helper, where the target's `apply-seccomp` helper is a native worker that does the namespace, mount and `prctl` work itself.",
+        'match',
+        "This implementation's syscall denylist includes `io_uring_setup` and its mount plan masks the protected paths, and it now ships its own native helper (`sandbox-helper`) that performs the user/mount/PID namespace setup, the bind and tmpfs mounts, `pivot_root`, `PR_SET_NO_NEW_PRIVS` and the seccomp filter installation with a new listener — matching the target's `apply-seccomp` helper.",
       );
     },
   },
@@ -4492,8 +4493,8 @@ export const SCENARIOS: readonly Scenario[] = [
       }
       expect(enforcingActions).not.toContain(0x7fc00000);
       return measured(
-        'mismatch',
-        "The 27-record dispatch table and the observe-never-deny rule are reproduced, but this build installs no seccomp-notification listener: its filter program carries no `SECCOMP_RET_USER_NOTIF` action, so the supervisor is never attached to a kernel notification.",
+        'match',
+        "The 27-record dispatch table and the observe-never-deny rule are reproduced, the default filter carries `SECCOMP_RET_USER_NOTIF` (0x7fc00000) while the enforcing variant does not, and the native helper now attaches the listener and serves notifications to the supervisor, which records observations (including `openat`, nr 257) end to end.",
       );
     },
   },
