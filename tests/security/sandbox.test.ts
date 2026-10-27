@@ -1000,9 +1000,9 @@ describe('CC-017 step 5 — the launcher', () => {
     // No Landlock ruleset is ever applied, and the notification listener is
     // never attached: the kernel attachment needs a native helper.
     expect(launched.status.layers.pathPolicy).toBe(false);
-    expect(launched.status.layers.supervisor).toBe(false);
+    expect(launched.status.layers.supervisor).toBe(true);
     expect(launched.status.notes.join(' ')).toMatch(/no Landlock ruleset is applied/);
-    expect(launched.status.notes.join(' ')).toMatch(/supervisor is not attached/);
+    expect(launched.status.notes.join(' ')).not.toMatch(/supervisor is not attached/);
 
     await launched.cleanup();
   });
@@ -1059,11 +1059,10 @@ describe('CC-017 step 5 — the launcher', () => {
     const supervisor = createSeccompSupervisor({ channel });
 
     const launched = await launchSandbox({ command: 'echo supervisor', cwd: root, supervisor });
-    expect(launched.status.layers.supervisor).toBe(false);
-    expect(launched.status.notes.join(' ')).toMatch(/supervisor is not attached/);
-    // The notification filter is installed by the helper, and the helper's
-    // kernel calls need a native listener — so the supervisor observes nothing.
-    expect(launched.status.notes.join(' ')).toMatch(/notification filter it needs is installed by the helper/);
+    // The helper attaches its own supervisor regardless of a supplied object:
+    // the layer comes from the kernel attachment, not from the object's presence.
+    expect(launched.status.layers.supervisor).toBe(true);
+    expect(launched.status.notes.join(' ')).not.toMatch(/supervisor is not attached/);
     await launched.cleanup();
   });
 
@@ -1107,18 +1106,10 @@ describe('CC-017 step 5 — the launcher', () => {
     const launched = await launchSandbox({ command: 'echo version', cwd: root });
 
     const enforcement = launched.status.enforcement;
-    expect(enforcement?.binary).toBe('/usr/bin/bwrap');
+    expect(enforcement?.binary).toMatch(/sandbox-helper$/);
     expect(enforcement?.setuid).toBe(false);
-    expect(enforcement?.version).toMatch(/^\d+\.\d+/);
-
-    // A version below the fixed one is a warning, and it names the advisory.
-    const version = enforcement?.version ?? '0.0.0';
-    const warnings = enforcement?.warnings.join(' ') ?? '';
-    if (compareVersions(version, BUBBLEWRAP_MINIMUM_VERSION) < 0) {
-      expect(warnings).toMatch(/CVE-2026-87766/);
-    } else {
-      expect(warnings).not.toMatch(/CVE-2026-87766/);
-    }
+    expect(enforcement?.version).toBe('sandbox-helper 1.0.0');
+    expect(enforcement?.warnings ?? []).toEqual([]);
 
     await launched.cleanup();
   });
@@ -1388,7 +1379,7 @@ describe('CC-017 step 5 — the launcher', () => {
         expect(probe.warning ?? '').toMatch(/CVE-2026-87766/);
 
         const root = temporaryDirectory();
-        const launched = await launchSandbox({ command: 'echo version', cwd: root });
+        const launched = await launchSandbox({ command: 'echo version', cwd: root, backend: bubblewrapBackend() });
         expect(launched.status.advisory?.id).toBe(BUBBLEWRAP_ADVISORY);
         expect(launched.status.reducedProtection.join(' ')).toMatch(/CVE-2026-87766/);
         await launched.cleanup();
@@ -1499,6 +1490,27 @@ describe('CC-017 step 5 — the launcher', () => {
     await launched.cleanup();
 
     expect(result.stdout).toContain('hello');
+  });
+
+  // --- F-35: the seccomp-notification supervisor observes the sandboxed run ---
+  it.skipIf(!bubblewrapAvailable)('records at least one syscall observation from a sandboxed run', async () => {
+    const root = temporaryDirectory();
+    const launched = await launchSandbox({ command: 'echo observed; cat /etc/hostname', cwd: root });
+
+    expect(launched.status.sandboxed).toBe(true);
+    expect(launched.status.layers.supervisor).toBe(true);
+
+    const result = await launched.wait();
+    const observations = launched.observations;
+    expect(observations).toBeDefined();
+    expect((observations ?? []).length).toBeGreaterThan(0);
+    const openat = (observations ?? []).find((entry) => entry.nr === 257);
+    expect(openat).toBeDefined();
+    expect(openat?.syscall).toBe('openat');
+    expect(typeof openat?.pid).toBe('number');
+
+    await launched.cleanup();
+    expect(result.exitCode).toBe(0);
   });
 
   // --- fix round 3, finding 1: the unconfined path ran with the sandbox's HOME=/tmp ---

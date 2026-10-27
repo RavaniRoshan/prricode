@@ -178,9 +178,9 @@ import {
   type ToolContext,
 } from '../../permissions/decision.js';
 import { isReadOnlyCommand } from '../readonly.js';
+import { defaultSandboxBackend } from '../../platform/sandbox/helper.js';
 import {
   SandboxRefusedError,
-  bubblewrapBackend,
   launchSandbox,
   sandboxEnvironment,
   type LaunchedSandbox,
@@ -1035,7 +1035,7 @@ export function createBashTool(deps: BuiltinToolDeps): ToolDefinition<BashInput,
         });
       }
 
-      const backend = deps.sandboxBackend ?? bubblewrapBackend();
+      const backend = deps.sandboxBackend ?? (await defaultSandboxBackend());
       const platform = deps.sandboxPlatform ?? process.platform;
       const { availability, report } = await backendAvailability(backend);
       const evaluation = evaluateSandbox(policy, platform, command, availability);

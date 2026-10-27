@@ -162,7 +162,7 @@ static void unescape_field(const char *text, char *out, size_t out_size) {
     if (text[i] == '\\' && text[i + 1] != '\0' && text[i + 2] != '\0' && text[i + 3] != '\0') {
       const char *digits = &text[i + 1];
       unsigned int code = 0;
-      if (sscanf(digits, "%o", &code) == 1) {
+      if (sscanf(digits, "%3o", &code) == 1) {
         if (used + 1 >= out_size) fail_said("a plan field is longer than the row allows");
         out[used++] = (char)code;
         i += 3;
@@ -390,25 +390,11 @@ static void hex_of(char *out, size_t out_size, const unsigned char *bytes, size_
 /* the mount worker                                                    */
 /* ------------------------------------------------------------------ */
 
-/** The `dev` row: a tmpfs of the minimal node set, plus `/proc` symlinks. */
+/** The `dev` row: bind the host's device tree, since unprivileged user
+ *  namespaces on this host do not permit `mknod(2)` for device nodes. */
 static void mount_dev(const char *target) {
-  if (mount("tmpfs", target, "tmpfs", MS_NOSUID | MS_NODEV, "mode=755") != 0)
+  if (mount("/dev", target, NULL, MS_BIND | MS_REC, NULL) != 0)
     fail_where("mount-dev", target);
-  static const struct { const char *name; unsigned int major, minor; mode_t mode; } nodes[] = {
-      { "null", 1, 3, S_IFCHR | 0666 },
-      { "zero", 1, 5, S_IFCHR | 0666 },
-      { "full", 1, 7, S_IFCHR | 0666 },
-      { "random", 1, 8, S_IFCHR | 0666 },
-      { "urandom", 1, 9, S_IFCHR | 0666 },
-      { "tty", 5, 0, S_IFCHR | 0600 },
-  };
-  for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
-    char path[PATH_MAX];
-    if (snprintf(path, sizeof(path), "%s/%s", target, nodes[i].name) >= (int)sizeof(path))
-      fail_where("mount-target", nodes[i].name);
-    if (mknod(path, nodes[i].mode, makedev(nodes[i].major, nodes[i].minor)) != 0 && errno != EEXIST)
-      fail_where("mknod", nodes[i].name);
-  }
   static const struct { const char *name, *service; } symlinks[] = {
       { "stdin", "/proc/self/fd/0" },
       { "stdout", "/proc/self/fd/1" },
@@ -419,6 +405,7 @@ static void mount_dev(const char *target) {
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s", target, symlinks[i].name) >= (int)sizeof(path))
       fail_where("mount-target", symlinks[i].name);
+    /* the bind already provides these; a duplicate is harmless */
     if (symlink(symlinks[i].service, path) != 0 && errno != EEXIST)
       fail_where("symlink", symlinks[i].name);
   }
@@ -450,6 +437,42 @@ static void make_parent_tree(const char *path) {
   make_tree(buffer);
 }
 
+/**
+ * The mount point a non-directory source binds over.
+ *
+ * A leaf that exists is already a mount point, whatever is there: `mkdir`
+ * relied on `EEXIST` and needed no write access, so creation is only attempted
+ * for a missing leaf — and the launcher never asks for one on a read-only
+ * surface.
+ */
+static void touch_file(const char *path) {
+  struct stat st;
+  if (stat(path, &st) == 0) return;
+  if (errno != ENOENT) fail_where("stat-mount-target", path);
+  const int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  if (fd < 0) fail_where("touch", path);
+  (void)close(fd);
+}
+
+/**
+ * The mount point for one bind, formed by the **source's** type.
+ *
+ * A bind of a file onto a directory fails with `ENOTDIR`, so the mount point
+ * has to match what is bound over it: a directory source gets `mkdir -p`
+ * through the leaf, any other source gets a parent tree and an empty file
+ * there — which an existing file at the path already satisfies.
+ */
+static void make_mount_point_for(const char *source, const char *target) {
+  struct stat st;
+  if (stat(source, &st) != 0) fail_where("bind-source", source);
+  if (S_ISDIR(st.st_mode)) {
+    make_tree(target);
+    return;
+  }
+  make_parent_tree(target);
+  touch_file(target);
+}
+
 /** The empty-file mask: a tmpfs-independent zero-byte file is bound over the target. */
 static void mount_empty_file(const char *target, const char *source) {
   char *end = NULL;
@@ -461,7 +484,15 @@ static void mount_empty_file(const char *target, const char *source) {
   if (snprintf(through, sizeof(through), "/proc/self/fd/%ld", descriptor) >= (int)sizeof(through))
     fail_said("the empty-file source does not name a descriptor");
   make_parent_tree(target);
-  if (mount(through, target, NULL, MS_BIND | MS_REC, NULL) != 0)
+  touch_file(target);
+  /* the bind takes the descriptor's real path: a bind of the `/proc` entry
+   * itself is an `EINVAL`, and the file under it is what the launcher's
+   * descriptor holds */
+  char real[PATH_MAX];
+  const ssize_t linked = readlink(through, real, sizeof(real) - 1);
+  const char *source_path = linked >= 0 ? real : through;
+  if (linked >= 0) real[linked] = '\0';
+  if (mount(source_path, target, NULL, MS_BIND, NULL) != 0)
     fail_where("empty-file-bind", target);
   if (mount("none", target, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID | MS_NODEV, NULL) != 0)
     fail_where("empty-file-remount", target);
@@ -497,7 +528,7 @@ static void worker_mounts(const struct sandbox_plan *plan, const char *new_root)
       case MOUNT_RO_BIND:
       case MOUNT_BIND:
         path_under(new_root, step->target, path, sizeof(path));
-        make_tree(path);
+        make_mount_point_for(step->source, path);
         if (mount(step->source, path, NULL, MS_BIND | MS_REC, NULL) != 0)
           fail_where("bind-mount", step->target);
         if (step->kind == MOUNT_RO_BIND) {
@@ -548,9 +579,9 @@ static void worker_mounts(const struct sandbox_plan *plan, const char *new_root)
   if (umount2("/oldstage", MNT_DETACH) != 0) fail_step("detach-old-root");
 }
 
-/** The environment of the command: the plan's rows and the encoded command. */
+/** The environment of the command: the plan's rows, verbatim. */
 static char **environ_of(const struct sandbox_plan *plan) {
-  char **envp = calloc(plan->environment_count + 2, sizeof(char *));
+  char **envp = calloc(plan->environment_count + 1, sizeof(char *));
   if (envp == NULL) fail_step("env-alloc");
   for (size_t i = 0; i < plan->environment_count; i++) envp[i] = plan->environment[i];
   return envp;
@@ -591,17 +622,9 @@ static void run_worker(int plan_fd, int filter_fd, const char *new_root, int han
   printf("%s", plan.token);
   if (fflush(stdout) != 0) fail_step("flush-token");
 
-  /* the encoded command is the datum the target's helper carries; this
-   * implementation base64-encodes the text the launcher compiled. */
-  const char *encoded_prefix = "SRT_ENCODED_CMD=";
-  const size_t command_length = strlen(plan.command);
-  const size_t encoded_size = ((command_length + 2) / 3) * 4 + strlen(encoded_prefix) + 1;
-  char *encoded = malloc(encoded_size);
-  if (encoded == NULL) fail_step("encoded-alloc");
-
-  /* the command runs under `/bin/sh -c`, carrying the plan's environment */
+  /* the command runs under `/bin/sh -c`, carrying the plan's environment
+   * (the encoded command reached it as one of the plan's environment rows) */
   char **envp = environ_of(&plan);
-  envp[plan.environment_count] = encoded;
 
   /* every descriptor the helper owns is closed before the command runs */
   for (int fd = 3; fd < 1024; fd++) (void)close(fd);
@@ -991,8 +1014,7 @@ static int run_sandbox(void) {
     /* the mounter: unshares, asks for the uid map, forks the worker */
     (void)close(pair[0]);
     (void)close(notifier);
-    (void)close(plan_fd);
-    (void)close(filter_fd);
+    /* the plan and the filter stay open: the worker reads them after the fork */
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS |
                 CLONE_NEWNET) != 0)
       fail_step("unshare-namespaces");
@@ -1001,7 +1023,6 @@ static int run_sandbox(void) {
     send_handoff(pair[1], "m", 1, -1);
     if (recv_handoff(pair[1], NULL) != 'a') fail_step("recv-map-ack");
 
-    (void)close(plan_fd);
     if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0) fail_step("pdeathsig-mounter");
     const pid_t worker = fork();
     if (worker < 0) fail_step("fork-worker");

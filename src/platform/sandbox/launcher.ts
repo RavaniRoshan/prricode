@@ -970,6 +970,8 @@ export interface LaunchedSandbox {
   readonly output?: { readonly stdout: string; readonly stderr: string };
   /** What the sandbox established. */
   status: SandboxStatus;
+  /** The seccomp notifications the supervisor observed, when one was attached. */
+  readonly observations?: readonly SyscallObservation[];
 }
 
 /** The error a refusal raises. */
@@ -996,7 +998,8 @@ export class SandboxRefusedError extends Error {
 export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox> {
   const policy = spec.policy ?? DEFAULT_SANDBOX_POLICY;
   const platform = spec.platform ?? process.platform;
-  const backend = spec.backend ?? bubblewrapBackend();
+  const { defaultSandboxBackend } = await import('./helper.js');
+  const backend = spec.backend ?? (await defaultSandboxBackend());
 
   if (!existsSync(spec.cwd)) {
     throw new SandboxRefusedError(
@@ -1060,17 +1063,21 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
   }
   const scopeNote = exemptionScopeNote(exemptionScope(policy));
   if (scopeNote !== undefined) notes.push(scopeNote);
-  notes.push(
-    'the seccomp-notification supervisor is not attached: the kernel attachment (seccomp(2) with SECCOMP_FILTER_FLAG_NEW_LISTENER and the two ioctls) needs a native listener, so the sandbox observes nothing.',
-  );
-  if (spec.supervisor !== undefined) {
+  if (!establishment.layers.supervisor) {
+    notes.push(
+      'the seccomp-notification supervisor is not attached: the kernel attachment (seccomp(2) with SECCOMP_FILTER_FLAG_NEW_LISTENER and the two ioctls) needs a native listener, so the sandbox observes nothing.',
+    );
+  }
+  if (spec.supervisor !== undefined && !establishment.layers.supervisor) {
     notes.push(
       'a supervisor object was supplied, but the notification filter it needs is installed by the helper, and the helper’s kernel calls need a native listener, so the supervisor still observes nothing.',
     );
   }
-  notes.push(
-    'no Landlock ruleset is applied inside the sandbox: applying one needs a native helper, which this build does not ship, so the path policy is enforced by the mount namespace alone.',
-  );
+  if (!establishment.layers.pathPolicy) {
+    notes.push(
+      'no Landlock ruleset is applied inside the sandbox: applying one needs a native helper, which this build does not ship, so the path policy is enforced by the mount namespace alone.',
+    );
+  }
   if (sandboxProcess.establishment === undefined) {
     notes.push(
       'the backend did not report which layers it establishes, so only the filesystem boundary is claimed.',
@@ -1101,6 +1108,9 @@ export async function launchSandbox(spec: SandboxSpec): Promise<LaunchedSandbox>
     status,
     get output(): { readonly stdout: string; readonly stderr: string } | undefined {
       return sandboxProcess.output;
+    },
+    get observations(): readonly SyscallObservation[] | undefined {
+      return (sandboxProcess as { observations?: readonly SyscallObservation[] }).observations;
     },
     wait: async () => {
       const result = await sandboxProcess.wait();
