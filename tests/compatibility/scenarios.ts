@@ -373,6 +373,7 @@ import {
   evaluateSandbox,
 } from '../../src/platform/sandbox/policy.js';
 import { MESSAGE_MARKER, renderMessages } from '../../src/ui/render/messages.js';
+import { DARK_THEME, isThemeRole, roleColor } from '../../src/ui/theme.js';
 
 import type { Outcome } from './matrix.js';
 
@@ -2825,6 +2826,15 @@ export const SCENARIOS: readonly Scenario[] = [
       // The behaviour vocabulary, enumerated by this implementation's own strictness table.
       const strictness = observe('the behaviour vocabulary', PERMISSION_STRICTNESS);
       expect([...strictness.keys()].sort()).toEqual(['allow', 'ask', 'deny']);
+      // The strictness is an ordering, not just a set: deny is stricter than
+      // ask, and ask is stricter than allow. A wrong ordering would let a
+      // weaker decision win.
+      expect(observe('deny strictness', strictness.get('deny'))).toBeGreaterThan(
+        observe('ask strictness', strictness.get('ask') as number),
+      );
+      expect(observe('ask strictness', strictness.get('ask'))).toBeGreaterThan(
+        observe('allow strictness', strictness.get('allow') as number),
+      );
       // The source vocabulary: every source the audit names is carried through
       // the prompt, unchanged, and every one of them is in the closed set.
       const sources = [
@@ -3065,6 +3075,9 @@ export const SCENARIOS: readonly Scenario[] = [
         }],
       );
       expect(gated).toMatchObject({ behavior: 'deny' });
+      // The host-gate reason and the affected paths must survive into the
+      // denial, so the user can see why and where.
+      expect(String(gated.reason ?? '')).toContain('the personal configuration has problems');
       const stopped = observe(
         'the stopped decision',
         await checkPermission(ctx, {
@@ -3074,6 +3087,7 @@ export const SCENARIOS: readonly Scenario[] = [
         }),
       );
       expect(stopped).toMatchObject({ behavior: 'deny' });
+      expect(String(stopped.reason ?? '')).toBe('A problem with your own settings or hooks is blocking tool calls');
       return measured(
         'match',
         'The personal-config restriction and the `stop`-severity hook failure both deny every call.',
@@ -4662,6 +4676,14 @@ export const SCENARIOS: readonly Scenario[] = [
       title: 'produces one block per assistant message',
     },
     probe: async () => {
+      // The theme carries the target's 72 roles, and a known role resolves to
+      // the target's own colour literal — not a default, not a guess.
+      const themeKeys = Object.keys(DARK_THEME);
+      expect(observe('the theme role count', themeKeys.length)).toBe(72);
+      expect(observe('the permission role colour', roleColor('permission'))).toBe('rgb(177,185,249)');
+      expect(observe('the prricode role colour', roleColor('prricode'))).toBe('rgb(215,119,87)');
+      expect(observe('isThemeRole on a real role', isThemeRole('permission'))).toBe(true);
+      expect(observe('isThemeRole on a bogus role', isThemeRole('no-such-role'))).toBe(false);
       const blocks = await observeCall(
         'the rendered blocks',
         renderMessages,
