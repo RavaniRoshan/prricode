@@ -192,7 +192,7 @@ Full per-module index with every Evidence ID: `/home/shiva/opt/reference-agent-r
 
 ### Handoff — 2026-10-28 13:45 UTC
 
-- Agent/owner: pair programmer (acting as per `research/latest-claude-code-2026.md`)
+- Agent/owner: pair programmer (acting as per `research/reference-agent-2.1.312-research.md`)
 - Task ID and status: `CC-019` compatibility measurement and honesty pass — **Complete**; 2026 state synthesis and alignment recommendations adopted.
 - Files changed: `tests/compatibility/scenarios.ts`, `docs/PROGRESS.md`
 - Evidence IDs and target hashes: Target pinned at 2.1.303 (`375988f457756524234695cf2d8f64ace99c5f68682e47ea24862a843c191450`).
